@@ -1,0 +1,36 @@
+# Rust build artifacts
+/target
+Cargo.lock
+
+# Git
+.git
+.gitignore
+
+# Documentation
+*.md
+docs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Environment files
+.env
+.env.local
+
+# Docker
+docker-compose.override.yml
+
+# CI/CD
+.github/
