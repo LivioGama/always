@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.alwaysapp.daemon</string>
+    <key>CFBundleName</key>
+    <string>AlwaysApp</string>
+    <key>CFBundleDisplayName</key>
+    <string>Always</string>
+    <key>CFBundleExecutable</key>
+    <string>AlwaysApp</string>
+    <key>CFBundleIconFile</key>
+    <string>AlwaysIcon</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSSupportsAutomaticTermination</key>
+    <true/>
+    <key>NSSupportsSuddenTermination</key>
+    <true/>
+    <key>NSAccessibilityUsageDescription</key>
+    <string>AlwaysApp needs accessibility access to position the voice indicator near your active text cursor.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>AlwaysApp needs accessibility access to position the voice indicator near your active text field.</string>
+</dict>
+</plist>

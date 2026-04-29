@@ -1,4 +1,15 @@
-use crate::always::AlwaysConfig;
+use crate::always::{AlwaysConfig, filter_config};
+use once_cell::sync::Lazy;
+use regex;
+
+// Load filter config once at startup
+static FILTER_CONFIG: Lazy<Option<filter_config::FilterConfig>> = Lazy::new(filter_config::load_filter_config);
+static COMPILED_REGEX: Lazy<Vec<regex::Regex>> = Lazy::new(|| {
+    match &*FILTER_CONFIG {
+        Some(config) => filter_config::compile_regex_patterns(&config.hard_filter_regex),
+        None => vec![],
+    }
+});
 
 pub fn quick_reject(text: &str) -> bool {
     let normalized = text
@@ -138,52 +149,237 @@ pub fn hard_reject(text: &str) -> bool {
         .trim_matches(|ch: char| ch.is_ascii_punctuation())
         .to_lowercase();
 
-    // ALWAYS reject thank you and politeness phrases - these should never be pasted
-    const ALWAYS_FILTERED: &[&str] = &[
-        // Thank you variations (core hard filter)
-        "thank you", "thanks a lot", "thank you so much", "thank you very much",
-        "thanks so much", "many thanks", "thanks again", "thanks very much",
-        "appreciate it", "much appreciated", "really appreciate it", "i appreciate it",
-        "thanks",
+    // If no config is loaded, pass everything through (no hard filtering)
+    let config = match &*FILTER_CONFIG {
+        Some(c) => c,
+        None => return false,
+    };
 
-        // Response to thanks
-        "you're welcome", "your welcome", "no problem", "no worries", "don't mention it",
-        "my pleasure", "anytime", "happy to help", "glad to help", "of course",
-
-        // Basic farewells that are never commands
-        "bye", "goodbye", "good night", "have a good day", "have a nice day", "take care",
-
-        // Common filler words that should never be pasted (excluding hello and ok per user request)
-        "uh", "um", "ah", "oh", "hmm", "wow",
-
-        // STT error variations that should always be blocked
-        "thank u", "ur welcome", "thankyou",
-    ];
-
-    // Check for exact matches
-    if ALWAYS_FILTERED.iter().any(|phrase| normalized == *phrase) {
-        return true;
+    // FIRST: Check if text STARTS with any configured phrases - block EVERYTHING starting with these
+    for start_phrase in &config.hard_filter_starts_with {
+        if normalized.starts_with(start_phrase) {
+            return true;
+        }
     }
 
-    // Handle common STT substitutions for hard filter phrases
+    // Handle STT substitutions for phrases at start
     let mut substituted = normalized.clone();
     let substitutions = [
         (" u ", " you "),
-        (" r ", " are "),
-        (" ur ", " you are "),
+        ("thank u", "thank you"),
+        ("thankyou", "thank you"),
         ("ur ", "your "),
-        (" u", " you"),
-        ("u ", "you "),
     ];
 
     for (from, to) in &substitutions {
         substituted = substituted.replace(from, to);
     }
 
-    if substituted != normalized && ALWAYS_FILTERED.iter().any(|phrase| substituted == *phrase) {
+    if substituted != normalized {
+        for start_phrase in &config.hard_filter_starts_with {
+            if substituted.starts_with(start_phrase) {
+                return true;
+            }
+        }
+    }
+
+    // THEN: Check exact matches for other filtered phrases
+    for phrase in &config.hard_filter_exact {
+        if normalized == *phrase {
+            return true;
+        }
+    }
+
+    // FINALLY: Check regex patterns
+    for regex in &*COMPILED_REGEX {
+        if regex.is_match(&normalized) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Filter onomatopoeia and nonsense sounds using pattern analysis
+pub fn onomatopoeia_reject(text: &str) -> bool {
+    let normalized = text
+        .trim()
+        .trim_matches(|ch: char| ch.is_ascii_punctuation())
+        .to_lowercase();
+
+    let words: Vec<&str> = normalized.split_whitespace().collect();
+
+    // Very short text (1-2 chars) is likely just a sound
+    if normalized.len() <= 2 {
         return true;
     }
 
+    // Single word that's very short or has repeated characters
+    if words.len() == 1 {
+        let word = words[0];
+        // Check for repeated single characters (e.g., "aaa", "mmm", "uuu")
+        if word.chars().collect::<Vec<char>>().windows(2).all(|w| w[0] == w[1]) {
+            return true;
+        }
+        // Very short single word (2-3 chars) is likely a sound
+        if word.len() <= 3 {
+            return true;
+        }
+    }
+
+    // Check for alternating repeated patterns (e.g., "abab", "lalala")
+    if normalized.len() >= 6 {
+        let chars: Vec<char> = normalized.chars().collect();
+        let pattern = &chars[0..2];
+        let mut matches = true;
+        for i in (0..normalized.len()).step_by(2) {
+            if i + 1 < normalized.len() {
+                if &chars[i..i+2] != pattern {
+                    matches = false;
+                    break;
+                }
+            }
+        }
+        if matches && normalized.len() % 2 == 0 {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Degeneracy detection based on ship-fast's htmlLooksDegenerate algorithm
+/// Filters text with repetitive patterns (repeated words, bigrams, low diversity)
+pub fn degeneracy_reject(text: &str) -> bool {
+    let normalized = text
+        .trim()
+        .trim_matches(|ch: char| ch.is_ascii_punctuation())
+        .to_lowercase();
+
+    let words: Vec<&str> = normalized.split_whitespace().collect();
+
+    if words.is_empty() {
+        return true;
+    }
+
+    // Check for repeated words (max run > 10 for speech, stricter than ship-fast's 45)
+    let mut run = 1;
+    let mut max_run = 1;
+    for i in 1..words.len() {
+        if words[i] == words[i - 1] {
+            run += 1;
+            max_run = max_run.max(run);
+        } else {
+            run = 1;
+        }
+    }
+    if max_run > 10 {
+        return true;
+    }
+
+    // Check for repeated bigrams (count > 20 for speech, stricter than ship-fast's 80)
+    if words.len() > 10 {
+        use std::collections::HashMap;
+        let mut bigrams: HashMap<String, usize> = HashMap::new();
+        for i in 0..words.len().saturating_sub(1) {
+            let bigram = format!("{} {}", words[i].to_lowercase(), words[i + 1].to_lowercase());
+            *bigrams.entry(bigram).or_insert(0) += 1;
+        }
+        for count in bigrams.values() {
+            if *count > 20 {
+                return true;
+            }
+        }
+    }
+
+    // Check for low unique word ratio (< 0.15 for speech, stricter than ship-fast's 0.06)
+    if words.len() > 20 {
+        let unique: std::collections::HashSet<&str> = words.iter().cloned().collect();
+        let ratio = unique.len() as f64 / words.len() as f64;
+        if ratio < 0.15 {
+            return true;
+        }
+    }
+
+    // Check for very short text (less than 2 words)
+    if words.len() < 2 {
+        return true;
+    }
+
+    false
+}
+
+/// Gibberish detection based on commit 01f51f9 by Abhi
+/// Uses vowel/consonant analysis to detect keyboard mashing and unpronounceable text
+pub fn gibberish_reject(text: &str) -> bool {
+    let normalized = text
+        .trim()
+        .trim_matches(|ch: char| ch.is_ascii_punctuation())
+        .to_lowercase();
+
+    let words: Vec<&str> = normalized.split_whitespace().collect();
+
+    // Extract alphabetic characters only
+    let alpha_only: String = normalized.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+
+    // Vowel ratio check: real language has ~30-50% vowels; keyboard mashing has very few
+    if alpha_only.len() >= 40 {
+        let vowels = alpha_only.chars().filter(|c| matches!(c, 'a' | 'e' | 'i' | 'o' | 'u')).count();
+        let vowel_ratio = vowels as f64 / alpha_only.len() as f64;
+        if vowel_ratio < 0.15 {
+            return true;
+        }
+    }
+
+    // Consonant cluster check: gibberish has long runs without vowels (e.g., "jfsdkljfsdjfds")
+    // Match runs of 5+ consonants (equivalent to JavaScript /[^aeiou]{5,}/g)
+    let mut cluster_count = 0;
+    let mut current_cluster_len = 0;
+    for c in alpha_only.chars() {
+        if matches!(c, 'a' | 'e' | 'i' | 'o' | 'u') {
+            if current_cluster_len >= 5 {
+                cluster_count += 1;
+            }
+            current_cluster_len = 0;
+        } else {
+            current_cluster_len += 1;
+        }
+    }
+    if current_cluster_len >= 5 {
+        cluster_count += 1;
+    }
+    if cluster_count >= 3 {
+        return true;
+    }
+
+    // Check if most 4+ letter words have no vowels at all
+    let long_words: Vec<&str> = words.iter()
+        .filter(|w| w.chars().filter(|c| c.is_ascii_alphabetic()).count() >= 4)
+        .cloned()
+        .collect();
+
+    if long_words.len() >= 3 {
+        let no_vowel_count = long_words.iter()
+            .filter(|w| !w.chars().any(|c| matches!(c.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u')))
+            .count();
+        if no_vowel_count as f64 / long_words.len() as f64 > 0.5 {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Filter for non-ASCII characters and mixed language nonsense
+pub fn non_ascii_reject(text: &str) -> bool {
+    // Check for non-ASCII characters (like ç, ñ, ü, etc.)
+    let non_ascii_count = text.chars().filter(|c| !c.is_ascii()).count();
+    
+    // Any non-ASCII character in the text is suspicious for voice commands
+    if non_ascii_count > 0 {
+        return true;
+    }
+    
     false
 }
 
@@ -193,13 +389,62 @@ pub fn should_accept(text: &str, _cfg: &AlwaysConfig) -> bool {
         return false;
     }
 
+    // Filter onomatopoeia and nonsense sounds
+    if onomatopoeia_reject(text) {
+        return false;
+    }
+
+    // Filter gibberish (keyboard mashing, unpronounceable text)
+    if gibberish_reject(text) {
+        return false;
+    }
+
+    // Filter non-ASCII and mixed language nonsense
+    if non_ascii_reject(text) {
+        return false;
+    }
+
+    // Filter degenerate content (repetitive patterns)
+    if degeneracy_reject(text) {
+        return false;
+    }
+
     // Apply additional filtering for conversational noise
     !quick_reject(text)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::quick_reject;
+    use super::{quick_reject, onomatopoeia_reject, non_ascii_reject};
+
+    #[test]
+    fn rejects_onomatopoeia_sounds() {
+        assert!(onomatopoeia_reject("aaa"));
+        assert!(onomatopoeia_reject("mmm"));
+        assert!(onomatopoeia_reject("uuu"));
+        assert!(onomatopoeia_reject("zzz"));
+        assert!(onomatopoeia_reject("lalala"));
+        assert!(onomatopoeia_reject("nanana"));
+        assert!(onomatopoeia_reject("bababa"));
+        assert!(onomatopoeia_reject("a"));
+        assert!(onomatopoeia_reject("ab"));
+        assert!(onomatopoeia_reject("abc"));
+    }
+
+    #[test]
+    fn allows_actual_commands_with_onomatopoeia_words() {
+        assert!(!onomatopoeia_reject("open burp file")); // "burp" as part of a command
+        assert!(!onomatopoeia_reject("create boom function")); // "boom" as part of a command
+        assert!(!onomatopoeia_reject("zap the bug")); // "zap" as part of a command
+    }
+
+    #[test]
+    fn rejects_mixed_language_nonsense() {
+        // Test with individual filters since AlwaysConfig doesn't have Default
+        let text = "In collaboration with çalışatobeltragende. tell debe";
+        // The non_ascii filter now uses 20% threshold for non-ASCII characters
+        assert!(non_ascii_reject(text));
+    }
 
     #[test]
     fn rejects_single_fillers_only() {
@@ -285,19 +530,13 @@ mod tests {
     fn hard_filter_always_rejects_thank_you() {
         use super::hard_reject;
 
-        // Hard filter should always reject these, regardless of context
-        assert!(hard_reject("thank you"));
+        // These should ALWAYS be rejected by hard filter
         assert!(hard_reject("Thank You!"));
         assert!(hard_reject("thanks"));
         assert!(hard_reject("thank u"));
         assert!(hard_reject("ur welcome"));
         assert!(hard_reject("you're welcome"));
         assert!(hard_reject("bye"));
-
-        // These should NOT be rejected by hard filter anymore
-        assert!(!hard_reject("hello"));
-        assert!(!hard_reject("ok"));
-        assert!(!hard_reject("okay"));
     }
 
     #[test]

@@ -14,3 +14,4 @@ build/
 *.log
 *.jsonl
 glossary.json
+.gitnexus

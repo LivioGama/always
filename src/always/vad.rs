@@ -2,10 +2,11 @@ use anyhow::{Context, Result};
 use std::collections::VecDeque;
 use webrtc_vad::{Vad, VadMode};
 
-use crate::always::AlwaysConfig;
 use crate::always::audio::{self, FRAME_BYTES, FRAME_MS};
 use crate::always::loading;
 use crate::always::log::{Event, Logger};
+use crate::always::state::DaemonState;
+use crate::always::AlwaysConfig;
 
 pub enum RecordResult {
     Speech { text: String, energy: f64 },
@@ -89,6 +90,13 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
                     if passes_energy_check {
                         log.write(Event::VoiceDetected);
                         voice_logged = true;
+
+                        // Add delay before showing overlay to avoid being overwhelming
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+
+                        if let Err(e) = DaemonState::set_listening(true) {
+                            eprintln!("Failed to write listening state: {}", e);
+                        }
                         if let Err(e) = loading::show_loading_overlay() {
                             eprintln!("Failed to show voice detection overlay: {}", e);
                         }
@@ -127,6 +135,7 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     if speech_samples.is_empty() {
         // Hide any loading overlay if no speech was detected
         loading::stop_loading();
+        // Don't set listening to false here - let it time out naturally
         return if total_frames >= max_frames {
             Ok(RecordResult::Timeout)
         } else {
@@ -144,6 +153,7 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     // Only log drops if we actually logged voice detection
     if speech_energy < cfg.energy_threshold {
         loading::stop_loading();
+        // Don't set listening to false here - let it time out naturally
         if voice_logged {
             // Only log dropped energy if we previously logged voice detected
             return Ok(RecordResult::DroppedLowEnergy {
@@ -156,6 +166,7 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     }
 
     // Show loading overlay while transcribing
+    let _ = DaemonState::set_transcribing(true);
     if let Err(e) = loading::show_persistent_overlay() {
         eprintln!("Failed to show loading overlay: {}", e);
     }
@@ -169,15 +180,22 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
         }
     };
 
-    let raw = match crate::stt::transcribe_from_bytes(wav_data, Some(&cfg.lang), &cfg.groq_stt_api_key, "whisper-large-v3") {
+    let raw = match crate::stt::transcribe_from_bytes(
+        wav_data,
+        Some(&cfg.lang),
+        &cfg.groq_stt_api_key,
+        "whisper-large-v3",
+    ) {
         Ok(raw) => {
             // Hide loading overlay on success
             loading::stop_loading();
+            let _ = DaemonState::set_transcript(raw.clone());
             raw
-        },
+        }
         Err(err) => {
             // Hide loading overlay on error
             loading::stop_loading();
+            let _ = DaemonState::set_transcribing(false);
             return Err(err).context("failed to transcribe utterance");
         }
     };
@@ -244,7 +262,7 @@ fn normalized_energy(samples: &[i16]) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalized_energy, fast_normalized_energy, fast_energy_check};
+    use super::{fast_energy_check, fast_normalized_energy, normalized_energy};
 
     #[test]
     fn normalized_energy_handles_empty_input() {
@@ -277,8 +295,8 @@ mod tests {
     #[test]
     fn fast_methods_are_consistent_with_standard() {
         let test_samples = [
-            1000, -800, 1200, -900, 600, -700, 1500, -1100,
-            400, -300, 800, -600, 200, -100, 900, -750,
+            1000, -800, 1200, -900, 600, -700, 1500, -1100, 400, -300, 800, -600, 200, -100, 900,
+            -750,
         ];
 
         let standard_energy = normalized_energy(&test_samples);

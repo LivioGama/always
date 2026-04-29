@@ -146,7 +146,7 @@ impl AlwaysConfig {
             silence_secs,
             auto_enter,
             filter_enabled: true, // Always enabled - filter is always on
-            energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.05),
+            energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.15),
             onset_ms: 100,
             cooldown_ms: prefs.stt_cooldown_ms.unwrap_or(150),
             log_path: log_path_from_preferences(&prefs),

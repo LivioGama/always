@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 
 use crate::always::log::{Event, Logger};
 use crate::always::{AlwaysConfig, daemon, filter, keyboard, notification, paste, pause, vad};
+use crate::db;
 
 pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     let _pid = daemon::PidGuard::install()?;
@@ -23,12 +24,24 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     }
 
     let mut last_process = Instant::now() - Duration::from_secs(10);
+    let mut last_config_reload = Instant::now() - Duration::from_secs(10);
 
     loop {
         if pause::is_paused() {
             // When paused, sleep for a short time to avoid busy waiting
             std::thread::sleep(Duration::from_millis(100));
             continue;
+        }
+
+        // Reload auto_enter config every second
+        if Instant::now().duration_since(last_config_reload).as_secs() >= 1 {
+            if let Ok(conn) = db::open() {
+                if let Ok(prefs) = db::get_preferences(&conn) {
+                    let new_auto_enter = prefs.stt_auto_enter.unwrap_or(false);
+                    pause::set_auto_enter_enabled(new_auto_enter);
+                }
+            }
+            last_config_reload = Instant::now();
         }
 
         process_one(&cfg, &mut log, &mut last_process)?;
