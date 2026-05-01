@@ -15,6 +15,7 @@ pub struct DaemonState {
     pub transcribing: bool,  // New field for transcription state
     pub paused: bool,
     pub auto_enter: bool,
+    pub voice_activity: bool,  // Early energy detection before VAD confirmation
     pub last_transcript: Option<String>,
     pub last_updated: u64,
     pub version: u64,  // Version counter for detecting stale state
@@ -28,6 +29,7 @@ impl Default for DaemonState {
             transcribing: false,
             paused: false,
             auto_enter: false,
+            voice_activity: false,
             last_transcript: None,
             last_updated: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -141,6 +143,18 @@ impl DaemonState {
         let _lock = STATE_MUTEX.lock().unwrap();
         let mut state = Self::load().unwrap_or_default();
         state.auto_enter = auto_enter;
+        state.version += 1;
+        state.last_updated = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        state.save()
+    }
+
+    pub fn set_voice_activity(voice_activity: bool) -> Result<()> {
+        let _lock = STATE_MUTEX.lock().unwrap();
+        let mut state = Self::load().unwrap_or_default();
+        state.voice_activity = voice_activity;
         state.version += 1;
         state.last_updated = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

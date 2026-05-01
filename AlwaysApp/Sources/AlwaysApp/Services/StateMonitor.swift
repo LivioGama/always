@@ -1,119 +1,144 @@
 import Foundation
 import Combine
-import Darwin
-
-struct DaemonState: Codable {
-    var listening: Bool
-    var processing: Bool
-    var transcribing: Bool?  // Make optional for backward compatibility
-    var paused: Bool
-    var autoEnter: Bool
-    var lastTranscript: String?
-    var lastUpdated: UInt64
-    var version: UInt64?  // Make optional for backward compatibility
-
-    enum CodingKeys: String, CodingKey {
-        case listening
-        case processing
-        case transcribing
-        case paused
-        case autoEnter = "auto_enter"
-        case lastTranscript = "last_transcript"
-        case lastUpdated = "last_updated"
-        case version
-    }
-}
 
 class StateMonitor: ObservableObject {
-    @Published var isListening: Bool = false
-    @Published var isProcessing: Bool = false
-    @Published var isTranscribing: Bool = false
+    static let shared = StateMonitor()
+
     @Published var isPaused: Bool = false
     @Published var isAutoEnter: Bool = false
-    @Published var lastTranscript: String? = nil
-    @Published var lastUpdated: UInt64 = 0
-    @Published var showNotification: Bool = false
+    @Published var isTranscribing: Bool = false
+    @Published var isVoiceActivity: Bool = false
+    private var cancellables = Set<AnyCancellable>()
+    private var udsClient: UDSClient
 
-    private var timer: Timer?
-    private var dispatchSource: DispatchSourceFileSystemObject?
-    private let stateFilePath: String
-    private let notificationFilePath: String
+    private func log(_ message: String) {
+        let timestamp = Date().description
+        let line = "[\(timestamp)] StateMonitor: \(message)\n"
+        let path = "/tmp/statemonitor.log"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: path) {
+                if let fileHandle = FileHandle(forWritingAtPath: path) {
+                    fileHandle.seekToEndOfFile()
+                    fileHandle.write(data)
+                    fileHandle.closeFile()
+                }
+            } else {
+                try? data.write(to: URL(fileURLWithPath: path))
+            }
+        }
+        NSLog("StateMonitor: \(message)")
+    }
 
-    init() {
-        // Path to state file: ~/.config/always/state.json
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        stateFilePath = home.appendingPathComponent(".config/always/state.json").path
-        notificationFilePath = home.appendingPathComponent(".config/always/notification.txt").path
-
-        startMonitoring()
+    private init() {
+        self.udsClient = UDSClient()
+        setupUDSEventListener()
+        setupOverlaySubscription()
+        log("Initialized with UDSClient and overlay subscription")
     }
     
     deinit {
-        stopMonitoring()
+        cancellables.forEach { $0.cancel() }
     }
 
-    func startMonitoring() {
-        // Check if state file exists at startup
-        let exists = FileManager.default.fileExists(atPath: stateFilePath)
-        print("StateMonitor: Starting monitoring at \(stateFilePath)")
-        print("StateMonitor: State file exists: \(exists)")
-
-        if exists {
-            // Read initial state
-            checkState()
-            print("StateMonitor: Initial state - listening: \(isListening), processing: \(isProcessing)")
-        }
-
-        // Use polling with 33ms interval (30fps) for responsive state detection
-        timer = Timer.scheduledTimer(withTimeInterval: 0.033, repeats: true) { [weak self] _ in
-            self?.checkState()
-        }
-        // Add timer to common run loop mode so it works when app is in background
-        RunLoop.main.add(timer!, forMode: .common)
-        print("StateMonitor: Timer scheduled (33ms interval)")
+    /// Tell the daemon (in-process) to toggle pause. The daemon mutates its
+    /// own state and broadcasts the resulting Paused/Resumed event back to
+    /// every subscriber, including us. Going through the daemon — instead
+    /// of spawning a CLI subprocess — is what makes the overlay update.
+    ///
+    /// Updates @Published state and flashes the overlay optimistically so
+    /// the UI feels instant. The daemon's echo arrives milliseconds later
+    /// and the changed-guard in handleDaemonEvent suppresses the duplicate.
+    func togglePause() {
+        let newValue = !isPaused
+        isPaused = newValue
+        StatusOverlayController.shared.flash(state: newValue ? .paused : .resumed)
+        udsClient.sendCommand("TogglePause")
     }
-    
-    func stopMonitoring() {
-        timer?.invalidate()
-        timer = nil
+
+    /// Same as togglePause, for auto-enter.
+    func toggleAutoEnter() {
+        let newValue = !isAutoEnter
+        isAutoEnter = newValue
+        StatusOverlayController.shared.flash(state: newValue ? .autoEnterOn : .autoEnterOff)
+        udsClient.sendCommand("ToggleAutoEnter")
     }
     
-    private func checkState() {
-        guard FileManager.default.fileExists(atPath: stateFilePath) else {
-            return
-        }
-
-        do {
-            let data = try Data(contentsOf: URL(fileURLWithPath: stateFilePath))
-            let state = try JSONDecoder().decode(DaemonState.self, from: data)
-
-            DispatchQueue.main.async {
-                // Update published properties (triggers Combine)
-                self.isListening = state.listening
-                self.isProcessing = state.processing
-                self.isTranscribing = state.transcribing ?? false
-                self.isPaused = state.paused
-                self.isAutoEnter = state.autoEnter
-                self.lastTranscript = state.lastTranscript
-                self.lastUpdated = state.lastUpdated
+    /// Track whether the daemon's most recent ongoing state still
+    /// warrants a persistent overlay. Used so a flash doesn't clobber
+    /// an in-progress transcription, and so the overlay restores
+    /// itself when a flash auto-hides during ongoing activity.
+    private func setupOverlaySubscription() {
+        Publishers.CombineLatest($isTranscribing, $isVoiceActivity)
+            .debounce(for: .milliseconds(50), scheduler: DispatchQueue.main)
+            .sink { [weak self] isTranscribing, isVoiceActivity in
+                guard let self = self else { return }
+                self.log("ongoing state - trans:\(isTranscribing) voice:\(isVoiceActivity)")
+                if isTranscribing {
+                    StatusOverlayController.shared.show(state: .transcribing)
+                } else if isVoiceActivity {
+                    StatusOverlayController.shared.show(state: .voiceActivity)
+                } else {
+                    StatusOverlayController.shared.hide()
+                }
             }
-        } catch {
-            print("StateMonitor: ERROR decoding state - \(error)")
-        }
-
-        // Check for notification trigger file
-        if FileManager.default.fileExists(atPath: notificationFilePath) {
-            DispatchQueue.main.async {
-                self.showNotification = true
-                // Delete the trigger file after reading
-                try? FileManager.default.removeItem(atPath: self.notificationFilePath)
-            }
-        }
+            .store(in: &cancellables)
     }
 
-    // Public method for forcing immediate state update (for keyboard shortcuts)
-    func forceStateUpdate() {
-        print("StateMonitor: Force state update requested")
-        checkState()
+    private func setupUDSEventListener() {
+        NotificationCenter.default.publisher(for: .daemonEvent)
+            .compactMap { $0.object as? DaemonEvent }
+            .sink { [weak self] event in
+                self?.log("received daemon event: \(event.type.rawValue)")
+                self?.handleDaemonEvent(event)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func handleDaemonEvent(_ event: DaemonEvent) {
+        DispatchQueue.main.async {
+            switch event.type {
+            case .paused:
+                let changed = !self.isPaused
+                self.isPaused = true
+                if changed {
+                    StatusOverlayController.shared.flash(state: .paused)
+                }
+            case .resumed:
+                let changed = self.isPaused
+                self.isPaused = false
+                if changed {
+                    StatusOverlayController.shared.flash(state: .resumed)
+                }
+            case .autoEnterEnabled:
+                let changed = !self.isAutoEnter
+                self.isAutoEnter = true
+                if changed {
+                    StatusOverlayController.shared.flash(state: .autoEnterOn)
+                }
+            case .autoEnterDisabled:
+                let changed = self.isAutoEnter
+                self.isAutoEnter = false
+                if changed {
+                    StatusOverlayController.shared.flash(state: .autoEnterOff)
+                }
+            case .transcribingStarted:
+                self.isTranscribing = true
+            case .transcribingStopped:
+                self.isTranscribing = false
+            case .transcriptFinal:
+                // The phrase is fully done. Force-clear the ongoing state
+                // so the "Listening" overlay disappears immediately —
+                // VoiceActivityEnded sometimes lags or is suppressed by
+                // residual room noise.
+                self.isTranscribing = false
+                self.isVoiceActivity = false
+            case .voiceActivityDetected:
+                self.isVoiceActivity = true
+            case .voiceActivityEnded:
+                self.isVoiceActivity = false
+            default:
+                break
+            }
+        }
     }
 }

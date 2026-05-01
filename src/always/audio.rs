@@ -68,7 +68,7 @@ pub struct RecChild {
 
 impl RecChild {
     pub fn spawn() -> Result<Self> {
-        let mut child = std::process::Command::new("rec")
+        let mut child = std::process::Command::new("/opt/homebrew/bin/rec")
             .args([
                 "--no-show-progress",
                 "-c",

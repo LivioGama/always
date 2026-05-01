@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **always** (847 symbols, 1793 relationships, 70 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **always** (971 symbols, 2059 relationships, 81 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -46,25 +46,70 @@ This project is indexed by GitNexus as **always** (847 symbols, 1793 relationshi
 
 ## Build & Launch Process
 
+**CRITICAL RULE:** After making ANY code changes to the AlwaysApp (Swift) or daemon (Rust), you MUST automatically rebuild and relaunch the app to test the changes.
+
+### Simple Workflow (Do This Every Time)
+
+```bash
+pkill -f AlwaysApp
+cd AlwaysApp && ./build.sh && open AlwaysApp.app
+```
+
+### Why This Process Matters
+
+**Common Mistake:** Using `swift run` to test changes
+- `swift run` builds in a temporary location
+- It does NOT create the app bundle at the correct location
+- Changes won't apply to the deployed app
+- The running app uses the old version
+
+**Correct Process:** Use `./build.sh`
+- Builds the Swift app properly
+- Copies the daemon binary into the app bundle
+- Creates the app bundle at `AlwaysApp/AlwaysApp.app`
+- Code signs the app for proper permissions
+- This is the actual deployed version
+
+### Detailed Steps
+
 **CRITICAL:** To rebuild and launch the Always app (both daemon and Mac status bar app):
 
-1. **Kill existing processes:**
+1. **Kill existing processes (no parallel versions):**
    ```bash
-   pkill -f "AlwaysApp" || true
-   pkill -f "always" || true
+   ./target/release/always stop
+   osascript -e 'tell application "AlwaysApp" to quit'
    ```
 
-2. **Build everything (daemon + Mac app):**
+2. **Build the Rust daemon:**
    ```bash
-   cargo build --release
+   cargo build --release --lib --bin always
    ```
 
-3. **Launch the Mac app (which starts both GUI and daemon):**
+3. **Build the Swift Mac app:**
+   ```bash
+   cd AlwaysApp && ./build.sh
+   ```
+
+4. **Deploy Mac app to correct location:**
+   ```bash
+   # The build script creates AlwaysApp.app in AlwaysApp/
+   # Ensure no other AlwaysApp instances are running before launching
+   ```
+
+5. **Launch the Mac app (which starts both GUI and daemon via CLIService):**
    ```bash
    open -a AlwaysApp
+   # Or from the app bundle:
+   open -a AlwaysApp/AlwaysApp.app
    ```
 
-**NEVER** run `./target/release/always start` directly — this only starts the daemon without the Mac status bar interface. Always use `open -a AlwaysApp` to launch the complete system.
+**IMPORTANT:**
+- **NEVER** run `./target/release/always start` directly — this bypasses CLIService environment variables
+- **NEVER** reference `./target/release/always` in code — the daemon binary is embedded in the Mac app bundle at `AlwaysApp.app/Contents/MacOS/always`
+- **NEVER** have parallel versions running — always stop old instances before launching new ones
+- The Mac app launches the daemon through CLIService which passes environment variables (like GROQ_API_KEY)
+- Both daemon and Mac app must be rebuilt and deployed together after code changes
+- The build script automatically copies the daemon binary into the app bundle
 
 ## Verification
 

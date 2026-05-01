@@ -2,7 +2,7 @@ use std::io::Write as _;
 
 use anyhow::{Context, Result};
 
-pub fn paste(text: &str, auto_enter: bool) -> Result<()> {
+pub fn copy_to_clipboard(text: String) -> Result<()> {
     let mut pbcopy = std::process::Command::new("pbcopy")
         .stdin(std::process::Stdio::piped())
         .spawn()
@@ -17,7 +17,10 @@ pub fn paste(text: &str, auto_enter: bool) -> Result<()> {
     if !status.success() {
         anyhow::bail!("pbcopy failed");
     }
+    Ok(())
+}
 
+pub fn paste_text(auto_enter: bool) -> Result<()> {
     let mut script =
         String::from("tell application \"System Events\" to keystroke \"v\" using command down");
     if auto_enter {
@@ -35,5 +38,11 @@ pub fn paste(text: &str, auto_enter: bool) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+pub fn paste(text: &str, auto_enter: bool) -> Result<()> {
+    copy_to_clipboard(text.to_string())?;
+    paste_text(auto_enter)?;
     Ok(())
 }

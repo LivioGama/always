@@ -19,3 +19,13 @@ struct DaemonStatus: Codable {
         return DaemonStatus(isRunning: false, pid: nil, logPath: nil)
     }
 }
+
+struct DaemonState: Codable {
+    let isPaused: Bool
+    let isAutoEnter: Bool
+
+    static func fromCLI(output: String) -> DaemonState? {
+        guard let data = output.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(DaemonState.self, from: data)
+    }
+}

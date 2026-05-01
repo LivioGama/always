@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -18,6 +18,7 @@ pub struct PostProcessor {
     learning_enabled: bool,
     groq_api_key: Option<String>,
     cache: Arc<Mutex<HashMap<String, String>>>,
+    cache_order: Arc<Mutex<VecDeque<String>>>,
     config: PostprocessConfig,
 }
 
@@ -51,6 +52,7 @@ impl PostProcessor {
             learning_enabled: false,
             groq_api_key,
             cache: Arc::new(Mutex::new(HashMap::new())),
+            cache_order: Arc::new(Mutex::new(VecDeque::new())),
             config,
         }
     }

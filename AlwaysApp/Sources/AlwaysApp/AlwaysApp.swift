@@ -1,7 +1,5 @@
 import SwiftUI
 import AppKit
-import Combine
-import ApplicationServices
 
 @main
 struct AlwaysApp: App {
@@ -11,7 +9,7 @@ struct AlwaysApp: App {
         MenuBarExtra("Always", systemImage: "mic.fill") {
             MenuBarView()
         }
-        .menuBarExtraStyle(.window)
+        .menuBarExtraStyle(.menu)
 
         Window("Always Settings", id: "settings") {
             SettingsWindow(cliService: CLIService())
@@ -21,50 +19,19 @@ struct AlwaysApp: App {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    private var stateMonitor: StateMonitor?
-    private var overlayController: OverlayController?
-    private var cancellables = Set<AnyCancellable>()
+    private var cliService: CLIService?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Prevent app from appearing in Dock
         NSApp.setActivationPolicy(.accessory)
+        cliService = CLIService()
 
-        // Set up overlay controller
-        overlayController = OverlayController()
+        // Bootstrap the singleton — touching .shared lazily creates it,
+        // which connects to the daemon over UDS and wires the overlay
+        // subscription. Without this access nothing else triggers it.
+        _ = StateMonitor.shared
 
-        // Set up state monitoring
-        stateMonitor = StateMonitor()
-
-        // Combine all states for responsive overlay updates
-        if let monitor = stateMonitor {
-            Publishers.CombineLatest4(monitor.$isListening, monitor.$isProcessing, monitor.$isPaused, monitor.$isAutoEnter)
-                .sink { [weak self] isListening, isProcessing, isPaused, isAutoEnter in
-                    self?.updateOverlayState(isListening: isListening, isProcessing: isProcessing, isPaused: isPaused, isAutoEnter: isAutoEnter)
-                }
-                .store(in: &cancellables)
-
-            // Subscribe to notification trigger
-            monitor.$showNotification
-                .sink { [weak self] shouldShow in
-                    if shouldShow {
-                        self?.overlayController?.showNotification()
-                    }
-                }
-                .store(in: &cancellables)
-        }
-    }
-
-    private func updateOverlayState(isListening: Bool, isProcessing: Bool, isPaused: Bool, isAutoEnter: Bool) {
-        if isPaused {
-            overlayController?.setState(.paused)
-        } else if isAutoEnter {
-            overlayController?.setState(.autoEnter)
-        } else if isListening {
-            overlayController?.setState(.listening)
-        } else if isProcessing {
-            overlayController?.setState(.processing)
-        } else {
-            overlayController?.setState(.hidden)
+        Task {
+            _ = try? await cliService?.startDaemon()
         }
     }
 }

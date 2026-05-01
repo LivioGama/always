@@ -1,9 +1,10 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use tokio::runtime::Runtime;
 
 use crate::always::log::{Event, Logger};
-use crate::always::{AlwaysConfig, daemon, filter, keyboard, mic_monitor, notification, paste, pause, state, vad};
+use crate::always::{AlwaysConfig, daemon, event, filter, keyboard, mic_monitor, notification, paste, pause, uds_server, vad};
 
 pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     let _pid = daemon::PidGuard::install()?;
@@ -20,6 +21,20 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     // Show startup notification
     if let Err(e) = notification::notify("ALWAYS", "🎤 Voice activation started", false) {
         eprintln!("Failed to show startup notification: {}", e);
+    }
+
+    // Start UDS server in background and track the task
+    let rt = Runtime::new()?;
+    let _uds_handle = rt.spawn(async {
+        if let Err(e) = uds_server::start_server().await {
+            eprintln!("UDS server error: {}", e);
+        }
+    });
+
+    // Send initial state events
+    event::global_broadcaster().listening_started();
+    if cfg.auto_enter {
+        event::global_broadcaster().auto_enter_enabled();
     }
 
     let mut last_process = Instant::now() - Duration::from_secs(10);
@@ -81,9 +96,9 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         // Auto-enter state is now managed consistently through keyboard shortcuts and settings UI
 
         if let Err(e) = process_one(&cfg, &mut log, &mut last_process) {
-            eprintln!("⚠️  Error in voice processing (continuing): {}", e);
+            eprintln!("⚠️  Error in voice processing (continuing): {:#}", e);
             log.write(Event::Error {
-                message: &format!("Voice processing error: {}", e)
+                message: &format!("Voice processing error: {:#}", e)
             });
             // Don't exit - continue running
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -139,12 +154,26 @@ fn handle_speech(
         energy,
     });
 
-    // Set transcript to filtered text so subtitle shows filtered content
-    let _ = state::DaemonState::set_transcript(transformed.clone());
+    // Send transcript event instead of writing to file
+    event::global_broadcaster().transcript_final(transformed.clone());
+
+    // Always copy to clipboard regardless of Command key state
+    paste::copy_to_clipboard(format!("{} ", transformed))?;
+
+    // Skip paste (and auto-enter) if the user is currently holding Command —
+    // they're likely mid-shortcut (e.g. ⌘+Tab) and an interjecting paste
+    // would corrupt their action. Transcript still broadcasted/logged above.
+    if keyboard::is_cmd_held() {
+        eprintln!("⊘ Skipped paste: Command key held");
+        log.write(Event::Error {
+            message: "Skipped paste: Command key held",
+        });
+        return Ok(());
+    }
 
     // Use the global auto-enter state instead of config
     let auto_enter = pause::is_auto_enter_enabled();
-    paste::paste(&format!("{} ", transformed), auto_enter)?;
+    paste::paste_text(auto_enter)?;
     Ok(())
 }
 
@@ -197,7 +226,7 @@ mod tests {
             auto_enter: false,
             filter_enabled: true,
             energy_threshold: 0.05,
-            onset_ms: 200,
+            onset_ms: 50,
             cooldown_ms: 1500,
             log_path: PathBuf::from("always.log"),
             vocab,

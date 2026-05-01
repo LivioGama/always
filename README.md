@@ -38,6 +38,18 @@ always run      # Run in foreground (debugging)
 - `Ctrl+Shift+A` — Toggle auto-enter mode
 - `Ctrl+C` — Stop daemon (foreground mode)
 
+### 🎯 Overlay Display Rules
+
+The overlay displays based on the current state in `~/.config/always/state.json`, which is polled every 33ms with the following priority order:
+
+1. **Paused** (orange circle) — When voice listening is paused
+2. **Auto-Enter** (green circle) — When auto-enter mode is enabled
+3. **Processing** (blue circle) — When filtering/post-processing transcription (after voice detection)
+4. **Transcribing** (purple circle) — When transcribing audio to text
+5. **Hidden** — When no activity (overlay is not visible)
+
+The overlay does **not** show during voice detection to avoid excessive visual feedback before filtering occurs.
+
 ### Configuration
 ```bash
 always config show                                    # View all settings

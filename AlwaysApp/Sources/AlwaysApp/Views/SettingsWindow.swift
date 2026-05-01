@@ -2,7 +2,7 @@ import SwiftUI
 
 struct SettingsWindow: View {
     @ObservedObject var cliService: CLIService
-    @StateObject private var stateMonitor = StateMonitor()
+    @ObservedObject private var stateMonitor: StateMonitor = .shared
     @State private var config: Config = Config.defaultConfig
     @State private var status: DaemonStatus?
     @State private var isLoading = false
@@ -38,7 +38,28 @@ struct SettingsWindow: View {
             }
 
             Section(header: Text("Behavior")) {
-                Toggle("Auto-Enter After Paste", isOn: $config.sttAutoEnter)
+                HStack {
+                    // Bind the toggle to the daemon's authoritative state.
+                    // Tapping fires a UDS command; the resulting AutoEnter*
+                    // event from the daemon updates stateMonitor.isAutoEnter
+                    // which flips the toggle.
+                    Toggle("Auto-Enter After Paste", isOn: Binding(
+                        get: { stateMonitor.isAutoEnter },
+                        set: { _ in stateMonitor.toggleAutoEnter() }
+                    ))
+                }
+
+                HStack {
+                    Button(action: {
+                        stateMonitor.togglePause()
+                    }) {
+                        HStack {
+                            Image(systemName: stateMonitor.isPaused ? "play.circle.fill" : "pause.circle.fill")
+                            Text(stateMonitor.isPaused ? "Resume" : "Pause")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                }
             }
 
             Section(header: Text("API Configuration")) {
@@ -241,7 +262,6 @@ struct SettingsWindow: View {
         .onChange(of: config.hearEnergyThreshold) { _, _ in saveConfig() }
         .onChange(of: config.sttSilence) { _, _ in saveConfig() }
         .onChange(of: config.sttCooldownMs) { _, _ in saveConfig() }
-        .onChange(of: config.sttAutoEnter) { _, _ in saveConfig() }
     }
 
     private func toggleDaemon() {

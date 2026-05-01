@@ -1,5 +1,6 @@
 //! Keyboard shortcut handler for global pause toggle and auto-enter toggle.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -7,7 +8,18 @@ use std::time::Duration;
 use anyhow::Result;
 use rdev::{listen, EventType, Key};
 
-use super::{config as always_config, log, notification, pause};
+use super::{config as always_config, event, log, notification, pause};
+
+/// Tracks whether the Command (⌘) key is currently held.
+/// Used by the paste path to suppress keystrokes when the user is mid-shortcut
+/// (e.g. ⌘+Tab) so an interjecting paste doesn't corrupt their action.
+static CMD_HELD: once_cell::sync::Lazy<AtomicBool> =
+    once_cell::sync::Lazy::new(|| AtomicBool::new(false));
+
+/// Returns true if either Command key is currently held.
+pub fn is_cmd_held() -> bool {
+    CMD_HELD.load(Ordering::Relaxed)
+}
 
 /// Start listening for keyboard shortcuts:
 /// - Ctrl+Shift+P: Toggle pause/resume
@@ -35,13 +47,21 @@ pub fn start_keyboard_listener() -> Result<()> {
                 EventType::KeyRelease(Key::ShiftLeft) | EventType::KeyRelease(Key::ShiftRight) => {
                     shift_pressed = false;
                 }
+                EventType::KeyPress(Key::MetaLeft) | EventType::KeyPress(Key::MetaRight) => {
+                    CMD_HELD.store(true, Ordering::Relaxed);
+                }
+                EventType::KeyRelease(Key::MetaLeft) | EventType::KeyRelease(Key::MetaRight) => {
+                    CMD_HELD.store(false, Ordering::Relaxed);
+                }
                 EventType::KeyPress(Key::KeyP) => {
                     if ctrl_pressed && shift_pressed {
                         let new_state = pause::toggle_pause();
 
-                        // Update state file
-                        if let Err(e) = crate::always::state::DaemonState::set_paused(new_state) {
-                            eprintln!("Failed to update paused state: {}", e);
+                        // Send event instead of writing to file
+                        if new_state {
+                            event::global_broadcaster().paused();
+                        } else {
+                            event::global_broadcaster().resumed();
                         }
 
                         // Log the pause toggle
@@ -61,9 +81,11 @@ pub fn start_keyboard_listener() -> Result<()> {
                     if ctrl_pressed && shift_pressed {
                         let new_state = pause::toggle_auto_enter();
 
-                        // Update state file
-                        if let Err(e) = crate::always::state::DaemonState::set_auto_enter(new_state) {
-                            eprintln!("Failed to update auto_enter state: {}", e);
+                        // Send event instead of writing to file
+                        if new_state {
+                            event::global_broadcaster().auto_enter_enabled();
+                        } else {
+                            event::global_broadcaster().auto_enter_disabled();
                         }
 
                         // Log the auto-enter toggle

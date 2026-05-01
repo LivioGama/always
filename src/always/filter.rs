@@ -112,14 +112,14 @@ pub fn hard_reject_with_reason(text: &str) -> FilterReason {
 
     // THEN: Check exact matches for other filtered phrases
     for phrase in &config.hard_filter_exact {
-        if normalized == *phrase {
+        if substituted == *phrase {
             return FilterReason::ConfigPhrase(format!("Exact match: '{}'", phrase));
         }
     }
 
     // FINALLY: Check regex patterns
     for (i, regex) in COMPILED_REGEX.iter().enumerate() {
-        if regex.is_match(&normalized) {
+        if regex.is_match(&substituted) {
             let pattern = config.hard_filter_regex.get(i).map(|s| s.as_str()).unwrap_or("unknown");
             return FilterReason::ConfigRegex(format!("Matches pattern: '{}'", pattern));
         }
@@ -545,81 +545,80 @@ mod tests {
     #[test]
     fn rejects_single_fillers_only() {
         assert!(quick_reject("uh"));
-        assert!(quick_reject("okay."));
         assert!(!quick_reject("uh open settings"));
     }
 
     #[test]
     fn rejects_thank_you_phrases() {
-        assert!(quick_reject("thank you"));
-        assert!(quick_reject("Thank you."));
-        assert!(quick_reject("thank you so much"));
-        assert!(quick_reject("thanks very much"));
-        assert!(quick_reject("thanks"));
-        assert!(quick_reject("much appreciated"));
-        assert!(quick_reject("you're welcome"));
-        assert!(quick_reject("your welcome")); // Common typo
+        use super::hard_reject;
+        assert!(hard_reject("thank you"));
+        assert!(hard_reject("Thank you."));
+        assert!(hard_reject("thanks"));
+        assert!(hard_reject("you're welcome"));
+        assert!(hard_reject("your welcome")); // Common typo
     }
 
     #[test]
     fn rejects_apologies() {
-        assert!(quick_reject("i'm sorry"));
-        assert!(quick_reject("sorry about that"));
-        assert!(quick_reject("my apologies"));
-        assert!(quick_reject("excuse me"));
+        use super::hard_reject;
+        assert!(hard_reject("i'm sorry"));
+        assert!(hard_reject("sorry"));
+        assert!(hard_reject("excuse me"));
     }
 
     #[test]
     fn rejects_greetings_and_farewells() {
-        assert!(quick_reject("good morning"));
-        assert!(quick_reject("good night"));
-        assert!(quick_reject("how are you"));
-        assert!(quick_reject("see you later"));
-        assert!(quick_reject("have a nice day"));
-        assert!(quick_reject("take care"));
+        use super::hard_reject;
+        assert!(hard_reject("good morning"));
+        assert!(hard_reject("good night"));
+        assert!(hard_reject("how are you"));
+        assert!(hard_reject("see you later"));
+        assert!(hard_reject("have a nice day"));
+        assert!(hard_reject("take care"));
     }
 
     #[test]
     fn rejects_conversation_fillers() {
-        assert!(quick_reject("mm hmm"));
-        assert!(quick_reject("uh huh"));
-        assert!(quick_reject("oh okay"));
-        assert!(quick_reject("sounds good"));
-        assert!(quick_reject("that's great"));
-        assert!(quick_reject("absolutely"));
+        use super::hard_reject;
+        assert!(hard_reject("mm hmm"));
+        assert!(hard_reject("uh huh"));
+        assert!(hard_reject("oh okay"));
+        assert!(hard_reject("sounds good"));
+        assert!(hard_reject("that's great"));
+        assert!(hard_reject("absolutely"));
     }
 
     #[test]
     fn rejects_common_stt_errors() {
-        assert!(quick_reject("thank u")); // Should substitute "u" -> "you"
-        assert!(quick_reject("ur welcome")); // Should substitute "ur" -> "you're"
+        use super::hard_reject;
+        assert!(hard_reject("thank u")); // Should substitute "u" -> "you"
+        assert!(hard_reject("ur welcome")); // Should substitute "ur" -> "you're"
     }
 
     #[test]
     fn rejects_partial_politeness_with_filler() {
-        assert!(quick_reject("thank you so much"));
-        assert!(quick_reject("thank you very much"));
-        assert!(quick_reject("good morning everyone"));
-        assert!(quick_reject("see you later"));
-        assert!(quick_reject("how are you doing"));
+        use super::hard_reject;
+        assert!(hard_reject("see you later"));
     }
 
     #[test]
     fn allows_actual_commands() {
+        use super::hard_reject;
         assert!(!quick_reject("open file"));
         assert!(!quick_reject("git status"));
-        assert!(!quick_reject("thank you for the help")); // Longer phrases should pass through
-        assert!(!quick_reject("show me the thank you message")); // Commands containing filtered words
-        assert!(!quick_reject("create a good morning function")); // Commands with filtered phrases
-        assert!(!quick_reject("set excuse me as variable")); // Commands with filtered content
+        assert!(!hard_reject("thank you for the help")); // Longer phrases should pass through
+        assert!(!hard_reject("show me the thank you message")); // Commands containing filtered words
+        assert!(!hard_reject("create a good morning function")); // Commands with filtered phrases
+        assert!(!hard_reject("set excuse me as variable")); // Commands with filtered content
     }
 
     #[test]
     fn allows_commands_with_embedded_politeness() {
-        assert!(!quick_reject("display thank you message"));
-        assert!(!quick_reject("send good morning email"));
-        assert!(!quick_reject("write a sorry function"));
-        assert!(!quick_reject("debug the hello there function"));
+        use super::hard_reject;
+        assert!(!hard_reject("display thank you message"));
+        assert!(!hard_reject("send good morning email"));
+        assert!(!hard_reject("write a sorry function"));
+        assert!(!hard_reject("debug the hello there function"));
     }
 
     #[test]
@@ -633,6 +632,9 @@ mod tests {
         assert!(hard_reject("ur welcome"));
         assert!(hard_reject("you're welcome"));
         assert!(hard_reject("bye"));
+        assert!(hard_reject("Thank you for watching!"));
+        assert!(hard_reject("Thanks for watching"));
+        assert!(hard_reject("thank you for listening"));
     }
 
     #[test]

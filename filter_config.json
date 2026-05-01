@@ -48,7 +48,11 @@
     "absolutely",
     "mm hmm",
     "uh huh",
-    "oh okay"
+    "oh okay",
+    "bye",
+    "goodbye",
+    "hello",
+    "hi"
   ],
   "hard_filter_regex": [
     "^thank.*for.*watching$",

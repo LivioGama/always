@@ -27,6 +27,18 @@ cp Info.plist AlwaysApp.app/Contents/
 cp .build/debug/AlwaysApp AlwaysApp.app/Contents/MacOS/
 cp Resources/AlwaysIcon.icns AlwaysApp.app/Contents/Resources/
 
+# Copy daemon binary into app bundle
+DAEMON_PATH="../target/release/always"
+if [ -f "$DAEMON_PATH" ]; then
+    echo "Copying daemon binary to app bundle..."
+    mkdir -p AlwaysApp.app/Contents/MacOS
+    cp "$DAEMON_PATH" AlwaysApp.app/Contents/MacOS/always
+    echo "✓ Daemon binary copied"
+else
+    echo "⚠️  Warning: Daemon binary not found at $DAEMON_PATH"
+    echo "   Build the daemon first: cd .. && cargo build --release --bin always"
+fi
+
 echo "Code signing app..."
 # Use stable bundle identifier for permissions persistence
 SIGN_IDENTITY="${ALWAYS_CODESIGN_IDENTITY:-}"
