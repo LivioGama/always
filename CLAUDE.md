@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **always** (666 symbols, 1501 relationships, 52 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **always** (847 symbols, 1793 relationships, 70 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -41,3 +41,43 @@ This project is indexed by GitNexus as **always** (666 symbols, 1501 relationshi
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
+
+# Always Voice-to-Text Development
+
+## Build & Launch Process
+
+**CRITICAL:** To rebuild and launch the Always app (both daemon and Mac status bar app):
+
+1. **Kill existing processes:**
+   ```bash
+   pkill -f "AlwaysApp" || true
+   pkill -f "always" || true
+   ```
+
+2. **Build everything (daemon + Mac app):**
+   ```bash
+   cargo build --release
+   ```
+
+3. **Launch the Mac app (which starts both GUI and daemon):**
+   ```bash
+   open -a AlwaysApp
+   ```
+
+**NEVER** run `./target/release/always start` directly — this only starts the daemon without the Mac status bar interface. Always use `open -a AlwaysApp` to launch the complete system.
+
+## Verification
+
+After launching, verify both processes are running:
+```bash
+ps aux | grep -v grep | grep -i always
+```
+
+Should show:
+- `/Applications/AlwaysApp.app/Contents/MacOS/AlwaysApp` (GUI)  
+- `/path/to/always run --lang en --timeout 30 --silence 0.4` (daemon)
+
+Check status bar for Always icon and logs:
+```bash
+tail -f "/Users/livio/Library/Application Support/always/always.log"
+```

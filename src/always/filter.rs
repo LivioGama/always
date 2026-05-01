@@ -11,139 +11,61 @@ static COMPILED_REGEX: Lazy<Vec<regex::Regex>> = Lazy::new(|| {
     }
 });
 
-pub fn quick_reject(text: &str) -> bool {
+#[derive(Debug, Clone)]
+pub enum FilterReason {
+    None,
+    MeaninglessSound(String),
+    VideoArtifact(String),
+    ConfigPhrase(String),
+    ConfigRegex(String),
+    Onomatopoeia(String),
+    Gibberish(String),
+    Degeneracy(String),
+    NonAscii(String),
+}
+
+impl FilterReason {
+    pub fn to_log_string(&self) -> String {
+        match self {
+            FilterReason::None => "No filter".to_string(),
+            FilterReason::MeaninglessSound(detail) => format!("Meaningless sound: {}", detail),
+            FilterReason::VideoArtifact(detail) => format!("Video artifact: {}", detail),
+            FilterReason::ConfigPhrase(detail) => format!("Config phrase: {}", detail),
+            FilterReason::ConfigRegex(detail) => format!("Config regex: {}", detail),
+            FilterReason::Onomatopoeia(detail) => format!("Sound effect: {}", detail),
+            FilterReason::Gibberish(detail) => format!("Gibberish: {}", detail),
+            FilterReason::Degeneracy(detail) => format!("Repetitive: {}", detail),
+            FilterReason::NonAscii(detail) => format!("Non-ASCII: {}", detail),
+        }
+    }
+}
+
+pub fn quick_reject_with_reason(text: &str) -> FilterReason {
     let normalized = text
         .trim()
         .trim_matches(|ch: char| ch.is_ascii_punctuation())
         .to_lowercase();
 
-    // Check for single word fillers
+    // ONLY reject truly meaningless single sounds/fillers that provide no value
     if normalized.split_whitespace().count() == 1 {
-        const SINGLE_FILLERS: &[&str] = &[
-            "ok", "okay", "yes", "no", "yeah", "yep", "nope", "hmm", "uh", "um", "ah", "oh", "wow",
-            "cool", "nice", "sure", "thanks", "welcome", "hello", "hi", "bye", "goodbye",
+        const MEANINGLESS_SOUNDS: &[&str] = &[
+            "uh", "um", "ah", "mmm", "hmm", "uhh", "umm", "ahh", "err",
         ];
-        if SINGLE_FILLERS.iter().any(|filler| normalized == *filler) {
-            return true;
+        if let Some(sound) = MEANINGLESS_SOUNDS.iter().find(|sound| normalized == **sound) {
+            return FilterReason::MeaninglessSound(format!("Single meaningless sound: '{}'", sound));
         }
     }
 
-    // Enhanced politeness and courtesy phrases filter
-    const POLITENESS_PHRASES: &[&str] = &[
-        // Thank you variations
-        "thank you", "thanks a lot", "thank you so much", "thank you very much",
-        "thanks so much", "many thanks", "thanks again", "thanks very much",
-        "appreciate it", "much appreciated", "really appreciate it", "i appreciate it",
+    FilterReason::None
+}
 
-        // Response to thanks
-        "you're welcome", "your welcome", "no problem", "no worries", "don't mention it",
-        "my pleasure", "anytime", "happy to help", "glad to help", "of course",
-
-        // Apologies
-        "i'm sorry", "sorry about that", "sorry for that", "my apologies", "i apologize",
-        "excuse me", "pardon me", "forgive me", "my bad",
-
-        // Greetings and farewells
-        "good morning", "good afternoon", "good evening", "good night", "good day",
-        "have a good day", "have a nice day", "have a great day", "take care",
-        "see you later", "talk to you later", "catch you later", "bye bye",
-        "goodbye now", "see you soon", "until next time",
-
-        // Small talk
-        "how are you", "how's it going", "how you doing", "what's up", "how are things",
-        "how's everything", "how have you been", "nice to see you", "good to see you",
-
-        // Conversation fillers and acknowledgments
-        "mm hmm", "uh huh", "oh okay", "alright then", "sounds good", "that's good",
-        "i see", "got it", "makes sense", "fair enough", "right on", "absolutely",
-        "definitely", "totally", "exactly", "for sure", "no doubt", "indeed",
-
-        // Polite interjections
-        "excuse me", "pardon", "what was that", "come again", "say that again",
-        "could you repeat that", "one more time", "i didn't catch that",
-
-        // Generic positive responses that aren't commands
-        "that's great", "that's awesome", "that's wonderful", "that's perfect",
-        "excellent", "fantastic", "brilliant", "amazing", "incredible",
-
-        // Common filler words as phrases
-        "you know", "i mean", "like", "so", "well", "anyway", "basically", "actually",
-
-        // Background conversation noise (often misheard)
-        "hello there", "hi there", "over here", "over there", "right here",
-        "just a second", "one moment", "give me a second", "hang on", "wait a minute",
-    ];
-
-    // Check if the entire normalized text matches any politeness phrase
-    if POLITENESS_PHRASES.iter().any(|phrase| normalized == *phrase) {
-        return true;
-    }
-
-    // Check for variations with common transcription errors
-    // Handle common STT substitutions (whole word replacements)
-    let common_substitutions = [
-        ("thank u", "thank you"),
-        ("ur welcome", "you're welcome"),
-        ("ur", "your"),       // General "ur" -> "your" for other contexts
-    ];
-
-    for (from, to) in &common_substitutions {
-        if normalized == *from {
-            return POLITENESS_PHRASES.iter().any(|phrase| *phrase == *to);
-        }
-    }
-
-    // Also check for single character substitutions in context
-    let mut substituted = normalized.clone();
-    let single_char_substitutions = [
-        (" u ", " you "),     // "u" in middle of phrase
-        (" r ", " are "),     // "r" in middle of phrase
-        (" c ", " see "),     // "c" in middle of phrase
-        (" 2 ", " to "),      // "2" in middle of phrase
-        (" 4 ", " for "),     // "4" in middle of phrase
-    ];
-
-    for (from, to) in &single_char_substitutions {
-        substituted = substituted.replace(from, to);
-    }
-
-    // Handle end-of-phrase substitutions
-    if substituted.ends_with(" u") {
-        substituted = substituted.replace(" u", " you");
-    }
-    if substituted.starts_with("u ") {
-        substituted = substituted.replace("u ", "you ");
-    }
-
-    if substituted != normalized && POLITENESS_PHRASES.iter().any(|phrase| substituted == *phrase) {
-        return true;
-    }
-
-    // Reject if it starts with politeness phrases but is slightly longer (with filler)
-    const POLITENESS_STARTS: &[&str] = &[
-        "thank you", "thanks", "sorry", "excuse me", "good morning", "good afternoon",
-        "good evening", "how are you", "see you", "talk to you", "have a good"
-    ];
-
-    for start_phrase in POLITENESS_STARTS {
-        if normalized.starts_with(start_phrase) {
-            let remainder = normalized[start_phrase.len()..].trim();
-            // If what follows is just filler words, reject it
-            const FILLER_ENDINGS: &[&str] = &[
-                "", "so much", "very much", "a lot", "again", "there", "later",
-                "soon", "day", "night", "doing", "going", "everyone", "everybody"
-            ];
-            if FILLER_ENDINGS.iter().any(|ending| remainder == *ending) {
-                return true;
-            }
-        }
-    }
-
-    false
+// Legacy function for backward compatibility
+pub fn quick_reject(text: &str) -> bool {
+    !matches!(quick_reject_with_reason(text), FilterReason::None)
 }
 
 /// Hard filter that always rejects certain phrases regardless of filter settings
-pub fn hard_reject(text: &str) -> bool {
+pub fn hard_reject_with_reason(text: &str) -> FilterReason {
     let normalized = text
         .trim()
         .trim_matches(|ch: char| ch.is_ascii_punctuation())
@@ -152,13 +74,18 @@ pub fn hard_reject(text: &str) -> bool {
     // If no config is loaded, pass everything through (no hard filtering)
     let config = match &*FILTER_CONFIG {
         Some(c) => c,
-        None => return false,
+        None => return FilterReason::None,
     };
+
+    // Check for transcription service watermarks
+    if normalized.starts_with("transcription by") || normalized.contains("transcription by") {
+        return FilterReason::VideoArtifact("Transcription service watermark".to_string());
+    }
 
     // FIRST: Check if text STARTS with any configured phrases - block EVERYTHING starting with these
     for start_phrase in &config.hard_filter_starts_with {
         if normalized.starts_with(start_phrase) {
-            return true;
+            return FilterReason::VideoArtifact(format!("Starts with blocked phrase: '{}'", start_phrase));
         }
     }
 
@@ -178,7 +105,7 @@ pub fn hard_reject(text: &str) -> bool {
     if substituted != normalized {
         for start_phrase in &config.hard_filter_starts_with {
             if substituted.starts_with(start_phrase) {
-                return true;
+                return FilterReason::VideoArtifact(format!("Starts with blocked phrase after substitution: '{}'", start_phrase));
             }
         }
     }
@@ -186,18 +113,24 @@ pub fn hard_reject(text: &str) -> bool {
     // THEN: Check exact matches for other filtered phrases
     for phrase in &config.hard_filter_exact {
         if normalized == *phrase {
-            return true;
+            return FilterReason::ConfigPhrase(format!("Exact match: '{}'", phrase));
         }
     }
 
     // FINALLY: Check regex patterns
-    for regex in &*COMPILED_REGEX {
+    for (i, regex) in COMPILED_REGEX.iter().enumerate() {
         if regex.is_match(&normalized) {
-            return true;
+            let pattern = config.hard_filter_regex.get(i).map(|s| s.as_str()).unwrap_or("unknown");
+            return FilterReason::ConfigRegex(format!("Matches pattern: '{}'", pattern));
         }
     }
 
-    false
+    FilterReason::None
+}
+
+// Legacy function for backward compatibility
+pub fn hard_reject(text: &str) -> bool {
+    !matches!(hard_reject_with_reason(text), FilterReason::None)
 }
 
 /// Filter onomatopoeia and nonsense sounds using pattern analysis
@@ -209,19 +142,34 @@ pub fn onomatopoeia_reject(text: &str) -> bool {
 
     let words: Vec<&str> = normalized.split_whitespace().collect();
 
-    // Very short text (1-2 chars) is likely just a sound
-    if normalized.len() <= 2 {
-        return true;
-    }
-
     // Single word that's very short or has repeated characters
     if words.len() == 1 {
         let word = words[0];
-        // Check for repeated single characters (e.g., "aaa", "mmm", "uuu")
-        if word.chars().collect::<Vec<char>>().windows(2).all(|w| w[0] == w[1]) {
+
+        // Allow common valid short words and technical terms
+        const VALID_SHORT_WORDS: &[&str] = &[
+            "yes", "no", "ok", "hi", "bye", "go", "stop", "wait", "run", "get", "set",
+            "add", "new", "old", "big", "top", "end", "use", "try", "see", "say", "do",
+            "can", "may", "will", "was", "are", "the", "and", "but", "for", "you", "all",
+            "api", "sql", "css", "jwt", "css", "url", "uri", "xml", "dom", "npm", "git",
+            "ssh", "tcp", "udp", "tls", "ssl", "cdn", "dns", "php", "css", "jsx", "tsx"
+        ];
+
+        if VALID_SHORT_WORDS.contains(&word) {
+            return false;
+        }
+
+        // Very short text (1-2 chars) is likely just a sound - AFTER checking allowlist
+        if normalized.len() <= 2 {
             return true;
         }
-        // Very short single word (2-3 chars) is likely a sound
+
+        // Check for repeated single characters (e.g., "aaa", "mmm", "uuu")
+        if word.len() >= 2 && word.chars().collect::<Vec<char>>().windows(2).all(|w| w[0] == w[1]) {
+            return true;
+        }
+
+        // Very short single word (2-3 chars) that's not in allowlist is likely a sound
         if word.len() <= 3 {
             return true;
         }
@@ -262,7 +210,7 @@ pub fn degeneracy_reject(text: &str) -> bool {
         return true;
     }
 
-    // Check for repeated words (max run > 10 for speech, stricter than ship-fast's 45)
+    // Check for repeated words (max run > 5 for speech, stricter than ship-fast's 45)
     let mut run = 1;
     let mut max_run = 1;
     for i in 1..words.len() {
@@ -273,7 +221,7 @@ pub fn degeneracy_reject(text: &str) -> bool {
             run = 1;
         }
     }
-    if max_run > 10 {
+    if max_run > 5 {
         return true;
     }
 
@@ -301,9 +249,27 @@ pub fn degeneracy_reject(text: &str) -> bool {
         }
     }
 
-    // Check for very short text (less than 2 words)
+    // Check for very short text (less than 2 words) - but allow common valid single words
     if words.len() < 2 {
-        return true;
+        // Allow common single-word responses, commands, and technical terms
+        const VALID_SINGLE_WORDS: &[&str] = &[
+            "yes", "no", "ok", "okay", "hi", "hello", "bye", "goodbye", "thanks", "stop", "wait",
+            "go", "run", "get", "set", "add", "new", "old", "big", "small", "open", "close",
+            "save", "load", "help", "start", "end", "up", "down", "left", "right", "next", "back",
+            "api", "sql", "json", "html", "css", "http", "rest", "crud", "oauth", "jwt", "xml",
+            "dom", "npm", "git", "ssh", "tcp", "udp", "tls", "ssl", "cdn", "dns", "php", "jsx", "tsx",
+            "ios", "app", "web", "dev", "cli", "sdk", "ide", "url", "uri", "aws", "gcp", "vpc",
+            "continue", "cancel", "exit",
+            // Popular frameworks and libraries
+            "react.js", "node.js", "vue.js", "angular.js", "next.js", "express.js", "nest.js",
+            "react", "angular", "vue", "svelte", "nuxt", "gatsby", "webpack", "vite", "rollup"
+        ];
+
+        if words.len() == 1 && VALID_SINGLE_WORDS.contains(&words[0]) {
+            return false; // Don't reject valid single words
+        }
+
+        return true; // Reject other single words and empty text
     }
 
     false
@@ -319,25 +285,87 @@ pub fn gibberish_reject(text: &str) -> bool {
 
     let words: Vec<&str> = normalized.split_whitespace().collect();
 
+    // Check for keyboard layout patterns (qwerty rows, adjacent keys)
+    const KEYBOARD_PATTERNS: &[&str] = &[
+        "qwerty", "asdf", "zxcv", "uiop", "hjkl", "bnm",
+        "qwertyuiop", "asdfghjkl", "zxcvbnm",
+        "qwe", "asd", "zxc", "uio", "hjk", "bnm"
+    ];
+
+    for word in &words {
+        if KEYBOARD_PATTERNS.contains(word) {
+            return true;
+        }
+    }
+
+    // Reject if multiple words are just random keyboard sequences
+    if words.len() >= 3 {
+        let keyboard_words = words.iter()
+            .filter(|w| KEYBOARD_PATTERNS.contains(w))
+            .count();
+        if keyboard_words >= 2 {
+            return true;
+        }
+    }
+
+    // Reject if it has many mixed fragments that look like partial words
+    if words.len() > 3 {
+        let suspicious_words = words.iter()
+            .filter(|w| {
+                let len = w.len();
+                // Words that are 6+ chars but have no common English patterns
+                len >= 6 && (
+                    w.contains("diy") ||  // Random tech acronyms mixed in gibberish
+                    // Only flag words ending in "in" if they don't match common English patterns
+                    (w.ends_with("in") && len > 8 &&
+                     !w.ends_with("ing") && !w.ends_with("tion") &&
+                     !w.ends_with("sion") && !w.ends_with("atin") && !w.ends_with("erin") &&
+                     !w.ends_with("ain") && !w.ends_with("oin")) ||
+                    !w.chars().any(|c| matches!(c, 'e' | 'a' | 'i' | 'o' | 'u')) // No vowels
+                )
+            })
+            .count();
+
+        if suspicious_words >= 2 {
+            return true;
+        }
+    }
+
+    // Check for words that are clearly corrupted/truncated (like "distrvDIY")
+    for word in &words {
+        if word.len() >= 6 {
+            let has_mixed_case_in_middle = word.chars()
+                .enumerate()
+                .any(|(i, c)| i > 1 && i < word.len() - 1 && c.is_uppercase());
+
+            let has_few_vowels = word.chars()
+                .filter(|c| matches!(c.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u'))
+                .count() < 2;
+
+            if has_mixed_case_in_middle || (word.len() >= 8 && has_few_vowels) {
+                return true;
+            }
+        }
+    }
+
     // Extract alphabetic characters only
     let alpha_only: String = normalized.chars().filter(|c| c.is_ascii_alphabetic()).collect();
 
     // Vowel ratio check: real language has ~30-50% vowels; keyboard mashing has very few
-    if alpha_only.len() >= 40 {
+    if alpha_only.len() >= 30 {  // Lowered from 40 to catch shorter gibberish
         let vowels = alpha_only.chars().filter(|c| matches!(c, 'a' | 'e' | 'i' | 'o' | 'u')).count();
         let vowel_ratio = vowels as f64 / alpha_only.len() as f64;
-        if vowel_ratio < 0.15 {
+        if vowel_ratio < 0.18 {  // Slightly increased from 0.15 to be less aggressive
             return true;
         }
     }
 
     // Consonant cluster check: gibberish has long runs without vowels (e.g., "jfsdkljfsdjfds")
-    // Match runs of 5+ consonants (equivalent to JavaScript /[^aeiou]{5,}/g)
     let mut cluster_count = 0;
     let mut current_cluster_len = 0;
     for c in alpha_only.chars() {
         if matches!(c, 'a' | 'e' | 'i' | 'o' | 'u') {
-            if current_cluster_len >= 5 {
+            if current_cluster_len >= 5 {  // Back to 5 from 6 - be more aggressive
                 cluster_count += 1;
             }
             current_cluster_len = 0;
@@ -345,10 +373,10 @@ pub fn gibberish_reject(text: &str) -> bool {
             current_cluster_len += 1;
         }
     }
-    if current_cluster_len >= 5 {
+    if current_cluster_len >= 5 {  // Back to 5 from 6
         cluster_count += 1;
     }
-    if cluster_count >= 3 {
+    if cluster_count >= 3 {  // Back to 3 from 5 - catch more gibberish
         return true;
     }
 
@@ -367,50 +395,118 @@ pub fn gibberish_reject(text: &str) -> bool {
         }
     }
 
+    // Additional check: if text contains random capitalization mixed with gibberish
+    // Only trigger for truly random caps (like "eLlO WoRLd" patterns), not normal sentences
+    if normalized != text.trim().to_lowercase() {
+        let words_orig: Vec<&str> = text.trim().split_whitespace().collect();
+        let words_lower: Vec<&str> = normalized.split_whitespace().collect();
+
+        let mut random_caps_words = 0;
+        for (orig_word, _lower_word) in words_orig.iter().zip(words_lower.iter()) {
+            if orig_word.len() > 3 {
+                // Count internal capitals (not first/last letter)
+                let internal_caps = orig_word.chars()
+                    .enumerate()
+                    .filter(|(i, c)| *i > 0 && *i < orig_word.len() - 1 && c.is_uppercase())
+                    .count();
+
+                // Only flag words with multiple internal capitals (like "eLlO" or "WoRLd")
+                if internal_caps >= 2 {
+                    random_caps_words += 1;
+                }
+            }
+        }
+
+        // Only reject if multiple words have random internal capitalization
+        if random_caps_words >= 3 {
+            return true;
+        }
+    }
+
     false
 }
 
 /// Filter for non-ASCII characters and mixed language nonsense
 pub fn non_ascii_reject(text: &str) -> bool {
-    // Check for non-ASCII characters (like ç, ñ, ü, etc.)
-    let non_ascii_count = text.chars().filter(|c| !c.is_ascii()).count();
-    
-    // Any non-ASCII character in the text is suspicious for voice commands
-    if non_ascii_count > 0 {
+    let normalized = text.trim().to_lowercase();
+
+    // Allow common accented characters in European languages (French, Spanish, etc.)
+    let european_accents = ['á', 'à', 'â', 'ä', 'ã', 'é', 'è', 'ê', 'ë', 'í', 'ì', 'î', 'ï', 'ó', 'ò', 'ô', 'ö', 'õ', 'ú', 'ù', 'û', 'ü', 'ý', 'ÿ', 'ñ', 'ç', 'ß'];
+
+    let mut non_ascii_chars = 0;
+    let mut total_chars = 0;
+
+    for ch in normalized.chars() {
+        if ch.is_alphabetic() {
+            total_chars += 1;
+            if !ch.is_ascii() && !european_accents.contains(&ch) {
+                non_ascii_chars += 1;
+            }
+        }
+    }
+
+    // If text has substantial non-European characters (> 20% of alphabetic chars), likely gibberish
+    if total_chars > 3 && non_ascii_chars as f64 / total_chars as f64 > 0.2 {
         return true;
     }
-    
+
+    // Reject if it contains CJK characters mixed with random Latin - common in garbled transcripts
+    let has_cjk = normalized.chars().any(|c| {
+        matches!(c,
+            '\u{4E00}'..='\u{9FFF}' |  // Chinese
+            '\u{3040}'..='\u{309F}' |  // Hiragana
+            '\u{30A0}'..='\u{30FF}' |  // Katakana
+            '\u{AC00}'..='\u{D7AF}'    // Korean
+        )
+    });
+
+    let has_latin = normalized.chars().any(|c| c.is_ascii_alphabetic());
+
+    // If it has both CJK and Latin characters, and Latin part looks random, reject
+    if has_cjk && has_latin {
+        let words: Vec<&str> = normalized.split_whitespace().collect();
+        // If multiple words with mixed scripts, likely garbage
+        if words.len() > 1 {
+            return true;
+        }
+    }
+
     false
 }
 
-pub fn should_accept(text: &str, _cfg: &AlwaysConfig) -> bool {
+pub fn should_accept_with_reason(text: &str, _cfg: &AlwaysConfig) -> FilterReason {
     // Hard filter always applies - these phrases should NEVER be pasted
-    if hard_reject(text) {
-        return false;
+    let hard_result = hard_reject_with_reason(text);
+    if !matches!(hard_result, FilterReason::None) {
+        return hard_result;
     }
 
     // Filter onomatopoeia and nonsense sounds
     if onomatopoeia_reject(text) {
-        return false;
+        return FilterReason::Onomatopoeia("Repetitive sound pattern or very short utterance".to_string());
     }
 
     // Filter gibberish (keyboard mashing, unpronounceable text)
     if gibberish_reject(text) {
-        return false;
+        return FilterReason::Gibberish("Unpronounceable text or keyboard mashing".to_string());
     }
 
     // Filter non-ASCII and mixed language nonsense
     if non_ascii_reject(text) {
-        return false;
+        return FilterReason::NonAscii("Contains non-ASCII characters".to_string());
     }
 
     // Filter degenerate content (repetitive patterns)
     if degeneracy_reject(text) {
-        return false;
+        return FilterReason::Degeneracy("Repetitive or low-diversity content".to_string());
     }
 
     // Apply additional filtering for conversational noise
-    !quick_reject(text)
+    quick_reject_with_reason(text)
+}
+
+pub fn should_accept(text: &str, cfg: &AlwaysConfig) -> bool {
+    matches!(should_accept_with_reason(text, cfg), FilterReason::None)
 }
 
 #[cfg(test)]

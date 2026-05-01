@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::always::AlwaysConfig;
+use crate::always::{AlwaysConfig, filter::FilterReason};
 
 pub enum Event<'a> {
     Start {
@@ -20,6 +20,7 @@ pub enum Event<'a> {
     Filtered {
         text: &'a str,
         energy: f64,
+        reason: FilterReason,
     },
     Silence,
     Timeout,
@@ -34,6 +35,13 @@ pub enum Event<'a> {
     },
     AutoEnterToggled {
         enabled: bool,
+    },
+    MicrophoneAutoPaused {
+        apps: &'a str,
+    },
+    MicrophoneAutoResumed,
+    Error {
+        message: &'a str,
     },
 }
 
@@ -82,8 +90,8 @@ impl Logger {
                     "✓ Transcribed: \"{raw}\"\n[{ts}] │ Energy: {energy:.4}\n[{ts}] ✎ Pasted: {processed}"
                 )
             }
-            Event::Filtered { text, energy } => {
-                format!("⊘ Filtered: \"{text}\" (energy: {energy:.4})")
+            Event::Filtered { text, energy, reason } => {
+                format!("⊘ Filtered: \"{text}\" (energy: {energy:.4}) - {}", reason.to_log_string())
             }
             Event::Silence => "⏸  Silence detected".to_string(),
             Event::Timeout => "⏱  Recording timeout".to_string(),
@@ -104,6 +112,15 @@ impl Logger {
                 } else {
                     "⏎  Auto-Enter DISABLED".to_string()
                 }
+            }
+            Event::MicrophoneAutoPaused { apps } => {
+                format!("🔇 Auto-paused: {} using microphone", apps)
+            }
+            Event::MicrophoneAutoResumed => {
+                "🎤 Auto-resumed: microphone available".to_string()
+            }
+            Event::Error { message } => {
+                format!("⚠️  ERROR: {}", message)
             }
         };
         let _ = writeln!(self.file, "[{ts}] {message}");

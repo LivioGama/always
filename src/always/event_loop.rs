@@ -3,8 +3,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use crate::always::log::{Event, Logger};
-use crate::always::{AlwaysConfig, daemon, filter, keyboard, notification, paste, pause, vad};
-use crate::db;
+use crate::always::{AlwaysConfig, daemon, filter, keyboard, mic_monitor, notification, paste, pause, state, vad};
 
 pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     let _pid = daemon::PidGuard::install()?;
@@ -24,27 +23,71 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     }
 
     let mut last_process = Instant::now() - Duration::from_secs(10);
-    let mut last_config_reload = Instant::now() - Duration::from_secs(10);
+
+    // Initialize microphone monitor for auto-pause functionality
+    let mut mic_monitor = mic_monitor::MicrophoneMonitor::new();
+    let mut auto_paused_for_mic = false;
 
     loop {
+        // Check if other apps are using the microphone
+        match mic_monitor.is_microphone_in_use() {
+            Ok(true) if !auto_paused_for_mic => {
+                // Another app started using the microphone - pause Always
+                if let Ok(users) = mic_monitor.get_microphone_users() {
+                    let app_list = if users.is_empty() {
+                        "another application".to_string()
+                    } else {
+                        users.join(", ")
+                    };
+                    eprintln!("🎙️  Microphone in use by: {} - Auto-pausing Always", app_list);
+
+                    // Log the auto-pause event
+                    log.write(Event::MicrophoneAutoPaused { apps: &app_list });
+
+                    if let Err(e) = notification::notify("ALWAYS", &format!("🔇 Auto-paused: {} using microphone", app_list), false) {
+                        eprintln!("Failed to show auto-pause notification: {}", e);
+                    }
+                }
+                pause::set_paused(true);
+                auto_paused_for_mic = true;
+            }
+            Ok(false) if auto_paused_for_mic => {
+                // Microphone is no longer in use - resume Always
+                eprintln!("🎙️  Microphone available - Auto-resuming Always");
+
+                // Log the auto-resume event
+                log.write(Event::MicrophoneAutoResumed);
+
+                if let Err(e) = notification::notify("ALWAYS", "🎤 Auto-resumed: microphone available", false) {
+                    eprintln!("Failed to show auto-resume notification: {}", e);
+                }
+
+                pause::set_paused(false);
+                auto_paused_for_mic = false;
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to check microphone usage: {}", e);
+            }
+            _ => {} // No change in microphone state
+        }
+
         if pause::is_paused() {
             // When paused, sleep for a short time to avoid busy waiting
             std::thread::sleep(Duration::from_millis(100));
             continue;
         }
 
-        // Reload auto_enter config every second
-        if Instant::now().duration_since(last_config_reload).as_secs() >= 1 {
-            if let Ok(conn) = db::open() {
-                if let Ok(prefs) = db::get_preferences(&conn) {
-                    let new_auto_enter = prefs.stt_auto_enter.unwrap_or(false);
-                    pause::set_auto_enter_enabled(new_auto_enter);
-                }
-            }
-            last_config_reload = Instant::now();
-        }
+        // Note: Removed auto_enter config reload that was causing race conditions
+        // Auto-enter state is now managed consistently through keyboard shortcuts and settings UI
 
-        process_one(&cfg, &mut log, &mut last_process)?;
+        if let Err(e) = process_one(&cfg, &mut log, &mut last_process) {
+            eprintln!("⚠️  Error in voice processing (continuing): {}", e);
+            log.write(Event::Error {
+                message: &format!("Voice processing error: {}", e)
+            });
+            // Don't exit - continue running
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 }
 
@@ -81,9 +124,10 @@ fn handle_speech(
     }
     *last_process = now;
 
-    if !filter::should_accept(text, cfg) {
-        eprintln!("filtered {text}");
-        log.write(Event::Filtered { text, energy });
+    let filter_result = filter::should_accept_with_reason(text, cfg);
+    if !matches!(filter_result, filter::FilterReason::None) {
+        eprintln!("filtered {text} - {}", filter_result.to_log_string());
+        log.write(Event::Filtered { text, energy, reason: filter_result });
         return Ok(());
     }
 
@@ -94,6 +138,9 @@ fn handle_speech(
         processed: &transformed,
         energy,
     });
+
+    // Set transcript to filtered text so subtitle shows filtered content
+    let _ = state::DaemonState::set_transcript(transformed.clone());
 
     // Use the global auto-enter state instead of config
     let auto_enter = pause::is_auto_enter_enabled();
