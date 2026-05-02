@@ -121,8 +121,8 @@ fn process_one(
     last_process: &mut Instant,
 ) -> Result<()> {
     match vad::record_utterance(cfg, log).context("failed to record/transcribe utterance")? {
-        vad::RecordResult::Speech { text, energy } => {
-            handle_speech(cfg, log, &text, energy, last_process)?;
+        vad::RecordResult::Speech { text, energy, transcription } => {
+            handle_speech(cfg, log, &text, energy, &transcription, last_process)?;
         }
         vad::RecordResult::Silence => {
             // Don't log silence events - they're too frequent and not useful
@@ -144,6 +144,7 @@ fn handle_speech(
     log: &mut Logger,
     text: &str,
     energy: f64,
+    transcription: &crate::stt::TranscriptionResult,
     last_process: &mut Instant,
 ) -> Result<()> {
     let now = Instant::now();
@@ -161,6 +162,19 @@ fn handle_speech(
             energy,
             reason: filter_result,
         });
+        event::global_broadcaster().voice_activity_ended();
+        return Ok(());
+    }
+
+    // Hallucination detection (post-API, uses Whisper segment metrics)
+    if let Some(reason) = crate::always::hallucination::is_hallucination(transcription) {
+        eprintln!("⊘ Hallucination filtered: {text} - {reason}");
+        log.write(Event::Filtered {
+            text,
+            energy,
+            reason: filter::FilterReason::HardPhrase(reason.to_string()),
+        });
+        event::global_broadcaster().voice_activity_ended();
         return Ok(());
     }
 

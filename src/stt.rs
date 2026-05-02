@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use reqwest::blocking::multipart as blocking_multipart;
+use serde::Deserialize;
 use std::sync::OnceLock;
 
 use crate::glossary;
@@ -15,7 +16,39 @@ fn auth_header(api_key: &str) -> &'static str {
     AUTH_HEADER.get_or_init(|| format!("Bearer {}", api_key))
 }
 
-pub fn transcribe_from_bytes(audio_data: Vec<u8>, api_key: &str) -> Result<String> {
+#[derive(Debug, Clone, Deserialize)]
+pub struct TranscriptionSegment {
+    #[serde(default)]
+    pub id: u32,
+    #[serde(default)]
+    pub start: f64,
+    #[serde(default)]
+    pub end: f64,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub no_speech_prob: f32,
+    #[serde(default)]
+    pub avg_logprob: f32,
+    #[serde(default)]
+    pub compression_ratio: f32,
+    #[serde(default)]
+    pub temperature: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TranscriptionResult {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub duration: f64,
+    #[serde(default)]
+    pub language: String,
+    #[serde(default)]
+    pub segments: Vec<TranscriptionSegment>,
+}
+
+pub fn transcribe_from_bytes(audio_data: Vec<u8>, api_key: &str) -> Result<TranscriptionResult> {
     let client = crate::http_client::blocking();
 
     let mut form = blocking_multipart::Form::new()
@@ -26,7 +59,7 @@ pub fn transcribe_from_bytes(audio_data: Vec<u8>, api_key: &str) -> Result<Strin
                 .mime_str("audio/wav")?,
         )
         .text("model", WHISPER_MODEL)
-        .text("response_format", "text")
+        .text("response_format", "verbose_json")
         .text("language", "en");
 
     if let Some(prompt) = glossary::whisper_bias_prompt() {
@@ -42,9 +75,11 @@ pub fn transcribe_from_bytes(audio_data: Vec<u8>, api_key: &str) -> Result<Strin
         .error_for_status()
         .context("Groq Whisper API returned an error")?;
 
-    let text = response
-        .text()
-        .context("failed to read Groq Whisper response")?;
+    let mut result: TranscriptionResult = response
+        .json()
+        .context("failed to parse Groq Whisper response")?;
 
-    Ok(text.trim().to_string())
+    result.text = result.text.trim().to_string();
+
+    Ok(result)
 }

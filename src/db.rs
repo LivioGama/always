@@ -22,6 +22,7 @@ pub struct Preferences {
     pub deepgram_api_key: Option<String>,
     pub groq_api_key: Option<String>,
     pub deepgram_model: Option<String>,
+    pub silero_threshold: Option<f64>,
 }
 
 pub fn open() -> Result<Connection> {
@@ -97,6 +98,13 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN deepgram_model TEXT;")?;
     }
 
+    let has_silero_threshold = conn
+        .prepare("SELECT silero_threshold FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_silero_threshold {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN silero_threshold REAL;")?;
+    }
+
     Ok(())
 }
 
@@ -104,7 +112,7 @@ fn migrate(conn: &Connection) -> Result<()> {
 
 pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
     let mut stmt = conn.prepare(
-        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model FROM preferences WHERE id = 1",
+        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold FROM preferences WHERE id = 1",
     )?;
     let result = stmt.query_row([], |row| {
         Ok(Preferences {
@@ -120,6 +128,7 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             deepgram_api_key: row.get(9)?,
             groq_api_key: row.get(10)?,
             deepgram_model: row.get(11)?,
+            silero_threshold: row.get(12)?,
         })
     });
     match result {
@@ -143,6 +152,7 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "deepgram_api_key",
         "groq_api_key",
         "deepgram_model",
+        "silero_threshold",
     ];
     if !valid_keys.contains(&key) {
         anyhow::bail!(
@@ -206,6 +216,14 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
                 anyhow::bail!("stt_silence must be between 0.2 and 15.0 seconds");
             }
         }
+        "silero_threshold" => {
+            let parsed = value
+                .parse::<f64>()
+                .context("silero_threshold must be a number")?;
+            if !(0.1..=0.9).contains(&parsed) {
+                anyhow::bail!("silero_threshold must be between 0.1 and 0.9");
+            }
+        }
         "stt_trim_silence" | "stt_auto_enter" => {
             if !matches!(value, "true" | "false" | "1" | "0") {
                 anyhow::bail!("{key} must be one of: true, false, 1, 0");
@@ -216,8 +234,8 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
 
     // Upsert: insert or update
     conn.execute(
-        "INSERT INTO preferences (id, lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model)
-         VALUES (1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+        "INSERT INTO preferences (id, lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold)
+         VALUES (1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
          ON CONFLICT(id) DO NOTHING",
         [],
     )?;
@@ -239,4 +257,13 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
 pub fn reset_preferences(conn: &Connection) -> Result<()> {
     conn.execute("DELETE FROM preferences WHERE id = 1", [])?;
     Ok(())
+}
+
+pub fn get_silero_threshold(conn: &Connection) -> Result<Option<f64>> {
+    let prefs = get_preferences(conn)?;
+    Ok(prefs.silero_threshold)
+}
+
+pub fn set_silero_threshold(conn: &Connection, value: f64) -> Result<()> {
+    set_preference(conn, "silero_threshold", &value.to_string())
 }

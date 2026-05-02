@@ -7,6 +7,7 @@ struct Config: Codable {
     var sttSilence: Double
     var sttAutoEnter: Bool
     var groqApiKey: String?
+    var sileroThreshold: Float
 
     static let defaultConfig = Config(
         sttEnergyThreshold: 0.005,
@@ -14,7 +15,8 @@ struct Config: Codable {
         sttCooldownMs: 150,
         sttSilence: 0.4,
         sttAutoEnter: false,
-        groqApiKey: nil
+        groqApiKey: nil,
+        sileroThreshold: 0.5
     )
 
     static func fromCLI(output: String) -> Config? {
@@ -42,6 +44,8 @@ struct Config: Codable {
                     if !value.contains("(not set)") {
                         config.groqApiKey = value
                     }
+                case "silero_threshold":
+                    config.sileroThreshold = Float(value) ?? defaultConfig.sileroThreshold
                 default:
                     break
                 }

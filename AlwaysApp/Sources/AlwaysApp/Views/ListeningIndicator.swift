@@ -101,8 +101,8 @@ class ListeningIndicatorWindow: NSPanel {
     }
     
     private func startTrackingTextField() {
-        // Update position every 500ms to follow active text field
-        updateTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        // Update position every 100ms to follow active text field
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             self?.updatePositionInTextField()
         }
     }
@@ -346,6 +346,7 @@ class ListeningIndicatorController {
     func hide() {
         DispatchQueue.main.async { [weak self] in
             self?.window?.orderOut(nil)
+            self?.window = nil
         }
     }
 

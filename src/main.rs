@@ -23,7 +23,7 @@ enum Commands {
         #[arg(short = 't', long, default_value = "30")]
         timeout: u32,
         /// Seconds of silence before considering phrase complete
-        #[arg(short = 's', long, default_value = "0.4")]
+        #[arg(short = 's', long, default_value = "0.8")]
         silence: f64,
         /// Press Enter automatically after pasting transcript
         #[arg(long, default_value_t = false)]
@@ -45,7 +45,7 @@ enum Commands {
         #[arg(short = 't', long, default_value = "30")]
         timeout: u32,
         /// Seconds of silence before considering phrase complete
-        #[arg(short = 's', long, default_value = "0.4")]
+        #[arg(short = 's', long, default_value = "0.8")]
         silence: f64,
         /// Press Enter automatically after pasting transcript
         #[arg(long, default_value_t = false)]
@@ -197,6 +197,13 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .as_deref()
                     .map(|k| format!("{}...", &k[..k.len().min(12)]))
                     .unwrap_or_else(|| "(not set)".to_string())
+            );
+            println!(
+                "silero_threshold: {}",
+                prefs
+                    .silero_threshold
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "0.5".to_string())
             );
         }
         ConfigAction::Set { key, value } => {

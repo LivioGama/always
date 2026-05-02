@@ -57,6 +57,7 @@ pub struct AlwaysConfig {
     pub learning_enabled: bool,
     pub groq_stt_api_key: String,
     pub vad_mode: VadMode,
+    pub silero_threshold: f32,
     pub vocab_config: VocabConfig,
     pub postprocess_config: PostprocessConfig,
 }
@@ -143,7 +144,7 @@ impl AlwaysConfig {
         let config = Self {
             lang,
             timeout_secs,
-            silence_secs,
+            silence_secs: prefs.stt_silence.unwrap_or(silence_secs),
             auto_enter,
             filter_enabled: true, // Always enabled - filter is always on
             energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.15),
@@ -157,6 +158,7 @@ impl AlwaysConfig {
             learning_enabled: postprocess_config.learning_history_limit > 0,
             groq_stt_api_key,
             vad_mode,
+            silero_threshold: prefs.silero_threshold.unwrap_or(0.5) as f32,
             vocab_config,
             postprocess_config,
         };
@@ -187,6 +189,7 @@ impl Default for AlwaysConfig {
             learning_enabled: postprocess_config.learning_history_limit > 0,
             groq_stt_api_key: String::new(),
             vad_mode: VadMode::default(),
+            silero_threshold: 0.5,
             vocab_config,
             postprocess_config,
         }

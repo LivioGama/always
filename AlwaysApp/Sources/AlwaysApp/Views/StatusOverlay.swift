@@ -396,10 +396,10 @@ class StatusOverlayController {
 
     private var window: StatusOverlayWindow?
     private var hideWorkItem: DispatchWorkItem?
+    private var flashEndsAt: Date?
+    private var pendingShowState: OverlayState?
 
-    private init() {
-        // Don't create window here - wait until first use
-    }
+    private init() {}
 
     private func ensureWindow() {
         if window == nil {
@@ -410,33 +410,65 @@ class StatusOverlayController {
 
     /// Show the overlay and keep it visible until explicitly hidden. Used
     /// for ongoing states like transcribing or voice activity.
+    /// If a flash is currently active, defer until the flash completes
+    /// so the user actually sees the toggle confirmation.
     func show(state: OverlayState) {
         ensureWindow()
+        if isFlashActive() {
+            pendingShowState = state
+            return
+        }
         cancelPendingHide()
         window?.show(state: state)
     }
 
     /// Show the overlay briefly then auto-hide. Used for transient
     /// notifications like Pause/Resume or Auto-Enter on/off toggles.
-    func flash(state: OverlayState, duration: TimeInterval = 5.0) {
+    /// Always lasts the full `duration` regardless of voice activity.
+    func flash(state: OverlayState, duration: TimeInterval = 1.5) {
         ensureWindow()
         cancelPendingHide()
         window?.show(state: state)
 
+        let endsAt = Date(timeIntervalSinceNow: duration)
+        flashEndsAt = endsAt
+
         let work = DispatchWorkItem { [weak self] in
-            self?.window?.hide()
+            guard let self = self else { return }
+            self.flashEndsAt = nil
+            // If a persistent show was deferred during the flash, honor it now
+            // instead of hiding (avoids a flicker between flash hide and show).
+            if let deferred = self.pendingShowState {
+                self.pendingShowState = nil
+                self.window?.show(state: deferred)
+            } else {
+                self.window?.hide()
+            }
         }
         hideWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
     }
 
     func hide() {
+        // If a flash is active, let it complete naturally — don't kill it
+        // mid-flash because of a stale voice-activity-ended.
+        if isFlashActive() {
+            pendingShowState = nil
+            return
+        }
         cancelPendingHide()
         window?.hide()
+    }
+
+    private func isFlashActive() -> Bool {
+        guard let endsAt = flashEndsAt else { return false }
+        return endsAt > Date()
     }
 
     private func cancelPendingHide() {
         hideWorkItem?.cancel()
         hideWorkItem = nil
+        flashEndsAt = nil
+        pendingShowState = nil
     }
 }

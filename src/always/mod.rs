@@ -9,6 +9,7 @@ pub mod event;
 pub mod event_loop;
 pub mod filter;
 pub mod filter_config;
+pub mod hallucination;
 pub mod hud;
 pub mod keyboard;
 pub mod log;

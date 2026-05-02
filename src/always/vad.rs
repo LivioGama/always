@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::collections::VecDeque;
-use webrtc_vad::{Vad, VadMode};
+use voice_activity_detector::VoiceActivityDetector;
 
 use crate::always::audio::{self, FRAME_BYTES, FRAME_MS, FRAME_SAMPLES};
 use crate::always::config::AlwaysConfig;
@@ -8,7 +8,11 @@ use crate::always::event;
 use crate::always::log::{Event, Logger};
 
 pub enum RecordResult {
-    Speech { text: String, energy: f64 },
+    Speech {
+        text: String,
+        energy: f64,
+        transcription: crate::stt::TranscriptionResult,
+    },
     Silence,
     DroppedLowEnergy { energy: f64 },
     DroppedNoise { raw: String },
@@ -25,8 +29,14 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     let min_speech_frames = (cfg.onset_ms / FRAME_MS).max(1) as usize;
     // Pre-buffer: keep 50ms of audio before speech detection to catch first words
     let pre_buffer_frames = (50 / FRAME_MS as usize).max(1);
-    let mut vad =
-        Vad::new_with_rate_and_mode(webrtc_vad::SampleRate::Rate16kHz, VadMode::LowBitrate);
+    let mut vad = VoiceActivityDetector::builder()
+        .sample_rate(16000_i64)
+        .chunk_size(512_usize)
+        .build()
+        .context("failed to build Silero VAD")?;
+    let speech_threshold: f32 = cfg.silero_threshold;
+    let mut vad_accum: Vec<i16> = Vec::with_capacity(1024);
+    let mut last_prob: f32 = 0.0;
 
     // Use persistent recorder to avoid process spawning overhead
     let recorder_arc = audio::RecChild::get_or_spawn()?;
@@ -74,7 +84,14 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
         }
         let samples = &sample_buf[..];
 
-        let is_speech = vad.is_voice_segment(samples).unwrap_or(false);
+        vad_accum.extend_from_slice(samples);
+        let is_speech = if vad_accum.len() >= 512 {
+            let chunk: Vec<i16> = vad_accum.drain(..512).collect();
+            last_prob = vad.predict(chunk);
+            last_prob >= speech_threshold
+        } else {
+            last_prob >= speech_threshold
+        };
 
         if is_speech {
             consecutive_speech += 1;
@@ -173,11 +190,11 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
         }
     };
 
-    let raw = match crate::stt::transcribe_from_bytes(wav_data, &cfg.groq_stt_api_key) {
-        Ok(raw) => {
+    let result = match crate::stt::transcribe_from_bytes(wav_data, &cfg.groq_stt_api_key) {
+        Ok(result) => {
             // Send transcribing stopped event on success
             event::global_broadcaster().transcribing_stopped();
-            raw
+            result
         }
         Err(err) => {
             // Send transcribing stopped event on error
@@ -186,6 +203,8 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
         }
     };
 
+    let raw = result.text.clone();
+
     if raw.is_empty() {
         return Ok(RecordResult::DroppedNoise { raw });
     }
@@ -193,6 +212,7 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     Ok(RecordResult::Speech {
         text: raw,
         energy: speech_energy,
+        transcription: result,
     })
 }
 

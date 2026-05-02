@@ -98,3 +98,29 @@ always vocab import
 ## 📄 License
 
 Apache-2.0
+
+## Future Optimization Opportunities
+
+The following optimizations were identified during a recent latency audit but not yet implemented. They're documented here for future work.
+
+### 🟢 Real wins still on the table
+
+1. **Native audio via `cpal`** — eliminates the SoX subprocess permanently. ~5-10ms latency cut, removes the `/opt/homebrew/bin/rec` external dependency, kills the persistent-recorder restart cycle. Significant rewrite (~half day).
+2. **Speculative early transcription** — start sending audio to Whisper before silence is fully detected. Could shave 0.4-1s off perceived latency for typical utterances. Risky (doubles API usage if not capped).
+3. **NSPasteboard via objc2** — finally remove the last subprocess (`pbcopy`) on the hot path. ~5-15ms saved per paste. Adds heavy `objc2` dependency.
+
+### 🟡 Marginal — only worth it if optimizing for clean code
+
+4. **Remove `smart_filter.rs` and `ai_filter.rs`** — only used by dev test bins now. Faster compile, smaller binary, but breaks `cargo run --bin filter_comparison`.
+5. **Vocabulary fuzzy matching with `aho-corasick`** instead of sequential string replace — only helps with large vocabularies (current default is small).
+6. **SQLite WAL + `PRAGMA synchronous=NORMAL`** — not a bottleneck (config is read once at startup).
+
+### 🔴 Not worth doing
+
+- SIMD energy calculation — already < 1ms, dwarfed by API time
+- Local Whisper fallback — quality tradeoff isn't worth it for dictation
+- Replacing `rdev` keyboard listener — works fine
+
+### Honest assessment
+
+The single biggest remaining win is **fixing the overlay regression** so we can re-enable Swift release mode (currently builds in debug to work around a regression introduced during the latency optimization pass). After that, **speculative transcription** is the next big lever because the API call is still ~60% of total latency. Everything else is polish.

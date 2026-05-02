@@ -43,35 +43,6 @@ class CLIService: ObservableObject {
         try await runCLI(arguments: ["config", "set", key, value])
     }
 
-    func setConfigFireAndForget(key: String, value: String) {
-        guard FileManager.default.fileExists(atPath: cliPath) else { return }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: cliPath)
-        process.arguments = ["config", "set", key, value]
-
-        var env = ProcessInfo.processInfo.environment
-        let homebrewBin = "/opt/homebrew/bin"
-        if env["PATH"]?.contains(homebrewBin) == false {
-            env["PATH"] = "\(homebrewBin):\(env["PATH"] ?? "")"
-        }
-        if let groqKey = ProcessInfo.processInfo.environment["GROQ_API_KEY"] {
-            env["GROQ_API_KEY"] = groqKey
-        }
-        process.environment = env
-
-        // Discard stdout/stderr to avoid pipe buffering
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-            // Don't wait — let the process finish on its own
-        } catch {
-            print("CLIService: setConfigFireAndForget failed - \(error)")
-        }
-    }
-
     func togglePause() async throws -> String {
         try await runCLI(arguments: ["toggle-pause"])
     }
