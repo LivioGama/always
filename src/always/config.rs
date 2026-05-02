@@ -91,7 +91,7 @@ pub struct PostprocessConfig {
 impl Default for PostprocessConfig {
     fn default() -> Self {
         Self {
-            groq_model: "llama3-8b-8192".to_string(),
+            groq_model: "llama-3.1-8b-instant".to_string(),
             learning_history_limit: 1000,
             grammar_correction_enabled: true,
             cache_ttl_seconds: 300,
@@ -165,6 +165,34 @@ impl AlwaysConfig {
     }
 }
 
+impl Default for AlwaysConfig {
+    fn default() -> Self {
+        let vocab_config = VocabConfig::default();
+        let postprocess_config = PostprocessConfig::default();
+
+        Self {
+            lang: "en".to_string(),
+            timeout_secs: 30,
+            silence_secs: 0.5,
+            auto_enter: false,
+            filter_enabled: true,
+            energy_threshold: 0.15,
+            onset_ms: 30,
+            cooldown_ms: 150,
+            log_path: default_log_path(),
+            vocab: Vocabulary::load(),
+            context_vocab: None,
+            post_processor: None,
+            project_root: detect_project_root(),
+            learning_enabled: postprocess_config.learning_history_limit > 0,
+            groq_stt_api_key: String::new(),
+            vad_mode: VadMode::default(),
+            vocab_config,
+            postprocess_config,
+        }
+    }
+}
+
 fn load_vocab_config() -> VocabConfig {
     VocabConfig {
         file_patterns: std::env::var("ALWAYS_FILE_PATTERNS")
@@ -189,7 +217,7 @@ fn load_vocab_config() -> VocabConfig {
 fn load_postprocess_config() -> PostprocessConfig {
     PostprocessConfig {
         groq_model: std::env::var("ALWAYS_GROQ_MODEL")
-            .unwrap_or_else(|_| "llama3-8b-8192".to_string()),
+            .unwrap_or_else(|_| "llama-3.1-8b-instant".to_string()),
         learning_history_limit: std::env::var("ALWAYS_LEARNING_LIMIT")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -207,21 +235,20 @@ fn load_postprocess_config() -> PostprocessConfig {
 
 fn default_vocab_patterns() -> Vec<String> {
     vec![
-        r"\b[A-Z][a-zA-Z0-9]*\b".to_string(), // CamelCase
-        r"\b[a-z]+_[a-z_]+\b".to_string(), // snake_case
-        r"\b[A-Z_]+\b".to_string(), // SCREAMING_SNAKE_CASE
+        r"\b[A-Z][a-zA-Z0-9]*\b".to_string(),       // CamelCase
+        r"\b[a-z]+_[a-z_]+\b".to_string(),          // snake_case
+        r"\b[A-Z_]+\b".to_string(),                 // SCREAMING_SNAKE_CASE
         r"\b[a-z]+[A-Z][a-zA-Z0-9]*\b".to_string(), // camelCase
     ]
 }
 
 fn default_common_words() -> Vec<String> {
     vec![
-        "the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
-        "her", "was", "one", "our", "out", "with", "have", "this", "that", "from",
-        "they", "will", "would", "there", "their", "what", "about", "which", "when",
-        "make", "like", "into", "year", "your", "just", "over", "also", "such",
-        "because", "these", "first", "being", "through", "after", "where", "should",
-        "some", "those",
+        "the", "and", "for", "are", "but", "not", "you", "all", "can", "had", "her", "was", "one",
+        "our", "out", "with", "have", "this", "that", "from", "they", "will", "would", "there",
+        "their", "what", "about", "which", "when", "make", "like", "into", "year", "your", "just",
+        "over", "also", "such", "because", "these", "first", "being", "through", "after", "where",
+        "should", "some", "those",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -230,12 +257,12 @@ fn default_common_words() -> Vec<String> {
 
 fn detect_project_root() -> Option<PathBuf> {
     let current = std::env::current_dir().ok()?;
-    
+
     // Check if current directory has .git
     if current.join(".git").exists() {
         return Some(current);
     }
-    
+
     // Check parents
     let mut path = current.clone();
     while path.pop() {
@@ -243,7 +270,7 @@ fn detect_project_root() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    
+
     None
 }
 
@@ -270,7 +297,10 @@ fn default_log_path() -> PathBuf {
 fn get_groq_stt_api_key() -> Result<String> {
     // Try environment variable first
     if let Ok(key) = std::env::var("GROQ_API_KEY") {
-        eprintln!("🔑 Using GROQ_API_KEY from environment variable (first 12 chars): {}...", &key[..key.len().min(12)]);
+        eprintln!(
+            "🔑 Using GROQ_API_KEY from environment variable (first 12 chars): {}...",
+            &key[..key.len().min(12)]
+        );
         return Ok(key);
     }
 
@@ -278,11 +308,16 @@ fn get_groq_stt_api_key() -> Result<String> {
     if let Ok(conn) = db::open() {
         if let Ok(prefs) = db::get_preferences(&conn) {
             if let Some(key) = prefs.groq_api_key {
-                eprintln!("🔑 Using GROQ_API_KEY from database (first 12 chars): {}...", &key[..key.len().min(12)]);
+                eprintln!(
+                    "🔑 Using GROQ_API_KEY from database (first 12 chars): {}...",
+                    &key[..key.len().min(12)]
+                );
                 return Ok(key);
             }
         }
     }
 
-    anyhow::bail!("GROQ_API_KEY environment variable not set and no key found in preferences. Set it with: always config set groq_api_key <your-key>")
+    anyhow::bail!(
+        "GROQ_API_KEY environment variable not set and no key found in preferences. Set it with: always config set groq_api_key <your-key>"
+    )
 }

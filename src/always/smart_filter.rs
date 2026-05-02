@@ -1,16 +1,27 @@
-use crate::always::ai_filter::{create_ai_filter, TranscriptionResult};
-use crate::always::filter;
 use crate::always::AlwaysConfig;
+use crate::always::ai_filter::create_ai_filter;
+use crate::always::filter;
 
-pub async fn should_accept_with_ai(text: &str, config: &AlwaysConfig) -> (bool, String, Option<String>) {
+pub async fn should_accept_with_ai(
+    text: &str,
+    config: &AlwaysConfig,
+) -> (bool, String, Option<String>) {
     // Try AI filtering first if available
     if let Some(ai_filter) = create_ai_filter(config) {
         match ai_filter.evaluate_transcription(text, config).await {
             Ok(result) => {
                 let reason = if result.should_accept {
-                    format!("AI: {} (confidence: {:.1}%)", result.reason, result.confidence_score * 100.0)
+                    format!(
+                        "AI: {} (confidence: {:.1}%)",
+                        result.reason,
+                        result.confidence_score * 100.0
+                    )
                 } else {
-                    format!("AI: {} (confidence: {:.1}%)", result.reason, result.confidence_score * 100.0)
+                    format!(
+                        "AI: {} (confidence: {:.1}%)",
+                        result.reason,
+                        result.confidence_score * 100.0
+                    )
                 };
 
                 // Return corrected text if different and accepted
@@ -38,10 +49,17 @@ pub async fn should_accept_with_ai(text: &str, config: &AlwaysConfig) -> (bool, 
 }
 
 // Synchronous version that uses fallback rules
-pub fn should_accept_with_simple_ai(text: &str, config: &AlwaysConfig) -> (bool, String, Option<String>) {
+pub fn should_accept_with_simple_ai(
+    text: &str,
+    config: &AlwaysConfig,
+) -> (bool, String, Option<String>) {
     if let Some(ai_filter) = create_ai_filter(config) {
         let result = ai_filter.evaluate_fallback(text);
-        let reason = format!("Simple AI: {} (confidence: {:.1}%)", result.reason, result.confidence_score * 100.0);
+        let reason = format!(
+            "Simple AI: {} (confidence: {:.1}%)",
+            result.reason,
+            result.confidence_score * 100.0
+        );
 
         let corrected = if result.corrected_text != text && result.should_accept {
             Some(result.corrected_text)

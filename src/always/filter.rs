@@ -1,14 +1,13 @@
-use crate::always::{AlwaysConfig, filter_config};
+use crate::always::{filter_config, AlwaysConfig};
 use once_cell::sync::Lazy;
 use regex;
 
 // Load filter config once at startup
-static FILTER_CONFIG: Lazy<Option<filter_config::FilterConfig>> = Lazy::new(filter_config::load_filter_config);
-static COMPILED_REGEX: Lazy<Vec<regex::Regex>> = Lazy::new(|| {
-    match &*FILTER_CONFIG {
-        Some(config) => filter_config::compile_regex_patterns(&config.hard_filter_regex),
-        None => vec![],
-    }
+static FILTER_CONFIG: Lazy<Option<filter_config::FilterConfig>> =
+    Lazy::new(filter_config::load_filter_config);
+static COMPILED_REGEX: Lazy<Vec<regex::Regex>> = Lazy::new(|| match &*FILTER_CONFIG {
+    Some(config) => filter_config::compile_regex_patterns(&config.hard_filter_regex),
+    None => vec![],
 });
 
 #[derive(Debug, Clone)]
@@ -27,7 +26,6 @@ impl FilterReason {
         }
     }
 }
-
 
 /// Hard phrase filter: exact matches and STT corrections (simple, high-precision)
 pub fn hard_reject_with_reason(text: &str) -> FilterReason {
@@ -50,7 +48,12 @@ pub fn hard_reject_with_reason(text: &str) -> FilterReason {
 
     // STT correction: handle common misheard words (u→you, ur→your, thankyou→thank you)
     let mut substituted = normalized.clone();
-    let substitutions = [(" u ", " you "), ("thank u", "thank you"), ("thankyou", "thank you"), ("ur ", "your ")];
+    let substitutions = [
+        (" u ", " you "),
+        ("thank u", "thank you"),
+        ("thankyou", "thank you"),
+        ("ur ", "your "),
+    ];
     for (from, to) in &substitutions {
         substituted = substituted.replace(from, to);
     }
@@ -58,7 +61,10 @@ pub fn hard_reject_with_reason(text: &str) -> FilterReason {
     if substituted != normalized {
         for start_phrase in &config.hard_filter_starts_with {
             if substituted.starts_with(start_phrase) {
-                return FilterReason::HardPhrase(format!("Starts with (after correction): '{}'", start_phrase));
+                return FilterReason::HardPhrase(format!(
+                    "Starts with (after correction): '{}'",
+                    start_phrase
+                ));
             }
         }
     }
@@ -73,7 +79,11 @@ pub fn hard_reject_with_reason(text: &str) -> FilterReason {
     // Regex patterns
     for (i, regex) in COMPILED_REGEX.iter().enumerate() {
         if regex.is_match(&substituted) {
-            let pattern = config.hard_filter_regex.get(i).map(|s| s.as_str()).unwrap_or("unknown");
+            let pattern = config
+                .hard_filter_regex
+                .get(i)
+                .map(|s| s.as_str())
+                .unwrap_or("unknown");
             return FilterReason::HardRegex(pattern.to_string());
         }
     }
@@ -84,6 +94,22 @@ pub fn hard_reject_with_reason(text: &str) -> FilterReason {
 pub fn should_accept_with_reason(text: &str, _cfg: &AlwaysConfig) -> FilterReason {
     // Hard filter always applies - these phrases should NEVER be pasted
     hard_reject_with_reason(text)
+}
+
+pub fn quick_reject_with_reason(text: &str) -> FilterReason {
+    hard_reject_with_reason(text)
+}
+
+pub fn onomatopoeia_reject(text: &str) -> bool {
+    matches!(hard_reject_with_reason(text), FilterReason::HardRegex(_))
+}
+
+pub fn gibberish_reject(text: &str) -> bool {
+    matches!(hard_reject_with_reason(text), FilterReason::HardRegex(_))
+}
+
+pub fn non_ascii_reject(text: &str) -> bool {
+    matches!(hard_reject_with_reason(text), FilterReason::HardRegex(_))
 }
 
 pub fn should_accept(text: &str, cfg: &AlwaysConfig) -> bool {

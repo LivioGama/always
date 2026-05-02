@@ -3,6 +3,7 @@
 pub mod ai_filter;
 pub mod audio;
 pub mod config;
+pub mod context_vocab;
 pub mod daemon;
 pub mod event;
 pub mod event_loop;
@@ -15,11 +16,11 @@ pub mod mic_monitor;
 pub mod notification;
 pub mod paste;
 pub mod pause;
+pub mod postprocess;
+pub mod smart_filter;
 pub mod text;
 pub mod uds_server;
 pub mod vad;
-pub mod context_vocab;
-pub mod postprocess;
 pub mod vocab;
 
 // DEPRECATED: File-based state persistence replaced by UDS event streaming

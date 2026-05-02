@@ -2,6 +2,9 @@ use std::collections::HashMap;
 
 use regex::Regex;
 use serde::Deserialize;
+use strsim::jaro_winkler;
+
+const FUZZY_CORRECTION_THRESHOLD: f64 = 0.92;
 
 #[derive(Debug, Clone)]
 pub struct Vocabulary {
@@ -96,6 +99,8 @@ impl Vocabulary {
             result = result.replace(wrong, correct);
         }
 
+        result = self.apply_fuzzy_corrections(&result);
+
         for rule in &self.patterns {
             let replacement = rule.replacement();
             result = rule
@@ -104,6 +109,64 @@ impl Vocabulary {
                 .to_string();
         }
 
+        result
+    }
+
+    fn apply_fuzzy_corrections(&self, text: &str) -> String {
+        let tokens = TokenSpan::scan(text);
+        if tokens.len() < 2 {
+            return text.to_string();
+        }
+
+        let mut replacements = Vec::new();
+        let mut correction_phrases: Vec<_> = self
+            .corrections
+            .iter()
+            .filter_map(|(wrong, correct)| {
+                let word_count = wrong.split_whitespace().count();
+                (word_count >= 2).then_some((wrong.as_str(), correct.as_str(), word_count))
+            })
+            .collect();
+        correction_phrases.sort_by_key(|(wrong, _, word_count)| {
+            (
+                std::cmp::Reverse(*word_count),
+                std::cmp::Reverse(wrong.len()),
+            )
+        });
+
+        for start in 0..tokens.len() {
+            let Some((replacement, end_token)) =
+                best_fuzzy_replacement(text, &tokens, start, &correction_phrases)
+            else {
+                continue;
+            };
+
+            let start_byte = tokens[start].start;
+            let end_byte = tokens[end_token].end;
+            if replacements
+                .iter()
+                .any(|(existing_start, existing_end, _)| {
+                    ranges_overlap(start_byte, end_byte, *existing_start, *existing_end)
+                })
+            {
+                continue;
+            }
+            replacements.push((start_byte, end_byte, replacement.to_string()));
+        }
+
+        if replacements.is_empty() {
+            return text.to_string();
+        }
+
+        replacements.sort_by_key(|(start, _, _)| *start);
+        let mut result = String::new();
+        let mut cursor = 0;
+        for (start, end, replacement) in replacements {
+            result.push_str(&text[cursor..start]);
+            result.push_str(&replacement);
+            cursor = end;
+        }
+        result.push_str(&text[cursor..]);
         result
     }
 
@@ -118,6 +181,85 @@ impl Vocabulary {
             patterns,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TokenSpan {
+    start: usize,
+    end: usize,
+}
+
+impl TokenSpan {
+    fn scan(text: &str) -> Vec<Self> {
+        let mut tokens = Vec::new();
+        let mut token_start = None;
+
+        for (idx, ch) in text.char_indices() {
+            if ch.is_alphanumeric() || ch == '\'' {
+                token_start.get_or_insert(idx);
+            } else if let Some(start) = token_start.take() {
+                tokens.push(Self { start, end: idx });
+            }
+        }
+
+        if let Some(start) = token_start {
+            tokens.push(Self {
+                start,
+                end: text.len(),
+            });
+        }
+
+        tokens
+    }
+}
+
+fn best_fuzzy_replacement(
+    text: &str,
+    tokens: &[TokenSpan],
+    start: usize,
+    correction_phrases: &[(&str, &str, usize)],
+) -> Option<(String, usize)> {
+    let mut best = None;
+
+    for (wrong, correct, word_count) in correction_phrases {
+        let end_token = start + word_count - 1;
+        if end_token >= tokens.len() {
+            continue;
+        }
+
+        let phrase_start = tokens[start].start;
+        let phrase_end = tokens[end_token].end;
+        let phrase = &text[phrase_start..phrase_end];
+        if normalize(phrase) == normalize(correct) {
+            continue;
+        }
+
+        let score = jaro_winkler(&normalize(phrase), &normalize(wrong));
+        if score < FUZZY_CORRECTION_THRESHOLD {
+            continue;
+        }
+
+        if best
+            .as_ref()
+            .map_or(true, |(best_score, _, _)| score > *best_score)
+        {
+            best = Some((score, (*correct).to_string(), end_token));
+        }
+    }
+
+    best.map(|(_, replacement, end_token)| (replacement, end_token))
+}
+
+fn normalize(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn ranges_overlap(start: usize, end: usize, other_start: usize, other_end: usize) -> bool {
+    start < other_end && other_start < end
 }
 
 impl PatternRule {
@@ -178,6 +320,27 @@ mod tests {
         });
 
         assert_eq!(vocab.apply("I wanna edit dot env"), "I want to edit .env");
+    }
+
+    #[test]
+    fn applies_fuzzy_multi_word_corrections() {
+        let vocab = Vocabulary::from_raw(RawVocabulary {
+            corrections: HashMap::from([("cloud code".to_string(), "Claude Code".to_string())]),
+            patterns: vec![],
+        });
+
+        assert_eq!(vocab.apply("open claud code"), "open Claude Code");
+        assert_eq!(vocab.apply("open cloud coad"), "open Claude Code");
+    }
+
+    #[test]
+    fn fuzzy_corrections_leave_unrelated_text_alone() {
+        let vocab = Vocabulary::from_raw(RawVocabulary {
+            corrections: HashMap::from([("cloud code".to_string(), "Claude Code".to_string())]),
+            patterns: vec![],
+        });
+
+        assert_eq!(vocab.apply("open cloud storage"), "open cloud storage");
     }
 
     #[test]

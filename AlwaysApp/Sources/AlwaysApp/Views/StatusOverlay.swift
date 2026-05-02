@@ -150,16 +150,17 @@ fileprivate class DotWaveView: NSView {
 /// frosted block with a large SF Symbol icon at the top and a label beneath.
 class StatusOverlayView: NSView {
     private let blurView: NSVisualEffectView
+    private let stackView: NSStackView
+    private let iconContainer: NSView
     private let iconView: NSImageView
     private let dotWaveView: DotWaveView
     private let label: NSTextField
 
-    fileprivate static let iconSize: CGFloat = 56
-    fileprivate static let cornerRadius: CGFloat = 24
-    fileprivate static let topPadding: CGFloat = 28
-    fileprivate static let iconLabelSpacing: CGFloat = 16
-    fileprivate static let bottomPadding: CGFloat = 22
-    fileprivate static let horizontalPadding: CGFloat = 18
+    fileprivate static let iconSize: CGFloat = 42
+    fileprivate static let cornerRadius: CGFloat = 22
+    fileprivate static let iconLabelSpacing: CGFloat = 10
+    fileprivate static let verticalPadding: CGFloat = 14
+    fileprivate static let horizontalPadding: CGFloat = 20
 
     var state: OverlayState = .voiceActivity {
         didSet {
@@ -169,6 +170,8 @@ class StatusOverlayView: NSView {
 
     override init(frame frameRect: NSRect) {
         self.blurView = NSVisualEffectView(frame: frameRect)
+        self.stackView = NSStackView()
+        self.iconContainer = NSView()
         self.iconView = NSImageView()
         self.dotWaveView = DotWaveView()
         self.label = NSTextField(labelWithString: "")
@@ -190,11 +193,11 @@ class StatusOverlayView: NSView {
 
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(iconView)
+        iconContainer.addSubview(iconView)
 
         dotWaveView.translatesAutoresizingMaskIntoConstraints = false
         dotWaveView.isHidden = true
-        addSubview(dotWaveView)
+        iconContainer.addSubview(dotWaveView)
 
         label.font = .systemFont(ofSize: 15, weight: .medium)
         label.textColor = .secondaryLabelColor
@@ -206,24 +209,39 @@ class StatusOverlayView: NSView {
         label.alignment = .center
         label.lineBreakMode = .byTruncatingTail
         label.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(label)
+
+        iconContainer.translatesAutoresizingMaskIntoConstraints = false
+        stackView.orientation = .vertical
+        stackView.alignment = .centerX
+        stackView.spacing = StatusOverlayView.iconLabelSpacing
+        stackView.translatesAutoresizingMaskIntoConstraints = false
+        stackView.addArrangedSubview(iconContainer)
+        stackView.addArrangedSubview(label)
+        addSubview(stackView)
 
         NSLayoutConstraint.activate([
-            iconView.centerXAnchor.constraint(equalTo: centerXAnchor),
-            iconView.topAnchor.constraint(equalTo: topAnchor, constant: StatusOverlayView.topPadding),
+            stackView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            stackView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            stackView.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: StatusOverlayView.verticalPadding),
+            stackView.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -StatusOverlayView.verticalPadding),
+            stackView.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: StatusOverlayView.horizontalPadding),
+            stackView.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -StatusOverlayView.horizontalPadding),
+
+            iconContainer.widthAnchor.constraint(equalToConstant: StatusOverlayView.iconSize),
+            iconContainer.heightAnchor.constraint(equalToConstant: StatusOverlayView.iconSize),
+
+            iconView.centerXAnchor.constraint(equalTo: iconContainer.centerXAnchor),
+            iconView.centerYAnchor.constraint(equalTo: iconContainer.centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: StatusOverlayView.iconSize),
             iconView.heightAnchor.constraint(equalToConstant: StatusOverlayView.iconSize),
 
-            // dotWaveView occupies the same 56x56 slot as iconView.
+            // dotWaveView occupies the same slot as iconView.
             dotWaveView.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
             dotWaveView.centerYAnchor.constraint(equalTo: iconView.centerYAnchor),
             dotWaveView.widthAnchor.constraint(equalTo: iconView.widthAnchor),
             dotWaveView.heightAnchor.constraint(equalTo: iconView.heightAnchor),
 
-            label.topAnchor.constraint(equalTo: iconView.bottomAnchor, constant: StatusOverlayView.iconLabelSpacing),
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: StatusOverlayView.horizontalPadding),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -StatusOverlayView.horizontalPadding),
-            label.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -StatusOverlayView.bottomPadding)
+            label.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -2 * StatusOverlayView.horizontalPadding)
         ])
 
         applyState()
@@ -269,8 +287,8 @@ class StatusOverlayView: NSView {
 class StatusOverlayWindow: NSWindow {
     private var overlayView: StatusOverlayView?
 
-    static let overlayWidth: CGFloat = 200
-    static let overlayHeight: CGFloat = 200
+    static let overlayWidth: CGFloat = 230
+    static let overlayHeight: CGFloat = 130
 
     init() {
         super.init(
@@ -400,7 +418,7 @@ class StatusOverlayController {
 
     /// Show the overlay briefly then auto-hide. Used for transient
     /// notifications like Pause/Resume or Auto-Enter on/off toggles.
-    func flash(state: OverlayState, duration: TimeInterval = 3.5) {
+    func flash(state: OverlayState, duration: TimeInterval = 5.0) {
         ensureWindow()
         cancelPendingHide()
         window?.show(state: state)
