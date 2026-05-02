@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import Combine
+import os.log
 
 // Event types matching Rust DaemonEvent enum
 enum DaemonEventType: String, Codable {
@@ -66,29 +67,43 @@ class UDSClient: ObservableObject {
     private var connection: NWConnection?
     private var queue: DispatchQueue
     private var reconnectScheduled = false
+    private let logger = Logger(subsystem: "com.always.app", category: "uds-client")
     
-    private func log(_ message: String) {
-        let timestamp = Date().description
-        let line = "[\(timestamp)] UDSClient: \(message)\n"
-        let path = "/tmp/udsclient.log"
-        if let data = line.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: path) {
-                if let fileHandle = FileHandle(forWritingAtPath: path) {
-                    fileHandle.seekToEndOfFile()
-                    fileHandle.write(data)
-                    fileHandle.closeFile()
-                }
-            } else {
-                try? data.write(to: URL(fileURLWithPath: path))
-            }
+    /// Get the default socket path based on the platform
+    static func defaultSocketPath() -> String {
+        #if os(macOS)
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home
+            .appendingPathComponent("Library")
+            .appendingPathComponent("Caches")
+            .appendingPathComponent("Always")
+            .appendingPathComponent("always.sock")
+            .path
+        #else
+        // Linux: Use XDG_RUNTIME_DIR or fallback to /tmp
+        if let runtimeDir = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"] {
+            return "\(runtimeDir)/always.sock"
+        } else {
+            return "/tmp/always.sock"
         }
-        NSLog("UDSClient: \(message)")
+        #endif
     }
     
-    init(socketPath: String = "/tmp/always.sock") {
-        self.socketPath = socketPath
+    private func log(_ message: String) {
+        logger.debug("\(message)")
+        
+        // Clean up old log file on launch
+        try? FileManager.default.removeItem(atPath: "/tmp/udsclient.log")
+    }
+    
+    init(socketPath: String? = nil) {
+        self.socketPath = socketPath ?? UDSClient.defaultSocketPath()
         self.queue = DispatchQueue(label: "com.always.udsclient")
-        log("Initializing with socket path: \(socketPath)")
+        logger.info("Initializing with socket path: \(self.socketPath)")
+        
+        // Clean up old log file on launch
+        try? FileManager.default.removeItem(atPath: "/tmp/udsclient.log")
+        
         connect()
     }
     
@@ -99,7 +114,7 @@ class UDSClient: ObservableObject {
     func connect() {
         guard !isConnected else { return }
         
-        log("Attempting to connect to \(socketPath)")
+        logger.debug("Attempting to connect to \(self.socketPath)")
         let endpoint = NWEndpoint.unix(path: socketPath)
         
         // CRITICAL: Use .tcp for Unix sockets, not default parameters
@@ -109,30 +124,37 @@ class UDSClient: ObservableObject {
         
         connection?.stateUpdateHandler = { [weak self] state in
             guard let self = self else { return }
-            self.log("State change: \(state)")
+            let stateDescription: String
+            switch state {
+            case .ready:
+                stateDescription = "ready"
+            case .failed(let error):
+                stateDescription = "failed(\(error.localizedDescription))"
+            case .waiting(let error):
+                stateDescription = "waiting(\(error.localizedDescription))"
+            case .setup:
+                stateDescription = "setup"
+            case .cancelled:
+                stateDescription = "cancelled"
+            case .preparing:
+                stateDescription = "preparing"
+            @unknown default:
+                stateDescription = "unknown"
+            }
+            self.logger.debug("State change: \(stateDescription)")
             switch state {
             case .ready:
                 DispatchQueue.main.async {
                     self.isConnected = true
                     self.connectionError = nil
-                    self.log("✅ Connected to daemon")
+                    self.logger.info("Connected to daemon")
                 }
                 self.startReceiving()
             case .failed(let error):
                 DispatchQueue.main.async {
                     self.isConnected = false
                     self.connectionError = error.localizedDescription
-                    self.log("❌ Connection failed - \(error)")
-                }
-                self.scheduleReconnect()
-            case .waiting(let error):
-                // NWConnection over Unix sockets sticks in .waiting when the
-                // server isn't listening yet (e.g. daemon still starting).
-                // Don't sit there indefinitely — cancel and reconnect after
-                // a short delay so we actually pick up the socket.
-                DispatchQueue.main.async {
-                    self.connectionError = error.localizedDescription
-                    self.log("⏳ Waiting - \(error) — cancelling and scheduling reconnect")
+                    self.logger.error("Connection failed: \(error.localizedDescription)")
                 }
                 self.connection?.cancel()
                 self.connection = nil
@@ -141,18 +163,19 @@ class UDSClient: ObservableObject {
                 }
                 self.scheduleReconnect()
             case .preparing:
-                self.log("🔄 Preparing connection")
-            case .setup:
-                self.log("⚙️ Setting up connection")
+                self.logger.debug("Preparing connection")
             case .cancelled:
-                self.log("🚫 Connection cancelled")
+                DispatchQueue.main.async {
+                    self.isConnected = false
+                    self.logger.warning("Connection cancelled")
+                }
             @unknown default:
-                self.log("❓ Unknown state: \(state)")
+                self.logger.warning("Unknown state")
             }
         }
         
         connection?.start(queue: queue)
-        log("Connection started on queue")
+        self.logger.debug("Connection started on queue")
     }
     
     func disconnect() {
@@ -181,25 +204,25 @@ class UDSClient: ObservableObject {
     }
     
     private func startReceiving() {
-        log("startReceiving() called")
+        logger.debug("startReceiving() called")
         connection?.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
             guard let self = self else { return }
             
             if let data = data, !data.isEmpty {
                 if let jsonString = String(data: data, encoding: .utf8) {
-                    self.log("Received data: \(jsonString)")
+                    self.logger.debug("Received data: \(jsonString, privacy: .public)")
                     self.processMessage(jsonString)
                 }
             }
             
             if let error = error {
-                self.log("Receive error - \(error)")
+                self.logger.error("Receive error: \(error.localizedDescription, privacy: .public)")
                 self.scheduleReconnect()
                 return
             }
             
             if isComplete {
-                self.log("Connection closed by server")
+                self.logger.info("Connection closed by server")
                 self.scheduleReconnect()
                 return
             }
@@ -219,14 +242,14 @@ class UDSClient: ObservableObject {
                     let event = try JSONDecoder().decode(DaemonEvent.self, from: data)
                     handleEvent(event)
                 } catch {
-                    print("UDSClient: Failed to decode event - \(error)")
+                    self.logger.error("Failed to decode event: \(error.localizedDescription)")
                 }
             }
         }
     }
     
     private func handleEvent(_ event: DaemonEvent) {
-        NSLog("UDSClient: handleEvent - type: \(event.type.rawValue)")
+        logger.debug("handleEvent - type: \(event.type.rawValue, privacy: .public)")
         DispatchQueue.main.async {
             NotificationCenter.default.post(name: .daemonEvent, object: event)
         }
@@ -237,7 +260,7 @@ class UDSClient: ObservableObject {
     /// DaemonEvent back to all connected subscribers.
     func sendCommand(_ commandType: String) {
         guard let connection = connection, isConnected else {
-            log("⚠️ sendCommand(\(commandType)) skipped — not connected")
+            self.logger.warning("sendCommand(\(commandType)) skipped — not connected")
             return
         }
 
@@ -246,9 +269,9 @@ class UDSClient: ObservableObject {
 
         connection.send(content: data, completion: .contentProcessed { [weak self] error in
             if let error = error {
-                self?.log("❌ sendCommand(\(commandType)) failed - \(error)")
+                self?.logger.error("sendCommand(\(commandType)) failed: \(error.localizedDescription)")
             } else {
-                self?.log("→ sent command \(commandType)")
+                self?.logger.debug("Sent command: \(commandType)")
             }
         })
     }

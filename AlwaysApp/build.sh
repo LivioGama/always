@@ -51,6 +51,44 @@ fi
 echo "Using signing identity: ${SIGN_IDENTITY}"
 codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "com.alwaysapp.daemon" --entitlements AlwaysApp.entitlements AlwaysApp.app
 
+# Notarization (only if using proper Apple Developer identity, not ad-hoc)
+if [ "$SIGN_IDENTITY" != "-" ] && [ -n "$ALWAYS_NOTARIZE_TEAM_ID" ]; then
+    echo "Notarizing app..."
+    
+    # Create a zip file for notarization
+    ZIP_PATH="AlwaysApp.zip"
+    ditto -c -k --keepParent "AlwaysApp.app" "$ZIP_PATH"
+    
+    # Submit for notarization
+    NOTARIZATION_OUTPUT=$(xcrun notarytool submit "$ZIP_PATH" \
+        --team-id "$ALWAYS_NOTARIZE_TEAM_ID" \
+        --apple-id "com.alwaysapp.daemon" \
+        --wait \
+        --output-format json)
+    
+    # Extract notarization ID
+    NOTARIZATION_ID=$(echo "$NOTARIZATION_OUTPUT" | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])" 2>/dev/null || echo "")
+    
+    if [ -n "$NOTARIZATION_ID" ]; then
+        echo "✓ Notarization submitted (ID: $NOTARIZATION_ID)"
+        
+        # Staple the notarization ticket
+        xcrun stapler staple "AlwaysApp.app"
+        echo "✓ Notarization ticket stapled"
+        
+        # Verify notarization
+        xcrun stapler validate "AlwaysApp.app"
+        echo "✓ Notarization validated"
+    else
+        echo "⚠️  Notarization failed or skipped"
+    fi
+    
+    # Clean up zip file
+    rm -f "$ZIP_PATH"
+else
+    echo "⚠️  Skipping notarization (requires ALWAYS_NOTARIZE_TEAM_ID and proper signing identity)"
+fi
+
 echo "Deploying to /Applications..."
 rm -rf /Applications/AlwaysApp.app
 cp -r AlwaysApp.app /Applications/

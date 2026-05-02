@@ -7,7 +7,7 @@ use super::context_vocab::ContextVocabulary;
 use super::postprocess::PostProcessor;
 use super::text::Vocabulary;
 use crate::db::Preferences;
-use crate::{config, db};
+use crate::db;
 
 #[derive(Debug, Clone)]
 pub enum VadMode {
@@ -294,33 +294,36 @@ fn log_path_from_preferences(prefs: &Preferences) -> PathBuf {
 }
 
 fn default_log_path() -> PathBuf {
-    config::config_dir().join("always.log")
+    // Use platform-standard log directory from telemetry module
+    crate::always::telemetry::get_log_directory().join("always.log")
 }
 
 fn get_groq_stt_api_key() -> Result<String> {
-    // Try environment variable first
+    use crate::always::keyring;
+
+    // Try environment variable first (highest priority)
     if let Ok(key) = std::env::var("GROQ_API_KEY") {
-        eprintln!(
-            "🔑 Using GROQ_API_KEY from environment variable (first 12 chars): {}...",
-            &key[..key.len().min(12)]
-        );
+        tracing::info!("Groq API key loaded from environment variable");
         return Ok(key);
     }
 
-    // Try database preferences (reusing groq_api_key field for STT)
+    // Try keyring
+    if let Ok(Some(key)) = keyring::get_groq_api_key() {
+        tracing::info!("Groq API key loaded from keychain");
+        return Ok(key);
+    }
+
+    // Fallback to database preferences for migration purposes
     if let Ok(conn) = db::open() {
         if let Ok(prefs) = db::get_preferences(&conn) {
             if let Some(key) = prefs.groq_api_key {
-                eprintln!(
-                    "🔑 Using GROQ_API_KEY from database (first 12 chars): {}...",
-                    &key[..key.len().min(12)]
-                );
+                tracing::warn!("Groq API key loaded from database (should migrate to keychain)");
                 return Ok(key);
             }
         }
     }
 
     anyhow::bail!(
-        "GROQ_API_KEY environment variable not set and no key found in preferences. Set it with: always config set groq_api_key <your-key>"
+        "GROQ_API_KEY environment variable not set and no key found in keychain. Set it with: always config set groq_api_key <your-key>"
     )
 }

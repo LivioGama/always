@@ -66,10 +66,7 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
                     } else {
                         users.join(", ")
                     };
-                    eprintln!(
-                        "🎙️  Microphone in use by: {} - Auto-pausing Always",
-                        app_list
-                    );
+                    tracing::info!(apps = %app_list, "microphone_auto_paused");
 
                     // Log the auto-pause event
                     log.write(Event::MicrophoneAutoPaused { apps: &app_list });
@@ -80,7 +77,7 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
             }
             Ok(false) if auto_paused_for_mic => {
                 // Microphone is no longer in use - resume Always
-                eprintln!("🎙️  Microphone available - Auto-resuming Always");
+                tracing::info!("microphone_auto_resumed");
 
                 // Log the auto-resume event
                 log.write(Event::MicrophoneAutoResumed);
@@ -90,7 +87,7 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
                 auto_paused_for_mic = false;
             }
             Err(e) => {
-                eprintln!("Warning: Failed to check microphone usage: {}", e);
+                tracing::warn!(error = %e, "microphone_check_failed");
             }
             _ => {} // No change in microphone state
         }
@@ -105,7 +102,7 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         // Auto-enter state is now managed consistently through keyboard shortcuts and settings UI
 
         if let Err(e) = process_one(&cfg, &mut log, &mut last_process) {
-            eprintln!("⚠️  Error in voice processing (continuing): {:#}", e);
+            tracing::error!(error = %e, "voice_processing_error");
             log.write(Event::Error {
                 message: &format!("Voice processing error: {:#}", e),
             });
@@ -132,7 +129,7 @@ fn process_one(
             log.write(Event::DroppedLowEnergy { energy });
         }
         vad::RecordResult::DroppedNoise { raw } => {
-            eprintln!("noise {raw:?}");
+            tracing::debug!(raw, "dropped_noise");
             log.write(Event::DroppedNoise { raw: &raw });
         }
     }
@@ -156,7 +153,7 @@ fn handle_speech(
     let filter_result = filter::should_accept_with_reason(text, cfg);
     if !matches!(filter_result, filter::FilterReason::None) {
         let filter_reason = filter_result.to_log_string();
-        eprintln!("filtered {text} - {filter_reason}");
+        tracing::info!(text, filter_reason, "filtered");
         log.write(Event::Filtered {
             text,
             energy,
@@ -180,7 +177,7 @@ fn handle_speech(
 
     let accepted_text = text;
     let transformed = apply_vocabulary(accepted_text, cfg);
-    eprintln!("{transformed} (energy: {energy:.4})");
+    tracing::debug!(transformed, energy, "pasting");
     log.write(Event::Pasting {
         raw: text,
         processed: &transformed,
@@ -197,7 +194,7 @@ fn handle_speech(
     // they're likely mid-shortcut (e.g. ⌘+Tab) and an interjecting paste
     // would corrupt their action. Transcript still broadcasted/logged above.
     if keyboard::is_cmd_held() {
-        eprintln!("⊘ Skipped paste: Command key held");
+        tracing::debug!("skipped_paste_cmd_held");
         log.write(Event::Error {
             message: "Skipped paste: Command key held",
         });
@@ -232,13 +229,13 @@ fn apply_vocabulary(text: &str, cfg: &AlwaysConfig) -> String {
 }
 
 fn print_banner(cfg: &AlwaysConfig) {
-    eprintln!(
-        "Always-on mode enabled. Shortcuts: Ctrl+C=stop, Ctrl+Shift+P=pause, Ctrl+Shift+A=auto-enter"
-    );
-    eprintln!("Log: {}", cfg.log_path.display());
-    eprintln!(
-        "Settings -> energy_threshold: {} silence: {}s auto_enter: {} filter: {}",
-        cfg.energy_threshold, cfg.silence_secs, cfg.auto_enter, cfg.filter_enabled
+    tracing::info!(
+        energy_threshold = cfg.energy_threshold,
+        silence_secs = cfg.silence_secs,
+        auto_enter = cfg.auto_enter,
+        filter_enabled = cfg.filter_enabled,
+        log_path = %cfg.log_path.display(),
+        "daemon_banner"
     );
 }
 
@@ -271,6 +268,7 @@ mod tests {
             learning_enabled: false,
             groq_stt_api_key: "test-key".to_string(),
             vad_mode: crate::always::config::VadMode::Local,
+            silero_threshold: 0.5,
             vocab_config: VocabConfig::default(),
             postprocess_config: PostprocessConfig::default(),
         }

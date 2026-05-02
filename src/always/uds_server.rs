@@ -1,14 +1,103 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Mutex;
 
 use super::event::{global_broadcaster, DaemonCommand, DaemonEvent};
 use super::pause;
 
+// DoS protection constants
+const MAX_COMMAND_LINE_LENGTH: usize = 1024; // 1KB max command size
+const COMMANDS_PER_SECOND_LIMIT: u32 = 10; // Max 10 commands per second per client
+
+/// Rate limiter for UDS commands
+struct RateLimiter {
+    last_reset: Instant,
+    command_count: u32,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self {
+            last_reset: Instant::now(),
+            command_count: 0,
+        }
+    }
+
+    fn check(&mut self) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_reset);
+
+        // Reset counter if more than 1 second has passed
+        if elapsed >= Duration::from_secs(1) {
+            self.last_reset = now;
+            self.command_count = 0;
+        }
+
+        // Check if we've exceeded the rate limit
+        if self.command_count >= COMMANDS_PER_SECOND_LIMIT {
+            tracing::warn!(
+                commands = self.command_count,
+                "uds_rate_limit_exceeded"
+            );
+            return false;
+        }
+
+        self.command_count += 1;
+        true
+    }
+}
+
+/// Validate a command line before processing
+fn validate_command(line: &str) -> Result<()> {
+    // Check line length
+    if line.len() > MAX_COMMAND_LINE_LENGTH {
+        anyhow::bail!("Command line exceeds maximum length of {} bytes", MAX_COMMAND_LINE_LENGTH);
+    }
+
+    // Check for basic JSON structure - must start with { and end with }
+    let trimmed = line.trim();
+    if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+        anyhow::bail!("Command must be valid JSON object");
+    }
+
+    // Check for suspicious patterns (e.g., nested objects that could cause deep recursion)
+    let brace_depth = trimmed.chars().filter(|&c| c == '{').count();
+    if brace_depth > 10 {
+        anyhow::bail!("Command has excessive nesting depth");
+    }
+
+    Ok(())
+}
+
 /// Unix Domain Socket path for daemon-to-GUI communication
 pub fn socket_path() -> Result<PathBuf> {
-    let path = std::path::PathBuf::from("/tmp/always.sock");
+    let path = if cfg!(target_os = "macos") {
+        // macOS: Use ~/Library/Caches/Always/always.sock
+        let home = std::env::var("HOME")
+            .context("HOME environment variable not set")?;
+        PathBuf::from(home)
+            .join("Library")
+            .join("Caches")
+            .join("Always")
+            .join("always.sock")
+    } else {
+        // Linux: Use XDG_RUNTIME_DIR or fallback to /tmp
+        if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+            PathBuf::from(runtime_dir).join("always.sock")
+        } else {
+            PathBuf::from("/tmp/always.sock")
+        }
+    };
+    
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .context("Failed to create socket directory")?;
+    }
+    
     Ok(path)
 }
 
@@ -24,7 +113,7 @@ pub async fn start_server() -> Result<()> {
     let listener = UnixListener::bind(&socket_path)
         .context("Failed to bind Unix Domain Socket")?;
 
-    eprintln!("🔌 UDS server listening on {}", socket_path.display());
+    tracing::info!(socket_path = %socket_path.display(), "uds_server_listening");
 
     // Accept connections in a loop
     loop {
@@ -35,7 +124,7 @@ pub async fn start_server() -> Result<()> {
                 });
             }
             Err(e) => {
-                eprintln!("Failed to accept connection: {}", e);
+                tracing::error!(error = %e, "uds_accept_failed");
             }
         }
     }
@@ -46,6 +135,7 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
     let mut rx = global_broadcaster().subscribe();
     let (reader, mut writer) = stream.into_split();
     let reader = BufReader::new(reader);
+    let rate_limiter = Mutex::new(RateLimiter::new());
 
     // Send current state on connection
     let is_paused = pause::is_paused();
@@ -60,14 +150,14 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
     for event in initial_events {
         if let Ok(json_line) = event.to_json_line() {
             if let Err(e) = writer.write_all(json_line.as_bytes()).await {
-                eprintln!("Failed to send initial state: {}", e);
+                tracing::error!(error = %e, "uds_send_initial_state_failed");
                 return Ok(());
             }
         }
     }
 
     if let Err(e) = writer.flush().await {
-        eprintln!("Failed to flush initial state: {}", e);
+        tracing::error!(error = %e, "uds_flush_initial_state_failed");
         return Ok(());
     }
 
@@ -86,13 +176,29 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
                     if trimmed.is_empty() {
                         continue;
                     }
+
+                    // Validate command before parsing
+                    if let Err(e) = validate_command(trimmed) {
+                        tracing::warn!(error = %e, command = %trimmed, "uds_command_validation_failed");
+                        continue;
+                    }
+
+                    // Check rate limit
+                    {
+                        let mut limiter: tokio::sync::MutexGuard<RateLimiter> = rate_limiter.lock().await;
+                        if !limiter.check() {
+                            tracing::warn!("uds_rate_limit_rejected_command");
+                            continue;
+                        }
+                    }
+
                     match DaemonCommand::from_json_line(trimmed) {
                         Ok(cmd) => execute_command(cmd),
-                        Err(e) => eprintln!("UDS: failed to parse command '{}': {}", trimmed, e),
+                        Err(e) => tracing::error!(error = %e, "uds_parse_command_failed: {command}", command = trimmed),
                     }
                 }
                 Err(e) => {
-                    eprintln!("UDS: read error: {}", e);
+                    tracing::error!(error = %e, "uds_read_error");
                     break;
                 }
             }
@@ -104,18 +210,18 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
         let json_line = match event.to_json_line() {
             Ok(line) => line,
             Err(e) => {
-                eprintln!("Failed to serialize event: {}", e);
+                tracing::error!(error = %e, "uds_serialize_event_failed");
                 continue;
             }
         };
 
         if let Err(e) = writer.write_all(json_line.as_bytes()).await {
-            eprintln!("Failed to write to client: {}", e);
+            tracing::error!(error = %e, "uds_write_failed");
             break;
         }
 
         if let Err(e) = writer.flush().await {
-            eprintln!("Failed to flush: {}", e);
+            tracing::error!(error = %e, "uds_flush_failed");
             break;
         }
     }
@@ -132,7 +238,7 @@ fn execute_command(cmd: DaemonCommand) {
             } else {
                 global_broadcaster().resumed();
             }
-            eprintln!("UDS: TogglePause -> {}", if new_state { "paused" } else { "resumed" });
+            tracing::info!(new_state, "uds_toggle_pause");
         }
         DaemonCommand::ToggleAutoEnter => {
             let new_state = pause::toggle_auto_enter();
@@ -141,7 +247,7 @@ fn execute_command(cmd: DaemonCommand) {
             } else {
                 global_broadcaster().auto_enter_disabled();
             }
-            eprintln!("UDS: ToggleAutoEnter -> {}", if new_state { "enabled" } else { "disabled" });
+            tracing::info!(new_state, "uds_toggle_auto_enter");
         }
     }
 }

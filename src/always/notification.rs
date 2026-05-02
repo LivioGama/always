@@ -27,8 +27,8 @@ pub fn notify(title: &str, message: &str, sound: bool) -> Result<()> {
     match command.output() {
         Ok(_) => Ok(()),
         Err(_) => {
-            // Fallback to console output
-            eprintln!("🔔 {} - {}", title, message);
+            // Fallback to logging
+            tracing::warn!(title, message, "notification_fallback");
             Ok(())
         }
     }

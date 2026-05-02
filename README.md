@@ -1,6 +1,6 @@
 # 🎤 Always — Voice Activation Daemon
 
-High-performance voice-to-text automation. Speak naturally and have your words instantly appear in any application.
+High-performance voice-to-text automation for macOS Apple Silicon. Speak naturally and have your words instantly appear in any application.
 
 ## ✨ Quick Start
 
@@ -20,9 +20,15 @@ Always is an always-on voice activation daemon that:
 
 ## 📦 Installation
 
+### macOS Apple Silicon
+
+The current release supports macOS Apple Silicon only. Linux support is planned for a future release.
+
 ```bash
 cargo install always
 ```
+
+**Note**: Requires macOS 14+ (Sonoma or later) on Apple Silicon. The daemon uses macOS-specific APIs for audio capture and clipboard automation.
 
 ## 🎮 Usage
 
@@ -85,8 +91,8 @@ jq '. += [{"term":"Kubernetes","mistranscriptions":["cuber netties"],"frequency"
 **Import from installed STT software** (Dragon, macOS Dictation, Whisper, etc.):
 ```bash
 always vocab import
-```
-
+```docs/
+docs/
 **Override the glossary path** by setting `ALWAYS_GLOSSARY_PATH` to a custom file.
 
 ## 📚 Documentation

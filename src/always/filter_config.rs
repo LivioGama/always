@@ -63,14 +63,14 @@ pub fn load_filter_config() -> Option<FilterConfig> {
         if path.exists() {
             if let Ok(content) = std::fs::read_to_string(&path) {
                 if let Ok(config) = serde_json::from_str::<FilterConfig>(&content) {
-                    eprintln!("Loaded filter config from {}", path.display());
+                    tracing::info!(path = %path.display(), "filter_config_loaded");
                     return Some(config);
                 }
             }
         }
     }
 
-    eprintln!("No filter_config.json found, using built-in defaults");
+    tracing::debug!("filter_config_using_defaults");
     Some(default_filter_config())
 }
 

@@ -1,10 +1,5 @@
-use std::fs::File;
-use std::io::Write as _;
-use std::path::Path;
-
-use anyhow::Result;
-
 use crate::always::{AlwaysConfig, filter::FilterReason};
+use crate::always::telemetry::should_log_transcripts;
 
 pub enum Event<'a> {
     Start {
@@ -45,84 +40,92 @@ pub enum Event<'a> {
     },
 }
 
-pub struct Logger {
-    file: File,
-}
+/// Logger now uses tracing infrastructure instead of file I/O
+/// The Event enum is kept for API compatibility but emission is handled via tracing
+pub struct Logger;
 
 impl Logger {
-    pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        Ok(Self { file })
+    /// Create a new logger (no-op with tracing, kept for API compatibility)
+    pub fn open(_path: &std::path::Path) -> anyhow::Result<Self> {
+        // With tracing, log file management is handled by the telemetry module
+        Ok(Self)
     }
 
+    /// Emit an event using structured tracing
     pub fn write(&mut self, event: Event<'_>) {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        let message = match event {
+        match event {
             Event::Start { cfg } => {
-                let separator = "─".repeat(80);
-                format!(
-                    "{}\n│ 🚀 DAEMON STARTED\n│ ⚙️  Energy Threshold: {} • Silence: {}s • Filter: {} • Auto-Enter: {}\n{}",
-                    separator,
-                    cfg.energy_threshold,
-                    cfg.silence_secs,
-                    if cfg.filter_enabled { "ON" } else { "OFF" },
-                    if cfg.auto_enter { "ON" } else { "OFF" },
-                    separator
-                )
+                tracing::info!(
+                    energy_threshold = cfg.energy_threshold,
+                    silence_secs = cfg.silence_secs,
+                    filter_enabled = cfg.filter_enabled,
+                    auto_enter = cfg.auto_enter,
+                    "daemon_started"
+                );
             }
             Event::Stop => {
-                let separator = "─".repeat(80);
-                format!("{}\n│ 🛑 DAEMON STOPPED\n{}", separator, separator)
+                tracing::info!("daemon_stopped");
             }
-            Event::VoiceDetected => "🎤 Voice detected...".to_string(),
+            Event::VoiceDetected => {
+                tracing::debug!("voice_detected");
+            }
             Event::Pasting {
                 raw,
                 processed,
                 energy,
             } => {
-                format!(
-                    "✓ Transcribed: \"{raw}\"\n[{ts}] │ Energy: {energy:.4}\n[{ts}] ✎ Pasted: {processed}"
-                )
+                let log_transcripts = should_log_transcripts();
+                tracing::info!(
+                    chars = raw.len(),
+                    energy,
+                    processed_chars = processed.len(),
+                    raw_text = if log_transcripts { Some(raw) } else { None },
+                    processed_text = if log_transcripts { Some(processed) } else { None },
+                    "transcription_pasted"
+                );
             }
             Event::Filtered { text, energy, reason } => {
-                format!("⊘ Filtered: \"{text}\" (energy: {energy:.4}) - {}", reason.to_log_string())
+                let log_transcripts = should_log_transcripts();
+                tracing::info!(
+                    chars = text.len(),
+                    energy,
+                    reason = reason.to_log_string(),
+                    text = if log_transcripts { Some(text) } else { None },
+                    "transcription_filtered"
+                );
             }
-            Event::Silence => "⏸  Silence detected".to_string(),
-            Event::Timeout => "⏱  Recording timeout".to_string(),
+            Event::Silence => {
+                tracing::debug!("silence_detected");
+            }
+            Event::Timeout => {
+                tracing::debug!("recording_timeout");
+            }
             Event::DroppedLowEnergy { energy } => {
-                format!("✗ Dropped: Energy too low ({energy:.4})")
+                tracing::debug!(energy, "dropped_low_energy");
             }
-            Event::DroppedNoise { raw } => format!("✗ Dropped: Background noise \"{raw:?}\""),
+            Event::DroppedNoise { raw } => {
+                let log_transcripts = should_log_transcripts();
+                tracing::debug!(
+                    chars = raw.len(),
+                    text = if log_transcripts { Some(raw) } else { None },
+                    "dropped_noise"
+                );
+            }
             Event::PauseToggled { paused } => {
-                if paused {
-                    "⏸️  Listening PAUSED (Ctrl+Shift+P to resume)".to_string()
-                } else {
-                    "▶️  Listening RESUMED".to_string()
-                }
+                tracing::info!(paused, "pause_toggled");
             }
             Event::AutoEnterToggled { enabled } => {
-                if enabled {
-                    "⏎  Auto-Enter ENABLED".to_string()
-                } else {
-                    "⏎  Auto-Enter DISABLED".to_string()
-                }
+                tracing::info!(enabled, "auto_enter_toggled");
             }
             Event::MicrophoneAutoPaused { apps } => {
-                format!("🔇 Auto-paused: {} using microphone", apps)
+                tracing::info!(apps, "microphone_auto_paused");
             }
             Event::MicrophoneAutoResumed => {
-                "🎤 Auto-resumed: microphone available".to_string()
+                tracing::info!("microphone_auto_resumed");
             }
             Event::Error { message } => {
-                format!("⚠️  ERROR: {}", message)
+                tracing::error!(message, "daemon_error");
             }
-        };
-        let _ = writeln!(self.file, "[{ts}] {message}");
+        }
     }
 }

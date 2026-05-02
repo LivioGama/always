@@ -45,7 +45,7 @@ impl MicrophoneMonitor {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             // Fallback for other platforms - just return false for now
-            eprintln!("Warning: Microphone monitoring not implemented for this platform");
+            tracing::warn!("microphone_monitoring_not_implemented");
             Ok(false)
         }
     }

@@ -94,7 +94,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                 _ => {}
             }
         }) {
-            eprintln!("Error in keyboard listener: {:?}", error);
+            tracing::error!(?error, "keyboard_listener_error");
             let _ = tx.send(());
         }
     });
