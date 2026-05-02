@@ -51,5 +51,9 @@ fi
 echo "Using signing identity: ${SIGN_IDENTITY}"
 codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "com.alwaysapp.daemon" --entitlements AlwaysApp.entitlements AlwaysApp.app
 
-echo "App bundle created at AlwaysApp.app"
-echo "Run with: open AlwaysApp.app"
+echo "Deploying to /Applications..."
+rm -rf /Applications/AlwaysApp.app
+cp -r AlwaysApp.app /Applications/
+echo "✓ Deployed to /Applications/AlwaysApp.app"
+
+echo "App bundle ready. Run with: open -a AlwaysApp"
