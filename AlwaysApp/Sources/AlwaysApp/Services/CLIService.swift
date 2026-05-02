@@ -73,8 +73,10 @@ class CLIService: ObservableObject {
         if env["PATH"]?.contains(homebrewBin) == false {
             env["PATH"] = "\(homebrewBin):\(env["PATH"] ?? "")"
         }
-        // Set GROQ_API_KEY environment variable
-        env["GROQ_API_KEY"] = "[REDACTED]"
+        // Pass through GROQ_API_KEY from parent environment if set
+        if let groqKey = ProcessInfo.processInfo.environment["GROQ_API_KEY"] {
+            env["GROQ_API_KEY"] = groqKey
+        }
         process.environment = env
 
         let pipe = Pipe()
