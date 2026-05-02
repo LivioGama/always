@@ -12,7 +12,8 @@ struct SettingsWindow: View {
     @FocusState private var focusedField: Field?
     @State private var vocabularyTermCount: Int = 0
     @State private var vocabularyPath: String = ""
-    
+    @State private var pendingSaveWork: DispatchWorkItem?
+
     enum Field {
         case apiKey
     }
@@ -258,10 +259,10 @@ struct SettingsWindow: View {
                 await refreshStatus()
             }
         }
-        .onChange(of: config.sttEnergyThreshold) { _, _ in saveConfig() }
-        .onChange(of: config.hearEnergyThreshold) { _, _ in saveConfig() }
-        .onChange(of: config.sttSilence) { _, _ in saveConfig() }
-        .onChange(of: config.sttCooldownMs) { _, _ in saveConfig() }
+        .onChange(of: config.sttEnergyThreshold) { _, _ in debouncedSaveConfig() }
+        .onChange(of: config.hearEnergyThreshold) { _, _ in debouncedSaveConfig() }
+        .onChange(of: config.sttSilence) { _, _ in debouncedSaveConfig() }
+        .onChange(of: config.sttCooldownMs) { _, _ in debouncedSaveConfig() }
     }
 
     private func toggleDaemon() {
@@ -310,12 +311,9 @@ struct SettingsWindow: View {
         isSavingApiKey = true
         Task {
             do {
-                // Only save API key if it's not masked (doesn't contain only dots)
                 if !apiKey.allSatisfy({ c in c == "•" }) {
                     _ = try await cliService.setConfig(key: "groq_api_key", value: apiKey.isEmpty ? "" : apiKey)
                 }
-                // Add a small delay to make the loader visible for testing
-                try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
             } catch {
                 print("Error saving API key: \(error)")
             }
@@ -323,21 +321,23 @@ struct SettingsWindow: View {
         }
     }
 
+    private func debouncedSaveConfig() {
+        pendingSaveWork?.cancel()
+        let work = DispatchWorkItem { [self] in
+            saveConfig()
+        }
+        pendingSaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
     private func saveConfig() {
-        Task {
-            do {
-                _ = try await cliService.setConfig(key: "stt_energy_threshold", value: String(config.sttEnergyThreshold))
-                _ = try await cliService.setConfig(key: "hear_energy_threshold", value: String(config.hearEnergyThreshold))
-                _ = try await cliService.setConfig(key: "stt_silence", value: String(config.sttSilence))
-                _ = try await cliService.setConfig(key: "stt_cooldown_ms", value: String(config.sttCooldownMs))
-                _ = try await cliService.setConfig(key: "stt_auto_enter", value: String(config.sttAutoEnter))
-                // Only save API key if it's not masked (doesn't contain only dots)
-                if !apiKey.allSatisfy({ c in c == "•" }) {
-                    _ = try await cliService.setConfig(key: "groq_api_key", value: apiKey.isEmpty ? "" : apiKey)
-                }
-            } catch {
-                print("Error saving config: \(error)")
-            }
+        cliService.setConfigFireAndForget(key: "stt_energy_threshold", value: String(config.sttEnergyThreshold))
+        cliService.setConfigFireAndForget(key: "hear_energy_threshold", value: String(config.hearEnergyThreshold))
+        cliService.setConfigFireAndForget(key: "stt_silence", value: String(config.sttSilence))
+        cliService.setConfigFireAndForget(key: "stt_cooldown_ms", value: String(config.sttCooldownMs))
+        cliService.setConfigFireAndForget(key: "stt_auto_enter", value: String(config.sttAutoEnter))
+        if !apiKey.allSatisfy({ c in c == "•" }) {
+            cliService.setConfigFireAndForget(key: "groq_api_key", value: apiKey.isEmpty ? "" : apiKey)
         }
     }
     

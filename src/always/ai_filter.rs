@@ -2,7 +2,6 @@ use crate::always::AlwaysConfig;
 use crate::always::context_vocab::ContextVocabulary;
 use crate::always::text::Vocabulary;
 use anyhow::{Result, anyhow};
-use reqwest;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,7 +65,6 @@ struct AiFilterResponse {
 }
 
 pub struct AiFilter {
-    client: reqwest::Client,
     api_key: String,
     model: String,
 }
@@ -74,7 +72,6 @@ pub struct AiFilter {
 impl AiFilter {
     pub fn new(api_key: String, model: Option<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
             api_key,
             model: model.unwrap_or_else(|| "llama-3.1-8b-instant".to_string()),
         }
@@ -183,8 +180,7 @@ Focus on whether the text represents something a user would want to act on or re
             }],
         };
 
-        let response = self
-            .client
+        let response = crate::http_client::async_client()
             .post("https://api.groq.com/openai/v1/chat/completions")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")

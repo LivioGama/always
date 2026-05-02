@@ -5,8 +5,8 @@ use tokio::runtime::Runtime;
 
 use crate::always::log::{Event, Logger};
 use crate::always::{
-    AlwaysConfig, daemon, event, filter, keyboard, mic_monitor, notification, paste, pause,
-    smart_filter, uds_server, vad,
+    AlwaysConfig, daemon, event, filter, keyboard, mic_monitor, paste, pause,
+    uds_server, vad,
 };
 
 pub fn run(cfg: &AlwaysConfig) -> Result<()> {
@@ -15,19 +15,28 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     log.write(Event::Start { cfg });
     print_banner(&cfg);
 
+    let rt = Runtime::new()?;
+
+    // Pre-warm TLS+HTTP/2 connection to Groq API in background using existing runtime
+    {
+        let api_key = cfg.groq_stt_api_key.clone();
+        rt.spawn(async move {
+            let client = crate::http_client::async_client();
+            let _ = client
+                .get("https://api.groq.com/openai/v1/models")
+                .header("Authorization", format!("Bearer {}", api_key))
+                .send()
+                .await;
+        });
+    }
+
     // Initialize the auto-enter state from config
     pause::init_auto_enter(cfg.auto_enter);
 
     // Start keyboard listener for shortcuts
     keyboard::start_keyboard_listener()?;
 
-    // Show startup notification
-    if let Err(e) = notification::notify("ALWAYS", "🎤 Voice activation started", false) {
-        eprintln!("Failed to show startup notification: {}", e);
-    }
-
     // Start UDS server in background and track the task
-    let rt = Runtime::new()?;
     let _uds_handle = rt.spawn(async {
         if let Err(e) = uds_server::start_server().await {
             eprintln!("UDS server error: {}", e);
@@ -64,16 +73,9 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
 
                     // Log the auto-pause event
                     log.write(Event::MicrophoneAutoPaused { apps: &app_list });
-
-                    if let Err(e) = notification::notify(
-                        "ALWAYS",
-                        &format!("🔇 Auto-paused: {} using microphone", app_list),
-                        false,
-                    ) {
-                        eprintln!("Failed to show auto-pause notification: {}", e);
-                    }
                 }
                 pause::set_paused(true);
+                event::global_broadcaster().paused();
                 auto_paused_for_mic = true;
             }
             Ok(false) if auto_paused_for_mic => {
@@ -83,13 +85,8 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
                 // Log the auto-resume event
                 log.write(Event::MicrophoneAutoResumed);
 
-                if let Err(e) =
-                    notification::notify("ALWAYS", "🎤 Auto-resumed: microphone available", false)
-                {
-                    eprintln!("Failed to show auto-resume notification: {}", e);
-                }
-
                 pause::set_paused(false);
+                event::global_broadcaster().resumed();
                 auto_paused_for_mic = false;
             }
             Err(e) => {
@@ -107,7 +104,7 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         // Note: Removed auto_enter config reload that was causing race conditions
         // Auto-enter state is now managed consistently through keyboard shortcuts and settings UI
 
-        if let Err(e) = process_one(&cfg, &mut log, &mut last_process, &rt) {
+        if let Err(e) = process_one(&cfg, &mut log, &mut last_process) {
             eprintln!("⚠️  Error in voice processing (continuing): {:#}", e);
             log.write(Event::Error {
                 message: &format!("Voice processing error: {:#}", e),
@@ -122,11 +119,10 @@ fn process_one(
     cfg: &AlwaysConfig,
     log: &mut Logger,
     last_process: &mut Instant,
-    rt: &Runtime,
 ) -> Result<()> {
     match vad::record_utterance(cfg, log).context("failed to record/transcribe utterance")? {
         vad::RecordResult::Speech { text, energy } => {
-            handle_speech(cfg, log, &text, energy, last_process, rt)?;
+            handle_speech(cfg, log, &text, energy, last_process)?;
         }
         vad::RecordResult::Silence => {
             // Don't log silence events - they're too frequent and not useful
@@ -149,7 +145,6 @@ fn handle_speech(
     text: &str,
     energy: f64,
     last_process: &mut Instant,
-    rt: &Runtime,
 ) -> Result<()> {
     let now = Instant::now();
     if in_cooldown(now, *last_process, cfg.cooldown_ms) {
@@ -157,19 +152,19 @@ fn handle_speech(
     }
     *last_process = now;
 
-    let (accepted, filter_reason, corrected_text) =
-        rt.block_on(smart_filter::should_accept_with_ai(text, cfg));
-    if !accepted {
+    let filter_result = filter::should_accept_with_reason(text, cfg);
+    if !matches!(filter_result, filter::FilterReason::None) {
+        let filter_reason = filter_result.to_log_string();
         eprintln!("filtered {text} - {filter_reason}");
         log.write(Event::Filtered {
             text,
             energy,
-            reason: filter::FilterReason::HardPhrase(filter_reason),
+            reason: filter_result,
         });
         return Ok(());
     }
 
-    let accepted_text = corrected_text.as_deref().unwrap_or(text);
+    let accepted_text = text;
     let transformed = apply_vocabulary(accepted_text, cfg);
     eprintln!("{transformed} (energy: {energy:.4})");
     log.write(Event::Pasting {

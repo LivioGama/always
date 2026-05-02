@@ -1,11 +1,11 @@
 use crate::always::{filter_config, AlwaysConfig};
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use regex;
 
 // Load filter config once at startup
-static FILTER_CONFIG: Lazy<Option<filter_config::FilterConfig>> =
-    Lazy::new(filter_config::load_filter_config);
-static COMPILED_REGEX: Lazy<Vec<regex::Regex>> = Lazy::new(|| match &*FILTER_CONFIG {
+static FILTER_CONFIG: LazyLock<Option<filter_config::FilterConfig>> =
+    LazyLock::new(filter_config::load_filter_config);
+static COMPILED_REGEX: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| match &*FILTER_CONFIG {
     Some(config) => filter_config::compile_regex_patterns(&config.hard_filter_regex),
     None => vec![],
 });

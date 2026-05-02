@@ -12,7 +12,7 @@ impl MicrophoneMonitor {
     pub fn new() -> Self {
         Self {
             last_check: Instant::now(),
-            check_interval: Duration::from_millis(2000), // Check every 2 seconds
+            check_interval: Duration::from_millis(3000), // Check every 3 seconds
             last_usage_state: false,
         }
     }
@@ -66,154 +66,71 @@ impl MicrophoneMonitor {
 // Platform-specific implementations
 #[cfg(target_os = "macos")]
 impl MicrophoneMonitor {
+    /// Single lightweight subprocess check for microphone usage.
+    /// Replaces the old 3-subprocess pipeline (system_profiler + lsof + sh/ps).
+    /// Uses one `lsof` call filtered to coreaudiod, excluding our own processes.
     fn check_microphone_usage_macos(&self) -> Result<bool> {
-        use std::process::Command;
-
-        // Method 1: Check for active audio input streams using system audio tools
-        let output = Command::new("system_profiler")
-            .args(&["SPAudioDataType", "-detailLevel", "mini"])
-            .output();
-
-        match output {
-            Ok(result) if result.status.success() => {
-                let output_str = String::from_utf8_lossy(&result.stdout);
-                // Look for active input devices or streams
-                if output_str.contains("Input Source: Internal Microphone")
-                   && output_str.contains("Sample Rate:") {
-                    return self.check_actual_microphone_usage();
-                }
-            }
-            _ => {}
-        }
-
-        // Method 2: Use AudioDeviceID to check for active input streams (more reliable)
-        self.check_actual_microphone_usage()
-    }
-
-    fn check_actual_microphone_usage(&self) -> Result<bool> {
-        use std::process::Command;
-
-        // Check for processes that have open file descriptors to audio devices
-        // This is more accurate than just checking if apps are running
-        let output = Command::new("lsof")
-            .args(&["-c", "^", "+D", "/dev", "-a", "-d", "^txt"])
-            .output();
-
-        match output {
-            Ok(result) if result.status.success() => {
-                let output_str = String::from_utf8_lossy(&result.stdout);
-
-                // Look for actual audio device usage, but exclude Always' own processes
-                if (output_str.contains("AppleAudioDevice") ||
-                   output_str.contains("coreaudiod") ||
-                   output_str.contains("/dev/audio")) &&
-                   !self.is_always_process(&output_str) {
-                    return Ok(true);
-                }
-            }
-            _ => {}
-        }
-
-        // Method 3: Check using sample rate and active recording indicators
-        // Exclude Always' own processes from detection
-        let output = Command::new("sh")
-            .args(&["-c", "ps aux | grep -v grep | grep -E '(recording|capturing|microphone|audio.*input)' | grep -v always | grep -v rec | grep -v sox"])
-            .output();
-
-        match output {
-            Ok(result) if result.status.success() => {
-                let output_str = String::from_utf8_lossy(&result.stdout);
-                if !output_str.trim().is_empty() {
-                    return Ok(true);
-                }
-            }
-            _ => {}
-        }
-
-        // If all specific checks fail, return false (no active usage detected)
-        Ok(false)
-    }
-
-    /// Check if a process belongs to Always (to avoid self-detection)
-    fn is_always_process(&self, process_info: &str) -> bool {
-        let always_indicators = [
-            "always",      // Always binary
-            "rec",         // SoX rec command used by Always
-            "sox",         // SoX audio processing
-            "/usr/bin/rec", // Full path to rec
-        ];
-
-        for indicator in &always_indicators {
-            if process_info.to_lowercase().contains(indicator) {
-                return true;
-            }
-        }
-
-        false
+        let output_str = self.run_mic_lsof()?;
+        Ok(!output_str.is_empty())
     }
 
     fn get_microphone_users_macos(&self) -> Result<Vec<String>> {
-        use std::process::Command;
+        let output_str = self.run_mic_lsof()?;
+        if output_str.is_empty() {
+            return Ok(Vec::new());
+        }
 
+        let output_lower = output_str.to_lowercase();
         let mut users = Vec::new();
 
-        // Only return apps if we can actually detect active microphone usage
-        if !self.check_actual_microphone_usage()? {
-            return Ok(users); // No active usage, return empty list
-        }
+        const APP_MAPPING: &[(&str, &str)] = &[
+            ("zoom", "Zoom"),
+            ("skype", "Skype"),
+            ("teams", "Microsoft Teams"),
+            ("discord", "Discord"),
+            ("facetime", "FaceTime"),
+            ("obs", "OBS Studio"),
+            ("audacity", "Audacity"),
+            ("garageband", "GarageBand"),
+            ("quicktime", "QuickTime Player"),
+            ("voice memos", "Voice Memos"),
+        ];
 
-        // Try to identify which specific apps are using the microphone
-        let output = Command::new("lsof")
-            .args(&["-c", "^", "+D", "/dev"])
-            .output();
-
-        match output {
-            Ok(result) if result.status.success() => {
-                let output_str = String::from_utf8_lossy(&result.stdout);
-
-                // Map process names to user-friendly app names
-                const APP_MAPPING: &[(&str, &str)] = &[
-                    ("zoom", "Zoom"),
-                    ("skype", "Skype"),
-                    ("teams", "Microsoft Teams"),
-                    ("discord", "Discord"),
-                    ("facetime", "FaceTime"),
-                    ("obs", "OBS Studio"),
-                    ("audacity", "Audacity"),
-                    ("garageband", "GarageBand"),
-                    ("quicktime", "QuickTime Player"),
-                    ("voice memos", "Voice Memos"),
-                ];
-
-                for (process_name, display_name) in APP_MAPPING {
-                    if output_str.to_lowercase().contains(process_name) {
-                        // Verify this process is actually doing audio I/O
-                        let process_check = Command::new("ps")
-                            .args(&["-o", "pid,comm", "-C", process_name])
-                            .output();
-
-                        if let Ok(ps_result) = process_check {
-                            if ps_result.status.success() && !ps_result.stdout.is_empty() {
-                                users.push(display_name.to_string());
-                            }
-                        }
-                    }
-                }
+        for (process_name, display_name) in APP_MAPPING {
+            if output_lower.contains(process_name) {
+                users.push(display_name.to_string());
             }
-            _ => {}
         }
 
-        // If we detected active usage but couldn't identify specific apps,
-        // indicate that SOMETHING is using the microphone
-        if users.is_empty() && self.check_actual_microphone_usage()? {
+        if users.is_empty() {
             users.push("Unknown application".to_string());
         }
 
         Ok(users)
     }
 
-    // Removed inaccurate check_common_audio_apps and get_common_audio_apps methods
-    // that were causing false positives by detecting installed apps rather than active usage
+    /// Run a single `lsof` command to find non-Always processes using CoreAudio.
+    /// Returns the filtered output (empty string = no other app is using the mic).
+    fn run_mic_lsof(&self) -> Result<String> {
+        use std::process::Command;
+
+        // Single subprocess: lsof for CoreAudio file descriptors,
+        // excluding our own processes (always, rec, sox, coreaudiod itself).
+        let output = Command::new("sh")
+            .args(&[
+                "-c",
+                "lsof -c /coreaudio/i 2>/dev/null | grep -iv -e always -e '\\brec\\b' -e sox -e coreaudiod | head -5",
+            ])
+            .output();
+
+        match output {
+            Ok(result) => {
+                let stdout = String::from_utf8_lossy(&result.stdout);
+                Ok(stdout.trim().to_string())
+            }
+            Err(_) => Ok(String::new()),
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]

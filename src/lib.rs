@@ -4,4 +4,5 @@ pub mod always;
 pub mod config;
 pub mod db;
 pub mod glossary;
+pub mod http_client;
 pub mod stt;

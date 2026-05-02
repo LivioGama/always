@@ -162,8 +162,8 @@ impl Default for EventBroadcaster {
 }
 
 /// Global event broadcaster instance
-static GLOBAL_BROADCASTER: once_cell::sync::Lazy<EventBroadcaster> =
-    once_cell::sync::Lazy::new(EventBroadcaster::new);
+static GLOBAL_BROADCASTER: std::sync::LazyLock<EventBroadcaster> =
+    std::sync::LazyLock::new(EventBroadcaster::new);
 
 /// Get the global event broadcaster
 pub fn global_broadcaster() -> &'static EventBroadcaster {

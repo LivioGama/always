@@ -1,12 +1,12 @@
 use std::io;
 use std::io::Read as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdout};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::VecDeque;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
 
@@ -18,12 +18,12 @@ pub const FRAME_BYTES: usize = 960;
 static TEMP_WAV_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // Global persistent audio recorder to avoid spawning processes repeatedly
-static GLOBAL_RECORDER: Lazy<Arc<Mutex<Option<RecChild>>>> =
-    Lazy::new(|| Arc::new(Mutex::new(None)));
+static GLOBAL_RECORDER: LazyLock<Arc<Mutex<Option<RecChild>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(None)));
 
 // Memory pool for audio buffers to reduce allocations
-static AUDIO_BUFFER_POOL: Lazy<Arc<Mutex<VecDeque<Vec<i16>>>>> =
-    Lazy::new(|| Arc::new(Mutex::new(VecDeque::with_capacity(10))));
+static AUDIO_BUFFER_POOL: LazyLock<Arc<Mutex<VecDeque<Vec<i16>>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(VecDeque::with_capacity(10))));
 
 pub struct AudioBuffer {
     buffer: Vec<i16>,
@@ -175,33 +175,24 @@ pub fn create_wav_bytes_i16_mono_16k(samples: &[i16]) -> Result<Vec<u8>> {
     wav_data.extend_from_slice(b"data");
     wav_data.extend_from_slice(&(data_size as u32).to_le_bytes());
 
-    // Write audio data directly
-    for sample in samples {
-        wav_data.extend_from_slice(&sample.to_le_bytes());
+    // Bulk write all samples as little-endian bytes (safe on little-endian platforms)
+    // SAFETY: i16 is 2 bytes, alignment of [i16] is 2, alignment of [u8] is 1.
+    // Slice from_raw_parts is safe because we don't escape the borrow.
+    #[cfg(target_endian = "little")]
+    {
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(samples.as_ptr() as *const u8, samples.len() * 2)
+        };
+        wav_data.extend_from_slice(bytes);
+    }
+    #[cfg(not(target_endian = "little"))]
+    {
+        for sample in samples {
+            wav_data.extend_from_slice(&sample.to_le_bytes());
+        }
     }
 
     Ok(wav_data)
-}
-
-pub fn write_wav_i16_mono_16k(path: &Path, samples: &[i16]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).context("failed to create utterance cache directory")?;
-    }
-
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: RATE,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut writer = hound::WavWriter::create(path, spec).context("failed to create WAV")?;
-    for sample in samples {
-        writer
-            .write_sample(*sample)
-            .context("failed to write sample")?;
-    }
-    writer.finalize().context("failed to finalize WAV")?;
-    Ok(())
 }
 
 pub fn temp_wav_path() -> PathBuf {

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::collections::VecDeque;
 use webrtc_vad::{Vad, VadMode};
 
-use crate::always::audio::{self, FRAME_BYTES, FRAME_MS};
+use crate::always::audio::{self, FRAME_BYTES, FRAME_MS, FRAME_SAMPLES};
 use crate::always::config::AlwaysConfig;
 use crate::always::event;
 use crate::always::log::{Event, Logger};
@@ -31,7 +31,8 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     // Use persistent recorder to avoid process spawning overhead
     let recorder_arc = audio::RecChild::get_or_spawn()?;
     let mut frame_buf = [0u8; FRAME_BYTES];
-    let mut speech_samples = Vec::new();
+    // Pre-allocate ~4 seconds of audio (16000 Hz * 4s = 64000 samples) to avoid Vec growth
+    let mut speech_samples: Vec<i16> = Vec::with_capacity(64_000);
     let mut consecutive_silence = 0usize;
     let mut consecutive_speech = 0usize;
     let mut in_speech = false;
@@ -51,6 +52,9 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
         0
     };
 
+    // Reusable per-frame sample buffer (stack allocated, no heap allocation per frame)
+    let mut sample_buf = [0i16; FRAME_SAMPLES];
+
     loop {
         let read = {
             let mut recorder = recorder_arc.lock().unwrap();
@@ -65,12 +69,12 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
             break;
         }
 
-        let samples: Vec<i16> = frame_buf
-            .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect();
+        for (i, chunk) in frame_buf.chunks_exact(2).enumerate() {
+            sample_buf[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
+        }
+        let samples = &sample_buf[..];
 
-        let is_speech = vad.is_voice_segment(&samples).unwrap_or(false);
+        let is_speech = vad.is_voice_segment(samples).unwrap_or(false);
 
         if is_speech {
             consecutive_speech += 1;
@@ -112,7 +116,7 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
         } else {
             consecutive_speech = 0;
             // Maintain pre-buffer: add new frame, drop oldest if full
-            pre_buffer.push_back(samples.clone());
+            pre_buffer.push_back(samples.to_vec());
             if pre_buffer.len() > pre_buffer_frames {
                 pre_buffer.pop_front();
             }
@@ -169,12 +173,7 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
         }
     };
 
-    let raw = match crate::stt::transcribe_from_bytes(
-        wav_data,
-        Some(&cfg.lang),
-        &cfg.groq_stt_api_key,
-        "whisper-large-v3",
-    ) {
+    let raw = match crate::stt::transcribe_from_bytes(wav_data, &cfg.groq_stt_api_key) {
         Ok(raw) => {
             // Send transcribing stopped event on success
             event::global_broadcaster().transcribing_stopped();

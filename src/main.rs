@@ -235,42 +235,28 @@ fn handle_vocab(action: VocabAction) -> Result<()> {
 
 fn handle_toggle_pause() -> Result<()> {
     let new_state = always::always::pause::toggle_pause();
-    
-    // Send distributed notification via Swift script
-    let notification_name = if new_state { "com.always.pause" } else { "com.always.resume" };
-    std::process::Command::new("swift")
-        .arg("scripts/send_notification.swift")
-        .arg(notification_name)
-        .output()?;
-    
-    // Broadcast event via UDS
+
+    // Broadcast event via UDS (Swift app receives this and shows overlay)
     if new_state {
         always::always::event::global_broadcaster().paused();
     } else {
         always::always::event::global_broadcaster().resumed();
     }
-    
+
     println!("Pause state: {}", if new_state { "paused" } else { "resumed" });
     Ok(())
 }
 
 fn handle_toggle_auto_enter() -> Result<()> {
     let new_state = always::always::pause::toggle_auto_enter();
-    
-    // Send distributed notification via Swift script
-    let notification_name = if new_state { "com.always.autoEnterEnabled" } else { "com.always.autoEnterDisabled" };
-    std::process::Command::new("swift")
-        .arg("scripts/send_notification.swift")
-        .arg(notification_name)
-        .output()?;
-    
-    // Broadcast event via UDS
+
+    // Broadcast event via UDS (Swift app receives this and shows overlay)
     if new_state {
         always::always::event::global_broadcaster().auto_enter_enabled();
     } else {
         always::always::event::global_broadcaster().auto_enter_disabled();
     }
-    
+
     println!("Auto-enter state: {}", if new_state { "enabled" } else { "disabled" });
     Ok(())
 }

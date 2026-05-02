@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 // Global mutex for atomic file operations
-static STATE_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static STATE_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonState {
