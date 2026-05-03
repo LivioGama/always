@@ -154,5 +154,93 @@ Should show:
 
 Check status bar for Always icon and logs:
 ```bash
-tail -f "/Users/livio/Library/Application Support/always/always.log"
+# New log location (JSON format):
+tail -f ~/Library/Logs/Always/always.$(date +%Y-%m-%d)
+
+# Or human-readable streaming:
+tail -f ~/Library/Logs/Always/*.log | grep -v "oslog"
 ```
+
+## Voice-to-Text Verification Checklist
+
+**After ANY refactoring that touches `event_loop.rs`, `audio.rs`, or logging infrastructure:**
+
+1. **BUILD → VERIFY → NEXT rule (non-negotiable):**
+   ```bash
+   cargo build --release --lib --bin always
+   pkill -f AlwaysApp
+   cd AlwaysApp && ./build.sh && open -a AlwaysApp
+   sleep 2
+   ```
+   - Speak into mic — verify transcription appears in status bar
+   - Check logs for "listening_started" event
+   ```bash
+   tail -20 ~/Library/Logs/Always/always.$(date +%Y-%m-%d) | grep listening
+   ```
+   - If no "listening_started" or "voice_detected" in logs → **audio pipeline is broken**, don't commit
+
+2. **Verify log locations:**
+   - New location: `~/Library/Logs/Always/always.YYYY-MM-DD` (JSON format)
+   - Old location: `~/Library/Application Support/always/always.log` (frozen, don't use)
+   - Both exist but only `~/Library/Logs/Always/` is active with new logging infrastructure
+
+3. **Check the event chain:**
+   - Daemon logs "listening_started" ✓
+   - Daemon logs "voice_detected" on speech ✓
+   - Swift app logs received UDS event ✓
+   - Overlay appears on status bar ✓
+   - If any step missing → something in the chain is broken
+
+4. **Mark incomplete scaffolding explicitly:**
+   - Use `TODO: audio stream wiring incomplete` comments if leaving work unfinished
+   - Don't bury incomplete work in commit message details
+   - Run `cargo check` to catch compilation errors before pushing
+
+5. **Document breaking changes:**
+   - Log location changes → mention in commit message
+   - Event format changes → mention which modules are affected
+   - API changes → add `MIGRATION.md` note
+
+## Overlay Won't Show? Check the Event Chain
+
+Overlay appearing = audio pipeline is working. No overlay = debug in this order:
+
+**Event chain (all must fire in sequence):**
+```
+Audio capture starts
+    ↓ (check logs for "listening_started")
+Voice detected (VAD triggers)
+    ↓ (check logs for "voice_detected")
+Daemon sends UDS event
+    ↓ (check Swift app logs for "received daemon event")
+Swift app updates overlay
+    ↓
+Overlay shows on status bar
+```
+
+**Troubleshooting:**
+
+1. **Logs show no "listening_started" or "voice_detected":**
+   - Audio capture not initialized (most common after refactoring)
+   - Check `event_loop.rs` — is audio stream startup wired?
+   - Check that `MicrophoneMonitor` is NOT confused with audio capture (it's only a system monitor)
+
+2. **Logs show "listening_started" but no "voice_detected":**
+   - Audio streaming but VAD not triggering
+   - Check microphone permission (System Preferences > Security & Privacy > Microphone)
+   - Check microphone input level / silence threshold in config
+   - Test with spoken voice, not just background noise
+
+3. **Logs show "voice_detected" but no Swift app event logs:**
+   - UDS socket broken or daemon not sending events
+   - Check socket exists: `ls -la ~/Library/Caches/Always/always.sock`
+   - Check daemon process: `ps aux | grep always`
+   - Rebuild Swift app: `cd AlwaysApp && ./build.sh && open -a AlwaysApp`
+
+4. **All events firing but no overlay:**
+   - Swift app receiving events but UI not updating
+   - Check Swift app logs in `~/Library/Logs/Always/`
+   - Rebuild with `build.sh` (not `swift run`)
+   - Verify code-signed: `codesign -v /Applications/AlwaysApp.app`
+
+**Pro tip:** If overlay is missing, **always check step 1 first** (daemon events). A silent daemon (runs but produces no events) is worse than a crashed daemon — harder to diagnose.
