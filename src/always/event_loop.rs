@@ -1,11 +1,12 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use tokio::runtime::Runtime;
+use tokio::runtime::{Handle, Runtime};
 
 use crate::always::log::{Event, Logger};
 use crate::always::{
-    AlwaysConfig, daemon, event, filter, keyboard, mic_monitor, paste, pause, uds_server, vad,
+    AlwaysConfig, clipboard_watcher, daemon, event, filter, keyboard, mic_monitor, paste, pause,
+    uds_server, vad,
 };
 
 pub fn run(cfg: &AlwaysConfig) -> Result<()> {
@@ -53,6 +54,19 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
             event::global_broadcaster().send(event::DaemonEvent::Heartbeat);
         }
     });
+
+    // Spawn the passive correction-capture watcher when the user has
+    // opted in via the `passive_correction_capture` preference. The
+    // module is a no-op when `enabled == false`; we still call it so
+    // the daemon's wiring is the single source of truth and a future
+    // toggle from the UI can simply restart the daemon. Failure to
+    // load preferences is non-fatal — we treat it as "feature off".
+    let passive_correction_enabled = crate::db::open()
+        .and_then(|conn| crate::db::get_preferences(&conn))
+        .ok()
+        .and_then(|p| p.passive_correction_capture)
+        .unwrap_or(false);
+    clipboard_watcher::spawn_if_enabled(rt.handle(), passive_correction_enabled);
 
     // Send initial state events
     event::global_broadcaster().listening_started();
@@ -112,7 +126,7 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         // Note: Removed auto_enter config reload that was causing race conditions
         // Auto-enter state is now managed consistently through keyboard shortcuts and settings UI
 
-        if let Err(e) = process_one(cfg, &mut log, &mut last_process) {
+        if let Err(e) = process_one(cfg, &mut log, &mut last_process, rt.handle()) {
             tracing::error!(error = %e, "voice_processing_error");
             log.write(Event::Error {
                 message: &format!("Voice processing error: {:#}", e),
@@ -123,14 +137,19 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     }
 }
 
-fn process_one(cfg: &AlwaysConfig, log: &mut Logger, last_process: &mut Instant) -> Result<()> {
+fn process_one(
+    cfg: &AlwaysConfig,
+    log: &mut Logger,
+    last_process: &mut Instant,
+    rt: &Handle,
+) -> Result<()> {
     match vad::record_utterance(cfg, log).context("failed to record/transcribe utterance")? {
         vad::RecordResult::Speech {
             text,
             energy,
             transcription,
         } => {
-            handle_speech(cfg, log, &text, energy, &transcription, last_process)?;
+            handle_speech(cfg, log, &text, energy, &transcription, last_process, rt)?;
         }
         vad::RecordResult::Silence => {
             // Don't log silence events - they're too frequent and not useful
@@ -203,6 +222,7 @@ fn handle_speech(
     energy: f64,
     transcription: &crate::stt::TranscriptionResult,
     last_process: &mut Instant,
+    rt: &Handle,
 ) -> Result<()> {
     let now = Instant::now();
     let action = classify_transcription(cfg, text, transcription, now, *last_process);
@@ -243,16 +263,41 @@ fn handle_speech(
             Ok(())
         }
         SpeechAction::Paste { text: transformed } => {
-            tracing::debug!(transformed, energy, "pasting");
+            // LLM postprocess (grammar + glossary mistranscription correction).
+            // Runs sync here via tokio Handle::block_on so the user's paste
+            // includes the cleaned text. On any error or when disabled,
+            // fall back to the vocab-only result.
+            let final_text = if cfg.postprocess_config.grammar_correction_enabled
+                && let Some(ref pp) = cfg.post_processor
+            {
+                let started = Instant::now();
+                match rt.block_on(pp.process(&transformed, None)) {
+                    Ok(cleaned) => {
+                        tracing::debug!(
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            "postprocess_applied"
+                        );
+                        cleaned
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "postprocess_failed_fallback_to_vocab");
+                        transformed
+                    }
+                }
+            } else {
+                transformed
+            };
+
+            tracing::debug!(final_text = %final_text, energy, "pasting");
             log.write(Event::Pasting {
                 raw: text,
-                processed: &transformed,
+                processed: &final_text,
                 energy,
             });
 
-            event::global_broadcaster().transcript_final(transformed.clone());
+            event::global_broadcaster().transcript_final(final_text.clone());
 
-            paste::copy_to_clipboard(format!("{} ", transformed))?;
+            paste::copy_to_clipboard(format!("{} ", final_text))?;
 
             // Skip paste if Command is held — likely a shortcut in flight.
             if keyboard::is_cmd_held() {
@@ -264,6 +309,17 @@ fn handle_speech(
             }
 
             paste::paste_text(pause::is_auto_enter_enabled())?;
+
+            // Snapshot the freshly-pasted text as the diff baseline for
+            // the manual-correction capture pipeline. We store the
+            // post-vocabulary, post-postprocess `final_text` (i.e. the
+            // exact bytes the user sees in their app) so the ⌃⌥X hotkey
+            // and passive clipboard watcher can compare it against the
+            // user's selection without having to reconstruct what was
+            // pasted. Only runs on the actually-pasted branch — if
+            // Cmd was held the early-return above skipped paste and
+            // there's nothing for a correction-diff to anchor on.
+            pause::set_last_pasted(final_text.clone());
             Ok(())
         }
     }

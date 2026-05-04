@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Manual correction capture: ⌃⌥X hotkey + passive clipboard watcher feed glossary mistranscriptions automatically.
+- New CLI: `always corrections list/approve/reject/clear/capture`.
+- New prefs: `shortcut_log_correction` (default `ctrl+alt+x`), `passive_correction_capture` (default `false`).
+- Manual-correction capture: ⌃⌥X hotkey diffs the user's selection against the last-pasted transcript and writes the `(wrong → right)` pair into `~/.always/glossary.json`. Opt-in passive variant available via `passive_correction_capture` pref + `always config set passive_correction_capture true`.
 - `ASSESSMENT.md` at repo root — production-readiness scorecard with per-criterion ratings
 - `.github/dependabot.yml` — weekly Cargo, GitHub Actions, and Swift Package Manager updates
 - Concurrency control on CI workflow (auto-cancel superseded runs)
@@ -21,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lint `clippy::print_stdout` / `clippy::print_stderr` warned at `lib.rs` root; allowed only on intentional CLI surfaces (`cli/logs.rs`, `daemon.rs`, `json_listener.rs`)
 
 ### Fixed
+- Vocabulary substring bug — terms like `Zed` no longer rewrite `analyzed` to `analyZed`. `Vocabulary::apply` now uses regex word boundaries (`whole_word_replace` in `src/always/text.rs`).
 - 23 latent clippy warnings under `--all-targets` (mostly `&PathBuf` → `&Path`, needless `&[…]` borrow in `args(…)`, dead `total_rejected` in example)
 - Stray `eprintln!` in `smart_filter.rs` and `hud.rs` migrated to `tracing::{warn,info}`
 

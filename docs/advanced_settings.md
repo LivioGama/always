@@ -157,6 +157,167 @@ A quick troubleshooting tree:
 
 ---
 
+## Manual correction capture
+
+Whisper isn't perfect: it'll mistranscribe domain jargon ("kubernetics"
+for "kubernetes", "doker" for "Docker", your colleague's name as
+nonsense). Always lets you teach it without leaving the keyboard. Two
+paths feed `~/.always/glossary.json`'s `mistranscriptions` lists, and
+both share the same on-disk effect.
+
+### Active hotkey — `⌃⌥X`
+
+The fast path. Workflow:
+
+1. Dictate a sentence. Always pastes it at the cursor.
+2. The paste is wrong — fix the bad word(s) inline, in whatever app you're
+   in.
+3. Select the corrected text.
+4. Press `⌃⌥X`.
+
+The daemon snapshots your selection (via simulated `Cmd+C`), diffs it
+word-by-word against the most recently pasted transcript, extracts the
+`(wrong → right)` pairs that look like real corrections (length ratio +
+Levenshtein gate — typo distance only, not unrelated rewrites), and
+appends them to `~/.always/glossary.json`.
+
+**Example.** Whisper transcribed:
+
+> deploy the kubernetics cluster to production
+
+You corrected it inline to "kubernetes" and selected the line. After
+`⌃⌥X`, your glossary now contains:
+
+```json
+[
+  {
+    "term": "kubernetes",
+    "mistranscriptions": ["kubernetics"],
+    "frequency": 100
+  }
+]
+```
+
+If `kubernetes` was already in the glossary as a curated entry,
+`kubernetics` is appended to its existing `mistranscriptions` list and
+nothing else about the entry is touched — `frequency`, casing, other
+mistranscriptions all survive untouched.
+
+Re-bind the hotkey:
+
+```bash
+always config set shortcut_log_correction "ctrl+alt+x"
+```
+
+### Passive clipboard watcher — opt-in
+
+The careful path. Some users prefer "the daemon notices when I re-copy
+my correction" over "I have to remember a hotkey." The watcher polls the
+system clipboard every 250 ms; when you re-copy a string that closely
+resembles the most recently pasted transcript, the diff is queued at
+`~/.always/pending_corrections.json` for you to approve or reject from
+the menu bar (or the CLI).
+
+Triggers:
+
+* You re-copy a string within 60 seconds of the paste it's a candidate
+  correction for. After 60 s, the paste is forgotten — the watcher
+  assumes you've moved on.
+* The full-string normalized Levenshtein similarity is ≥ 0.55, and a
+  per-word similarity gate clears for at least one substitution. Below
+  that, the re-copy is treated as unrelated content and ignored.
+
+Stale entries are pruned after 7 days. The queue is capped at 100
+pending items; past that, the oldest unreviewed entry is evicted on
+insert.
+
+Opt in:
+
+```bash
+always config set passive_correction_capture true
+```
+
+The watcher is **off by default** — it's a probabilistic match against
+your real clipboard, and silently mutating user data is the wrong
+default.
+
+### CLI
+
+```bash
+$ always corrections list
+No pending corrections.
+```
+
+When entries are pending, the listing is one row per item with the full
+UUID, source, age, and the diff:
+
+```
+ID                                     Source     Queued         Wrong → Right
+9d3e4c5e-…full UUID printed…           passive    2min           kubernetics → kubernetes
+1f8a0b2c-…full UUID printed…           hotkey     just now       supr whisper → SuperWhisper
+```
+
+```bash
+always corrections approve <UUID>      # apply the pair to glossary, drop from queue
+always corrections reject  <UUID>      # drop from queue without applying
+always corrections clear               # drop everything (prints count first)
+always corrections capture             # run the active capture flow without the hotkey
+```
+
+`approve`/`reject` exit non-zero on an unknown UUID so wrapping shell
+scripts can detect a stale reference (e.g. an entry already actioned
+from another window).
+
+`capture` is the manual equivalent of `⌃⌥X` — useful when the hotkey
+is shadowed by another app, or for scripting. It uses the same 60-second
+"recent paste" window.
+
+### How merging works
+
+Both paths land at `correction::apply_pairs_to_glossary`, which is the
+single place glossary writes happen:
+
+* If a glossary entry already exists with `term == pair.right`, the
+  `wrong` token is appended to that entry's `mistranscriptions` list
+  (deduped against what's already there). **`frequency` and other
+  fields are not touched.**
+* Otherwise, a new entry `{"term": right, "mistranscriptions": [wrong],
+  "frequency": 100}` is created.
+
+In other words: curated glossary entries you've hand-tuned will never
+be overwritten — only their `mistranscriptions` arrays are extended.
+
+### Privacy
+
+* **The passive watcher polls the clipboard** via `pbpaste` every
+  250 ms. It does not keylog and it does not read individual keystrokes.
+* **The active hotkey simulates `Cmd+C`** in the foreground app, reads
+  the new pasteboard contents, and then restores the previous clipboard
+  value (best-effort). Clipboard-history apps like Paste or Maccy may
+  still see the temporary copy event during that ~100 ms window — that's
+  inherent to how `Cmd+C` works on macOS, not something Always can
+  suppress.
+* **Nothing is sent over the network.** All correction data lives on
+  your laptop in `~/.always/`.
+
+### When to use which
+
+| | **Active hotkey (`⌃⌥X`)** | **Passive watcher** |
+|---|---|---|
+| Trigger | Explicit keypress | Re-copy after a paste |
+| Optimizes for | Recall — captures every correction the user makes | Precision — captures only what's confidently a correction |
+| User effort | Press one shortcut | None (just copy as you would anyway) |
+| False positives | Almost zero — you choose what to record | Possible — gated to ≥ 0.55 string similarity + 60 s window |
+| Default | On (hotkey is bound) | Off (`passive_correction_capture = false`) |
+| Writes glossary directly | Yes | No — queues for review |
+
+If you're curating a project glossary aggressively, leave the watcher
+off and use the hotkey deliberately. If you mostly trust the diff and
+want a low-effort feedback loop, turn on passive capture and skim
+`always corrections list` once a day.
+
+---
+
 ## Vocabulary auto-import — what actually works
 
 `always vocab import` scans installed sources and writes the union of

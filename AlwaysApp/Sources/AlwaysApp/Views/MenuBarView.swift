@@ -7,6 +7,7 @@ struct MenuBarView: View {
     // semantic toggles (pause = temporarily mute, not kill the daemon).
     @ObservedObject private var stateMonitor = StateMonitor.shared
     @ObservedObject private var updateService = UpdateService.shared
+    @ObservedObject private var corrections = CorrectionsCenter.shared
     @Environment(\.openWindow) private var openWindow
 
     private var statusText: String {
@@ -70,6 +71,31 @@ struct MenuBarView: View {
 
             Divider()
 
+            // Glossary corrections section. The submenu is always shown
+            // (so the badge count is visible at a glance); when empty
+            // it's disabled with a "No pending corrections" placeholder
+            // so users don't fall into an empty submenu by accident.
+            correctionsMenu
+
+            Button(action: { corrections.captureNow() }) {
+                Label("Capture Selection Now", systemImage: "scope")
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .disabled(!stateMonitor.isDaemonConnected)
+            .help("Diff your current selection against the last paste and add the correction to the glossary.")
+
+            // Inline toast (visible only when a correction was just
+            // logged). Lives inside the menu — that's where the user is
+            // already looking when they open the menu-extra; a separate
+            // floating popover would be more code for similar value.
+            if let logged = corrections.lastLogged {
+                CorrectionToast(logged: logged)
+            }
+
+            Divider()
+
             Button(action: { updateService.checkForUpdates() }) {
                 Label("Check for Updates…", systemImage: "arrow.down.circle")
             }
@@ -89,6 +115,33 @@ struct MenuBarView: View {
             .padding(.vertical, 6)
         }
         .frame(width: 220)
+    }
+
+    /// Submenu that lists every pending correction with Approve/Reject
+    /// buttons. Each entry uses the daemon-issued UUID as `id` so the
+    /// approve/reject calls round-trip cleanly even when wrong/right
+    /// strings collide across multiple candidates.
+    @ViewBuilder
+    private var correctionsMenu: some View {
+        if corrections.pending.isEmpty {
+            // Disabled placeholder so the menu structure is stable —
+            // users always know where this section lives.
+            Label("No pending corrections", systemImage: "checkmark.seal")
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+        } else {
+            Menu("Pending Corrections (\(corrections.pending.count))") {
+                ForEach(corrections.pending) { item in
+                    Menu("\(item.wrong) → \(item.right)") {
+                        Button("Approve") { corrections.approve(item.id) }
+                        Button("Reject") { corrections.reject(item.id) }
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+        }
     }
 
     private func openSettings() {
@@ -142,5 +195,47 @@ struct MenuBarView: View {
             .appendingPathComponent("always")
             .path
         return FileManager.default.fileExists(atPath: bundled) ? bundled : "always"
+    }
+}
+
+/// Inline confirmation banner shown after the daemon auto-applies a
+/// correction. Self-dismissing after 2.5s — same duration as a
+/// StatusOverlay flash, for consistency with other transient feedback.
+///
+/// Why inline (not a separate window/popover): the menu-extra is the
+/// natural surface where the user already sees pending corrections, so
+/// confirming a logged one in the same surface keeps the cognitive
+/// model coherent. A floating window would also fight macOS focus
+/// rules when triggered from a menu open.
+private struct CorrectionToast: View {
+    let logged: CorrectionsCenter.Logged
+    @State private var visible: Bool = true
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+            Text("Saved: \(logged.wrong) → \(logged.right)")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .opacity(visible ? 1 : 0)
+        .animation(.easeOut(duration: 0.25), value: visible)
+        // Re-fire the auto-hide timer whenever a fresh correction
+        // arrives during an open menu (cheap; menu views recreate on
+        // each open anyway).
+        .task(id: logged) {
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            visible = false
+            // Small grace period so the fade animation finishes before
+            // we clear the published state and the row collapses.
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            CorrectionsCenter.shared.dismissLastLogged()
+        }
     }
 }

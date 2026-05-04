@@ -242,12 +242,26 @@ impl AlwaysConfig {
             )))
         });
 
+        // Honor user pref for LLM postprocess: DB > env > default true.
+        let postprocess_enabled = prefs
+            .postprocess_enabled
+            .unwrap_or(postprocess_config.grammar_correction_enabled);
+        let mut effective_postprocess = postprocess_config.clone();
+        effective_postprocess.grammar_correction_enabled = postprocess_enabled;
+
         let post_processor = if let (Some(vocab), Some(context_vocab)) = (&vocab, &context_vocab) {
-            let groq_api_key = std::env::var("GROQ_API_KEY").ok();
+            // Reuse the STT API key for LLM postprocess (same Groq account).
+            let groq_api_key = std::env::var("GROQ_API_KEY").ok().or_else(|| {
+                if groq_stt_api_key.is_empty() {
+                    None
+                } else {
+                    Some(groq_stt_api_key.clone())
+                }
+            });
             Some(Arc::new(PostProcessor::new_with_config(
                 vocab.clone(),
                 Arc::clone(context_vocab),
-                postprocess_config.clone(),
+                effective_postprocess.clone(),
                 groq_api_key,
             )))
         } else {
@@ -273,7 +287,7 @@ impl AlwaysConfig {
             vad_mode,
             silero_threshold: prefs.silero_threshold.unwrap_or(0.5) as f32,
             vocab_config,
-            postprocess_config,
+            postprocess_config: effective_postprocess,
         };
 
         Ok(config)
@@ -290,7 +304,9 @@ impl Default for AlwaysConfig {
             timeout_secs: 30,
             // Defaults aligned with `SensitivityPreset::Normal` and the
             // Mic Sensitivity / Speaking Style picker in the GUI.
-            silence_secs: 2.0,
+            // 2.5s (was 2.0) — gives users room for mid-sentence thinking pauses
+            // without triggering premature end-of-utterance.
+            silence_secs: 2.5,
             auto_enter: false,
             filter_enabled: true,
             energy_threshold: 0.012,

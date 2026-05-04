@@ -101,6 +101,19 @@ class StateMonitor: ObservableObject {
         StatusOverlayController.shared.flash(state: newValue ? .autoEnterOn : .autoEnterOff)
         udsClient.sendCommand("ToggleAutoEnter")
     }
+
+    /// Send a parameterless command to the daemon (e.g. `CaptureCorrection`).
+    /// Exposed so `CorrectionsCenter` doesn't need its own UDSClient instance —
+    /// only one connection should exist per app process.
+    func sendCommand(_ name: String) {
+        udsClient.sendCommand(name)
+    }
+
+    /// Send a JSON-tagged command with a typed payload. Used for
+    /// approve/reject correction flows that carry a UUID.
+    func sendCommandWithData<T: Encodable>(_ name: String, _ payload: T) {
+        udsClient.sendCommandWithData(name, payload)
+    }
     
     /// Track whether the daemon's most recent ongoing state still
     /// warrants a persistent overlay. Used so a flash doesn't clobber

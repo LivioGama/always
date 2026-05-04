@@ -27,6 +27,11 @@ enum DaemonEventType: String, Codable {
     case voiceActivityEnded = "VoiceActivityEnded"
     case transcriptionFiltered = "TranscriptionFiltered"
     case heartbeat = "Heartbeat"
+    // Glossary / corrections pipeline. The daemon emits these when it
+    // either auto-applies a correction (Logged) or queues a candidate
+    // pulled from a recent paste edit (Pending) for the user to confirm.
+    case correctionLogged = "CorrectionLogged"
+    case correctionPending = "CorrectionPending"
 }
 
 // Event data structures
@@ -40,6 +45,23 @@ struct TranscriptFinalData: Codable {
 
 struct HelloData: Codable {
     let version: UInt32
+}
+
+// Sent when the daemon has just applied a known correction (the wrong
+// form was already in the glossary) — used purely for UI feedback.
+struct CorrectionLoggedData: Codable {
+    let wrong: String
+    let right: String
+}
+
+// Sent when the daemon detected a *new* candidate correction (e.g. user
+// edited a freshly-pasted phrase) and wants the user to approve or reject
+// it before adding to the persistent glossary. The `id` is what the UI
+// echoes back in ApproveCorrection / RejectCorrection.
+struct CorrectionPendingData: Codable {
+    let id: String
+    let wrong: String
+    let right: String
 }
 
 // Main event structure - matches Rust serde tagged enum format
@@ -57,6 +79,16 @@ struct DaemonEvent: Codable {
     /// was not built against.
     let helloVersion: UInt32?
 
+    /// Populated only for `CorrectionLogged`. We keep this typed
+    /// (rather than reusing the loose `[String:String]` blob) so callers
+    /// don't have to re-validate keys at every consumption site.
+    let correctionLogged: CorrectionLoggedData?
+
+    /// Populated only for `CorrectionPending`. Same rationale as
+    /// `correctionLogged`; the `id` field round-trips back to the daemon
+    /// when the user approves/rejects.
+    let correctionPending: CorrectionPendingData?
+
     enum CodingKeys: String, CodingKey {
         case type
         case data
@@ -66,30 +98,66 @@ struct DaemonEvent: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let type = try container.decode(DaemonEventType.self, forKey: .type)
         self.type = type
-        if type == .hello {
+        switch type {
+        case .hello:
+            // Protocol-version handshake — typed payload, not a string dict.
             let payload = try container.decodeIfPresent(HelloData.self, forKey: .data)
             self.helloVersion = payload?.version
             self.data = nil
-        } else {
+            self.correctionLogged = nil
+            self.correctionPending = nil
+        case .correctionLogged:
+            let payload = try container.decodeIfPresent(CorrectionLoggedData.self, forKey: .data)
+            self.correctionLogged = payload
+            self.data = nil
+            self.helloVersion = nil
+            self.correctionPending = nil
+        case .correctionPending:
+            let payload = try container.decodeIfPresent(CorrectionPendingData.self, forKey: .data)
+            self.correctionPending = payload
+            self.data = nil
+            self.helloVersion = nil
+            self.correctionLogged = nil
+        default:
+            // Fall-through path: text-bearing or empty events. Keep using
+            // the loose dict so existing call sites (e.g. transcript chunk
+            // text extraction) continue to work unchanged.
             self.data = try container.decodeIfPresent([String: String].self, forKey: .data)
             self.helloVersion = nil
+            self.correctionLogged = nil
+            self.correctionPending = nil
         }
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(type, forKey: .type)
-        if type == .hello, let v = helloVersion {
-            try container.encode(HelloData(version: v), forKey: .data)
-        } else {
+        switch type {
+        case .hello:
+            if let v = helloVersion {
+                try container.encode(HelloData(version: v), forKey: .data)
+            }
+        case .correctionLogged:
+            try container.encodeIfPresent(correctionLogged, forKey: .data)
+        case .correctionPending:
+            try container.encodeIfPresent(correctionPending, forKey: .data)
+        default:
             try container.encodeIfPresent(data, forKey: .data)
         }
     }
 
-    init(type: DaemonEventType, data: [String: String]? = nil, helloVersion: UInt32? = nil) {
+    init(
+        type: DaemonEventType,
+        data: [String: String]? = nil,
+        helloVersion: UInt32? = nil,
+        correctionLogged: CorrectionLoggedData? = nil,
+        correctionPending: CorrectionPendingData? = nil
+    ) {
         self.type = type
         self.data = data
         self.helloVersion = helloVersion
+        self.correctionLogged = correctionLogged
+        self.correctionPending = correctionPending
     }
 }
 
@@ -423,7 +491,46 @@ class UDSClient: ObservableObject {
         }
 
         let json = "{\"type\":\"\(commandType)\"}\n"
-        guard let data = json.data(using: .utf8) else { return }
+        writeLine(json, commandType: commandType)
+    }
+
+    /// Send a JSON command with a typed `data` payload. The daemon's
+    /// command enum uses `#[serde(tag = "type", content = "data")]` so
+    /// the wire format is `{"type":"NAME","data":{...}}`. Anything
+    /// `Encodable` works as the payload — typically a small dictionary
+    /// like `["id": "<uuid>"]`.
+    ///
+    /// We share `writeLine` with `sendCommand` rather than duplicating
+    /// the socket-write/error path so all command-emit paths log
+    /// identically and respect the same connection guard.
+    func sendCommandWithData<T: Encodable>(_ commandType: String, _ payload: T) {
+        guard socketFD >= 0, isConnected else {
+            self.logger.warning("sendCommandWithData(\(commandType)) skipped — not connected")
+            return
+        }
+
+        let envelope = CommandEnvelope(type: commandType, data: payload)
+        do {
+            let encoder = JSONEncoder()
+            // Stable key order helps when grepping logs for replays.
+            encoder.outputFormatting = [.sortedKeys]
+            let body = try encoder.encode(envelope)
+            guard var line = String(data: body, encoding: .utf8) else {
+                logger.error("sendCommandWithData(\(commandType)): payload not UTF-8")
+                return
+            }
+            line.append("\n")
+            writeLine(line, commandType: commandType)
+        } catch {
+            logger.error("sendCommandWithData(\(commandType)) encode failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Single funnel for socket writes. Logs success/failure consistently
+    /// so misrouted commands are easy to spot in the daemon side-channel
+    /// log.
+    private func writeLine(_ line: String, commandType: String) {
+        guard let data = line.data(using: .utf8) else { return }
 
         let bytesWritten = data.withUnsafeBytes { buffer in
             send(socketFD, buffer.baseAddress!, buffer.count, 0)
@@ -431,7 +538,7 @@ class UDSClient: ObservableObject {
 
         if bytesWritten < 0 {
             let err = errno
-            logger.error("sendCommand(\(commandType)) failed: \(String(cString: strerror(err)))")
+            logger.error("send(\(commandType)) failed: \(String(cString: strerror(err)))")
         } else {
             logger.debug("Sent command: \(commandType)")
         }
@@ -441,4 +548,13 @@ class UDSClient: ObservableObject {
 // Notification name for daemon events
 extension Notification.Name {
     static let daemonEvent = Notification.Name("daemonEvent")
+}
+
+// File-private envelope mirroring the Rust DaemonCommand enum's
+// `#[serde(tag = "type", content = "data")]` shape. Lifted out of
+// `sendCommandWithData` because Swift forbids generic types nested in
+// generic functions.
+private struct CommandEnvelope<P: Encodable>: Encodable {
+    let type: String
+    let data: P
 }

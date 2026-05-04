@@ -11,6 +11,7 @@ struct Config: Codable {
     var shortcutPause: String
     var shortcutAutoEnter: String
     var shortcutForcePaste: String
+    var postprocessEnabled: Bool
 
     // Defaults match `SensitivityPreset::Normal` and the Rust
     // `AlwaysConfig::default()` values.
@@ -18,13 +19,14 @@ struct Config: Codable {
         sttEnergyThreshold: 0.012,
         hearEnergyThreshold: 0.001,
         sttCooldownMs: 150,
-        sttSilence: 2.0,
+        sttSilence: 2.5,
         sttAutoEnter: false,
         groqApiKey: nil,
         sileroThreshold: 0.5,
         shortcutPause: "ctrl+alt+p",
         shortcutAutoEnter: "ctrl+alt+a",
-        shortcutForcePaste: "ctrl+alt+v"
+        shortcutForcePaste: "ctrl+alt+v",
+        postprocessEnabled: true
     )
 
     static func fromCLI(output: String) -> Config? {
@@ -66,6 +68,8 @@ struct Config: Codable {
                     if !value.contains("(not set)") {
                         config.shortcutForcePaste = value
                     }
+                case "postprocess_enabled":
+                    config.postprocessEnabled = (value == "true" || value == "1")
                 default:
                     break
                 }

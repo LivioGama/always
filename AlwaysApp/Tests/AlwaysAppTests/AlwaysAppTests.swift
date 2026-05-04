@@ -65,7 +65,8 @@ final class AlwaysAppTests: XCTestCase {
             "sileroThreshold": 0.5,
             "shortcutPause": "ctrl+alt+p",
             "shortcutAutoEnter": "ctrl+alt+a",
-            "shortcutForcePaste": "ctrl+alt+v"
+            "shortcutForcePaste": "ctrl+alt+v",
+            "postprocessEnabled": true
         }
         """
         let data = json.data(using: .utf8)!
@@ -320,5 +321,129 @@ final class AlwaysAppTests: XCTestCase {
         let low = SensitivityPreset.low.thresholds.stt
         XCTAssertLessThan(high, normal)
         XCTAssertLessThan(normal, low)
+    }
+
+    // MARK: - Correction events (decoder)
+    //
+    // CorrectionLogged / CorrectionPending share the same
+    // `#[serde(tag="type", content="data")]` envelope as Hello on the
+    // Rust side. These tests pin the wire format so a daemon-side
+    // serde refactor can't silently break the menu-bar UI.
+
+    func testCorrectionLoggedEventDecodes() throws {
+        let json = #"{"type":"CorrectionLogged","data":{"wrong":"kuburnetes","right":"kubernetes"}}"#
+        let event = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: json.data(using: .utf8)!
+        )
+        XCTAssertEqual(event.type, .correctionLogged)
+        XCTAssertEqual(event.correctionLogged?.wrong, "kuburnetes")
+        XCTAssertEqual(event.correctionLogged?.right, "kubernetes")
+        // Typed payloads must NOT collapse into the loose data dict —
+        // the menu view depends on the typed accessor.
+        XCTAssertNil(event.data)
+        XCTAssertNil(event.correctionPending)
+    }
+
+    func testCorrectionPendingEventDecodes() throws {
+        let json = #"{"type":"CorrectionPending","data":{"id":"7c0c9e1a-aaaa-bbbb-cccc-deadbeef0001","wrong":"kuburnetes","right":"kubernetes"}}"#
+        let event = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: json.data(using: .utf8)!
+        )
+        XCTAssertEqual(event.type, .correctionPending)
+        XCTAssertEqual(event.correctionPending?.id, "7c0c9e1a-aaaa-bbbb-cccc-deadbeef0001")
+        XCTAssertEqual(event.correctionPending?.wrong, "kuburnetes")
+        XCTAssertEqual(event.correctionPending?.right, "kubernetes")
+        XCTAssertNil(event.data)
+        XCTAssertNil(event.correctionLogged)
+    }
+
+    // MARK: - CorrectionsCenter event handling
+    //
+    // Same notification-injection pattern as
+    // testStateMonitorTogglesPauseFromEvents — we post a synthetic
+    // .daemonEvent and pump the main RunLoop briefly so the published
+    // mutation lands before assertions.
+
+    private func flushMainQueue(_ seconds: TimeInterval = 0.1) {
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: seconds))
+    }
+
+    /// Drain every Pending entry and clear lastLogged so each test
+    /// starts from a known-empty state. CorrectionsCenter is a
+    /// singleton that survives across tests.
+    private func resetCorrectionsCenter() {
+        CorrectionsCenter.shared.pending.removeAll()
+        CorrectionsCenter.shared.lastLogged = nil
+    }
+
+    func testCorrectionsCenterAddsPendingFromEvent() throws {
+        // Touch the singleton so its NotificationCenter subscription is
+        // live before we post the event.
+        resetCorrectionsCenter()
+
+        let pendingEvent = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: #"{"type":"CorrectionPending","data":{"id":"abc-1","wrong":"foo","right":"bar"}}"#.data(using: .utf8)!
+        )
+        NotificationCenter.default.post(name: .daemonEvent, object: pendingEvent)
+        flushMainQueue()
+
+        XCTAssertEqual(CorrectionsCenter.shared.pending.count, 1)
+        XCTAssertEqual(CorrectionsCenter.shared.pending.first?.id, "abc-1")
+        XCTAssertEqual(CorrectionsCenter.shared.pending.first?.wrong, "foo")
+        XCTAssertEqual(CorrectionsCenter.shared.pending.first?.right, "bar")
+
+        resetCorrectionsCenter()
+    }
+
+    func testCorrectionsCenterClearsPendingOnLogged() throws {
+        resetCorrectionsCenter()
+
+        // Pre-populate the pending list with a candidate the daemon is
+        // about to confirm via CorrectionLogged.
+        let pendingEvent = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: #"{"type":"CorrectionPending","data":{"id":"abc-2","wrong":"kuburnetes","right":"kubernetes"}}"#.data(using: .utf8)!
+        )
+        NotificationCenter.default.post(name: .daemonEvent, object: pendingEvent)
+        flushMainQueue()
+        XCTAssertEqual(CorrectionsCenter.shared.pending.count, 1)
+
+        let loggedEvent = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: #"{"type":"CorrectionLogged","data":{"wrong":"kuburnetes","right":"kubernetes"}}"#.data(using: .utf8)!
+        )
+        NotificationCenter.default.post(name: .daemonEvent, object: loggedEvent)
+        flushMainQueue()
+
+        XCTAssertTrue(CorrectionsCenter.shared.pending.isEmpty,
+                      "Pending entry matching a logged correction should be removed")
+        XCTAssertEqual(CorrectionsCenter.shared.lastLogged?.wrong, "kuburnetes")
+        XCTAssertEqual(CorrectionsCenter.shared.lastLogged?.right, "kubernetes")
+
+        resetCorrectionsCenter()
+    }
+
+    func testCorrectionsCenterDedupesPendingById() throws {
+        resetCorrectionsCenter()
+
+        // Posting the same Pending event twice (e.g. after a daemon
+        // reconnect that re-broadcasts unsettled candidates) must not
+        // grow the list — dedupe is keyed on id.
+        let pendingEvent = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: #"{"type":"CorrectionPending","data":{"id":"dup-id","wrong":"foo","right":"bar"}}"#.data(using: .utf8)!
+        )
+        NotificationCenter.default.post(name: .daemonEvent, object: pendingEvent)
+        flushMainQueue()
+        NotificationCenter.default.post(name: .daemonEvent, object: pendingEvent)
+        flushMainQueue()
+
+        XCTAssertEqual(CorrectionsCenter.shared.pending.count, 1,
+                       "Duplicate CorrectionPending events with the same id must dedupe")
+
+        resetCorrectionsCenter()
     }
 }

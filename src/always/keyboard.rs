@@ -29,7 +29,7 @@ use std::time::Duration;
 use anyhow::Result;
 
 #[cfg(feature = "macos")]
-use super::{config as always_config, event, log, paste, pause};
+use super::{clipboard_watcher, config as always_config, correction, event, log, paste, pause};
 
 static CMD_HELD: std::sync::LazyLock<AtomicBool> =
     std::sync::LazyLock::new(|| AtomicBool::new(false));
@@ -93,11 +93,18 @@ impl Combo {
 }
 
 #[allow(dead_code)] // referenced only in tests + macos listener
-fn default_shortcuts() -> (Combo, Combo, Combo) {
+fn default_shortcuts() -> (Combo, Combo, Combo, Combo) {
     (
         Combo::from_str("ctrl+alt+p").expect("default pause shortcut is valid"),
         Combo::from_str("ctrl+alt+a").expect("default auto-enter shortcut is valid"),
         Combo::from_str("ctrl+alt+v").expect("default force-paste shortcut is valid"),
+        // ⌃⌥X is the hotkey-driven correction capture: read the user's
+        // current selection, diff it against the most recent paste, and
+        // append the resulting `(wrong → right)` pairs to the glossary.
+        // Default chosen so it doesn't collide with the existing trio
+        // and stays inside the "ctrl+alt+<letter>" pattern users already
+        // know.
+        Combo::from_str("ctrl+alt+x").expect("default log-correction shortcut is valid"),
     )
 }
 
@@ -106,8 +113,10 @@ fn resolve_shortcuts(
     pause: Option<&str>,
     auto_enter: Option<&str>,
     force_paste: Option<&str>,
-) -> (Combo, Combo, Combo) {
-    let (default_pause, default_auto_enter, default_force_paste) = default_shortcuts();
+    log_correction: Option<&str>,
+) -> (Combo, Combo, Combo, Combo) {
+    let (default_pause, default_auto_enter, default_force_paste, default_log_correction) =
+        default_shortcuts();
     let pause_combo = pause.and_then(Combo::from_str).unwrap_or(default_pause);
     let auto_enter_combo = auto_enter
         .and_then(Combo::from_str)
@@ -115,12 +124,20 @@ fn resolve_shortcuts(
     let force_paste_combo = force_paste
         .and_then(Combo::from_str)
         .unwrap_or(default_force_paste);
+    let log_correction_combo = log_correction
+        .and_then(Combo::from_str)
+        .unwrap_or(default_log_correction);
 
-    (pause_combo, auto_enter_combo, force_paste_combo)
+    (
+        pause_combo,
+        auto_enter_combo,
+        force_paste_combo,
+        log_correction_combo,
+    )
 }
 
 #[cfg(feature = "macos")]
-fn load_shortcuts() -> (Combo, Combo, Combo) {
+fn load_shortcuts() -> (Combo, Combo, Combo, Combo) {
     let defaults = default_shortcuts();
 
     let Ok(conn) = crate::db::open() else {
@@ -134,6 +151,7 @@ fn load_shortcuts() -> (Combo, Combo, Combo) {
         prefs.shortcut_pause.as_deref(),
         prefs.shortcut_auto_enter.as_deref(),
         prefs.shortcut_force_paste.as_deref(),
+        prefs.shortcut_log_correction.as_deref(),
     )
 }
 
@@ -179,7 +197,7 @@ fn key_to_shortcut_name(key: &rdev::Key) -> Option<&'static str> {
 pub fn start_keyboard_listener() -> Result<()> {
     use rdev::{EventType, Key, listen};
 
-    let (pause_combo, auto_enter_combo, force_paste_combo) = load_shortcuts();
+    let (pause_combo, auto_enter_combo, force_paste_combo, log_correction_combo) = load_shortcuts();
     let (tx, _rx) = mpsc::channel();
 
     thread::spawn(move || {
@@ -268,6 +286,39 @@ pub fn start_keyboard_listener() -> Result<()> {
                         }
                     } else {
                         tracing::debug!("force_paste_no_text");
+                    }
+                } else if log_correction_combo.matches_name(
+                    ctrl_pressed,
+                    shift_pressed,
+                    alt_pressed,
+                    name,
+                ) {
+                    // Active manual-correction capture path. The user
+                    // selected text they just edited and pressed ⌃⌥X;
+                    // the daemon snapshots that selection, diffs it
+                    // against the freshest `last_pasted` (within
+                    // `clipboard_watcher::PASTE_WINDOW`), and appends
+                    // the extracted pairs to the glossary directly.
+                    // Each pair fires a `CorrectionLogged` event so the
+                    // GUI can surface confirmation toast / sound.
+                    match correction::capture_via_hotkey(clipboard_watcher::PASTE_WINDOW) {
+                        Ok(correction::CaptureOutcome::Applied { pairs, applied: _ }) => {
+                            for p in pairs {
+                                event::global_broadcaster().correction_logged(p.wrong, p.right);
+                            }
+                        }
+                        Ok(correction::CaptureOutcome::NoRecentPaste) => {
+                            tracing::debug!("log_correction_no_recent_paste");
+                        }
+                        Ok(correction::CaptureOutcome::NoChange) => {
+                            tracing::debug!("log_correction_no_change");
+                        }
+                        Ok(correction::CaptureOutcome::NoCorrectionPairs) => {
+                            tracing::debug!("log_correction_no_correction_pairs");
+                        }
+                        Err(error) => {
+                            tracing::error!(?error, "log_correction_failed");
+                        }
                     }
                 }
             }
@@ -390,20 +441,48 @@ mod tests {
     #[cfg(feature = "macos")]
     #[test]
     fn falls_back_to_defaults_for_invalid_configured_shortcuts() {
-        let (pause, auto_enter, force_paste) =
-            super::resolve_shortcuts(Some("ctrl+alt+return"), Some("a"), Some("v"));
+        // Each invalid string falls through to the corresponding
+        // hard-coded default. We feed one bogus value per slot to make
+        // sure the per-shortcut fallback is wired independently — a
+        // single shared default would silently mask a regression where
+        // e.g. force-paste's combo overrode log-correction's.
+        let (pause, auto_enter, force_paste, log_correction) = super::resolve_shortcuts(
+            Some("ctrl+alt+return"),
+            Some("a"),
+            Some("v"),
+            Some("not a combo"),
+        );
         assert!(pause.matches_name(true, false, true, "p"));
         assert!(auto_enter.matches_name(true, false, true, "a"));
         assert!(force_paste.matches_name(true, false, true, "v"));
+        assert!(log_correction.matches_name(true, false, true, "x"));
     }
 
     #[cfg(feature = "macos")]
     #[test]
     fn uses_configured_shortcuts_when_valid() {
-        let (pause, auto_enter, force_paste) =
-            super::resolve_shortcuts(Some("shift+x"), Some("ctrl+space"), Some("ctrl+shift+v"));
+        let (pause, auto_enter, force_paste, log_correction) = super::resolve_shortcuts(
+            Some("shift+x"),
+            Some("ctrl+space"),
+            Some("ctrl+shift+v"),
+            Some("ctrl+alt+l"),
+        );
         assert!(pause.matches_name(false, true, false, "x"));
         assert!(auto_enter.matches_name(true, false, false, "space"));
         assert!(force_paste.matches_name(true, true, false, "v"));
+        assert!(log_correction.matches_name(true, false, true, "l"));
+    }
+
+    #[cfg(feature = "macos")]
+    #[test]
+    fn log_correction_default_is_ctrl_alt_x() {
+        // Sanity: nothing configured → all four slots resolve to their
+        // documented defaults. Guards against silent default drift.
+        let (pause, auto_enter, force_paste, log_correction) =
+            super::resolve_shortcuts(None, None, None, None);
+        assert!(pause.matches_name(true, false, true, "p"));
+        assert!(auto_enter.matches_name(true, false, true, "a"));
+        assert!(force_paste.matches_name(true, false, true, "v"));
+        assert!(log_correction.matches_name(true, false, true, "x"));
     }
 }

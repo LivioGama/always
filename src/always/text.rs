@@ -6,6 +6,34 @@ use strsim::jaro_winkler;
 
 const FUZZY_CORRECTION_THRESHOLD: f64 = 0.92;
 
+/// Replace `needle` with `replacement` in `haystack`, but only on whole-word
+/// boundaries. The previous implementation used `String::replace`, which
+/// triggered case-sensitive substring matches: a glossary term like `Zed`
+/// rewrote `analyzed` to `analyZed`, and `UI` rewrote `you` to `UIr`.
+///
+/// Word boundaries are determined by `regex`'s `\b` (the standard Unicode-aware
+/// definition: a transition between `\w` and non-`\w`). Match is
+/// case-insensitive — Whisper rarely capitalizes proper nouns the same way the
+/// glossary does — and the canonical replacement string is always written
+/// verbatim from the glossary's `term` field.
+///
+/// `needle`s containing regex metacharacters are properly escaped before
+/// being inlined into the regex, so any string is safe to pass.
+fn whole_word_replace(haystack: &str, needle: &str, replacement: &str) -> String {
+    if needle.is_empty() || haystack.is_empty() {
+        return haystack.to_string();
+    }
+    // `(?i)` = case-insensitive. Surround the literal needle with `\b` so we
+    // never match in the middle of a longer word.
+    let pattern = format!(r"(?i)\b{}\b", regex::escape(needle));
+    match Regex::new(&pattern) {
+        Ok(re) => re
+            .replace_all(haystack, regex::NoExpand(replacement))
+            .into_owned(),
+        Err(_) => haystack.to_string(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Vocabulary {
     corrections: HashMap<String, String>,
@@ -96,7 +124,7 @@ impl Vocabulary {
         corrections.sort_by_key(|(wrong, _)| std::cmp::Reverse(wrong.len()));
 
         for (wrong, correct) in corrections {
-            result = result.replace(wrong, correct);
+            result = whole_word_replace(&result, wrong, correct);
         }
 
         result = self.apply_fuzzy_corrections(&result);
@@ -300,6 +328,73 @@ impl QuoteKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whole_word_replace_does_not_match_substring() {
+        // The original bug: `Zed` rewrote `analyzed` → `analyZed`.
+        assert_eq!(
+            whole_word_replace("I analyzed the data", "Zed", "Zed"),
+            "I analyzed the data"
+        );
+        // The original bug: `UI` rewrote `you` → `UIr`, your → UIr.
+        assert_eq!(
+            whole_word_replace("your code looks UI", "UI", "UI"),
+            "your code looks UI"
+        );
+    }
+
+    #[test]
+    fn whole_word_replace_replaces_word_at_boundary() {
+        assert_eq!(
+            whole_word_replace("zed is great", "zed", "Zed"),
+            "Zed is great"
+        );
+        assert_eq!(
+            whole_word_replace("the ui sucks", "ui", "UI"),
+            "the UI sucks"
+        );
+    }
+
+    #[test]
+    fn whole_word_replace_is_case_insensitive_in_match_only() {
+        // Match ignores case but replacement preserves the canonical form.
+        assert_eq!(
+            whole_word_replace("Open ZED now", "zed", "Zed"),
+            "Open Zed now"
+        );
+    }
+
+    #[test]
+    fn whole_word_replace_handles_punctuation_boundaries() {
+        // Word boundary should fire between word/non-word chars.
+        assert_eq!(
+            whole_word_replace("zed; zed. zed!", "zed", "Zed"),
+            "Zed; Zed. Zed!"
+        );
+    }
+
+    #[test]
+    fn whole_word_replace_escapes_regex_metachars() {
+        // A glossary term with regex metacharacters must not blow up.
+        assert_eq!(
+            whole_word_replace("the c.foo() call", "c.foo", "C.Foo"),
+            "the C.Foo() call"
+        );
+    }
+
+    #[test]
+    fn whole_word_replace_preserves_haystack_when_no_match() {
+        assert_eq!(
+            whole_word_replace("nothing to see here", "kubernetes", "Kubernetes"),
+            "nothing to see here"
+        );
+    }
+
+    #[test]
+    fn whole_word_replace_handles_empty_inputs() {
+        assert_eq!(whole_word_replace("", "x", "y"), "");
+        assert_eq!(whole_word_replace("hello", "", "y"), "hello");
+    }
 
     #[test]
     fn transforms_dot_words() {

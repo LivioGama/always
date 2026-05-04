@@ -26,6 +26,9 @@ pub struct Preferences {
     pub shortcut_pause: Option<String>,
     pub shortcut_auto_enter: Option<String>,
     pub shortcut_force_paste: Option<String>,
+    pub postprocess_enabled: Option<bool>,
+    pub shortcut_log_correction: Option<String>,
+    pub passive_correction_capture: Option<bool>,
 }
 
 pub fn open() -> Result<Connection> {
@@ -129,6 +132,29 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN shortcut_force_paste TEXT;")?;
     }
 
+    let has_postprocess_enabled = conn
+        .prepare("SELECT postprocess_enabled FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_postprocess_enabled {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN postprocess_enabled INTEGER;")?;
+    }
+
+    let has_shortcut_log_correction = conn
+        .prepare("SELECT shortcut_log_correction FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_shortcut_log_correction {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN shortcut_log_correction TEXT;")?;
+    }
+
+    let has_passive_correction_capture = conn
+        .prepare("SELECT passive_correction_capture FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_passive_correction_capture {
+        conn.execute_batch(
+            "ALTER TABLE preferences ADD COLUMN passive_correction_capture INTEGER;",
+        )?;
+    }
+
     Ok(())
 }
 
@@ -136,7 +162,7 @@ fn migrate(conn: &Connection) -> Result<()> {
 
 pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
     let mut stmt = conn.prepare(
-        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste FROM preferences WHERE id = 1",
+        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture FROM preferences WHERE id = 1",
     )?;
     let result = stmt.query_row([], |row| {
         Ok(Preferences {
@@ -156,6 +182,9 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             shortcut_pause: row.get(13)?,
             shortcut_auto_enter: row.get(14)?,
             shortcut_force_paste: row.get(15)?,
+            postprocess_enabled: row.get::<_, Option<i64>>(16)?.map(|v| v != 0),
+            shortcut_log_correction: row.get(17)?,
+            passive_correction_capture: row.get::<_, Option<i64>>(18)?.map(|v| v != 0),
         })
     });
     match result {
@@ -183,6 +212,9 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "shortcut_pause",
         "shortcut_auto_enter",
         "shortcut_force_paste",
+        "postprocess_enabled",
+        "shortcut_log_correction",
+        "passive_correction_capture",
     ];
     if !valid_keys.contains(&key) {
         anyhow::bail!(
@@ -254,7 +286,10 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
                 anyhow::bail!("silero_threshold must be between 0.1 and 0.9");
             }
         }
-        "stt_trim_silence" | "stt_auto_enter" => {
+        "stt_trim_silence"
+        | "stt_auto_enter"
+        | "postprocess_enabled"
+        | "passive_correction_capture" => {
             if !matches!(value, "true" | "false" | "1" | "0") {
                 anyhow::bail!("{key} must be one of: true, false, 1, 0");
             }
@@ -271,7 +306,10 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
     )?;
     let sql = format!("UPDATE preferences SET {key} = ?1 WHERE id = 1");
     let normalized = match key {
-        "stt_trim_silence" | "stt_auto_enter" => {
+        "stt_trim_silence"
+        | "stt_auto_enter"
+        | "postprocess_enabled"
+        | "passive_correction_capture" => {
             if matches!(value, "true" | "1") {
                 "1"
             } else {

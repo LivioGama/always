@@ -137,3 +137,47 @@ pub fn take_last_filtered() -> Option<String> {
 pub fn clear_last_filtered_for_test() {
     *LAST_FILTERED.lock() = None;
 }
+
+/// Last successfully-pasted transcript + the moment it was pasted.
+///
+/// Captured by `event_loop::handle_speech` immediately after the daemon
+/// commits a paste to the user's foreground app. Read by:
+///
+/// 1. The `⌃⌥X` correction-capture hotkey (`correction::capture_via_hotkey`)
+///    to diff the user's current selection against what we pasted.
+/// 2. The passive clipboard watcher (`clipboard_watcher`) to recognize a
+///    user-corrected re-copy of recently-pasted text.
+///
+/// Only the most recent paste is retained; an utterance entering this
+/// slot evicts the previous one. Reads use [`take_last_pasted_within`]
+/// to enforce a freshness window so an unrelated selection captured
+/// minutes after the original paste isn't mistaken for a correction.
+static LAST_PASTED: std::sync::LazyLock<Mutex<Option<(String, std::time::Instant)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+/// Record the text we just pasted. Called from `event_loop::handle_speech`
+/// after `paste::paste_text` succeeds.
+pub fn set_last_pasted(text: impl Into<String>) {
+    *LAST_PASTED.lock() = Some((text.into(), std::time::Instant::now()));
+}
+
+/// Read the most recent paste if it's still within `window` seconds.
+/// Does NOT clear the slot — multiple consumers (hotkey + watcher) may
+/// inspect it. Returns `(text, paste_instant)`.
+pub fn take_last_pasted_within(
+    window: std::time::Duration,
+) -> Option<(String, std::time::Instant)> {
+    let guard = LAST_PASTED.lock();
+    let (text, ts) = guard.as_ref()?;
+    if ts.elapsed() <= window {
+        Some((text.clone(), *ts))
+    } else {
+        None
+    }
+}
+
+/// Test helper: clear the slot so tests don't leak state between cases.
+#[cfg(test)]
+pub fn clear_last_pasted_for_test() {
+    *LAST_PASTED.lock() = None;
+}

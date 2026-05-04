@@ -187,13 +187,17 @@ pub fn is_hallucination(result: &TranscriptionResult) -> Option<&'static str> {
     }
 
     // ---- Layer C: length sanity ----
+    // Real human fast speech tops around 30-35 chars/sec. Whisper hallucinations
+    // typically exceed 50+ cps because the model fills silence with dense filler.
+    // 25 was too tight — natural fast speakers tripped it. 40 separates fast
+    // speech from clear hallucinations.
     if result.duration > 0.0 {
         let chars_per_sec = text.chars().count() as f64 / result.duration;
-        if chars_per_sec > 25.0 {
+        if chars_per_sec > 40.0 {
             return Some("too many chars per second");
         }
         let word_count = text.split_whitespace().count();
-        if result.duration < 1.0 && word_count > 4 {
+        if result.duration < 1.0 && word_count > 5 {
             return Some("too many words for short clip");
         }
     }
