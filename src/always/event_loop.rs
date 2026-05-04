@@ -329,21 +329,21 @@ fn in_cooldown(now: Instant, last_process: Instant, cooldown_ms: u32) -> bool {
     now.duration_since(last_process).as_millis() < cooldown_ms as u128
 }
 
-fn apply_vocabulary(text: &str, cfg: &AlwaysConfig) -> String {
-    let mut result = text.to_string();
-
-    // Apply base vocabulary
-    if let Some(ref vocab) = cfg.vocab {
-        result = vocab.apply(&result);
-    }
-
-    // Apply learned corrections
-    if let Some(ref post_processor) = cfg.post_processor {
-        result = post_processor.apply_learned_corrections(&result);
-        result = post_processor.code_aware_pattern_match(&result);
-    }
-
-    result
+/// Pre-LLM transform pass.
+///
+/// Used to chain Vocabulary::apply (regex glossary), apply_fuzzy_corrections,
+/// apply_learned_corrections, and code_aware_pattern_match here. All four
+/// were deleted in the pipeline-simplification pass — they piled up bug-
+/// by-bug and produced non-debuggable interactions. The single remaining
+/// transformation is the optional LLM postprocessor invoked downstream
+/// from this function in `handle_speech`. Voice-to-text delivers what was
+/// said by default; users opt into the LLM cleanup via
+/// `postprocess_enabled` pref.
+///
+/// Kept as a function (rather than inlining) so the call site in
+/// `classify_transcription` and the unit tests don't need to change.
+fn apply_vocabulary(text: &str, _cfg: &AlwaysConfig) -> String {
+    text.to_string()
 }
 
 fn print_banner(cfg: &AlwaysConfig) {
@@ -393,16 +393,32 @@ mod tests {
     }
 
     #[test]
-    fn vocabulary_is_applied_to_text_about_to_paste() {
+    fn apply_vocabulary_is_pure_passthrough_after_simplification() {
+        // After collapsing the 6-layer text-mutation pipeline into a
+        // single optional LLM postprocessor, this function is now
+        // intentionally a no-op. Voice-to-text delivers what was said;
+        // any cleanup happens downstream in `handle_speech` via the
+        // LLM postprocessor (gated on `postprocess_enabled` pref).
+        //
+        // This test pins the contract so a future commit doesn't
+        // silently re-introduce a transformation step here.
         let cfg = test_config(Some(Vocabulary::default_patterns()));
         assert_eq!(
             apply_vocabulary("open src/main.rs", &cfg),
-            "open `src/main.rs`"
+            "open src/main.rs",
+            "apply_vocabulary must not transform text — verbatim Whisper output is the contract"
+        );
+        assert_eq!(
+            apply_vocabulary("I have an idea about Kubernetes.", &cfg),
+            "I have an idea about Kubernetes.",
+            "common-English words must NEVER be rewritten by the pre-LLM pass"
         );
     }
 
     #[test]
     fn vocabulary_passthrough_when_not_configured() {
+        // Same contract regardless of whether `cfg.vocab` is set —
+        // the function is a no-op either way.
         let cfg = test_config(None);
         assert_eq!(
             apply_vocabulary("open src/main.rs", &cfg),
@@ -468,7 +484,9 @@ mod tests {
     }
 
     #[test]
-    fn classify_applies_vocabulary_before_paste() {
+    fn classify_does_not_rewrite_text_pre_llm() {
+        // Post-simplification: the pre-LLM pass is a no-op. Text reaches
+        // the LLM postprocessor (or paste) verbatim from Whisper.
         let cfg = test_config(Some(Vocabulary::default_patterns()));
         let now = Instant::now();
         let action = classify_transcription(
@@ -479,7 +497,7 @@ mod tests {
             now - Duration::from_secs(10),
         );
         match action {
-            SpeechAction::Paste { text } => assert_eq!(text, "open `src/main.rs`"),
+            SpeechAction::Paste { text } => assert_eq!(text, "open src/main.rs"),
             other => panic!("expected Paste, got {:?}", other),
         }
     }

@@ -22,7 +22,6 @@ use reqwest::blocking::multipart as blocking_multipart;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::glossary;
 
 const GROQ_TRANSCRIPTIONS_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 const WHISPER_MODEL: &str = "whisper-large-v3-turbo";
@@ -178,7 +177,18 @@ fn backoff_with_jitter(attempt: u32) -> Duration {
 }
 
 fn build_form(audio_data: Vec<u8>) -> Result<blocking_multipart::Form, anyhow::Error> {
-    let mut form = blocking_multipart::Form::new()
+    // Whisper's `prompt` (initial_prompt) field used to be populated
+    // with the user's glossary terms. That biased Whisper acoustically
+    // toward those terms — fine for unique product names like
+    // "Kubernetes", but catastrophic for app names that collide with
+    // common English words: dictating "I have an idea" produced
+    // "I have an IntelliJ IDEA" because the bias prompt listed every
+    // /Applications/*.app entry.
+    //
+    // The bias prompt is gone. Voice-to-text delivers what was said.
+    // If users want post-hoc cleanup, the optional LLM postprocessor
+    // (`postprocess_enabled` pref) handles it with strict rewrite rules.
+    let form = blocking_multipart::Form::new()
         .part(
             "file",
             blocking_multipart::Part::bytes(audio_data)
@@ -188,9 +198,6 @@ fn build_form(audio_data: Vec<u8>) -> Result<blocking_multipart::Form, anyhow::E
         .text("model", WHISPER_MODEL)
         .text("response_format", "verbose_json")
         .text("language", "en");
-    if let Some(prompt) = glossary::whisper_bias_prompt() {
-        form = form.text("prompt", prompt.clone());
-    }
     Ok(form)
 }
 
