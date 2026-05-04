@@ -89,37 +89,43 @@ fn build_postprocess_prompt(entries: &[Entry]) -> String {
 talking about their projects. Produce a clean, coherent version.\n\n",
     );
 
-    if !entries.is_empty() {
+    // Only include entries with explicit mistranscriptions in the
+    // "rewrite this" section. Bare auto-imported app names (e.g.
+    // "IntelliJ IDEA" pulled from /Applications) caused a real bug:
+    // the LLM treated `idea` (the English word) as a phonetic match
+    // for `IntelliJ IDEA` and substituted aggressively. Now the
+    // rewriter only acts on user-curated wrong→right pairs.
+    let actionable: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| !e.term.trim().is_empty() && !e.mistranscriptions.is_empty())
+        .collect();
+
+    if !actionable.is_empty() {
         out.push_str(
-            "# Niche vocabulary used by this speaker\n\n\
-These terms come up frequently. Whisper often mistranscribes them — fix any phonetic \
-mistranscriptions you spot. Canonical spelling is on the left; common mistranscriptions \
-on the right.\n\n",
+            "# Known mistranscriptions to fix\n\n\
+Each line is `canonical — wrong1, wrong2, …`. Replace ONLY the exact wrong forms with \
+the canonical term. Do NOT substitute against the canonical term itself unless the \
+input matches one of the listed wrong forms.\n\n",
         );
-        for e in entries {
+        for e in &actionable {
             let term = e.term.trim();
-            if term.is_empty() {
-                continue;
-            }
-            if e.mistranscriptions.is_empty() {
-                out.push_str(&format!("- {term}\n"));
-            } else {
-                let miss: Vec<&str> = e
-                    .mistranscriptions
-                    .iter()
-                    .take(5)
-                    .map(|s| s.as_str())
-                    .collect();
-                out.push_str(&format!("- {term} — {}\n", miss.join(", ")));
-            }
+            let miss: Vec<&str> = e
+                .mistranscriptions
+                .iter()
+                .take(5)
+                .map(|s| s.as_str())
+                .collect();
+            out.push_str(&format!("- {term} — {}\n", miss.join(", ")));
         }
         out.push('\n');
     }
 
     out.push_str(
         "# Rules\n\n\
-1. Fix mistranscriptions of the niche terms above when context confirms it. Don't \
-   change ordinary words like \"cloud\" when cloud computing is meant.\n\
+1. Substitute ONLY where the input contains an exact wrong form listed above. Never \
+   rewrite an ordinary English word to a proper-noun term that wasn't explicitly \
+   listed as one of its mistranscriptions. Example: \"I have an idea\" stays \
+   \"I have an idea\" even if \"IntelliJ IDEA\" is in the speaker's vocabulary.\n\
 2. Make the result a coherent, well-formed phrase. Restore minimal grammar so the \
    output reads as a real sentence. Add periods and commas at obvious sentence \
    boundaries. Add question marks for questions.\n\
@@ -215,4 +221,91 @@ fn locate_glossary() -> Option<PathBuf> {
         }
     }
     candidates.into_iter().find(|p| p.exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(term: &str, miss: &[&str]) -> Entry {
+        Entry {
+            term: term.to_string(),
+            mistranscriptions: miss.iter().map(|s| s.to_string()).collect(),
+            frequency: 100,
+        }
+    }
+
+    #[test]
+    fn postprocess_prompt_excludes_bare_auto_imported_terms_from_listing() {
+        // Regression: the listing used to include "IntelliJ IDEA" with
+        // no mistranscriptions, so the LLM aggressively rewrote `idea`
+        // (the English word) to `IntelliJ IDEA`. Bare terms must not
+        // appear as listing bullets.
+        //
+        // Rule 1 keeps `IntelliJ IDEA` as a *cautionary example* in its
+        // prose so the model knows which failure mode to avoid; the
+        // assertion below scopes to the listing section, not Rule 1.
+        let entries = vec![
+            entry("IntelliJ IDEA", &[]),
+            entry("Notion", &[]),
+            entry("Cursor", &[]),
+            entry("Kubernetes", &["kubernetics", "cuber netties"]),
+        ];
+        let prompt = build_postprocess_prompt(&entries);
+        let listing_section = prompt
+            .split("# Rules")
+            .next()
+            .expect("prompt must have a Rules header");
+        assert!(
+            !listing_section.contains("IntelliJ IDEA"),
+            "bare auto-imported app names must not appear as a listing bullet:\n{listing_section}"
+        );
+        assert!(
+            !listing_section.contains("Notion"),
+            "bare auto-imported app names must not appear as a listing bullet:\n{listing_section}"
+        );
+        assert!(
+            !listing_section.contains("- Cursor"),
+            "bare auto-imported app names must not appear as a listing bullet:\n{listing_section}"
+        );
+        // Curated entry with mistranscriptions DOES appear in the listing.
+        assert!(
+            listing_section.contains("Kubernetes"),
+            "curated terms with mistranscriptions must still be fed:\n{listing_section}"
+        );
+        assert!(listing_section.contains("kubernetics"));
+    }
+
+    #[test]
+    fn postprocess_prompt_explicitly_warns_against_proper_noun_substitution() {
+        // The Rule 1 must explicitly call out the `idea` → `IntelliJ IDEA`
+        // failure mode so the LLM doesn't regress when models change.
+        let entries = vec![entry("Kubernetes", &["kubernetics"])];
+        let prompt = build_postprocess_prompt(&entries);
+        assert!(
+            prompt.to_lowercase().contains("idea"),
+            "Rule 1 should mention the canonical example bug to keep the model on rails:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn postprocess_prompt_handles_empty_glossary() {
+        let prompt = build_postprocess_prompt(&[]);
+        // Body is still produced even with no actionable entries.
+        assert!(prompt.contains("# Rules"));
+        // No empty `# Known mistranscriptions to fix` heading.
+        assert!(!prompt.contains("# Known mistranscriptions"));
+    }
+
+    #[test]
+    fn whisper_bias_prompt_still_includes_bare_terms() {
+        // Whisper's initial_prompt is gentle — bias-only, no rewrite —
+        // so it's safe to keep auto-imported app names there. Confirm
+        // the change above didn't accidentally also strip them from the
+        // bias prompt.
+        let entries = vec![entry("IntelliJ IDEA", &[]), entry("Notion", &[])];
+        let prompt = build_whisper_bias_prompt(&entries).unwrap();
+        assert!(prompt.contains("IntelliJ IDEA"));
+        assert!(prompt.contains("Notion"));
+    }
 }
