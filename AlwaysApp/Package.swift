@@ -12,10 +12,18 @@ let package = Package(
             targets: ["AlwaysApp"]
         )
     ],
+    dependencies: [
+        // Sparkle drives in-app auto-update against the appcast.xml emitted
+        // by the release workflow. EdDSA signing keys are documented in
+        // docs/RELEASE.md; the public half lives in Info.plist (`SUPublicEDKey`).
+        .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.6.0")
+    ],
     targets: [
         .executableTarget(
             name: "AlwaysApp",
-            dependencies: [],
+            dependencies: [
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             path: "Sources"
         ),
         .testTarget(

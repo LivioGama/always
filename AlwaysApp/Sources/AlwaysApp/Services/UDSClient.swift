@@ -3,8 +3,14 @@ import Darwin
 import Combine
 import os.log
 
+// Wire-format protocol version. MUST match `PROTOCOL_VERSION` in
+// `src/always/event.rs`. Bumping either side without the other will
+// cause the client to refuse the connection.
+let UDS_PROTOCOL_VERSION: UInt32 = 1
+
 // Event types matching Rust DaemonEvent enum
 enum DaemonEventType: String, Codable {
+    case hello = "Hello"
     case listeningStarted = "ListeningStarted"
     case listeningStopped = "ListeningStopped"
     case processingStarted = "ProcessingStarted"
@@ -32,30 +38,58 @@ struct TranscriptFinalData: Codable {
     let text: String
 }
 
+struct HelloData: Codable {
+    let version: UInt32
+}
+
 // Main event structure - matches Rust serde tagged enum format
 // Rust uses #[serde(tag = "type", content = "data")]
 // This produces JSON like: {"type":"ListeningStarted"} or {"type":"TranscriptFinal","data":{"text":"hello"}}
 struct DaemonEvent: Codable {
     let type: DaemonEventType
-    
-    // Data is nil for events without payloads, or contains the payload struct
+
+    // Data is nil for events without payloads, or contains the string payload
+    // for text-bearing events (TranscriptChunk, TranscriptFinal, …).
     let data: [String: String]?
-    
+
+    /// Populated only for `Hello`. Carries the wire-format protocol
+    /// version; the client refuses to talk to a daemon whose version it
+    /// was not built against.
+    let helloVersion: UInt32?
+
     enum CodingKeys: String, CodingKey {
         case type
         case data
     }
-    
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.type = try container.decode(DaemonEventType.self, forKey: .type)
-        self.data = try container.decodeIfPresent([String: String].self, forKey: .data)
+        let type = try container.decode(DaemonEventType.self, forKey: .type)
+        self.type = type
+        if type == .hello {
+            let payload = try container.decodeIfPresent(HelloData.self, forKey: .data)
+            self.helloVersion = payload?.version
+            self.data = nil
+        } else {
+            self.data = try container.decodeIfPresent([String: String].self, forKey: .data)
+            self.helloVersion = nil
+        }
     }
-    
+
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(type, forKey: .type)
-        try container.encodeIfPresent(data, forKey: .data)
+        if type == .hello, let v = helloVersion {
+            try container.encode(HelloData(version: v), forKey: .data)
+        } else {
+            try container.encodeIfPresent(data, forKey: .data)
+        }
+    }
+
+    init(type: DaemonEventType, data: [String: String]? = nil, helloVersion: UInt32? = nil) {
+        self.type = type
+        self.data = data
+        self.helloVersion = helloVersion
     }
 }
 
@@ -350,6 +384,26 @@ class UDSClient: ObservableObject {
         // Any event (incl. Heartbeat) proves the daemon is alive.
         lastEventTime = Date()
         logger.debug("handleEvent - type: \(event.type.rawValue, privacy: .public)")
+
+        // Hello carries the wire-format protocol version. If it doesn't
+        // match what this build expects, refuse to talk to the daemon —
+        // an outdated app and a new daemon will silently disagree on
+        // event shapes otherwise.
+        if event.type == .hello {
+            let actual = event.helloVersion ?? 0
+            if actual != UDS_PROTOCOL_VERSION {
+                let msg = "UDS protocol mismatch — expected v\(UDS_PROTOCOL_VERSION), daemon sent v\(actual). Disconnecting."
+                logger.error("\(msg, privacy: .public)")
+                log(msg)
+                DispatchQueue.main.async {
+                    self.connectionError = msg
+                }
+                disconnect()
+                return
+            }
+            log("Daemon protocol version v\(actual) accepted")
+            return
+        }
 
         // Heartbeat is purely a liveness signal — don't spam NotificationCenter.
         if event.type == .heartbeat { return }

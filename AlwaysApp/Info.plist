@@ -26,5 +26,24 @@
     <string>AlwaysApp needs accessibility access to position the voice indicator near your active text cursor.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>AlwaysApp needs accessibility access to position the voice indicator near your active text field.</string>
+    <!--
+      Sparkle auto-update settings.
+
+      `SUFeedURL`         — appcast XML emitted by .github/workflows/release.yml.
+      `SUPublicEDKey`     — base64 EdDSA public key. Rotate per docs/RELEASE.md;
+                            replace with the matching public half each rotation.
+                            Placeholder must be replaced before the first
+                            signed release reaches users.
+      `SUEnableAutomaticChecks` — enabled; user can disable via Settings.
+      `SUScheduledCheckInterval` — 86400s = once per day.
+    -->
+    <key>SUFeedURL</key>
+    <string>https://github.com/rtk-ai/always/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>REPLACE_WITH_BASE64_EDDSA_PUBLIC_KEY</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
 </dict>
 </plist>

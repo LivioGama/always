@@ -15,8 +15,11 @@ struct AlwaysApp: App {
         Window("Always Settings", id: "settings") {
             SettingsWindow(cliService: CLIService())
         }
-        .defaultSize(width: 800, height: 750)
-        
+        // `.contentSize` makes the window grow to exactly fit its SwiftUI
+        // content and disables manual resize handles. The settings view
+        // is laid out to fit on a 14" laptop without any scrolling.
+        .windowResizability(.contentSize)
+
         Window("Welcome to Always", id: "onboarding") {
             OnboardingView()
         }

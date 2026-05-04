@@ -12,11 +12,13 @@ struct Config: Codable {
     var shortcutAutoEnter: String
     var shortcutForcePaste: String
 
+    // Defaults match `SensitivityPreset::Normal` and the Rust
+    // `AlwaysConfig::default()` values.
     static let defaultConfig = Config(
-        sttEnergyThreshold: 0.005,
+        sttEnergyThreshold: 0.012,
         hearEnergyThreshold: 0.001,
         sttCooldownMs: 150,
-        sttSilence: 0.4,
+        sttSilence: 2.0,
         sttAutoEnter: false,
         groqApiKey: nil,
         sileroThreshold: 0.5,

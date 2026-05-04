@@ -6,10 +6,14 @@ on:
   pull_request:
     branches: [main, develop]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rust:
     name: Rust
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
@@ -40,25 +44,83 @@ jobs:
         run: cargo fmt --check
 
       - name: Run clippy
-        run: cargo clippy --release -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
       - name: Run tests
-        run: cargo test
+        run: cargo test --locked --all-targets
 
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage (lcov)
+        run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+          flags: rust
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Install cargo-audit / deny / machete
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny,cargo-machete
 
       - name: Security audit
-        run: cargo audit
-        # Non-blocking while the project audits transitive advisories; installation
-        # failures still fail the workflow so the audit cannot silently disappear.
-        continue-on-error: true
+        run: cargo audit --deny warnings
+
+      - name: Supply-chain (cargo-deny)
+        run: cargo deny --all-features check
+
+      - name: Unused deps (cargo-machete)
+        run: cargo machete
+
+  linux-build:
+    name: Linux build (CLI-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install ALSA + SQLite headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libsqlite3-dev pkg-config
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-linux-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build with --features linux
+        run: cargo build --no-default-features --features linux --locked
+
+      - name: Run audio-free unit tests
+        # Skip tests that touch macOS-only paths.
+        run: cargo test --no-default-features --features linux --locked --lib --bins -- --skip macos
 
   swift:
     name: Swift
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cache Swift build
+        uses: actions/cache@v4
+        with:
+          path: |
+            AlwaysApp/.build
+            ~/Library/Caches/org.swift.swiftpm
+          key: ${{ runner.os }}-swiftpm-${{ hashFiles('AlwaysApp/Package.swift', 'AlwaysApp/Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-swiftpm-
 
       - name: Build Swift app
         run: |

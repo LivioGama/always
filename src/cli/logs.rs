@@ -1,8 +1,12 @@
+// The `logs` subcommand renders structured log records to the user's
+// terminal — stdout/stderr are the deliberate output channels.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// View and manage Always logs
@@ -67,7 +71,7 @@ pub fn handle_logs(cmd: LogsCommand) -> Result<()> {
     Ok(())
 }
 
-fn resolve_log_file(log_dir: &PathBuf, date: Option<&str>) -> Result<PathBuf> {
+fn resolve_log_file(log_dir: &Path, date: Option<&str>) -> Result<PathBuf> {
     let date = date
         .map(|s| s.to_string())
         .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
@@ -81,7 +85,7 @@ fn resolve_log_file(log_dir: &PathBuf, date: Option<&str>) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn tail_pretty(path: &PathBuf, level_filter: Option<&str>) -> Result<()> {
+fn tail_pretty(path: &Path, level_filter: Option<&str>) -> Result<()> {
     let mut child = Command::new("tail")
         .arg("-F")
         .arg("-n")
@@ -186,7 +190,10 @@ fn render_event(json: &Value) -> Option<String> {
             let text = fields.get("text").and_then(Value::as_str);
             match text {
                 Some(t) => format!("⚡ Force-pasted: {t}"),
-                None => format!("⚡ Force-pasted: <{} chars hidden>", field_str(fields, "chars")),
+                None => format!(
+                    "⚡ Force-pasted: <{} chars hidden>",
+                    field_str(fields, "chars")
+                ),
             }
         }
         "dropped_low_energy" => format!("· dropped (low energy {})", field_str(fields, "energy")),

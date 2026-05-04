@@ -532,6 +532,7 @@ mod tests {
     }
 }
 #[cfg(test)]
+#[allow(clippy::print_stdout)]
 mod test_malformed_domains {
     use crate::always::ai_filter::AiFilter;
 

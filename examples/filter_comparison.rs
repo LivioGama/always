@@ -127,9 +127,9 @@ async fn run_comprehensive_comparison() {
     ];
 
     let mut agreements = 0;
-    let mut rule_wins = 0; // Cases where rule-based seems more correct
-    let mut ai_wins = 0; // Cases where AI seems more correct
-    let mut total = test_cases.len();
+    let _rule_wins = 0; // Cases where rule-based seems more correct
+    let _ai_wins = 0; // Cases where AI seems more correct
+    let total = test_cases.len();
 
     for (text, description) in test_cases {
         println!("\n📝 Testing: {} - \"{}\"", description, text);

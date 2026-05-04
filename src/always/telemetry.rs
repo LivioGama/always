@@ -63,7 +63,7 @@ pub fn init_logging(foreground: bool) -> Result<tracing_appender::non_blocking::
     }
 
     // Add oslog layer on macOS
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "macos"))]
     {
         init_oslog();
     }
@@ -72,7 +72,7 @@ pub fn init_logging(foreground: bool) -> Result<tracing_appender::non_blocking::
 }
 
 /// Initialize macOS oslog integration
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "macos"))]
 fn init_oslog() {
     use oslog::OsLogger;
 
@@ -82,13 +82,22 @@ fn init_oslog() {
     let _ = OsLogger::new("com.always.daemon").init();
 }
 
-/// Get the platform-specific log directory
+/// Get the platform-specific log directory.
+///
+/// Falls back to `std::env::temp_dir()/always` if the platform's home or
+/// config directory cannot be resolved. Logging is best-effort and must
+/// never panic the daemon.
 pub fn get_log_directory() -> PathBuf {
+    fn fallback() -> PathBuf {
+        tracing::warn!("home/config directory not resolvable; logs will go to a temp directory");
+        std::env::temp_dir().join("always")
+    }
+
     #[cfg(target_os = "macos")]
     {
         dirs::home_dir()
-            .expect("Home directory not found")
-            .join("Library/Logs/Always")
+            .map(|h| h.join("Library/Logs/Always"))
+            .unwrap_or_else(fallback)
     }
 
     #[cfg(target_os = "linux")]
@@ -97,8 +106,8 @@ pub fn get_log_directory() -> PathBuf {
             PathBuf::from(state_home).join("always")
         } else {
             dirs::home_dir()
-                .expect("Home directory not found")
-                .join(".local/state/always")
+                .map(|h| h.join(".local/state/always"))
+                .unwrap_or_else(fallback)
         }
     }
 
@@ -108,17 +117,16 @@ pub fn get_log_directory() -> PathBuf {
             PathBuf::from(local_appdata).join("Always/Logs")
         } else {
             dirs::home_dir()
-                .expect("Home directory not found")
-                .join("AppData/Local/Always/Logs")
+                .map(|h| h.join("AppData/Local/Always/Logs"))
+                .unwrap_or_else(fallback)
         }
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        // Fallback to config directory for other platforms
         dirs::config_dir()
-            .expect("Config directory not found")
-            .join("always")
+            .map(|c| c.join("always"))
+            .unwrap_or_else(fallback)
     }
 }
 

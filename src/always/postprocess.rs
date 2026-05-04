@@ -1,7 +1,8 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -70,7 +71,8 @@ impl PostProcessor {
         result = self.base_vocab.apply(&result);
 
         // Step 2: Apply context-aware corrections
-        if let Ok(context_vocab) = self.context_vocab.lock() {
+        {
+            let context_vocab = self.context_vocab.lock();
             let context_corrections = context_vocab.get_context_corrections();
             for (wrong, correct) in context_corrections {
                 result = result.replace(&wrong, &correct);
@@ -121,9 +123,7 @@ impl PostProcessor {
 
     async fn correct_grammar(&self, text: &str, api_key: &str) -> Result<String> {
         // Check cache first
-        if let Ok(cache) = self.cache.lock()
-            && let Some(cached) = cache.get(text)
-        {
+        if let Some(cached) = self.cache.lock().get(text) {
             return Ok(cached.clone());
         }
 
@@ -167,9 +167,9 @@ impl PostProcessor {
             .to_string();
 
         // Cache the result
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(text.to_string(), corrected.clone());
-        }
+        self.cache
+            .lock()
+            .insert(text.to_string(), corrected.clone());
 
         Ok(corrected)
     }
@@ -249,11 +249,11 @@ impl PostProcessor {
     pub fn apply_learned_corrections(&self, text: &str) -> String {
         let mut result = text.to_string();
 
-        let vocab_path = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))
-            .unwrap()
-            .join(".always")
-            .join("learning.json");
+        let Some(home) = dirs::home_dir() else {
+            tracing::warn!("home directory unavailable; skipping learned corrections");
+            return result;
+        };
+        let vocab_path = home.join(".always").join("learning.json");
 
         if vocab_path.exists()
             && let Ok(content) = std::fs::read_to_string(&vocab_path)

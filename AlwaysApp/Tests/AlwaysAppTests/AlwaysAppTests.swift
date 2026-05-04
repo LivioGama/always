@@ -62,7 +62,10 @@ final class AlwaysAppTests: XCTestCase {
             "sttSilence": 0.4,
             "sttAutoEnter": true,
             "groqApiKey": null,
-            "sileroThreshold": 0.5
+            "sileroThreshold": 0.5,
+            "shortcutPause": "ctrl+alt+p",
+            "shortcutAutoEnter": "ctrl+alt+a",
+            "shortcutForcePaste": "ctrl+alt+v"
         }
         """
         let data = json.data(using: .utf8)!
@@ -73,6 +76,7 @@ final class AlwaysAppTests: XCTestCase {
         XCTAssertEqual(config.sttSilence, 0.4)
         XCTAssertTrue(config.sttAutoEnter)
         XCTAssertEqual(config.sileroThreshold, 0.5)
+        XCTAssertEqual(config.shortcutPause, "ctrl+alt+p")
     }
 
     func testDaemonStatusModel() throws {
@@ -244,5 +248,77 @@ final class AlwaysAppTests: XCTestCase {
         )
         NotificationCenter.default.post(name: .daemonEvent, object: resumed)
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+    }
+
+    // MARK: - UDS protocol versioning
+
+    func testHelloEventDecodesVersion() throws {
+        let json = #"{"type":"Hello","data":{"version":1}}"#
+        let event = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: json.data(using: .utf8)!
+        )
+        XCTAssertEqual(event.type, .hello)
+        XCTAssertEqual(event.helloVersion, 1)
+        XCTAssertNil(event.data, "Hello payload should not collapse into the string-data dict")
+    }
+
+    func testHelloEventRoundTripsThroughCodable() throws {
+        let original = DaemonEvent(type: .hello, helloVersion: 1)
+        let encoded = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(DaemonEvent.self, from: encoded)
+        XCTAssertEqual(decoded.type, .hello)
+        XCTAssertEqual(decoded.helloVersion, 1)
+    }
+
+    func testProtocolVersionMatchesDaemon() throws {
+        // The Rust daemon's PROTOCOL_VERSION is pinned to 1 in
+        // tests/uds_protocol_test.rs. Bumping either side without the
+        // other will be caught by both tests.
+        XCTAssertEqual(UDS_PROTOCOL_VERSION, 1)
+    }
+
+    func testHelloWithMismatchedVersionIsObservable() throws {
+        // The client refuses connections on mismatch; here we just
+        // verify the decoder surfaces a non-1 version so handleEvent
+        // has the data it needs to refuse.
+        let json = #"{"type":"Hello","data":{"version":99}}"#
+        let event = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: json.data(using: .utf8)!
+        )
+        XCTAssertEqual(event.helloVersion, 99)
+    }
+
+    // MARK: - Sensitivity preset round-trip
+    //
+    // The threshold pairs MUST stay in lockstep with `SensitivityPreset`
+    // in `src/always/config.rs`. Drift between the two would silently
+    // make the GUI picker write different values than the CLI.
+
+    func testNormalPresetMatchesDefaultConfig() {
+        let (stt, hear) = SensitivityPreset.normal.thresholds
+        XCTAssertEqual(stt, Config.defaultConfig.sttEnergyThreshold)
+        XCTAssertEqual(hear, Config.defaultConfig.hearEnergyThreshold)
+    }
+
+    func testPresetRoundTripsThroughThresholds() {
+        for preset in SensitivityPreset.allCases {
+            let (s, h) = preset.thresholds
+            XCTAssertEqual(SensitivityPreset.from(stt: s, hear: h), preset)
+        }
+    }
+
+    func testCustomThresholdsResolveToNil() {
+        XCTAssertNil(SensitivityPreset.from(stt: 0.123, hear: 0.456))
+    }
+
+    func testPresetThresholdsAreOrderedByStrictness() {
+        // Higher sensitivity = lower energy thresholds.
+        let high = SensitivityPreset.high.thresholds.stt
+        let normal = SensitivityPreset.normal.thresholds.stt
+        let low = SensitivityPreset.low.thresholds.stt
+        XCTAssertLessThan(high, normal)
+        XCTAssertLessThan(normal, low)
     }
 }

@@ -6,6 +6,7 @@ struct MenuBarView: View {
     // shows live connection state from StateMonitor and exposes only
     // semantic toggles (pause = temporarily mute, not kill the daemon).
     @ObservedObject private var stateMonitor = StateMonitor.shared
+    @ObservedObject private var updateService = UpdateService.shared
     @Environment(\.openWindow) private var openWindow
 
     private var statusText: String {
@@ -69,6 +70,16 @@ struct MenuBarView: View {
 
             Divider()
 
+            Button(action: { updateService.checkForUpdates() }) {
+                Label("Check for Updates…", systemImage: "arrow.down.circle")
+            }
+            .disabled(!updateService.canCheckForUpdates)
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+
+            Divider()
+
             Button("Quit Always") {
                 AppDelegate.killStaleDaemon()
                 NSApplication.shared.terminate(nil)
@@ -92,26 +103,44 @@ struct MenuBarView: View {
         }
     }
 
-    /// Open today's daemon log file in the default app (usually Console.app
-    /// for plain text). Path: ~/Library/Logs/Always/always.YYYY-MM-DD
+    /// Open Terminal.app and stream today's daemon log with the bundled
+    /// CLI's pretty renderer. The previous implementation tried to hand
+    /// the raw JSON file to LaunchServices which usually picked Xcode or
+    /// nothing at all; running `always logs --pretty` in a real terminal
+    /// is what users actually want.
     private func openTodaysLog() {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        let dateString = formatter.string(from: Date())
+        let alwaysCLI = Self.bundledDaemonPath()
+        // Use single quotes around the path so spaces in the bundle path
+        // (e.g. "AlwaysApp.app") don't break the AppleScript-driven
+        // shell. Escape any single quotes inside the path defensively.
+        let escapedCLI = alwaysCLI.replacingOccurrences(of: "'", with: "'\\''")
+        let command = "'\(escapedCLI)' logs --pretty"
 
-        let logURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library")
-            .appendingPathComponent("Logs")
-            .appendingPathComponent("Always")
-            .appendingPathComponent("always.\(dateString)")
+        let script = """
+        tell application "Terminal"
+            activate
+            do script "\(command)"
+        end tell
+        """
 
-        if FileManager.default.fileExists(atPath: logURL.path) {
-            NSWorkspace.shared.open(logURL)
-        } else {
-            // No log yet for today — reveal the parent directory instead.
-            let logsDir = logURL.deletingLastPathComponent()
-            NSWorkspace.shared.open(logsDir)
+        if let osa = NSAppleScript(source: script) {
+            var err: NSDictionary?
+            osa.executeAndReturnError(&err)
+            if let err {
+                NSLog("openTodaysLog AppleScript failed: \(err)")
+            }
         }
+    }
+
+    /// Path to the daemon CLI bundled inside this app's Contents/MacOS.
+    /// Falls back to `always` on PATH for `swift run` development builds
+    /// where the binary lives elsewhere.
+    private static func bundledDaemonPath() -> String {
+        let bundled = Bundle.main.bundleURL
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("MacOS")
+            .appendingPathComponent("always")
+            .path
+        return FileManager.default.fileExists(atPath: bundled) ? bundled : "always"
     }
 }

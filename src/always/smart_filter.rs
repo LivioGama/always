@@ -26,8 +26,7 @@ pub async fn should_accept_with_ai(
                 return (result.should_accept, reason, corrected);
             }
             Err(e) => {
-                eprintln!("AI filter failed, falling back to rule-based: {}", e);
-                // Fall through to rule-based filtering
+                tracing::warn!(error = %e, "AI filter failed, falling back to rule-based");
             }
         }
     }

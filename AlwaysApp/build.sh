@@ -62,6 +62,31 @@ else
     echo "   Build the daemon first: cd .. && cargo build --bin always (or --release)"
 fi
 
+# Bundle Sparkle.framework. Swift Package Manager downloads it as part of
+# the Sparkle xcframework; we ship the macos-arm64_x86_64 slice. Without
+# this step the app crashes at launch with a dyld "Library not loaded:
+# @rpath/Sparkle.framework" error because @rpath resolves under
+# Contents/Frameworks/ in a real bundle.
+SPARKLE_SRC=".build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+if [ -d "$SPARKLE_SRC" ]; then
+    echo "Bundling Sparkle.framework..."
+    mkdir -p AlwaysApp.app/Contents/Frameworks
+    rm -rf AlwaysApp.app/Contents/Frameworks/Sparkle.framework
+    cp -R "$SPARKLE_SRC" AlwaysApp.app/Contents/Frameworks/Sparkle.framework
+    # `swift build` does NOT add @executable_path/../Frameworks to LC_RPATH.
+    # Without this the dyld lookup at launch fails because the framework
+    # only resolves at the standard bundle search path.
+    if ! otool -l AlwaysApp.app/Contents/MacOS/AlwaysApp \
+            | grep -A2 LC_RPATH | grep -q "@executable_path/../Frameworks"; then
+        install_name_tool -add_rpath "@executable_path/../Frameworks" \
+            AlwaysApp.app/Contents/MacOS/AlwaysApp
+        echo "✓ Added @executable_path/../Frameworks rpath"
+    fi
+    echo "✓ Sparkle.framework copied"
+else
+    echo "⚠️  Sparkle.framework not found at $SPARKLE_SRC — auto-update will not work"
+fi
+
 echo "Code signing app..."
 # Use stable bundle identifier for permissions persistence
 SIGN_IDENTITY="${ALWAYS_CODESIGN_IDENTITY:-}"

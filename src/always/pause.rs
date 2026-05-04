@@ -1,7 +1,9 @@
 //! Pause state and auto-enter state management for the always-on mode.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use parking_lot::Mutex;
 
 /// Shared pause state that can be toggled from anywhere
 pub struct PauseState {
@@ -124,18 +126,14 @@ static LAST_FILTERED: std::sync::LazyLock<Mutex<Option<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(None));
 
 pub fn set_last_filtered(text: impl Into<String>) {
-    if let Ok(mut slot) = LAST_FILTERED.lock() {
-        *slot = Some(text.into());
-    }
+    *LAST_FILTERED.lock() = Some(text.into());
 }
 
 pub fn take_last_filtered() -> Option<String> {
-    LAST_FILTERED.lock().ok().and_then(|mut slot| slot.take())
+    LAST_FILTERED.lock().take()
 }
 
 #[cfg(test)]
 pub fn clear_last_filtered_for_test() {
-    if let Ok(mut slot) = LAST_FILTERED.lock() {
-        *slot = None;
-    }
+    *LAST_FILTERED.lock() = None;
 }

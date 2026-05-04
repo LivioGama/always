@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use voice_activity_detector::VoiceActivityDetector;
 
 use crate::always::audio::{self, FRAME_BYTES, FRAME_MS, FRAME_SAMPLES};
@@ -43,8 +44,9 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     // - At final, if speculation is still valid (no resume), use its result —
     //   transcription has been running in parallel during the silence wait, so
     //   the user gets snappy paste with no extra latency cost.
-    // Tentative is half the final window, clamped to a sane range.
-    let tentative_silence_secs = (cfg.silence_secs * 0.5).clamp(0.4, 1.5);
+    // Tentative at 75% of final window (not 50%) to allow user to finish thought before speculation.
+    // If model returns early on partial audio, we still wait for final silence before accepting result.
+    let tentative_silence_secs = (cfg.silence_secs * 0.75).clamp(0.6, 2.0);
     let tentative_silence_frames =
         ((tentative_silence_secs * 1000.0) / FRAME_MS as f64).ceil() as usize;
     // Pre-buffer: keep 50ms of audio before speech detection to catch first words
@@ -59,8 +61,9 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     // Silero's probability naturally dips below 0.5 during voiceless consonants
     // (h, s, f), inter-syllable pauses, and quiet syllables — without hysteresis,
     // these brief dips accumulate consecutive_silence and prematurely cut the
-    // utterance mid-sentence. The exit threshold is 60% of the entry threshold.
-    let silence_threshold: f32 = speech_threshold * 0.6;
+    // utterance mid-sentence. Tighter threshold (75% vs 60%) prevents cutoff on
+    // trailing soft consonants like 's' in "models", 'f' in "leaf", 'h' in "with".
+    let silence_threshold: f32 = speech_threshold * 0.75;
     let mut vad_accum: Vec<i16> = Vec::with_capacity(1024);
     let mut last_prob: f32 = 0.0;
 
@@ -98,7 +101,7 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
 
     loop {
         let read = {
-            let mut recorder = recorder_arc.lock().unwrap();
+            let mut recorder = recorder_arc.lock();
             if let Some(ref mut rec) = recorder.as_mut() {
                 rec.read_frame(&mut frame_buf)?
             } else {
@@ -133,7 +136,7 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
             // is now stale because more speech will be appended).
             if speculation_pending {
                 speculation_pending = false;
-                *speculation_slot.lock().unwrap() = None;
+                *speculation_slot.lock() = None;
             }
             consecutive_speech += 1;
             consecutive_silence = 0;
@@ -178,11 +181,29 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
                 let api_key = cfg.groq_stt_api_key.clone();
                 let slot = Arc::clone(&speculation_slot);
                 std::thread::spawn(move || {
-                    let outcome = (|| -> Result<crate::stt::TranscriptionResult> {
-                        let wav = audio::create_wav_bytes_i16_mono_16k(&audio_snapshot)?;
-                        crate::stt::transcribe_from_bytes(wav, &api_key)
-                    })();
-                    *slot.lock().unwrap() = Some(outcome);
+                    // Wrap in catch_unwind: a panic in transcribe_from_bytes
+                    // (network, deserialization, etc.) used to poison
+                    // std::sync::Mutex and stall the next utterance. With
+                    // parking_lot the lock can't poison, but we still want
+                    // the slot populated with an Err so the main loop sees
+                    // the failure instead of timing out.
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                        || -> Result<crate::stt::TranscriptionResult> {
+                            let wav = audio::create_wav_bytes_i16_mono_16k(&audio_snapshot)?;
+                            crate::stt::transcribe_from_bytes(wav, &api_key)
+                                .map_err(anyhow::Error::from)
+                        },
+                    ))
+                    .unwrap_or_else(|panic_payload| {
+                        let msg = panic_payload
+                            .downcast_ref::<&'static str>()
+                            .copied()
+                            .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
+                            .unwrap_or("speculation thread panicked");
+                        tracing::error!(panic = %msg, "speculation transcription panicked");
+                        Err(anyhow::anyhow!("speculation transcription panicked: {msg}"))
+                    });
+                    *slot.lock() = Some(outcome);
                 });
             }
 
@@ -249,7 +270,7 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
         let max_wait = std::time::Duration::from_secs(10);
         let mut taken: Option<Result<crate::stt::TranscriptionResult>> = None;
         loop {
-            if let Some(r) = speculation_slot.lock().unwrap().take() {
+            if let Some(r) = speculation_slot.lock().take() {
                 taken = Some(r);
                 break;
             }

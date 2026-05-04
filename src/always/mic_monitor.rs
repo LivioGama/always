@@ -192,27 +192,23 @@ impl MicrophoneMonitor {
     fn check_alsa_devices(&self) -> Result<bool> {
         use std::fs;
 
-        // Check if any ALSA capture devices are in use
-        match fs::read_to_string("/proc/asound/cards") {
-            Ok(content) => {
-                // Basic check - if there are sound cards present, we can do more detailed checks
-                if !content.is_empty() {
-                    // Check for active PCM streams
-                    for card_dir in fs::read_dir("/proc/asound/").unwrap_or_else(|_| {
-                        return std::fs::read_dir("/dev/null").unwrap();
-                    }) {
-                        if let Ok(entry) = card_dir {
-                            let path = entry.path().join("pcm0c").join("info");
-                            if path.exists() {
-                                return Ok(true);
-                            }
-                        }
-                    }
-                }
-            }
-            Err(_) => {}
+        // Check if any ALSA capture devices are in use. Best-effort: any I/O
+        // failure here is treated as "no device in use" rather than panicking.
+        let Ok(content) = fs::read_to_string("/proc/asound/cards") else {
+            return Ok(false);
+        };
+        if content.is_empty() {
+            return Ok(false);
         }
-
+        let Ok(entries) = fs::read_dir("/proc/asound/") else {
+            return Ok(false);
+        };
+        for card_dir in entries {
+            let Ok(entry) = card_dir else { continue };
+            if entry.path().join("pcm0c").join("info").exists() {
+                return Ok(true);
+            }
+        }
         Ok(false)
     }
 

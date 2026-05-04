@@ -1,11 +1,12 @@
 use anyhow::Result;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::LazyLock;
-use std::sync::Mutex;
 
-// Global mutex for atomic file operations
+// Global mutex for atomic file operations. parking_lot is poison-free,
+// so a panic in a holder does not stall every future caller.
 static STATE_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,7 +77,7 @@ impl DaemonState {
     }
 
     pub fn set_listening(listening: bool) -> Result<()> {
-        let _lock = STATE_MUTEX.lock().unwrap();
+        let _lock = STATE_MUTEX.lock();
         let mut state = Self::load().unwrap_or_default();
         state.listening = listening;
         state.version += 1;
@@ -88,7 +89,7 @@ impl DaemonState {
     }
 
     pub fn set_processing(processing: bool) -> Result<()> {
-        let _lock = STATE_MUTEX.lock().unwrap();
+        let _lock = STATE_MUTEX.lock();
         let mut state = Self::load().unwrap_or_default();
         state.processing = processing;
         state.version += 1;
@@ -100,7 +101,7 @@ impl DaemonState {
     }
 
     pub fn set_transcribing(transcribing: bool) -> Result<()> {
-        let _lock = STATE_MUTEX.lock().unwrap();
+        let _lock = STATE_MUTEX.lock();
         let mut state = Self::load().unwrap_or_default();
         state.transcribing = transcribing;
         state.processing = !transcribing; // Clear processing when starting transcription
@@ -113,7 +114,7 @@ impl DaemonState {
     }
 
     pub fn set_transcript(transcript: String) -> Result<()> {
-        let _lock = STATE_MUTEX.lock().unwrap();
+        let _lock = STATE_MUTEX.lock();
         let mut state = Self::load().unwrap_or_default();
         state.last_transcript = Some(transcript);
         state.processing = false;
@@ -128,7 +129,7 @@ impl DaemonState {
     }
 
     pub fn set_paused(paused: bool) -> Result<()> {
-        let _lock = STATE_MUTEX.lock().unwrap();
+        let _lock = STATE_MUTEX.lock();
         let mut state = Self::load().unwrap_or_default();
         state.paused = paused;
         state.version += 1;
@@ -140,7 +141,7 @@ impl DaemonState {
     }
 
     pub fn set_auto_enter(auto_enter: bool) -> Result<()> {
-        let _lock = STATE_MUTEX.lock().unwrap();
+        let _lock = STATE_MUTEX.lock();
         let mut state = Self::load().unwrap_or_default();
         state.auto_enter = auto_enter;
         state.version += 1;
@@ -152,7 +153,7 @@ impl DaemonState {
     }
 
     pub fn set_voice_activity(voice_activity: bool) -> Result<()> {
-        let _lock = STATE_MUTEX.lock().unwrap();
+        let _lock = STATE_MUTEX.lock();
         let mut state = Self::load().unwrap_or_default();
         state.voice_activity = voice_activity;
         state.version += 1;

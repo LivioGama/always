@@ -4,7 +4,7 @@
 pub fn show_status_bar_indicator(paused: bool) -> anyhow::Result<()> {
     let icon = if paused { "🔇" } else { "🎤" };
     let status = if paused { "PAUSED" } else { "ACTIVE" };
-    eprintln!("{} ALWAYS {}", icon, status);
+    tracing::info!(target: "always::hud", "{} ALWAYS {}", icon, status);
     Ok(())
 }
 

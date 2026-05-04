@@ -43,6 +43,7 @@ fn main() {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct TestResult {
     accepted: bool,
     rejection_reason: Option<String>,
@@ -68,7 +69,7 @@ impl TestResults {
     fn add_result(&mut self, category: &str, sentence: &str, result: &TestResult) {
         self.categories
             .entry(category.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((sentence.to_string(), result.clone()));
     }
 
@@ -78,11 +79,9 @@ impl TestResults {
 
         let mut total_sentences = 0;
         let mut total_accepted = 0;
-        let mut total_rejected = 0;
 
         for (category, results) in &self.categories {
             let accepted = results.iter().filter(|(_, r)| r.accepted).count();
-            let rejected = results.iter().filter(|(_, r)| !r.accepted).count();
             let acceptance_rate = (accepted as f64 / results.len() as f64) * 100.0;
 
             println!(
@@ -95,7 +94,6 @@ impl TestResults {
 
             total_sentences += results.len();
             total_accepted += accepted;
-            total_rejected += rejected;
         }
 
         let overall_acceptance = (total_accepted as f64 / total_sentences as f64) * 100.0;
@@ -112,10 +110,10 @@ impl TestResults {
 
         for results in self.categories.values() {
             for (_, result) in results {
-                if !result.accepted {
-                    if let Some(reason) = &result.rejection_reason {
-                        *rejection_counts.entry(reason.clone()).or_insert(0) += 1;
-                    }
+                if !result.accepted
+                    && let Some(reason) = &result.rejection_reason
+                {
+                    *rejection_counts.entry(reason.clone()).or_insert(0) += 1;
                 }
             }
         }
@@ -154,7 +152,7 @@ impl TestResults {
 
                 content.push_str(&format!("{} {}{}\n", status, sentence, reason));
             }
-            content.push_str("\n");
+            content.push('\n');
         }
 
         fs::write(filename, content).expect("Failed to write results file");

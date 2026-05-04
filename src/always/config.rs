@@ -1,7 +1,8 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::Result;
+use parking_lot::Mutex;
 
 use super::context_vocab::ContextVocabulary;
 use super::postprocess::PostProcessor;
@@ -31,6 +32,125 @@ impl std::fmt::Display for VadMode {
         match self {
             Self::Local => write!(f, "local"),
         }
+    }
+}
+
+/// Coarse, user-facing mic sensitivity level. Each variant maps to a
+/// fixed pair of `stt_energy_threshold` + `hear_energy_threshold`. Both
+/// the GUI Mic Sensitivity picker and the
+/// `always config preset <low|normal|high>` CLI command write the same
+/// underlying preferences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensitivityPreset {
+    /// Quiet rooms / soft speakers — picks up faint speech but more
+    /// likely to false-trigger on background noise.
+    High,
+    /// Recommended default — balanced for typical office voice.
+    Normal,
+    /// Noisy environments — only loud, clear speech triggers transcription.
+    Low,
+}
+
+impl SensitivityPreset {
+    /// `(stt_energy_threshold, hear_energy_threshold)` for this preset.
+    pub fn thresholds(self) -> (f64, f64) {
+        match self {
+            SensitivityPreset::High => (0.005, 0.0005),
+            SensitivityPreset::Normal => (0.012, 0.001),
+            SensitivityPreset::Low => (0.025, 0.002),
+        }
+    }
+
+    /// Which preset (if any) the supplied raw thresholds correspond to.
+    /// Returns `None` for custom values.
+    pub fn from_thresholds(stt: f64, hear: f64) -> Option<Self> {
+        for preset in [Self::High, Self::Normal, Self::Low] {
+            let (s, h) = preset.thresholds();
+            if (s - stt).abs() < 1e-6 && (h - hear).abs() < 1e-6 {
+                return Some(preset);
+            }
+        }
+        None
+    }
+}
+
+impl std::str::FromStr for SensitivityPreset {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "low" => Ok(Self::Low),
+            "normal" | "medium" | "med" => Ok(Self::Normal),
+            "high" => Ok(Self::High),
+            _ => anyhow::bail!("invalid preset: {s}, must be one of low|normal|high"),
+        }
+    }
+}
+
+impl std::fmt::Display for SensitivityPreset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SensitivityPreset::Low => "low",
+            SensitivityPreset::Normal => "normal",
+            SensitivityPreset::High => "high",
+        })
+    }
+}
+
+#[cfg(test)]
+mod sensitivity_preset_tests {
+    use super::SensitivityPreset;
+    use std::str::FromStr;
+
+    #[test]
+    fn parses_canonical_names() {
+        assert_eq!(
+            SensitivityPreset::from_str("low").unwrap(),
+            SensitivityPreset::Low
+        );
+        assert_eq!(
+            SensitivityPreset::from_str("Normal").unwrap(),
+            SensitivityPreset::Normal
+        );
+        assert_eq!(
+            SensitivityPreset::from_str("HIGH").unwrap(),
+            SensitivityPreset::High
+        );
+    }
+
+    #[test]
+    fn accepts_medium_alias() {
+        assert_eq!(
+            SensitivityPreset::from_str("medium").unwrap(),
+            SensitivityPreset::Normal
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_levels() {
+        assert!(SensitivityPreset::from_str("ultra").is_err());
+    }
+
+    #[test]
+    fn round_trips_through_thresholds() {
+        for preset in [
+            SensitivityPreset::Low,
+            SensitivityPreset::Normal,
+            SensitivityPreset::High,
+        ] {
+            let (s, h) = preset.thresholds();
+            assert_eq!(SensitivityPreset::from_thresholds(s, h), Some(preset));
+        }
+    }
+
+    #[test]
+    fn custom_values_resolve_to_none() {
+        assert_eq!(SensitivityPreset::from_thresholds(0.999, 0.001), None);
+    }
+
+    #[test]
+    fn normal_default_matches_alwaysconfig_default() {
+        let (s, _) = SensitivityPreset::Normal.thresholds();
+        assert!((s - 0.012).abs() < 1e-9);
     }
 }
 
@@ -140,7 +260,7 @@ impl AlwaysConfig {
             silence_secs: prefs.stt_silence.unwrap_or(silence_secs),
             auto_enter,
             filter_enabled: true, // Always enabled - filter is always on
-            energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.15),
+            energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.012),
             onset_ms: 30,
             cooldown_ms: prefs.stt_cooldown_ms.unwrap_or(150),
             log_path: log_path_from_preferences(&prefs),
@@ -168,10 +288,12 @@ impl Default for AlwaysConfig {
         Self {
             lang: "en".to_string(),
             timeout_secs: 30,
-            silence_secs: 0.5,
+            // Defaults aligned with `SensitivityPreset::Normal` and the
+            // Mic Sensitivity / Speaking Style picker in the GUI.
+            silence_secs: 2.0,
             auto_enter: false,
             filter_enabled: true,
-            energy_threshold: 0.15,
+            energy_threshold: 0.012,
             onset_ms: 30,
             cooldown_ms: 150,
             log_path: default_log_path(),

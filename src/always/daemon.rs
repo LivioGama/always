@@ -1,3 +1,7 @@
+// Daemon lifecycle commands print user-facing status to stdout — that's
+// the CLI contract, not stray debug output.
+#![allow(clippy::print_stdout)]
+
 use std::io::Write as _;
 use std::path::PathBuf;
 

@@ -190,7 +190,12 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
     let is_paused = pause::is_paused();
     let is_auto_enter = pause::is_auto_enter_enabled();
 
+    // The Hello frame MUST be first so version-mismatched clients can
+    // disconnect before reading state they may not understand.
     let initial_events = vec![
+        DaemonEvent::Hello {
+            version: crate::always::event::PROTOCOL_VERSION,
+        },
         if is_paused {
             DaemonEvent::Paused
         } else {

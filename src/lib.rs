@@ -1,4 +1,5 @@
 //! always — Voice activation daemon with Groq STT.
+#![warn(clippy::print_stdout, clippy::print_stderr)]
 
 pub mod always;
 pub mod config;

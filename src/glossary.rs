@@ -180,6 +180,18 @@ fn load_entries() -> Result<Vec<Entry>> {
     Ok(entries)
 }
 
+/// Canonical user-facing location for glossary.json. The daemon writes
+/// here on `always vocab import`, the GUI Settings panel reveals here,
+/// and `locate_glossary` searches here first.
+pub fn user_glossary_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".always").join("glossary.json"))
+}
+
+/// Resolve the glossary path. Search order:
+///   1. `ALWAYS_GLOSSARY_PATH` env var (escape hatch for tests/CI)
+///   2. `~/.always/glossary.json` (canonical user location)
+///   3. `$CWD/glossary.json`             (legacy — for users who haven't migrated)
+///   4. Adjacent to the daemon binary    (legacy)
 fn locate_glossary() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("ALWAYS_GLOSSARY_PATH") {
         let pb = PathBuf::from(p);
@@ -188,6 +200,9 @@ fn locate_glossary() -> Option<PathBuf> {
         }
     }
     let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(p) = user_glossary_path() {
+        candidates.push(p);
+    }
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("glossary.json"));
     }
