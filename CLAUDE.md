@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **always** (971 symbols, 2059 relationships, 81 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **always** (1049 symbols, 2457 relationships, 88 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -56,19 +56,38 @@ The overlay system depends on TWO binaries that must be in sync:
 
 | You changed... | Must rebuild |
 |---|---|
-| Any `.rs` file in `src/` | Rust daemon (`cargo build --release`), then Swift app (`build.sh`) |
+| Any `.rs` file in `src/` | Rust daemon (`cargo build`), then Swift app (`build.sh`) |
 | Any `.swift` file in `AlwaysApp/Sources/` | Swift app only (`build.sh`) |
 | Both | Rust first, then Swift |
 
 **Why rebuild Swift after Rust changes?** `build.sh` copies the daemon binary into the Swift app bundle. If you only rebuild Rust, the bundle still has the old binary.
 
+**Profile choice — debug for local dev, release for distribution.**
+Local development uses the **debug** profile so `cfg!(debug_assertions)` is `true` and `should_log_transcripts()` returns `true` automatically — actual transcribed text shows in `always logs --pretty` without setting `ALWAYS_LOG_TRANSCRIPTS=1`. Release builds hide transcripts by default for privacy.
+
+`build.sh` auto-picks the newest of `target/release/always` and `target/debug/always`. Force a profile with `ALWAYS_BUILD_PROFILE=release|debug ./build.sh`.
+
 ### Simple Workflow (Do This Every Time)
 
-**After Rust changes:**
+**Preferred — `scripts/dev-rebuild.sh`:**
+```bash
+scripts/dev-rebuild.sh            # debug profile (default — transcripts visible)
+scripts/dev-rebuild.sh release    # release profile (transcripts hidden)
+```
+The script kills the running app, rebuilds Rust + Swift, redeploys to `/Applications/AlwaysApp.app`, and relaunches. It plays a short macOS system sound at each lifecycle marker (kill / compiled / up / fail) so you can hear progress while looking at logs. Mute with `ALWAYS_REBUILD_SILENT=1`.
+
+**Manual equivalent (after Rust changes, debug):**
+```bash
+pkill -f AlwaysApp
+cargo build --lib --bin always
+cd AlwaysApp && ./build.sh && open -a AlwaysApp
+```
+
+**Manual equivalent (release for distribution):**
 ```bash
 pkill -f AlwaysApp
 cargo build --release --lib --bin always
-cd AlwaysApp && ./build.sh && open -a AlwaysApp
+cd AlwaysApp && ALWAYS_BUILD_PROFILE=release ./build.sh && open -a AlwaysApp
 ```
 
 **After Swift-only changes:**
@@ -121,7 +140,9 @@ If `/tmp/udsclient.log` doesn't exist, the running app is a stale build without 
 
 2. **Build the Rust daemon (if any `.rs` changed):**
    ```bash
-   cargo build --release --lib --bin always
+   cargo build --lib --bin always       # debug — local dev, transcripts visible
+   # or:
+   cargo build --release --lib --bin always   # release — distribution, transcripts hidden
    ```
 
 3. **Build the Swift Mac app:**
@@ -154,12 +175,15 @@ Should show:
 
 Check status bar for Always icon and logs:
 ```bash
-# New log location (JSON format):
-tail -f ~/Library/Logs/Always/always.$(date +%Y-%m-%d)
+# Pretty (emoji) streaming — preferred:
+always logs --pretty
+# (or, for the bundled CLI: /Applications/AlwaysApp.app/Contents/MacOS/always logs --pretty)
 
-# Or human-readable streaming:
-tail -f ~/Library/Logs/Always/*.log | grep -v "oslog"
+# Raw JSON tail of today's file:
+tail -F ~/Library/Logs/Always/always.$(date +%Y-%m-%d)
 ```
+
+Transcripts (raw text in pasted/filtered/transcribed events) are visible automatically in **debug builds** (`cfg!(debug_assertions)` toggles `should_log_transcripts()`). For release builds set `ALWAYS_LOG_TRANSCRIPTS=1` (e.g. `launchctl setenv ALWAYS_LOG_TRANSCRIPTS 1`) before launching.
 
 ## Voice-to-Text Verification Checklist
 
@@ -167,7 +191,7 @@ tail -f ~/Library/Logs/Always/*.log | grep -v "oslog"
 
 1. **BUILD → VERIFY → NEXT rule (non-negotiable):**
    ```bash
-   cargo build --release --lib --bin always
+   cargo build --lib --bin always       # debug — local dev (use --release before shipping)
    pkill -f AlwaysApp
    cd AlwaysApp && ./build.sh && open -a AlwaysApp
    sleep 2

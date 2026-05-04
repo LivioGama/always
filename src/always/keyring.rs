@@ -65,7 +65,7 @@ pub fn delete_deepgram_api_key() -> Result<()> {
 /// Get a secret from keyring
 fn get_secret(account: &str) -> Result<Option<String>> {
     let entry = Entry::new(SERVICE_NAME, account)?;
-    
+
     match entry.get_password() {
         Ok(password) => Ok(Some(password)),
         Err(KeyringError::NoEntry) => Ok(None),
@@ -99,35 +99,35 @@ fn delete_secret(account: &str) -> Result<()> {
 /// to the secure keyring. After migration, the database fields should be nulled out.
 pub fn migrate_keys_from_db() -> Result<()> {
     use crate::db;
-    
+
     let conn = db::open()?;
     let prefs = db::get_preferences(&conn)?;
-    
+
     let mut migrated = false;
-    
+
     // Migrate Groq API key
-    if let Some(groq_key) = prefs.groq_api_key.as_ref() {
-        if get_groq_api_key()?.is_none() {
-            set_groq_api_key(groq_key)?;
-            // Null out in database
-            db::set_preference(&conn, "groq_api_key", "")?;
-            migrated = true;
-        }
+    if let Some(groq_key) = prefs.groq_api_key.as_ref()
+        && get_groq_api_key()?.is_none()
+    {
+        set_groq_api_key(groq_key)?;
+        // Null out in database
+        db::set_preference(&conn, "groq_api_key", "")?;
+        migrated = true;
     }
-    
+
     // Migrate Deepgram API key
-    if let Some(deepgram_key) = prefs.deepgram_api_key.as_ref() {
-        if get_deepgram_api_key()?.is_none() {
-            set_deepgram_api_key(deepgram_key)?;
-            // Null out in database
-            db::set_preference(&conn, "deepgram_api_key", "")?;
-            migrated = true;
-        }
+    if let Some(deepgram_key) = prefs.deepgram_api_key.as_ref()
+        && get_deepgram_api_key()?.is_none()
+    {
+        set_deepgram_api_key(deepgram_key)?;
+        // Null out in database
+        db::set_preference(&conn, "deepgram_api_key", "")?;
+        migrated = true;
     }
-    
+
     if migrated {
         tracing::info!("API keys migrated from database to keyring");
     }
-    
+
     Ok(())
 }

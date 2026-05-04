@@ -301,16 +301,17 @@ pub fn is_hallucination(result: &TranscriptionResult) -> Option<&'static str> {
         return Some("unicode replacement char");
     }
     let chars: Vec<char> = text.chars().collect();
-    if chars.windows(4).any(|w| {
-        w[0] == w[1] && w[1] == w[2] && w[2] == w[3] && w[0].is_alphabetic()
-    }) {
+    if chars
+        .windows(4)
+        .any(|w| w[0] == w[1] && w[1] == w[2] && w[2] == w[3] && w[0].is_alphabetic())
+    {
         return Some("repeated char run");
     }
 
     // ---- Layer G: suspicious single-token "domain" ----
     let words: Vec<&str> = text.split_whitespace().collect();
     if words.len() == 1 && text.contains('.') {
-        let has_non_ascii = text.chars().any(|c| !c.is_ascii());
+        let has_non_ascii = !text.is_ascii();
         let has_latin = text.chars().any(|c| c.is_ascii_alphabetic());
         if has_non_ascii || !has_latin {
             return Some("malformed domain");

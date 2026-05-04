@@ -8,7 +8,11 @@ mod cli;
 use cli::LogsCommand;
 
 #[derive(Parser)]
-#[command(name = "always", version, about = "Always-on voice activation daemon — Groq STT with intelligent transcription")]
+#[command(
+    name = "always",
+    version,
+    about = "Always-on voice activation daemon — Groq STT with intelligent transcription"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -63,7 +67,6 @@ enum Commands {
         #[command(subcommand)]
         action: VocabAction,
     },
-    /// Toggle pause/resume state
     /// View and manage Always logs
     Logs {
         #[command(flatten)]
@@ -109,6 +112,19 @@ enum ConfigAction {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Initialize structured logging (writes to ~/Library/Logs/Always/ on macOS).
+    // Foreground only for `Run` (the explicit foreground/debug subcommand).
+    let foreground = matches!(cli.command, Some(Commands::RunForeground { .. }));
+    let _logging_guard = always::always::telemetry::init_logging(foreground)
+        .map_err(|e| anyhow::anyhow!("Failed to initialize logging: {}", e))?;
+
+    // One-shot migration: move any plaintext API keys from SQLite to the OS Keychain.
+    // Non-fatal — if Keychain access fails (e.g., headless Linux without secret-service),
+    // existing config flow still works.
+    if let Err(e) = always::always::keyring::migrate_keys_from_db() {
+        tracing::warn!(error = %e, "key migration to keychain failed");
+    }
+
     match cli.command {
         Some(Commands::Start {
             lang,
@@ -118,7 +134,10 @@ fn main() -> Result<()> {
         }) => always::always::daemon::start(&always_config(lang, timeout, silence, auto_enter)?),
         Some(Commands::Stop) => always::always::daemon::stop(),
         Some(Commands::Status) => always::always::daemon::status(),
-        Some(Commands::GetState) => Ok(handle_get_state()),
+        Some(Commands::GetState) => {
+            handle_get_state();
+            Ok(())
+        }
         Some(Commands::RunForeground {
             lang,
             timeout,
@@ -157,7 +176,7 @@ fn handle_config(action: ConfigAction) -> Result<()> {
     match action {
         ConfigAction::Show => {
             let prefs = db::get_preferences(&conn)?;
-            
+
             // Check keychain for API keys
             let groq_in_keychain = always::always::keyring::get_groq_api_key()
                 .unwrap_or(None)
@@ -232,6 +251,21 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "0.5".to_string())
             );
+            println!(
+                "shortcut_pause: {}",
+                prefs.shortcut_pause.as_deref().unwrap_or("ctrl+alt+p")
+            );
+            println!(
+                "shortcut_auto_enter: {}",
+                prefs.shortcut_auto_enter.as_deref().unwrap_or("ctrl+alt+a")
+            );
+            println!(
+                "shortcut_force_paste: {}",
+                prefs
+                    .shortcut_force_paste
+                    .as_deref()
+                    .unwrap_or("ctrl+alt+v")
+            );
         }
         ConfigAction::Set { key, value } => {
             // Handle API keys specially - store in keychain
@@ -246,22 +280,20 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                 println!("{key} = {value}");
             }
         }
-        ConfigAction::DeleteKey { key } => {
-            match key.as_str() {
-                "groq_api_key" => {
-                    always::always::keyring::delete_groq_api_key()?;
-                    println!("groq_api_key deleted from keychain");
-                }
-                "deepgram_api_key" => {
-                    always::always::keyring::delete_deepgram_api_key()?;
-                    println!("deepgram_api_key deleted from keychain");
-                }
-                _ => {
-                    eprintln!("Unknown key: {key}. Valid keys: groq_api_key, deepgram_api_key");
-                    std::process::exit(1);
-                }
+        ConfigAction::DeleteKey { key } => match key.as_str() {
+            "groq_api_key" => {
+                always::always::keyring::delete_groq_api_key()?;
+                println!("groq_api_key deleted from keychain");
             }
-        }
+            "deepgram_api_key" => {
+                always::always::keyring::delete_deepgram_api_key()?;
+                println!("deepgram_api_key deleted from keychain");
+            }
+            _ => {
+                eprintln!("Unknown key: {key}. Valid keys: groq_api_key, deepgram_api_key");
+                std::process::exit(1);
+            }
+        },
         ConfigAction::Reset => {
             db::reset_preferences(&conn)?;
             println!("Preferences reset to defaults.");
@@ -302,7 +334,10 @@ fn handle_toggle_pause() -> Result<()> {
         always::always::event::global_broadcaster().resumed();
     }
 
-    println!("Pause state: {}", if new_state { "paused" } else { "resumed" });
+    println!(
+        "Pause state: {}",
+        if new_state { "paused" } else { "resumed" }
+    );
     Ok(())
 }
 
@@ -316,7 +351,10 @@ fn handle_toggle_auto_enter() -> Result<()> {
         always::always::event::global_broadcaster().auto_enter_disabled();
     }
 
-    println!("Auto-enter state: {}", if new_state { "enabled" } else { "disabled" });
+    println!(
+        "Auto-enter state: {}",
+        if new_state { "enabled" } else { "disabled" }
+    );
     Ok(())
 }
 

@@ -1,7 +1,9 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
-use std::process::Command;
-use always::always::telemetry;
+use serde_json::Value;
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 /// View and manage Always logs
 #[derive(Parser, Debug)]
@@ -21,11 +23,18 @@ pub struct LogsCommand {
     /// Use Console.app on macOS instead of tail
     #[arg(long)]
     pub console: bool,
+
+    /// Render logs in pretty emoji format (mirrors pre-9475cc5 layout)
+    #[arg(long)]
+    pub pretty: bool,
+
+    /// Specific date (YYYY-MM-DD). Defaults to today.
+    #[arg(long)]
+    pub date: Option<String>,
 }
 
 pub fn handle_logs(cmd: LogsCommand) -> Result<()> {
-    let log_dir = telemetry::get_log_directory();
-    let log_file = log_dir.join("always.log");
+    let log_dir = always::always::telemetry::get_log_directory();
 
     if cmd.path {
         println!("{}", log_dir.display());
@@ -44,21 +53,208 @@ pub fn handle_logs(cmd: LogsCommand) -> Result<()> {
         }
     }
 
-    // Build tail command
+    let log_file = resolve_log_file(&log_dir, cmd.date.as_deref())?;
+
+    if cmd.pretty {
+        return tail_pretty(&log_file, cmd.level.as_deref());
+    }
+
     let mut tail_cmd = Command::new("tail");
     tail_cmd.arg("-F").arg(&log_file);
-
-    // Execute tail
     let mut child = tail_cmd.spawn()?;
     child.wait()?;
 
     Ok(())
 }
 
+fn resolve_log_file(log_dir: &PathBuf, date: Option<&str>) -> Result<PathBuf> {
+    let date = date
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
+    let path = log_dir.join(format!("always.{date}"));
+    if !path.exists() {
+        anyhow::bail!(
+            "log file not found: {}. Available files: see `always logs --path`",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+fn tail_pretty(path: &PathBuf, level_filter: Option<&str>) -> Result<()> {
+    let mut child = Command::new("tail")
+        .arg("-F")
+        .arg("-n")
+        .arg("100")
+        .arg(path)
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("Failed to spawn tail")?;
+
+    let stdout = child.stdout.take().context("tail stdout missing")?;
+    let reader = BufReader::new(stdout);
+
+    let level_filter = level_filter.map(str::to_uppercase);
+
+    for line in reader.lines() {
+        let Ok(line) = line else { continue };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(json) = serde_json::from_str::<Value>(&line) else {
+            // Not JSON — print raw
+            println!("{line}");
+            continue;
+        };
+        if let Some(filter) = &level_filter
+            && let Some(lvl) = json.get("level").and_then(Value::as_str)
+            && lvl != filter
+        {
+            continue;
+        }
+        if let Some(rendered) = render_event(&json) {
+            println!("{rendered}");
+        }
+    }
+
+    child.wait().ok();
+    Ok(())
+}
+
+fn render_event(json: &Value) -> Option<String> {
+    let fields = json.get("fields")?;
+    let message = fields.get("message").and_then(Value::as_str)?;
+    let ts = json
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(format_timestamp)
+        .unwrap_or_default();
+    let prefix = if ts.is_empty() {
+        String::new()
+    } else {
+        format!("[{ts}] ")
+    };
+
+    let body = match message {
+        "daemon_started" => format!(
+            "🚀 DAEMON STARTED  ⚙️  energy={}  silence={}s  filter={}  auto_enter={}",
+            field_str(fields, "energy_threshold"),
+            field_str(fields, "silence_secs"),
+            field_str(fields, "filter_enabled"),
+            field_str(fields, "auto_enter"),
+        ),
+        "daemon_stopped" => "🛑 DAEMON STOPPED".to_string(),
+        "voice_detected" => "🎤 Voice detected...".to_string(),
+        "transcription_received" => {
+            let energy = field_str(fields, "energy");
+            let text = fields.get("text").and_then(Value::as_str);
+            match text {
+                Some(t) => format!("✓ Transcribed: \"{t}\"\n           │ Energy: {energy}"),
+                None => format!(
+                    "✓ Transcribed: <{} chars hidden>  │ Energy: {energy}",
+                    field_str(fields, "chars")
+                ),
+            }
+        }
+        "transcription_pasted" => {
+            let text = fields
+                .get("processed_text")
+                .or_else(|| fields.get("raw_text"))
+                .and_then(Value::as_str);
+            let energy = field_str(fields, "energy");
+            match text {
+                Some(t) => format!("✎ Pasted: {t}\n           │ Energy: {energy}"),
+                None => format!(
+                    "✎ Pasted: <{} chars hidden>  │ Energy: {energy}",
+                    field_str(fields, "chars")
+                ),
+            }
+        }
+        "transcription_filtered" => {
+            let reason = field_str(fields, "reason");
+            let energy = field_str(fields, "energy");
+            let text = fields.get("text").and_then(Value::as_str);
+            match text {
+                Some(t) => format!("🚫 Filtered [{reason}]: {t}\n           │ Energy: {energy}"),
+                None => format!(
+                    "🚫 Filtered [{reason}]: <{} chars hidden>  │ Energy: {energy}",
+                    field_str(fields, "chars")
+                ),
+            }
+        }
+        "force_pasted_filtered" => {
+            let text = fields.get("text").and_then(Value::as_str);
+            match text {
+                Some(t) => format!("⚡ Force-pasted: {t}"),
+                None => format!("⚡ Force-pasted: <{} chars hidden>", field_str(fields, "chars")),
+            }
+        }
+        "dropped_low_energy" => format!("· dropped (low energy {})", field_str(fields, "energy")),
+        "dropped_noise" => format!("· dropped (noise, {} chars)", field_str(fields, "chars")),
+        "pause_toggled" => {
+            if field_str(fields, "paused") == "true" {
+                "⏸  Paused".to_string()
+            } else {
+                "▶  Resumed".to_string()
+            }
+        }
+        "auto_enter_toggled" => {
+            let on = field_str(fields, "enabled") == "true";
+            format!("↵  Auto-enter {}", if on { "ON" } else { "OFF" })
+        }
+        "microphone_auto_paused" => {
+            format!("🎙️  Auto-paused — apps: {}", field_str(fields, "apps"))
+        }
+        "microphone_auto_resumed" => "🎙️  Auto-resumed".to_string(),
+        "daemon_error" => format!("❌ {}", field_str(fields, "message")),
+        "uds_server_listening" => format!("🔌 UDS listening: {}", field_str(fields, "socket_path")),
+        other => {
+            let level = json.get("level").and_then(Value::as_str).unwrap_or("INFO");
+            format!("[{level}] {other} {}", flatten_fields(fields))
+        }
+    };
+
+    Some(format!("{prefix}{body}"))
+}
+
+fn field_str(fields: &Value, key: &str) -> String {
+    match fields.get(key) {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Bool(b)) => b.to_string(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
+
+fn flatten_fields(fields: &Value) -> String {
+    let Value::Object(map) = fields else {
+        return String::new();
+    };
+    let mut parts = Vec::new();
+    for (k, v) in map {
+        if k == "message" {
+            continue;
+        }
+        parts.push(format!("{k}={v}"));
+    }
+    parts.join(" ")
+}
+
+fn format_timestamp(ts: &str) -> Option<String> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(ts).ok()?;
+    Some(
+        parsed
+            .with_timezone(&chrono::Local)
+            .format("%H:%M:%S")
+            .to_string(),
+    )
+}
+
 #[cfg(target_os = "macos")]
 fn view_logs_in_console() -> Result<()> {
     let status = Command::new("log")
-        .args(&[
+        .args([
             "stream",
             "--predicate",
             "subsystem CONTAINS \"com.always\"",

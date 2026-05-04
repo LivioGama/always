@@ -6,18 +6,13 @@ use anyhow::Result;
 use super::context_vocab::ContextVocabulary;
 use super::postprocess::PostProcessor;
 use super::text::Vocabulary;
-use crate::db::Preferences;
 use crate::db;
+use crate::db::Preferences;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum VadMode {
+    #[default]
     Local,
-}
-
-impl Default for VadMode {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 impl std::str::FromStr for VadMode {
@@ -120,14 +115,12 @@ impl AlwaysConfig {
 
         let project_root = detect_project_root();
 
-        let context_vocab = if let Some(ref root) = project_root {
-            Some(Arc::new(Mutex::new(ContextVocabulary::new_with_config(
+        let context_vocab = project_root.as_ref().map(|root| {
+            Arc::new(Mutex::new(ContextVocabulary::new_with_config(
                 Some(root.clone()),
                 vocab_config.clone(),
-            ))))
-        } else {
-            None
-        };
+            )))
+        });
 
         let post_processor = if let (Some(vocab), Some(context_vocab)) = (&vocab, &context_vocab) {
             let groq_api_key = std::env::var("GROQ_API_KEY").ok();
@@ -294,8 +287,10 @@ fn log_path_from_preferences(prefs: &Preferences) -> PathBuf {
 }
 
 fn default_log_path() -> PathBuf {
-    // Use platform-standard log directory from telemetry module
-    crate::always::telemetry::get_log_directory().join("always.log")
+    // Tracing-appender rotates daily and suffixes with the current date,
+    // so the actual file is `always.YYYY-MM-DD`, not `always.log`.
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    crate::always::telemetry::get_log_directory().join(format!("always.{date}"))
 }
 
 fn get_groq_stt_api_key() -> Result<String> {
@@ -314,13 +309,12 @@ fn get_groq_stt_api_key() -> Result<String> {
     }
 
     // Fallback to database preferences for migration purposes
-    if let Ok(conn) = db::open() {
-        if let Ok(prefs) = db::get_preferences(&conn) {
-            if let Some(key) = prefs.groq_api_key {
-                tracing::warn!("Groq API key loaded from database (should migrate to keychain)");
-                return Ok(key);
-            }
-        }
+    if let Ok(conn) = db::open()
+        && let Ok(prefs) = db::get_preferences(&conn)
+        && let Some(key) = prefs.groq_api_key
+    {
+        tracing::warn!("Groq API key loaded from database (should migrate to keychain)");
+        return Ok(key);
     }
 
     anyhow::bail!(

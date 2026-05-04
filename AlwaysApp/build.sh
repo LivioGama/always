@@ -27,16 +27,39 @@ cp Info.plist AlwaysApp.app/Contents/
 cp .build/debug/AlwaysApp AlwaysApp.app/Contents/MacOS/
 cp Resources/AlwaysIcon.icns AlwaysApp.app/Contents/Resources/
 
-# Copy daemon binary into app bundle
-DAEMON_PATH="../target/release/always"
+# Copy daemon binary into app bundle.
+# Pick newest of release/debug so local dev (debug build) keeps showing
+# transcripts in logs (privacy gate is auto-on in debug builds).
+# Override with ALWAYS_BUILD_PROFILE=release|debug to pin a specific profile.
+RELEASE_BIN="../target/release/always"
+DEBUG_BIN="../target/debug/always"
+DAEMON_PATH=""
+case "${ALWAYS_BUILD_PROFILE:-}" in
+    release) DAEMON_PATH="$RELEASE_BIN" ;;
+    debug)   DAEMON_PATH="$DEBUG_BIN" ;;
+    *)
+        if [ -f "$RELEASE_BIN" ] && [ -f "$DEBUG_BIN" ]; then
+            if [ "$DEBUG_BIN" -nt "$RELEASE_BIN" ]; then
+                DAEMON_PATH="$DEBUG_BIN"
+            else
+                DAEMON_PATH="$RELEASE_BIN"
+            fi
+        elif [ -f "$DEBUG_BIN" ]; then
+            DAEMON_PATH="$DEBUG_BIN"
+        else
+            DAEMON_PATH="$RELEASE_BIN"
+        fi
+        ;;
+esac
+
 if [ -f "$DAEMON_PATH" ]; then
-    echo "Copying daemon binary to app bundle..."
+    echo "Copying daemon binary to app bundle ($DAEMON_PATH)..."
     mkdir -p AlwaysApp.app/Contents/MacOS
     cp "$DAEMON_PATH" AlwaysApp.app/Contents/MacOS/always
     echo "✓ Daemon binary copied"
 else
     echo "⚠️  Warning: Daemon binary not found at $DAEMON_PATH"
-    echo "   Build the daemon first: cd .. && cargo build --release --bin always"
+    echo "   Build the daemon first: cd .. && cargo build --bin always (or --release)"
 fi
 
 echo "Code signing app..."

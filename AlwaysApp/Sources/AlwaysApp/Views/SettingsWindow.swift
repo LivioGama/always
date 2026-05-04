@@ -1,4 +1,84 @@
 import SwiftUI
+import AppKit
+
+// MARK: - Shortcut formatting helpers
+
+/// Format `"ctrl+alt+p"` → `"⌃⌥P"` for display.
+func formatShortcut(_ s: String) -> String {
+    let symbolMap: [String: String] = [
+        "ctrl": "⌃", "control": "⌃",
+        "alt": "⌥", "option": "⌥",
+        "shift": "⇧",
+        "meta": "⌘", "cmd": "⌘", "command": "⌘"
+    ]
+    let parts = s.lowercased().split(separator: "+").map(String.init)
+    return parts.map { symbolMap[$0] ?? $0.uppercased() }.joined()
+}
+
+// MARK: - Key capture button
+
+struct KeyCaptureButton: View {
+    let label: String
+    @Binding var shortcut: String
+    let onSave: (String) async -> Void
+
+    @State private var isRecording = false
+    @State private var monitor: Any?
+
+    var body: some View {
+        HStack {
+            Text(label)
+            Spacer()
+            Button(action: toggleRecording) {
+                Text(isRecording ? "Press keys…" : formatShortcut(shortcut))
+                    .monospacedDigit()
+                    .foregroundColor(isRecording ? .orange : .secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(isRecording ? Color.orange.opacity(0.08) : Color.clear)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(
+                                isRecording ? Color.orange : Color.secondary.opacity(0.35),
+                                lineWidth: 1
+                            )
+                    )
+                    .cornerRadius(5)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func toggleRecording() {
+        if isRecording { stopRecording(); return }
+        isRecording = true
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let mods = event.modifierFlags
+            var parts: [String] = []
+            if mods.contains(.control) { parts.append("ctrl") }
+            if mods.contains(.option)  { parts.append("alt") }
+            if mods.contains(.shift)   { parts.append("shift") }
+            if mods.contains(.command) { parts.append("meta") }
+
+            let keyChar = event.charactersIgnoringModifiers?.lowercased() ?? ""
+            // require at least one modifier + a single printable key
+            if !keyChar.isEmpty, keyChar.count == 1, !parts.isEmpty {
+                let newShortcut = (parts + [keyChar]).joined(separator: "+")
+                shortcut = newShortcut
+                Task { await onSave(newShortcut) }
+            }
+            stopRecording()
+            return nil
+        }
+    }
+
+    private func stopRecording() {
+        isRecording = false
+        if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+    }
+}
+
+// MARK: - Settings window
 
 struct SettingsWindow: View {
     @ObservedObject var cliService: CLIService
@@ -12,28 +92,20 @@ struct SettingsWindow: View {
     @FocusState private var focusedField: Field?
     @State private var vocabularyTermCount: Int = 0
     @State private var vocabularyPath: String = ""
-    
+
     enum Field {
         case apiKey
     }
 
     var body: some View {
         Form {
-            Section(header: Text("Daemon Control")) {
+            Section(header: Text("Status")) {
                 HStack {
-                    Button(action: toggleDaemon) {
-                        HStack {
-                            Image(systemName: status?.isRunning == true ? "stop.circle.fill" : "play.circle.fill")
-                            Text(status?.isRunning == true ? "Stop Daemon" : "Start Daemon")
-                        }
-                    }
-                    .disabled(isLoading)
-                    .buttonStyle(.borderedProminent)
-
+                    Image(systemName: status?.isRunning == true ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundColor(status?.isRunning == true ? .green : .orange)
+                    Text(status?.isRunning == true ? "Running" : "Reconnecting…")
+                        .foregroundColor(status?.isRunning == true ? .green : .orange)
                     Spacer()
-
-                    Text(status?.isRunning == true ? "Running" : "Stopped")
-                        .foregroundColor(status?.isRunning == true ? .green : .red)
                 }
             }
 
@@ -234,26 +306,33 @@ struct SettingsWindow: View {
             }
 
             Section(header: Text("Keyboard Shortcuts")) {
-                HStack {
-                    Text("Pause/Unpause")
-                    Spacer()
-                    Text("Ctrl+Shift+P")
-                        .foregroundColor(.secondary)
-                }
+                KeyCaptureButton(
+                    label: "Pause / Resume",
+                    shortcut: $config.shortcutPause,
+                    onSave: { value in
+                        _ = try? await cliService.setConfig(key: "shortcut_pause", value: value)
+                    }
+                )
 
-                HStack {
-                    Text("Toggle Auto-Enter")
-                    Spacer()
-                    Text("Ctrl+Shift+A")
-                        .foregroundColor(.secondary)
-                }
+                KeyCaptureButton(
+                    label: "Toggle Auto-Enter",
+                    shortcut: $config.shortcutAutoEnter,
+                    onSave: { value in
+                        _ = try? await cliService.setConfig(key: "shortcut_auto_enter", value: value)
+                    }
+                )
 
-                HStack {
-                    Text("Stop Daemon")
-                    Spacer()
-                    Text("Ctrl+C")
-                        .foregroundColor(.secondary)
-                }
+                KeyCaptureButton(
+                    label: "Paste Last Filtered",
+                    shortcut: $config.shortcutForcePaste,
+                    onSave: { value in
+                        _ = try? await cliService.setConfig(key: "shortcut_force_paste", value: value)
+                    }
+                )
+
+                Text("Shortcut changes take effect on next launch.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -275,23 +354,6 @@ struct SettingsWindow: View {
         .onChange(of: config.sttSilence) { _, _ in saveConfig() }
         .onChange(of: config.sttCooldownMs) { _, _ in saveConfig() }
         .onChange(of: config.sileroThreshold) { _, _ in saveConfig() }
-    }
-
-    private func toggleDaemon() {
-        isLoading = true
-        Task {
-            do {
-                if status?.isRunning == true {
-                    _ = try await cliService.stopDaemon()
-                } else {
-                    _ = try await cliService.startDaemon()
-                }
-                await refreshStatus()
-            } catch {
-                print("Error toggling daemon: \(error)")
-            }
-            isLoading = false
-        }
     }
 
     private func loadConfig() async {
@@ -324,7 +386,7 @@ struct SettingsWindow: View {
         Task {
             do {
                 // Only save API key if it's not masked (doesn't contain only dots)
-                if !apiKey.allSatisfy({ c in c == "•" }) {
+                if shouldPersistApiKey(apiKey) {
                     _ = try await cliService.setConfig(key: "groq_api_key", value: apiKey.isEmpty ? "" : apiKey)
                 }
                 // Add a small delay to make the loader visible for testing
@@ -346,7 +408,7 @@ struct SettingsWindow: View {
                 _ = try await cliService.setConfig(key: "stt_auto_enter", value: String(config.sttAutoEnter))
                 _ = try await cliService.setConfig(key: "silero_threshold", value: String(config.sileroThreshold))
                 // Only save API key if it's not masked (doesn't contain only dots)
-                if !apiKey.allSatisfy({ c in c == "•" }) {
+                if shouldPersistApiKey(apiKey) {
                     _ = try await cliService.setConfig(key: "groq_api_key", value: apiKey.isEmpty ? "" : apiKey)
                 }
             } catch {

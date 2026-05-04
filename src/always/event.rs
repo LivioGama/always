@@ -33,6 +33,9 @@ pub enum DaemonEvent {
     VoiceActivityDetected,
     /// Voice activity ended
     VoiceActivityEnded,
+    /// Transcription was rejected by the filter or hallucination detector.
+    /// Carries a short, human-readable reason so the GUI can display it.
+    TranscriptionFiltered { reason: String },
     /// Heartbeat for connection health
     Heartbeat,
 }
@@ -152,6 +155,13 @@ impl EventBroadcaster {
     /// Send voice activity ended event
     pub fn voice_activity_ended(&self) {
         self.send(DaemonEvent::VoiceActivityEnded);
+    }
+
+    /// Send transcription-filtered event with the human-readable reason.
+    pub fn transcription_filtered(&self, reason: impl Into<String>) {
+        self.send(DaemonEvent::TranscriptionFiltered {
+            reason: reason.into(),
+        });
     }
 }
 

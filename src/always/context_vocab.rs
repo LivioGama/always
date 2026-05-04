@@ -45,10 +45,9 @@ impl ContextVocabulary {
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .current_dir(root)
             .output()
+            && let Ok(branch) = String::from_utf8(branch_output.stdout)
         {
-            if let Ok(branch) = String::from_utf8(branch_output.stdout) {
-                self.git_branch = Some(branch.trim().to_string());
-            }
+            self.git_branch = Some(branch.trim().to_string());
         }
 
         // Get current commit
@@ -56,10 +55,9 @@ impl ContextVocabulary {
             .args(["rev-parse", "--short", "HEAD"])
             .current_dir(root)
             .output()
+            && let Ok(commit) = String::from_utf8(commit_output.stdout)
         {
-            if let Ok(commit) = String::from_utf8(commit_output.stdout) {
-                self.git_commit = Some(commit.trim().to_string());
-            }
+            self.git_commit = Some(commit.trim().to_string());
         }
     }
 
@@ -68,10 +66,10 @@ impl ContextVocabulary {
 
         // Extract from codemap.md if it exists
         let codemap_path = root.join("codemap.md");
-        if codemap_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&codemap_path) {
-                Self::extract_terms_from_markdown(&content, &mut terms, &self.config);
-            }
+        if codemap_path.exists()
+            && let Ok(content) = std::fs::read_to_string(&codemap_path)
+        {
+            Self::extract_terms_from_markdown(&content, &mut terms, &self.config);
         }
 
         // Extract from file names using Walk if available, otherwise simple directory traversal
@@ -84,15 +82,14 @@ impl ContextVocabulary {
                         Self::extract_terms_from_identifier(&name, &mut terms, &self.config);
                     }
 
-                    if path.extension().map_or(false, |ext| {
+                    if path.extension().is_some_and(|ext| {
                         matches!(
                             ext.to_str(),
                             Some("rs") | Some("ts") | Some("tsx") | Some("js") | Some("jsx")
                         )
-                    }) {
-                        if let Ok(content) = std::fs::read_to_string(path) {
-                            Self::extract_terms_from_javascript(&content, &mut terms, &self.config);
-                        }
+                    }) && let Ok(content) = std::fs::read_to_string(path)
+                    {
+                        Self::extract_terms_from_javascript(&content, &mut terms, &self.config);
                     }
                 }
             }

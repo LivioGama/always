@@ -1,16 +1,23 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
-use super::event::{global_broadcaster, DaemonCommand, DaemonEvent};
+use super::event::{DaemonCommand, DaemonEvent, global_broadcaster};
 use super::pause;
 
 // DoS protection constants
 const MAX_COMMAND_LINE_LENGTH: usize = 1024; // 1KB max command size
 const COMMANDS_PER_SECOND_LIMIT: u32 = 10; // Max 10 commands per second per client
+
+/// How long the daemon stays alive after the last UDS client disconnects.
+/// Prevents stale daemons surviving indefinitely when the Mac app quits.
+const ORPHAN_TIMEOUT_SECS: u64 = 30;
+
+static CONNECTED_CLIENTS: AtomicUsize = AtomicUsize::new(0);
 
 /// Rate limiter for UDS commands
 struct RateLimiter {
@@ -38,10 +45,7 @@ impl RateLimiter {
 
         // Check if we've exceeded the rate limit
         if self.command_count >= COMMANDS_PER_SECOND_LIMIT {
-            tracing::warn!(
-                commands = self.command_count,
-                "uds_rate_limit_exceeded"
-            );
+            tracing::warn!(commands = self.command_count, "uds_rate_limit_exceeded");
             return false;
         }
 
@@ -54,7 +58,10 @@ impl RateLimiter {
 fn validate_command(line: &str) -> Result<()> {
     // Check line length
     if line.len() > MAX_COMMAND_LINE_LENGTH {
-        anyhow::bail!("Command line exceeds maximum length of {} bytes", MAX_COMMAND_LINE_LENGTH);
+        anyhow::bail!(
+            "Command line exceeds maximum length of {} bytes",
+            MAX_COMMAND_LINE_LENGTH
+        );
     }
 
     // Check for basic JSON structure - must start with { and end with }
@@ -72,12 +79,21 @@ fn validate_command(line: &str) -> Result<()> {
     Ok(())
 }
 
+/// RAII guard that decrements connected client count on drop.
+struct ClientGuard;
+
+impl Drop for ClientGuard {
+    fn drop(&mut self) {
+        let prev = CONNECTED_CLIENTS.fetch_sub(1, Ordering::Relaxed);
+        tracing::info!(clients = prev - 1, "uds_client_disconnected");
+    }
+}
+
 /// Unix Domain Socket path for daemon-to-GUI communication
 pub fn socket_path() -> Result<PathBuf> {
     let path = if cfg!(target_os = "macos") {
         // macOS: Use ~/Library/Caches/Always/always.sock
-        let home = std::env::var("HOME")
-            .context("HOME environment variable not set")?;
+        let home = std::env::var("HOME").context("HOME environment variable not set")?;
         PathBuf::from(home)
             .join("Library")
             .join("Caches")
@@ -91,13 +107,12 @@ pub fn socket_path() -> Result<PathBuf> {
             PathBuf::from("/tmp/always.sock")
         }
     };
-    
+
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .context("Failed to create socket directory")?;
+        std::fs::create_dir_all(parent).context("Failed to create socket directory")?;
     }
-    
+
     Ok(path)
 }
 
@@ -110,10 +125,37 @@ pub async fn start_server() -> Result<()> {
         std::fs::remove_file(&socket_path)?;
     }
 
-    let listener = UnixListener::bind(&socket_path)
-        .context("Failed to bind Unix Domain Socket")?;
+    let listener = UnixListener::bind(&socket_path).context("Failed to bind Unix Domain Socket")?;
+
+    // Restrict socket to owner only — defense against local privilege escalation.
+    // Without this, a multi-user macOS could let any local user inject UDS commands.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+            .context("Failed to chmod 0600 on UDS socket")?;
+    }
 
     tracing::info!(socket_path = %socket_path.display(), "uds_server_listening");
+
+    // Orphan watchdog: if no UDS client is connected for ORPHAN_TIMEOUT_SECS,
+    // the Mac app is gone (quit/crashed/force-killed). Exit so we don't leave
+    // a stale daemon that the next app launch can't communicate with.
+    tokio::spawn(async {
+        let mut last_had_clients = Instant::now();
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let clients = CONNECTED_CLIENTS.load(Ordering::Relaxed);
+            if clients > 0 {
+                last_had_clients = Instant::now();
+            } else if last_had_clients.elapsed() > Duration::from_secs(ORPHAN_TIMEOUT_SECS) {
+                tracing::warn!(
+                    timeout_secs = ORPHAN_TIMEOUT_SECS,
+                    "orphan_daemon_exit: no UDS clients for too long"
+                );
+                std::process::exit(0);
+            }
+        }
+    });
 
     // Accept connections in a loop
     loop {
@@ -132,6 +174,13 @@ pub async fn start_server() -> Result<()> {
 
 /// Handle a single client connection
 async fn handle_client(stream: UnixStream) -> Result<()> {
+    CONNECTED_CLIENTS.fetch_add(1, Ordering::Relaxed);
+    let _guard = ClientGuard;
+    tracing::info!(
+        clients = CONNECTED_CLIENTS.load(Ordering::Relaxed),
+        "uds_client_connected"
+    );
+
     let mut rx = global_broadcaster().subscribe();
     let (reader, mut writer) = stream.into_split();
     let reader = BufReader::new(reader);
@@ -142,17 +191,25 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
     let is_auto_enter = pause::is_auto_enter_enabled();
 
     let initial_events = vec![
-        if is_paused { DaemonEvent::Paused } else { DaemonEvent::Resumed },
-        if is_auto_enter { DaemonEvent::AutoEnterEnabled } else { DaemonEvent::AutoEnterDisabled },
+        if is_paused {
+            DaemonEvent::Paused
+        } else {
+            DaemonEvent::Resumed
+        },
+        if is_auto_enter {
+            DaemonEvent::AutoEnterEnabled
+        } else {
+            DaemonEvent::AutoEnterDisabled
+        },
         DaemonEvent::ListeningStarted,
     ];
 
     for event in initial_events {
-        if let Ok(json_line) = event.to_json_line() {
-            if let Err(e) = writer.write_all(json_line.as_bytes()).await {
-                tracing::error!(error = %e, "uds_send_initial_state_failed");
-                return Ok(());
-            }
+        if let Ok(json_line) = event.to_json_line()
+            && let Err(e) = writer.write_all(json_line.as_bytes()).await
+        {
+            tracing::error!(error = %e, "uds_send_initial_state_failed");
+            return Ok(());
         }
     }
 
@@ -185,7 +242,8 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
 
                     // Check rate limit
                     {
-                        let mut limiter: tokio::sync::MutexGuard<RateLimiter> = rate_limiter.lock().await;
+                        let mut limiter: tokio::sync::MutexGuard<RateLimiter> =
+                            rate_limiter.lock().await;
                         if !limiter.check() {
                             tracing::warn!("uds_rate_limit_rejected_command");
                             continue;
@@ -194,7 +252,9 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
 
                     match DaemonCommand::from_json_line(trimmed) {
                         Ok(cmd) => execute_command(cmd),
-                        Err(e) => tracing::error!(error = %e, "uds_parse_command_failed: {command}", command = trimmed),
+                        Err(e) => {
+                            tracing::error!(error = %e, "uds_parse_command_failed: {command}", command = trimmed)
+                        }
                     }
                 }
                 Err(e) => {

@@ -1,11 +1,17 @@
-use std::time::{Duration, Instant};
 use anyhow::Result;
+use std::time::{Duration, Instant};
 
 /// Cross-platform microphone usage monitor
 pub struct MicrophoneMonitor {
     last_check: Instant,
     check_interval: Duration,
     last_usage_state: bool,
+}
+
+impl Default for MicrophoneMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MicrophoneMonitor {
@@ -117,7 +123,7 @@ impl MicrophoneMonitor {
         // Single subprocess: lsof for CoreAudio file descriptors,
         // excluding our own processes (always, rec, sox, coreaudiod itself).
         let output = Command::new("sh")
-            .args(&[
+            .args([
                 "-c",
                 "lsof -c /coreaudio/i 2>/dev/null | grep -iv -e always -e '\\brec\\b' -e sox -e coreaudiod | head -5",
             ])
@@ -170,9 +176,7 @@ impl MicrophoneMonitor {
         }
 
         // Try pw-cli (PipeWire)
-        let output = Command::new("pw-cli")
-            .args(&["list-objects"])
-            .output();
+        let output = Command::new("pw-cli").args(&["list-objects"]).output();
 
         match output {
             Ok(result) if result.status.success() => {
@@ -224,13 +228,23 @@ impl MicrophoneMonitor {
             return Ok(false);
         }
 
-        let processes = String::from_utf8(output.stdout)
-            .context("Invalid UTF-8 in ps output")?;
+        let processes = String::from_utf8(output.stdout).context("Invalid UTF-8 in ps output")?;
 
         const AUDIO_APPS: &[&str] = &[
-            "zoom", "skype", "teams", "discord", "firefox", "chrome",
-            "obs", "audacity", "kdenlive", "openshot", "audacious",
-            "pulseaudio", "pipewire", "jack"
+            "zoom",
+            "skype",
+            "teams",
+            "discord",
+            "firefox",
+            "chrome",
+            "obs",
+            "audacity",
+            "kdenlive",
+            "openshot",
+            "audacious",
+            "pulseaudio",
+            "pipewire",
+            "jack",
         ];
 
         let processes_lower = processes.to_lowercase();
@@ -288,8 +302,7 @@ impl MicrophoneMonitor {
             return Ok(users);
         }
 
-        let processes = String::from_utf8(output.stdout)
-            .context("Invalid UTF-8 in ps output")?;
+        let processes = String::from_utf8(output.stdout).context("Invalid UTF-8 in ps output")?;
 
         const AUDIO_APPS: &[(&str, &str)] = &[
             ("zoom", "Zoom"),

@@ -29,6 +29,15 @@ class CLIService: ObservableObject {
         try await runCLI(arguments: ["stop"])
     }
 
+    /// Force-kill any existing daemon and start fresh. Handles stale daemons
+    /// that survived a crash or force-quit.
+    func restartDaemon() async throws -> String {
+        AppDelegate.killStaleDaemon()
+        // Brief pause so the OS reclaims the socket and PID file
+        try await Task.sleep(nanoseconds: 300_000_000) // 300ms
+        return try await runCLI(arguments: ["start"])
+    }
+
     func getStatus() async throws -> DaemonStatus {
         let output = try await runCLI(arguments: ["status"])
         return DaemonStatus.fromCLI(output: output) ?? DaemonStatus(isRunning: false, pid: nil, logPath: nil)

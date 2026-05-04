@@ -97,8 +97,8 @@ docs/
 
 ## 📚 Documentation
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — Architecture details
-- [DEVELOPMENT.md](DEVELOPMENT.md) — Development & contributing
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — Architecture details
+- [DEVELOPMENT.md](docs/DEVELOPMENT.md) — Development & contributing
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — Troubleshooting guide
 
 ## 📄 License

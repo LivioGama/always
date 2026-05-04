@@ -2,8 +2,8 @@
 // These tests verify the daemon lifecycle, UDS communication, and end-to-end transcription flow
 
 use std::time::Duration;
-use tokio::time::sleep;
 use tokio::net::UnixStream;
+use tokio::time::sleep;
 
 #[tokio::test]
 #[ignore] // Requires daemon to be running
@@ -11,7 +11,7 @@ async fn test_daemon_uds_connection() {
     use serde_json::json;
 
     let socket_path = always::always::uds_server::socket_path().unwrap();
-    
+
     // Wait a bit for daemon to start
     sleep(Duration::from_millis(500)).await;
 
@@ -23,7 +23,7 @@ async fn test_daemon_uds_connection() {
     // Send a TogglePause command
     let command = json!({"type": "TogglePause"});
     let command_str = serde_json::to_string(&command).unwrap() + "\n";
-    
+
     let (mut reader, mut writer) = stream.into_split();
     tokio::io::AsyncWriteExt::write_all(&mut writer, command_str.as_bytes())
         .await
@@ -34,10 +34,13 @@ async fn test_daemon_uds_connection() {
     let n = tokio::io::AsyncReadExt::read(&mut reader, &mut buffer)
         .await
         .expect("Failed to read response");
-    
+
     let response = String::from_utf8_lossy(&buffer[..n]);
-    assert!(response.contains("Paused"), "Expected Paused event in response");
-    
+    assert!(
+        response.contains("Paused"),
+        "Expected Paused event in response"
+    );
+
     println!("UDS connection test passed");
 }
 
@@ -47,9 +50,7 @@ async fn test_daemon_lifecycle() {
     use std::process::Command;
 
     // Stop any existing daemon
-    let _ = Command::new("always")
-        .arg("stop")
-        .output();
+    let _ = Command::new("always").arg("stop").output();
 
     // Start daemon
     let output = Command::new("always")
@@ -69,7 +70,10 @@ async fn test_daemon_lifecycle() {
         .expect("Failed to get daemon status");
 
     let status_output = String::from_utf8_lossy(&output.stdout);
-    assert!(status_output.contains("Running"), "Daemon should be running");
+    assert!(
+        status_output.contains("Running"),
+        "Daemon should be running"
+    );
 
     // Stop daemon
     let output = Command::new("always")
@@ -102,7 +106,10 @@ async fn test_config_commands() {
         .expect("Failed to get config");
 
     let config_output = String::from_utf8_lossy(&output.stdout);
-    assert!(config_output.contains("energy_threshold"), "Config should contain energy_threshold");
+    assert!(
+        config_output.contains("energy_threshold"),
+        "Config should contain energy_threshold"
+    );
 
     println!("Config commands test passed");
 }
@@ -113,9 +120,7 @@ async fn test_toggle_pause() {
     use std::process::Command;
 
     // Start daemon if not running
-    let _ = Command::new("always")
-        .arg("start")
-        .output();
+    let _ = Command::new("always").arg("start").output();
 
     sleep(Duration::from_secs(2)).await;
 
@@ -141,14 +146,18 @@ async fn test_toggle_pause() {
 #[test]
 fn test_socket_path_resolution() {
     let socket_path = always::always::uds_server::socket_path().unwrap();
-    
+
     // On macOS, should use ~/Library/Caches/Always/always.sock
     // On Linux, should use XDG_RUNTIME_DIR or /tmp
     #[cfg(target_os = "macos")]
     {
-        assert!(socket_path.to_string_lossy().contains("Library/Caches/Always"));
+        assert!(
+            socket_path
+                .to_string_lossy()
+                .contains("Library/Caches/Always")
+        );
     }
-    
+
     #[cfg(not(target_os = "macos"))]
     {
         // Either XDG_RUNTIME_DIR or /tmp
@@ -158,6 +167,6 @@ fn test_socket_path_resolution() {
             "Socket path should use runtime directory or /tmp"
         );
     }
-    
+
     println!("Socket path resolution test passed");
 }

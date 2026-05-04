@@ -1,7 +1,8 @@
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Configuration for a vocabulary plugin
+#[derive(Default)]
 pub struct PluginConfig {
     /// Custom installation path (optional)
     pub install_path: Option<PathBuf>,
@@ -13,18 +14,6 @@ pub struct PluginConfig {
     pub api_endpoints: Vec<String>,
     /// Custom metadata
     pub metadata: std::collections::HashMap<String, String>,
-}
-
-impl Default for PluginConfig {
-    fn default() -> Self {
-        Self {
-            install_path: None,
-            config_paths: Vec::new(),
-            data_paths: Vec::new(),
-            api_endpoints: Vec::new(),
-            metadata: std::collections::HashMap::new(),
-        }
-    }
 }
 
 /// Trait for vocabulary import plugins
@@ -52,7 +41,7 @@ pub trait VocabPlugin {
     fn is_installed(&self) -> bool;
 
     /// Check if the software is installed at a specific path
-    fn is_installed_at(&self, path: &PathBuf) -> bool {
+    fn is_installed_at(&self, path: &Path) -> bool {
         path.exists()
     }
 
@@ -106,15 +95,17 @@ pub trait VocabPlugin {
         }
 
         // Limit to top 100 terms by frequency
-        let mut term_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut term_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         for term in &all_terms {
             *term_counts.entry(term.clone()).or_insert(0) += 1;
         }
-        
+
         let mut sorted_terms: Vec<(String, usize)> = term_counts.into_iter().collect();
         sorted_terms.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by frequency descending
-        
-        let top_100: Vec<String> = sorted_terms.into_iter()
+
+        let top_100: Vec<String> = sorted_terms
+            .into_iter()
             .take(100)
             .map(|(term, _)| term)
             .collect();
@@ -136,58 +127,89 @@ impl VocabPlugin for SuperwhisperPlugin {
 
     fn get_config(&self) -> PluginConfig {
         let mut config = PluginConfig::default();
-        
+
         // Common Superwhisper configuration paths
         #[cfg(target_os = "macos")]
         {
             if let Ok(home) = std::env::var("HOME") {
-                config.config_paths.push(PathBuf::from(format!("{}/Library/Application Support/Superwhisper", home)));
-                config.data_paths.push(PathBuf::from(format!("{}/Library/Application Support/Superwhisper/vocabulary.json", home)));
-                config.data_paths.push(PathBuf::from(format!("{}/Documents/superwhisper/recordings", home)));
+                config.config_paths.push(PathBuf::from(format!(
+                    "{}/Library/Application Support/Superwhisper",
+                    home
+                )));
+                config.data_paths.push(PathBuf::from(format!(
+                    "{}/Library/Application Support/Superwhisper/vocabulary.json",
+                    home
+                )));
+                config.data_paths.push(PathBuf::from(format!(
+                    "{}/Documents/superwhisper/recordings",
+                    home
+                )));
             }
         }
-        
+
         #[cfg(target_os = "windows")]
         {
             if let Ok(appdata) = std::env::var("APPDATA") {
-                config.config_paths.push(PathBuf::from(format!(r"{}\Superwhisper", appdata)));
-                config.data_paths.push(PathBuf::from(format!(r"{}\Superwhisper\vocabulary.json", appdata)));
-                config.data_paths.push(PathBuf::from(format!(r"{}\Superwhisper\recordings", appdata)));
+                config
+                    .config_paths
+                    .push(PathBuf::from(format!(r"{}\Superwhisper", appdata)));
+                config.data_paths.push(PathBuf::from(format!(
+                    r"{}\Superwhisper\vocabulary.json",
+                    appdata
+                )));
+                config.data_paths.push(PathBuf::from(format!(
+                    r"{}\Superwhisper\recordings",
+                    appdata
+                )));
             }
             if let Ok(home) = std::env::var("USERPROFILE") {
-                config.data_paths.push(PathBuf::from(format!(r"{}\Documents\Superwhisper\recordings", home)));
+                config.data_paths.push(PathBuf::from(format!(
+                    r"{}\Documents\Superwhisper\recordings",
+                    home
+                )));
             }
         }
-        
+
         #[cfg(target_os = "linux")]
         {
             if let Ok(home) = std::env::var("HOME") {
-                config.config_paths.push(PathBuf::from(format!("{}/.config/superwhisper", home)));
-                config.data_paths.push(PathBuf::from(format!("{}/.config/superwhisper/vocabulary.json", home)));
-                config.data_paths.push(PathBuf::from(format!("{}/Documents/superwhisper/recordings", home)));
+                config
+                    .config_paths
+                    .push(PathBuf::from(format!("{}/.config/superwhisper", home)));
+                config.data_paths.push(PathBuf::from(format!(
+                    "{}/.config/superwhisper/vocabulary.json",
+                    home
+                )));
+                config.data_paths.push(PathBuf::from(format!(
+                    "{}/Documents/superwhisper/recordings",
+                    home
+                )));
             }
         }
-        
+
         config
     }
 
     fn get_installation_paths(&self) -> Vec<PathBuf> {
         let mut paths = Vec::new();
-        
+
         #[cfg(target_os = "macos")]
         {
             paths.push(PathBuf::from("/Applications/superwhisper.app"));
         }
-        
+
         #[cfg(target_os = "windows")]
         {
             paths.push(PathBuf::from(r"C:\Program Files\Superwhisper"));
             paths.push(PathBuf::from(r"C:\Program Files (x86)\Superwhisper"));
             if let Ok(username) = std::env::var("USERNAME") {
-                paths.push(PathBuf::from(format!(r"C:\Users\{}\AppData\Local\Programs\Superwhisper", username)));
+                paths.push(PathBuf::from(format!(
+                    r"C:\Users\{}\AppData\Local\Programs\Superwhisper",
+                    username
+                )));
             }
         }
-        
+
         #[cfg(target_os = "linux")]
         {
             paths.push(PathBuf::from("/usr/bin/superwhisper"));
@@ -196,19 +218,19 @@ impl VocabPlugin for SuperwhisperPlugin {
                 paths.push(PathBuf::from(format!("{}/.local/bin/superwhisper", home)));
             }
         }
-        
+
         paths
     }
 
     fn is_installed(&self) -> bool {
         // Check custom config path first
         let config = self.get_config();
-        if let Some(custom_path) = config.install_path {
-            if custom_path.exists() {
-                return true;
-            }
+        if let Some(custom_path) = config.install_path
+            && custom_path.exists()
+        {
+            return true;
         }
-        
+
         // Check default installation paths
         self.get_installation_paths().iter().any(|p| p.exists())
     }
@@ -264,73 +286,74 @@ impl VocabPlugin for SuperwhisperPlugin {
     fn extract_vocabulary_from_config(&self) -> Result<Vec<String>> {
         let mut terms = Vec::new();
         let config = self.get_config();
-        
+
         // Try to read vocabulary from config files
         for config_path in &config.config_paths {
-            if config_path.exists() {
-                if let Ok(entries) = std::fs::read_dir(config_path) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.extension().map_or(false, |ext| ext == "json") {
-                            if let Ok(content) = std::fs::read_to_string(&path) {
-                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                                    extract_strings_from_json(&json, &mut terms);
-                                }
-                            }
-                        }
+            if config_path.exists()
+                && let Ok(entries) = std::fs::read_dir(config_path)
+            {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().is_some_and(|ext| ext == "json")
+                        && let Ok(content) = std::fs::read_to_string(&path)
+                        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+                    {
+                        extract_strings_from_json(&json, &mut terms);
                     }
                 }
             }
         }
-        
+
         Ok(terms)
     }
 
     fn extract_vocabulary_from_data(&self) -> Result<Vec<String>> {
         let mut terms = Vec::new();
         let config = self.get_config();
-        
+
         // Try to read transcripts from recordings folder
         for data_path in &config.data_paths {
-            if data_path.ends_with("recordings") && data_path.exists() {
-                if let Ok(entries) = std::fs::read_dir(data_path) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.is_dir() {
-                            // Check if this recording was made with Ultra model
-                            let meta_path = path.join("meta.json");
-                            if meta_path.exists() {
-                                if let Ok(meta_content) = std::fs::read_to_string(&meta_path) {
-                                    if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_content) {
-                                        // Check if model is Ultra
-                                        let is_ultra = meta.get("modelName")
-                                            .and_then(|m| m.as_str())
-                                            .map(|s| s.contains("Ultra"))
-                                            .unwrap_or(false) ||
-                                            meta.get("modelKey")
-                                            .and_then(|k| k.as_str())
-                                            .map(|s| s.contains("ultra"))
-                                            .unwrap_or(false);
-                                        
-                                        if !is_ultra {
-                                            continue; // Skip non-Ultra recordings
-                                        }
-                                    }
-                                }
+            if data_path.ends_with("recordings")
+                && data_path.exists()
+                && let Ok(entries) = std::fs::read_dir(data_path)
+            {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        // Check if this recording was made with Ultra model
+                        let meta_path = path.join("meta.json");
+                        if meta_path.exists()
+                            && let Ok(meta_content) = std::fs::read_to_string(&meta_path)
+                            && let Ok(meta) =
+                                serde_json::from_str::<serde_json::Value>(&meta_content)
+                        {
+                            // Check if model is Ultra
+                            let is_ultra = meta
+                                .get("modelName")
+                                .and_then(|m| m.as_str())
+                                .map(|s| s.contains("Ultra"))
+                                .unwrap_or(false)
+                                || meta
+                                    .get("modelKey")
+                                    .and_then(|k| k.as_str())
+                                    .map(|s| s.contains("ultra"))
+                                    .unwrap_or(false);
+
+                            if !is_ultra {
+                                continue; // Skip non-Ultra recordings
                             }
-                            
-                            // Look for transcript files in each recording folder
-                            if let Ok(recording_entries) = std::fs::read_dir(&path) {
-                                for recording_entry in recording_entries.flatten() {
-                                    let recording_path = recording_entry.path();
-                                    if recording_path.extension().map_or(false, |ext| {
-                                        matches!(ext.to_str(), Some("txt") | Some("json") | Some("md"))
-                                    }) {
-                                        if let Ok(content) = std::fs::read_to_string(&recording_path) {
-                                            // Extract interesting words from transcript
-                                            terms.extend(extract_interesting_words(&content));
-                                        }
-                                    }
+                        }
+
+                        // Look for transcript files in each recording folder
+                        if let Ok(recording_entries) = std::fs::read_dir(&path) {
+                            for recording_entry in recording_entries.flatten() {
+                                let recording_path = recording_entry.path();
+                                if recording_path.extension().is_some_and(|ext| {
+                                    matches!(ext.to_str(), Some("txt") | Some("json") | Some("md"))
+                                }) && let Ok(content) = std::fs::read_to_string(&recording_path)
+                                {
+                                    // Extract interesting words from transcript
+                                    terms.extend(extract_interesting_words(&content));
                                 }
                             }
                         }
@@ -338,21 +361,23 @@ impl VocabPlugin for SuperwhisperPlugin {
                 }
             }
         }
-        
+
         // Limit to top 100 terms by frequency
-        let mut term_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut term_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         for term in &terms {
             *term_counts.entry(term.clone()).or_insert(0) += 1;
         }
-        
+
         let mut sorted_terms: Vec<(String, usize)> = term_counts.into_iter().collect();
         sorted_terms.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by frequency descending
-        
-        let top_100: Vec<String> = sorted_terms.into_iter()
+
+        let top_100: Vec<String> = sorted_terms
+            .into_iter()
             .take(100)
             .map(|(term, _)| term)
             .collect();
-        
+
         Ok(top_100)
     }
 }
@@ -381,80 +406,83 @@ fn extract_strings_from_json(value: &serde_json::Value, terms: &mut Vec<String>)
 
 /// Extract interesting words from transcript content using pure statistical analysis
 fn extract_interesting_words(content: &str) -> Vec<String> {
-    let mut word_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut word_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     let mut total_words = 0;
-    
+
     // Count word frequencies
     for word in content.split_whitespace() {
         let clean_word = word
             .trim()
             .trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-' && c != '_')
             .to_lowercase();
-        
+
         if clean_word.len() >= 3 && clean_word.len() <= 50 {
             *word_counts.entry(clean_word.clone()).or_insert(0) += 1;
             total_words += 1;
         }
     }
-    
+
     if total_words == 0 {
         return Vec::new();
     }
-    
+
     // Calculate frequency statistics
-    let frequencies: Vec<f64> = word_counts.values()
+    let frequencies: Vec<f64> = word_counts
+        .values()
         .map(|&count| count as f64 / total_words as f64)
         .collect();
-    
+
     let mean = frequencies.iter().sum::<f64>() / frequencies.len() as f64;
-    let variance = frequencies.iter()
-        .map(|&f| (f - mean).powi(2))
-        .sum::<f64>() / frequencies.len() as f64;
+    let variance =
+        frequencies.iter().map(|&f| (f - mean).powi(2)).sum::<f64>() / frequencies.len() as f64;
     let std_dev = variance.sqrt();
-    
+
     let mut interesting_words = Vec::new();
-    
+
     // Filter words based on statistical outliers and technical characteristics
     for (word, count) in word_counts {
         let relative_freq = count as f64 / total_words as f64;
-        
+
         // Calculate Z-score (how many standard deviations from mean)
         let z_score = if std_dev > 0.0 {
             (relative_freq - mean) / std_dev
         } else {
             0.0
         };
-        
+
         // Technical term indicators:
         let has_numbers = word.chars().any(|c| c.is_numeric());
         let has_underscore = word.chars().any(|c| c == '_');
         let has_hyphen = word.chars().any(|c| c == '-');
         let has_multiple_special = word.chars().filter(|c| !c.is_alphanumeric()).count() > 1;
         let is_long = word.len() > 8;
-        let is_capitalized = word.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
-        
+        let is_capitalized = word
+            .chars()
+            .next()
+            .map(|c| c.is_uppercase())
+            .unwrap_or(false);
+
         // Statistical outlier: words with frequency significantly different from mean
         // Either very rare (negative Z-score) or very common (positive Z-score)
         let is_statistical_outlier = z_score.abs() > 1.5;
-        
+
         // Technical characteristics
         let is_technical = has_numbers || has_underscore || has_hyphen || has_multiple_special;
-        
+
         // Keep word if it's a statistical outlier AND has technical characteristics
         // OR if it's very rare (Z-score < -1) and long
-        if (is_statistical_outlier && is_technical) || (z_score < -1.0 && is_long && is_capitalized) {
+        if (is_statistical_outlier && is_technical) || (z_score < -1.0 && is_long && is_capitalized)
+        {
             interesting_words.push(word);
         }
     }
-    
+
     interesting_words
 }
 
 pub fn get_all_plugins() -> Vec<Box<dyn VocabPlugin>> {
-    vec![
-        Box::new(SuperwhisperPlugin),
-        Box::new(WisprflowPlugin),
-    ]
+    vec![Box::new(SuperwhisperPlugin), Box::new(WisprflowPlugin)]
 }
 
 pub struct WisprflowPlugin;
@@ -470,52 +498,71 @@ impl VocabPlugin for WisprflowPlugin {
 
     fn get_config(&self) -> PluginConfig {
         let mut config = PluginConfig::default();
-        
+
         // Common Wispr Flow configuration paths
         #[cfg(target_os = "macos")]
         {
             if let Ok(home) = std::env::var("HOME") {
-                config.config_paths.push(PathBuf::from(format!("{}/Library/Application Support/Wispr Flow", home)));
-                config.data_paths.push(PathBuf::from(format!("{}/Library/Application Support/Wispr Flow/workflows.json", home)));
+                config.config_paths.push(PathBuf::from(format!(
+                    "{}/Library/Application Support/Wispr Flow",
+                    home
+                )));
+                config.data_paths.push(PathBuf::from(format!(
+                    "{}/Library/Application Support/Wispr Flow/workflows.json",
+                    home
+                )));
             }
         }
-        
+
         #[cfg(target_os = "windows")]
         {
             if let Ok(appdata) = std::env::var("APPDATA") {
-                config.config_paths.push(PathBuf::from(format!(r"{}\WisprFlow", appdata)));
-                config.data_paths.push(PathBuf::from(format!(r"{}\WisprFlow\workflows.json", appdata)));
+                config
+                    .config_paths
+                    .push(PathBuf::from(format!(r"{}\WisprFlow", appdata)));
+                config.data_paths.push(PathBuf::from(format!(
+                    r"{}\WisprFlow\workflows.json",
+                    appdata
+                )));
             }
         }
-        
+
         #[cfg(target_os = "linux")]
         {
             if let Ok(home) = std::env::var("HOME") {
-                config.config_paths.push(PathBuf::from(format!("{}/.config/wisprflow", home)));
-                config.data_paths.push(PathBuf::from(format!("{}/.config/wisprflow/workflows.json", home)));
+                config
+                    .config_paths
+                    .push(PathBuf::from(format!("{}/.config/wisprflow", home)));
+                config.data_paths.push(PathBuf::from(format!(
+                    "{}/.config/wisprflow/workflows.json",
+                    home
+                )));
             }
         }
-        
+
         config
     }
 
     fn get_installation_paths(&self) -> Vec<PathBuf> {
         let mut paths = Vec::new();
-        
+
         #[cfg(target_os = "macos")]
         {
             paths.push(PathBuf::from("/Applications/Wispr Flow.app"));
         }
-        
+
         #[cfg(target_os = "windows")]
         {
             paths.push(PathBuf::from(r"C:\Program Files\Wispr Flow"));
             paths.push(PathBuf::from(r"C:\Program Files (x86)\Wispr Flow"));
             if let Ok(username) = std::env::var("USERNAME") {
-                paths.push(PathBuf::from(format!(r"C:\Users\{}\AppData\Local\Programs\Wispr Flow", username)));
+                paths.push(PathBuf::from(format!(
+                    r"C:\Users\{}\AppData\Local\Programs\Wispr Flow",
+                    username
+                )));
             }
         }
-        
+
         #[cfg(target_os = "linux")]
         {
             paths.push(PathBuf::from("/usr/bin/wisprflow"));
@@ -524,19 +571,19 @@ impl VocabPlugin for WisprflowPlugin {
                 paths.push(PathBuf::from(format!("{}/.local/bin/wisprflow", home)));
             }
         }
-        
+
         paths
     }
 
     fn is_installed(&self) -> bool {
         // Check custom config path first
         let config = self.get_config();
-        if let Some(custom_path) = config.install_path {
-            if custom_path.exists() {
-                return true;
-            }
+        if let Some(custom_path) = config.install_path
+            && custom_path.exists()
+        {
+            return true;
         }
-        
+
         // Check default installation paths
         self.get_installation_paths().iter().any(|p| p.exists())
     }
@@ -635,25 +682,24 @@ impl VocabPlugin for WisprflowPlugin {
     fn extract_vocabulary_from_config(&self) -> Result<Vec<String>> {
         let mut terms = Vec::new();
         let config = self.get_config();
-        
+
         // Try to read vocabulary from config files
         for config_path in &config.config_paths {
-            if config_path.exists() {
-                if let Ok(entries) = std::fs::read_dir(config_path) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.extension().map_or(false, |ext| ext == "json") {
-                            if let Ok(content) = std::fs::read_to_string(&path) {
-                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                                    extract_strings_from_json(&json, &mut terms);
-                                }
-                            }
-                        }
+            if config_path.exists()
+                && let Ok(entries) = std::fs::read_dir(config_path)
+            {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().is_some_and(|ext| ext == "json")
+                        && let Ok(content) = std::fs::read_to_string(&path)
+                        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+                    {
+                        extract_strings_from_json(&json, &mut terms);
                     }
                 }
             }
         }
-        
+
         Ok(terms)
     }
 }

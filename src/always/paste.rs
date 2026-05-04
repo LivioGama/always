@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 
 pub fn copy_to_clipboard(text: String) -> Result<()> {
-    use std::process::{Command, Stdio};
     use std::io::Write as _;
+    use std::process::{Command, Stdio};
 
     let mut pbcopy = Command::new("pbcopy")
         .stdin(Stdio::piped())
@@ -22,7 +22,7 @@ pub fn copy_to_clipboard(text: String) -> Result<()> {
 }
 
 pub fn paste_text(auto_enter: bool) -> Result<()> {
-    use core_graphics::event::{CGEvent, CGEventFlags, CGKeyCode, CGEventTapLocation};
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)

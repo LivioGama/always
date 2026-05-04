@@ -8,6 +8,9 @@ struct Config: Codable {
     var sttAutoEnter: Bool
     var groqApiKey: String?
     var sileroThreshold: Float
+    var shortcutPause: String
+    var shortcutAutoEnter: String
+    var shortcutForcePaste: String
 
     static let defaultConfig = Config(
         sttEnergyThreshold: 0.005,
@@ -16,7 +19,10 @@ struct Config: Codable {
         sttSilence: 0.4,
         sttAutoEnter: false,
         groqApiKey: nil,
-        sileroThreshold: 0.5
+        sileroThreshold: 0.5,
+        shortcutPause: "ctrl+alt+p",
+        shortcutAutoEnter: "ctrl+alt+a",
+        shortcutForcePaste: "ctrl+alt+v"
     )
 
     static func fromCLI(output: String) -> Config? {
@@ -46,6 +52,18 @@ struct Config: Codable {
                     }
                 case "silero_threshold":
                     config.sileroThreshold = Float(value) ?? defaultConfig.sileroThreshold
+                case "shortcut_pause":
+                    if !value.contains("(not set)") {
+                        config.shortcutPause = value
+                    }
+                case "shortcut_auto_enter":
+                    if !value.contains("(not set)") {
+                        config.shortcutAutoEnter = value
+                    }
+                case "shortcut_force_paste":
+                    if !value.contains("(not set)") {
+                        config.shortcutForcePaste = value
+                    }
                 default:
                     break
                 }

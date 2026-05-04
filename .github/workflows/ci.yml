@@ -45,6 +45,15 @@ jobs:
       - name: Run tests
         run: cargo test
 
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Security audit
+        run: cargo audit
+        # Non-blocking while the project audits transitive advisories; installation
+        # failures still fail the workflow so the audit cannot silently disappear.
+        continue-on-error: true
+
   swift:
     name: Swift
     runs-on: macos-latest
@@ -55,3 +64,8 @@ jobs:
         run: |
           cd AlwaysApp
           swift build
+
+      - name: Swift tests
+        run: |
+          cd AlwaysApp
+          swift test

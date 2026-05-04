@@ -1,12 +1,12 @@
+use std::collections::VecDeque;
 use std::io;
 use std::io::Read as _;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdout};
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::collections::VecDeque;
-use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
 
@@ -35,11 +35,14 @@ impl AudioBuffer {
         let pool = Arc::clone(&AUDIO_BUFFER_POOL);
         let buffer = {
             let mut pool_lock = pool.lock().unwrap();
-            pool_lock.pop_front().unwrap_or_else(|| Vec::with_capacity(16000)) // 1 second at 16kHz
+            pool_lock
+                .pop_front()
+                .unwrap_or_else(|| Vec::with_capacity(16000)) // 1 second at 16kHz
         };
         Self { buffer, pool }
     }
 
+    #[allow(clippy::should_implement_trait)] // `as_mut` returns the inner Vec, not a generic AsMut
     pub fn as_mut(&mut self) -> &mut Vec<i16> {
         &mut self.buffer
     }
@@ -54,7 +57,8 @@ impl Drop for AudioBuffer {
         // Return buffer to pool
         self.buffer.clear();
         let mut pool_lock = self.pool.lock().unwrap();
-        if pool_lock.len() < 10 { // Limit pool size
+        if pool_lock.len() < 10 {
+            // Limit pool size
             pool_lock.push_back(std::mem::take(&mut self.buffer));
         }
     }
@@ -92,7 +96,11 @@ impl RecChild {
             .spawn()
             .context("Failed to run 'rec' command. Install SoX: brew install sox")?;
         let stdout = child.stdout.take().context("sox stdout missing")?;
-        Ok(Self { child, stdout, reuse_count: 0 })
+        Ok(Self {
+            child,
+            stdout,
+            reuse_count: 0,
+        })
     }
 
     pub fn get_or_spawn() -> Result<Arc<Mutex<Option<RecChild>>>> {
@@ -166,11 +174,11 @@ pub fn create_wav_bytes_i16_mono_16k(samples: &[i16]) -> Result<Vec<u8>> {
     wav_data.extend_from_slice(b"WAVE");
     wav_data.extend_from_slice(b"fmt ");
     wav_data.extend_from_slice(&16u32.to_le_bytes()); // PCM format chunk size
-    wav_data.extend_from_slice(&1u16.to_le_bytes());  // PCM format
-    wav_data.extend_from_slice(&1u16.to_le_bytes());  // Mono
-    wav_data.extend_from_slice(&RATE.to_le_bytes());  // Sample rate
+    wav_data.extend_from_slice(&1u16.to_le_bytes()); // PCM format
+    wav_data.extend_from_slice(&1u16.to_le_bytes()); // Mono
+    wav_data.extend_from_slice(&RATE.to_le_bytes()); // Sample rate
     wav_data.extend_from_slice(&(RATE * 2).to_le_bytes()); // Byte rate
-    wav_data.extend_from_slice(&2u16.to_le_bytes());  // Block align
+    wav_data.extend_from_slice(&2u16.to_le_bytes()); // Block align
     wav_data.extend_from_slice(&16u16.to_le_bytes()); // Bits per sample
     wav_data.extend_from_slice(b"data");
     wav_data.extend_from_slice(&(data_size as u32).to_le_bytes());
@@ -180,9 +188,8 @@ pub fn create_wav_bytes_i16_mono_16k(samples: &[i16]) -> Result<Vec<u8>> {
     // Slice from_raw_parts is safe because we don't escape the borrow.
     #[cfg(target_endian = "little")]
     {
-        let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(samples.as_ptr() as *const u8, samples.len() * 2)
-        };
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(samples.as_ptr() as *const u8, samples.len() * 2) };
         wav_data.extend_from_slice(bytes);
     }
     #[cfg(not(target_endian = "little"))]
@@ -212,7 +219,7 @@ pub fn temp_wav_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{temp_wav_path, create_wav_bytes_i16_mono_16k};
+    use super::{create_wav_bytes_i16_mono_16k, temp_wav_path};
 
     #[test]
     fn temp_wav_paths_are_unique() {

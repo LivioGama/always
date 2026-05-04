@@ -2,8 +2,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::LazyLock;
+use std::sync::Mutex;
 
 // Global mutex for atomic file operations
 static STATE_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -12,13 +12,13 @@ static STATE_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 pub struct DaemonState {
     pub listening: bool,
     pub processing: bool,
-    pub transcribing: bool,  // New field for transcription state
+    pub transcribing: bool, // New field for transcription state
     pub paused: bool,
     pub auto_enter: bool,
-    pub voice_activity: bool,  // Early energy detection before VAD confirmation
+    pub voice_activity: bool, // Early energy detection before VAD confirmation
     pub last_transcript: Option<String>,
     pub last_updated: u64,
-    pub version: u64,  // Version counter for detecting stale state
+    pub version: u64, // Version counter for detecting stale state
 }
 
 impl Default for DaemonState {
@@ -103,7 +103,7 @@ impl DaemonState {
         let _lock = STATE_MUTEX.lock().unwrap();
         let mut state = Self::load().unwrap_or_default();
         state.transcribing = transcribing;
-        state.processing = !transcribing;  // Clear processing when starting transcription
+        state.processing = !transcribing; // Clear processing when starting transcription
         state.version += 1;
         state.last_updated = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

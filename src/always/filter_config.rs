@@ -20,25 +20,65 @@ fn default_filter_config() -> FilterConfig {
             "subtitles by",
             "captions by the",
             "captions by",
-        ].into_iter().map(String::from).collect(),
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
         hard_filter_exact: vec![
-            "subtitles", "closed captions", "captions", "subtitle", "caption",
-            "turn on subtitles", "turn off subtitles", "enable subtitles", "disable subtitles",
-            "subtitle settings", "caption settings", "subtitles available", "captions available",
-            "auto-generated subtitles", "automatic captions",
-            "subtitles by the amara.org community", "captions by the amara.org community",
+            "subtitles",
+            "closed captions",
+            "captions",
+            "subtitle",
+            "caption",
+            "turn on subtitles",
+            "turn off subtitles",
+            "enable subtitles",
+            "disable subtitles",
+            "subtitle settings",
+            "caption settings",
+            "subtitles available",
+            "captions available",
+            "auto-generated subtitles",
+            "automatic captions",
+            "subtitles by the amara.org community",
+            "captions by the amara.org community",
             "cc",
             // Standalone politeness / conversational fillers
-            "thank you", "thanks", "thank you so much", "thanks a lot",
-            "you're welcome", "your welcome",
-            "excuse me", "i'm sorry", "sorry", "pardon",
-            "good morning", "good night", "good afternoon", "good evening",
-            "how are you", "see you later", "have a nice day", "take care",
-            "sounds good", "that's great", "absolutely",
-            "mm hmm", "uh huh", "oh okay", "oh ok",
-            "bye", "goodbye", "bye bye",
-            "hello", "hi", "hey",
-        ].into_iter().map(String::from).collect(),
+            "thank you",
+            "thanks",
+            "thank you so much",
+            "thanks a lot",
+            "you're welcome",
+            "your welcome",
+            "excuse me",
+            "i'm sorry",
+            "sorry",
+            "pardon",
+            "good morning",
+            "good night",
+            "good afternoon",
+            "good evening",
+            "how are you",
+            "see you later",
+            "have a nice day",
+            "take care",
+            "sounds good",
+            "that's great",
+            "absolutely",
+            "mm hmm",
+            "uh huh",
+            "oh okay",
+            "oh ok",
+            "bye",
+            "goodbye",
+            "bye bye",
+            "hello",
+            "hi",
+            "hey",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
         hard_filter_regex: vec![
             r"^thank.*for.*watching$",
             r"^thanks.*for.*watching$",
@@ -47,7 +87,10 @@ fn default_filter_config() -> FilterConfig {
             r".*amara\.org.*",
             r".*subtitle.*community.*",
             r".*caption.*community.*",
-        ].into_iter().map(String::from).collect(),
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
     }
 }
 
@@ -60,13 +103,12 @@ pub fn load_filter_config() -> Option<FilterConfig> {
     ];
 
     for path in paths {
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(config) = serde_json::from_str::<FilterConfig>(&content) {
-                    tracing::info!(path = %path.display(), "filter_config_loaded");
-                    return Some(config);
-                }
-            }
+        if path.exists()
+            && let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(config) = serde_json::from_str::<FilterConfig>(&content)
+        {
+            tracing::info!(path = %path.display(), "filter_config_loaded");
+            return Some(config);
         }
     }
 
@@ -75,8 +117,5 @@ pub fn load_filter_config() -> Option<FilterConfig> {
 }
 
 pub fn compile_regex_patterns(patterns: &[String]) -> Vec<Regex> {
-    patterns
-        .iter()
-        .filter_map(|p| Regex::new(p).ok())
-        .collect()
+    patterns.iter().filter_map(|p| Regex::new(p).ok()).collect()
 }

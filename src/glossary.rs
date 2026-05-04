@@ -32,7 +32,7 @@ fn entries() -> &'static [Entry] {
             v
         }
         Err(e) => {
-            eprintln!("always: warning: failed to load glossary.json: {e}");
+            tracing::warn!(error = %e, "failed to load glossary.json");
             Vec::new()
         }
     })
@@ -191,12 +191,12 @@ fn locate_glossary() -> Option<PathBuf> {
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("glossary.json"));
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("glossary.json"));
-            if let Some(parent) = dir.parent().and_then(|p| p.parent()) {
-                candidates.push(parent.join("glossary.json"));
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.join("glossary.json"));
+        if let Some(parent) = dir.parent().and_then(|p| p.parent()) {
+            candidates.push(parent.join("glossary.json"));
         }
     }
     candidates.into_iter().find(|p| p.exists())

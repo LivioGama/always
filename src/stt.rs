@@ -16,6 +16,23 @@ fn auth_header(api_key: &str) -> &'static str {
     AUTH_HEADER.get_or_init(|| format!("Bearer {}", api_key))
 }
 
+/// Resolve the Groq transcription endpoint URL.
+///
+/// Honors the `ALWAYS_GROQ_BASE_URL` environment variable so integration tests
+/// can point the client at a wiremock server. The override base URL is appended
+/// with `/openai/v1/audio/transcriptions`. Defaults to the production Groq URL
+/// when the variable is unset.
+fn transcriptions_url() -> String {
+    std::env::var("ALWAYS_GROQ_BASE_URL")
+        .map(|base| {
+            format!(
+                "{}/openai/v1/audio/transcriptions",
+                base.trim_end_matches('/')
+            )
+        })
+        .unwrap_or_else(|_| GROQ_TRANSCRIPTIONS_URL.to_string())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct TranscriptionSegment {
     #[serde(default)]
@@ -67,7 +84,7 @@ pub fn transcribe_from_bytes(audio_data: Vec<u8>, api_key: &str) -> Result<Trans
     }
 
     let response = client
-        .post(GROQ_TRANSCRIPTIONS_URL)
+        .post(transcriptions_url())
         .header("Authorization", auth_header(api_key))
         .multipart(form)
         .send()

@@ -23,6 +23,9 @@ pub struct Preferences {
     pub groq_api_key: Option<String>,
     pub deepgram_model: Option<String>,
     pub silero_threshold: Option<f64>,
+    pub shortcut_pause: Option<String>,
+    pub shortcut_auto_enter: Option<String>,
+    pub shortcut_force_paste: Option<String>,
 }
 
 pub fn open() -> Result<Connection> {
@@ -105,6 +108,27 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN silero_threshold REAL;")?;
     }
 
+    let has_shortcut_pause = conn
+        .prepare("SELECT shortcut_pause FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_shortcut_pause {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN shortcut_pause TEXT;")?;
+    }
+
+    let has_shortcut_auto_enter = conn
+        .prepare("SELECT shortcut_auto_enter FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_shortcut_auto_enter {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN shortcut_auto_enter TEXT;")?;
+    }
+
+    let has_shortcut_force_paste = conn
+        .prepare("SELECT shortcut_force_paste FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_shortcut_force_paste {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN shortcut_force_paste TEXT;")?;
+    }
+
     Ok(())
 }
 
@@ -112,7 +136,7 @@ fn migrate(conn: &Connection) -> Result<()> {
 
 pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
     let mut stmt = conn.prepare(
-        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold FROM preferences WHERE id = 1",
+        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste FROM preferences WHERE id = 1",
     )?;
     let result = stmt.query_row([], |row| {
         Ok(Preferences {
@@ -129,6 +153,9 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             groq_api_key: row.get(10)?,
             deepgram_model: row.get(11)?,
             silero_threshold: row.get(12)?,
+            shortcut_pause: row.get(13)?,
+            shortcut_auto_enter: row.get(14)?,
+            shortcut_force_paste: row.get(15)?,
         })
     });
     match result {
@@ -153,6 +180,9 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "groq_api_key",
         "deepgram_model",
         "silero_threshold",
+        "shortcut_pause",
+        "shortcut_auto_enter",
+        "shortcut_force_paste",
     ];
     if !valid_keys.contains(&key) {
         anyhow::bail!(

@@ -18,8 +18,12 @@ pub enum RecordResult {
         transcription: crate::stt::TranscriptionResult,
     },
     Silence,
-    DroppedLowEnergy { energy: f64 },
-    DroppedNoise { raw: String },
+    DroppedLowEnergy {
+        energy: f64,
+    },
+    DroppedNoise {
+        raw: String,
+    },
     Timeout,
 }
 
@@ -79,7 +83,7 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     // For very low thresholds, we can use a simplified RMS calculation
     // that's much faster than the full normalized energy calculation
     let fast_energy_threshold_sq = if use_fast_energy_check {
-        (fast_energy_threshold as f64 * 32768.0).powi(2) as i64
+        (fast_energy_threshold * 32768.0).powi(2) as i64
     } else {
         0
     };
@@ -138,9 +142,9 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
                 if !voice_logged {
                     // Fast energy check for very low thresholds to minimize latency
                     let passes_energy_check = if use_fast_energy_check {
-                        fast_energy_check(&samples, fast_energy_threshold_sq)
+                        fast_energy_check(samples, fast_energy_threshold_sq)
                     } else {
-                        let current_energy = normalized_energy(&samples);
+                        let current_energy = normalized_energy(samples);
                         current_energy >= cfg.energy_threshold * 0.5 // Use 50% of threshold for early check
                     };
 
@@ -158,12 +162,12 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
                 }
             }
             if in_speech {
-                speech_samples.extend_from_slice(&samples);
+                speech_samples.extend_from_slice(samples);
             }
         } else if in_speech {
             consecutive_silence += 1;
             consecutive_speech = 0;
-            speech_samples.extend_from_slice(&samples);
+            speech_samples.extend_from_slice(samples);
 
             // At tentative silence, kick off speculative transcription in the
             // background so the result is ready (or nearly so) by the time we
