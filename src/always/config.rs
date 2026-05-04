@@ -209,7 +209,18 @@ impl Default for PostprocessConfig {
         Self {
             groq_model: "llama-3.1-8b-instant".to_string(),
             learning_history_limit: 1000,
-            grammar_correction_enabled: true,
+            // Default OFF. The post-process LLM (Groq llama-3.1-8b-instant)
+            // is small and unreliable: it pattern-matches on glossary
+            // entries and aggressively rewrites ordinary English words
+            // to proper-noun terms that were merely *mentioned* in the
+            // system prompt (e.g. `idea` → `IntelliJ IDEA`). Voice-to-text
+            // tools should deliver what the user said, not a paraphrase.
+            //
+            // Users who want grammar/vocab cleanup can opt in via:
+            //   always config set postprocess_enabled true
+            // The Whisper bias prompt (initial_prompt) still helps —
+            // Whisper biases gently rather than rewriting.
+            grammar_correction_enabled: false,
             cache_ttl_seconds: 300,
         }
     }

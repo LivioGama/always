@@ -122,10 +122,10 @@ input matches one of the listed wrong forms.\n\n",
 
     out.push_str(
         "# Rules\n\n\
-1. Substitute ONLY where the input contains an exact wrong form listed above. Never \
-   rewrite an ordinary English word to a proper-noun term that wasn't explicitly \
-   listed as one of its mistranscriptions. Example: \"I have an idea\" stays \
-   \"I have an idea\" even if \"IntelliJ IDEA\" is in the speaker's vocabulary.\n\
+1. Substitute ONLY when the input literally contains a wrong form that appears \
+   on the right-hand side of a line in the section above. If no wrong form \
+   matches, output the input verbatim word-for-word. Never invent substitutions \
+   based on phonetic similarity, capitalization, or context.\n\
 2. Make the result a coherent, well-formed phrase. Restore minimal grammar so the \
    output reads as a real sentence. Add periods and commas at obvious sentence \
    boundaries. Add question marks for questions.\n\
@@ -277,14 +277,20 @@ mod tests {
     }
 
     #[test]
-    fn postprocess_prompt_explicitly_warns_against_proper_noun_substitution() {
-        // The Rule 1 must explicitly call out the `idea` → `IntelliJ IDEA`
-        // failure mode so the LLM doesn't regress when models change.
-        let entries = vec![entry("Kubernetes", &["kubernetics"])];
-        let prompt = build_postprocess_prompt(&entries);
+    fn postprocess_prompt_rule_one_blocks_phonetic_substitution() {
+        // Rule 1 must phrase the substitution rule strictly enough that
+        // a small model can't justify rewriting an ordinary English
+        // word to a proper-noun glossary term. Don't mention specific
+        // terms in the rule text — small models latch on to them.
+        let prompt = build_postprocess_prompt(&[]);
+        assert!(prompt.contains("phonetic similarity"));
+        assert!(prompt.contains("output the input verbatim"));
+        // Anti-regression: must NOT name `IntelliJ IDEA` in Rule 1
+        // prose because llama-3-8b treated it as a target instead of
+        // a counter-example.
         assert!(
-            prompt.to_lowercase().contains("idea"),
-            "Rule 1 should mention the canonical example bug to keep the model on rails:\n{prompt}"
+            !prompt.contains("IntelliJ IDEA"),
+            "Rule 1 must not mention specific glossary terms — small models pattern-match on them:\n{prompt}"
         );
     }
 
