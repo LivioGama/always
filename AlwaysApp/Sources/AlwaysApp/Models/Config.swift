@@ -19,7 +19,7 @@ struct Config: Codable {
         sttEnergyThreshold: 0.012,
         hearEnergyThreshold: 0.001,
         sttCooldownMs: 150,
-        sttSilence: 2.5,
+        sttSilence: 1.5,
         sttAutoEnter: false,
         groqApiKey: nil,
         sileroThreshold: 0.5,

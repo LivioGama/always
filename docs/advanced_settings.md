@@ -69,17 +69,21 @@ always config set hear_energy_threshold 0.0008
 
 | | |
 |---|---|
-| Default | `2.0` (seconds) |
+| Default | `1.5` (seconds) |
 | Range   | `0.1 – 10.0` |
 | What    | How many seconds of silence end an utterance. Whisper is invoked once silence persists this long. |
 | Lower → | Snappier; transcription fires sooner; may cut off natural pauses. |
 | Higher → | Tolerates long mid-sentence pauses; user feels the "lag" before paste. |
 
-`2.0` is deliberate: humans pause mid-sentence. Going below ~`0.7` will
-chop trains of thought into fragments.
+`1.5 s` balances snappiness against natural mid-sentence pauses.
+Speculative transcription kicks off at 75 % of this (≈ 1.1 s) so the
+Whisper round-trip happens in parallel with the silence wait —
+end-to-end paste latency rarely exceeds ~1.5 s from when the user
+stops talking. Going below ~`0.7` chops trains of thought into
+fragments.
 
 ```bash
-always config set stt_silence 2.0
+always config set stt_silence 1.5
 ```
 
 ### `stt_cooldown_ms`

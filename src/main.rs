@@ -44,7 +44,7 @@ enum Commands {
         #[arg(short = 't', long, default_value = "30")]
         timeout: u32,
         /// Seconds of silence before considering phrase complete
-        #[arg(short = 's', long, default_value = "2.0")]
+        #[arg(short = 's', long, default_value = "1.5")]
         silence: f64,
         /// Press Enter automatically after pasting transcript
         #[arg(long, default_value_t = false)]
@@ -66,7 +66,7 @@ enum Commands {
         #[arg(short = 't', long, default_value = "30")]
         timeout: u32,
         /// Seconds of silence before considering phrase complete
-        #[arg(short = 's', long, default_value = "2.0")]
+        #[arg(short = 's', long, default_value = "1.5")]
         silence: f64,
         /// Press Enter automatically after pasting transcript
         #[arg(long, default_value_t = false)]

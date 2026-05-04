@@ -304,9 +304,11 @@ impl Default for AlwaysConfig {
             timeout_secs: 30,
             // Defaults aligned with `SensitivityPreset::Normal` and the
             // Mic Sensitivity / Speaking Style picker in the GUI.
-            // 2.5s (was 2.0) — gives users room for mid-sentence thinking pauses
-            // without triggering premature end-of-utterance.
-            silence_secs: 2.5,
+            // 1.5s — snappier than 2.0 / 2.5 while still tolerating
+            // typical mid-sentence pauses. Speculative transcription
+            // kicks off at 75% of this (≈1.1s) so end-to-end paste
+            // latency rarely exceeds ~1.5s after the user stops talking.
+            silence_secs: 1.5,
             auto_enter: false,
             filter_enabled: true,
             energy_threshold: 0.012,

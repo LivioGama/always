@@ -491,7 +491,7 @@ struct SettingsWindow: View {
                         unit: "s",
                         formatter: Self.secondsFormatter,
                         value: $config.sttSilence,
-                        defaultValue: 2.0,
+                        defaultValue: 1.5,
                         range: 0.1...10
                     )
 
