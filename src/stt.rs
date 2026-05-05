@@ -56,7 +56,7 @@ pub enum SttError {
         #[source]
         source: reqwest::Error,
     },
-    #[error("Groq returned an unrecoverable error (HTTP {status}): {body}")]
+    #[error("STT provider returned an unrecoverable error (HTTP {status}): {body}")]
     ClientError { status: u16, body: String },
     #[error(
         "Groq transcription circuit breaker is open (cool-down {remaining_ms} ms remaining); \
@@ -177,17 +177,11 @@ fn backoff_with_jitter(attempt: u32) -> Duration {
 }
 
 fn build_form(audio_data: Vec<u8>) -> Result<blocking_multipart::Form, anyhow::Error> {
-    // Whisper's `prompt` (initial_prompt) field used to be populated
-    // with the user's glossary terms. That biased Whisper acoustically
-    // toward those terms — fine for unique product names like
-    // "Kubernetes", but catastrophic for app names that collide with
-    // common English words: dictating "I have an idea" produced
-    // "I have an IntelliJ IDEA" because the bias prompt listed every
-    // /Applications/*.app entry.
-    //
-    // The bias prompt is gone. Voice-to-text delivers what was said.
-    // If users want post-hoc cleanup, the optional LLM postprocessor
-    // (`postprocess_enabled` pref) handles it with strict rewrite rules.
+    // Whisper's `prompt` field is intentionally NOT used. It was tried
+    // historically and produced "I have an idea" → "I have an IntelliJ
+    // IDEA" because the bias listed every app on disk. Voice-to-text
+    // delivers what was said. Glossary corrections happen downstream
+    // in the optional LLM postprocess pass (`postprocess_enabled`).
     let form = blocking_multipart::Form::new()
         .part(
             "file",

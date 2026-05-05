@@ -263,10 +263,12 @@ fn handle_speech(
             Ok(())
         }
         SpeechAction::Paste { text: transformed } => {
-            // LLM postprocess (grammar + glossary mistranscription correction).
-            // Runs sync here via tokio Handle::block_on so the user's paste
-            // includes the cleaned text. On any error or when disabled,
-            // fall back to the vocab-only result.
+            // Single optional cleanup: LLM postprocess (off by default).
+            // The Whisper transcript is otherwise pasted verbatim. The
+            // glossary's curated `mistranscriptions` are surfaced to the
+            // LLM via the postprocess prompt; deterministic regex
+            // substitution was tried and removed because it kept firing
+            // on natural speech ("structure" → "struct" etc.).
             let final_text = if cfg.postprocess_config.grammar_correction_enabled
                 && let Some(ref pp) = cfg.post_processor
             {

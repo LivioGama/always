@@ -80,15 +80,29 @@ pub fn looks_like_correction(wrong: &str, right: &str) -> bool {
 }
 
 /// Word-level diff between `old` (what we pasted) and `new` (what the
-/// user corrected to). Returns up to [`MAX_PAIRS_PER_CAPTURE`] pairs
-/// where each pair clears the [`looks_like_correction`] gate.
+/// user corrected to). Returns up to [`MAX_PAIRS_PER_CAPTURE`] pairs.
 ///
-/// Algorithm: longest-common-subsequence of word arrays (Wagner-Fisher
-/// DP, fine for utterance-length input). Words inside the LCS match
-/// are skipped; for each consecutive run of unmatched words on both
-/// sides, we emit pair-wise mappings while a same-length run lasts.
-/// Asymmetric runs (one side longer) emit only the overlap so the user
-/// adding or deleting words doesn't inject garbage glossary entries.
+/// Algorithm:
+/// 1. Run LCS on the whitespace-tokenized arrays.
+/// 2. For each gap between consecutive LCS anchors, look at the
+///    unmatched runs on each side:
+///    - Both runs same length → emit per-word pairs. Strict
+///      [`looks_like_correction`] gate applies only when the gap
+///      isn't sandwiched by anchors on both sides; when context is
+///      anchored bilaterally, accept the substitution because the
+///      surrounding words confirm it's a real correction (e.g.
+///      `"... 16 cloud code running ..." → "... 16 Claude Code running ..."`
+///      — `looks_like_correction` would reject `cloud → Claude` on
+///      Levenshtein, but the anchors `16` and `running` make it
+///      unambiguous).
+///    - Different lengths → emit a single PHRASE pair joining each
+///      run with spaces (e.g. `"cloudcodes" ↔ "Claude Code"`,
+///      `"rock trees" ↔ "worktrees"`). This is the lever that lets
+///      the user select the whole corrected sentence and have the
+///      daemon find multi-word substitutions.
+/// 3. Trailing punctuation is stripped from emitted pairs so the
+///    glossary doesn't fill up with `"trees."` vs `"trees,"`
+///    duplicates.
 pub fn diff_words(old: &str, new: &str) -> Vec<CorrectionPair> {
     let old_tokens: Vec<&str> = old.split_whitespace().collect();
     let new_tokens: Vec<&str> = new.split_whitespace().collect();
@@ -103,6 +117,9 @@ pub fn diff_words(old: &str, new: &str) -> Vec<CorrectionPair> {
     let mut oi = 0;
     let mut ni = 0;
     let mut li = 0;
+    // Track whether we just consumed an LCS anchor — used to decide
+    // whether the current gap has bilateral anchors.
+    let mut prev_was_anchor = false;
 
     while oi < old_tokens.len() && ni < new_tokens.len() {
         // Both sides at the next LCS anchor → advance.
@@ -115,6 +132,7 @@ pub fn diff_words(old: &str, new: &str) -> Vec<CorrectionPair> {
             oi += 1;
             ni += 1;
             li += 1;
+            prev_was_anchor = true;
             continue;
         }
 
@@ -138,25 +156,69 @@ pub fn diff_words(old: &str, new: &str) -> Vec<CorrectionPair> {
             None => new_tokens.len(),
         };
 
-        let pair_count = (old_run_end - oi).min(new_run_end - ni);
-        for k in 0..pair_count {
-            let wrong = old_tokens[oi + k];
-            let right = new_tokens[ni + k];
-            if looks_like_correction(wrong, right) {
-                pairs.push(CorrectionPair {
-                    wrong: wrong.to_string(),
-                    right: right.to_string(),
-                });
-                if pairs.len() >= MAX_PAIRS_PER_CAPTURE {
-                    return pairs;
+        let old_len = old_run_end - oi;
+        let new_len = new_run_end - ni;
+        // Bilateral anchoring: there's an LCS word immediately before
+        // (prev_was_anchor) AND an LCS word immediately after
+        // (next_lcs is Some). In that case the run is tightly framed
+        // by surrounding context, so we trust the substitution.
+        let bilateral = prev_was_anchor && next_lcs.is_some();
+
+        if old_len > 0 && new_len > 0 {
+            if old_len == new_len {
+                // Same-length runs — per-word pairs.
+                for k in 0..old_len {
+                    let wrong_raw = old_tokens[oi + k];
+                    let right_raw = new_tokens[ni + k];
+                    let wrong = strip_edge_punct(wrong_raw);
+                    let right = strip_edge_punct(right_raw);
+                    if wrong.is_empty() || right.is_empty() || wrong == right {
+                        continue;
+                    }
+                    if bilateral || looks_like_correction(wrong, right) {
+                        pairs.push(CorrectionPair {
+                            wrong: wrong.to_string(),
+                            right: right.to_string(),
+                        });
+                        if pairs.len() >= MAX_PAIRS_PER_CAPTURE {
+                            return pairs;
+                        }
+                    }
+                }
+            } else {
+                // Asymmetric runs — emit a single PHRASE pair joining
+                // both sides. Punctuation stripped from the phrase
+                // edges so `rock trees.` ↔ `worktrees.` becomes
+                // `rock trees` ↔ `worktrees`.
+                let wrong_phrase = old_tokens[oi..old_run_end].join(" ");
+                let right_phrase = new_tokens[ni..new_run_end].join(" ");
+                let wrong = strip_edge_punct(&wrong_phrase).to_string();
+                let right = strip_edge_punct(&right_phrase).to_string();
+                if !wrong.is_empty() && !right.is_empty() && wrong != right {
+                    pairs.push(CorrectionPair { wrong, right });
+                    if pairs.len() >= MAX_PAIRS_PER_CAPTURE {
+                        return pairs;
+                    }
                 }
             }
         }
+
+        prev_was_anchor = false;
         oi = old_run_end;
         ni = new_run_end;
     }
 
     pairs
+}
+
+/// Strip leading and trailing punctuation/whitespace from a token or
+/// phrase. Internal punctuation is preserved (e.g. dotted module
+/// names, hyphenated identifiers).
+fn strip_edge_punct(s: &str) -> &str {
+    s.trim_matches(|c: char| {
+        c.is_whitespace()
+            || matches!(c, '.' | ',' | '!' | '?' | ';' | ':' | '"' | '\'' | '(' | ')')
+    })
 }
 
 /// Standard Wagner-Fisher LCS over token slices.
@@ -530,6 +592,50 @@ mod tests {
         assert!(diff_words("", "anything").is_empty());
         assert!(diff_words("anything", "").is_empty());
         assert!(diff_words("", "").is_empty());
+    }
+
+    #[test]
+    fn diff_words_user_demo_phrase_and_word_substitutions() {
+        // Real-world example: user dictates → Whisper produces wrong
+        // text → user selects the WHOLE corrected sentence and presses
+        // ⌃⌥X. Daemon must extract both substitutions even though
+        // they're asymmetric (1↔2 words and 2↔1 words).
+        let old = "Cursor? Are you living under a rock? I have 16 cloudcodes running in different Git rock trees.";
+        let new = "Cursor? Are you living under a rock? I have 16 Claude Code running in different Git worktrees.";
+        let pairs = diff_words(old, new);
+
+        let pair_set: Vec<(String, String)> = pairs
+            .iter()
+            .map(|p| (p.wrong.clone(), p.right.clone()))
+            .collect();
+
+        assert!(
+            pair_set.contains(&("cloudcodes".to_string(), "Claude Code".to_string())),
+            "missing cloudcodes → Claude Code, got {:?}",
+            pair_set
+        );
+        assert!(
+            pair_set.contains(&("rock trees".to_string(), "worktrees".to_string())),
+            "missing rock trees → worktrees, got {:?}",
+            pair_set
+        );
+        assert_eq!(
+            pairs.len(),
+            2,
+            "expected exactly two phrase pairs, got {:?}",
+            pair_set
+        );
+    }
+
+    #[test]
+    fn diff_words_bilateral_anchor_accepts_low_levenshtein_match() {
+        // Without bilateral anchoring, "cloud" → "Claude" fails the
+        // Levenshtein gate (distance 3 > floor 2 for length-6 words).
+        // With anchors on both sides ("16" and "code"), it must pass.
+        let pairs = diff_words("16 cloud code today", "16 Claude code today");
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].wrong, "cloud");
+        assert_eq!(pairs[0].right, "Claude");
     }
 
     #[test]

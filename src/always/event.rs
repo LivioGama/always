@@ -60,6 +60,14 @@ pub enum DaemonEvent {
         wrong: String,
         right: String,
     },
+    /// Outcome of an active manual-correction capture (⌃⌥X). Lets
+    /// the GUI flash a status-bar overlay confirming what happened —
+    /// `applied`, `no_recent_paste`, `no_change`, `no_correction_pairs`,
+    /// or `error`. Per-pair detail flows separately via
+    /// [`DaemonEvent::CorrectionLogged`].
+    CorrectionCaptureResult {
+        outcome: String,
+    },
     /// Heartbeat for connection health
     Heartbeat,
 }
@@ -229,6 +237,15 @@ impl EventBroadcaster {
             id: id.into(),
             wrong: wrong.into(),
             right: right.into(),
+        });
+    }
+
+    /// Broadcast the outcome of an active correction-capture press
+    /// (⌃⌥X). `outcome` is one of: `applied`, `no_recent_paste`,
+    /// `no_change`, `no_correction_pairs`, `error`.
+    pub fn correction_capture_result(&self, outcome: impl Into<String>) {
+        self.send(DaemonEvent::CorrectionCaptureResult {
+            outcome: outcome.into(),
         });
     }
 }

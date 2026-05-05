@@ -302,22 +302,34 @@ pub fn start_keyboard_listener() -> Result<()> {
                     // Each pair fires a `CorrectionLogged` event so the
                     // GUI can surface confirmation toast / sound.
                     match correction::capture_via_hotkey(clipboard_watcher::PASTE_WINDOW) {
-                        Ok(correction::CaptureOutcome::Applied { pairs, applied: _ }) => {
-                            for p in pairs {
-                                event::global_broadcaster().correction_logged(p.wrong, p.right);
+                        Ok(correction::CaptureOutcome::Applied { pairs, applied }) => {
+                            for p in &pairs {
+                                event::global_broadcaster()
+                                    .correction_logged(p.wrong.clone(), p.right.clone());
                             }
+                            event::global_broadcaster()
+                                .correction_capture_result("applied");
+                            let _ = applied; // count surfaced via per-pair CorrectionLogged events
                         }
                         Ok(correction::CaptureOutcome::NoRecentPaste) => {
                             tracing::debug!("log_correction_no_recent_paste");
+                            event::global_broadcaster()
+                                .correction_capture_result("no_recent_paste");
                         }
                         Ok(correction::CaptureOutcome::NoChange) => {
                             tracing::debug!("log_correction_no_change");
+                            event::global_broadcaster()
+                                .correction_capture_result("no_change");
                         }
                         Ok(correction::CaptureOutcome::NoCorrectionPairs) => {
                             tracing::debug!("log_correction_no_correction_pairs");
+                            event::global_broadcaster()
+                                .correction_capture_result("no_correction_pairs");
                         }
                         Err(error) => {
                             tracing::error!(?error, "log_correction_failed");
+                            event::global_broadcaster()
+                                .correction_capture_result("error");
                         }
                     }
                 }

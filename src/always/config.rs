@@ -207,20 +207,23 @@ pub struct PostprocessConfig {
 impl Default for PostprocessConfig {
     fn default() -> Self {
         Self {
-            groq_model: "llama-3.1-8b-instant".to_string(),
+            // Tested empirically against the user's failure set:
+            //   8b-instant: invents (`Mo`→`Monday`, `struts`→`structures`,
+            //               `5050`→`5.050`), ignores glossary
+            //   70b-versatile: catches glossary but still expands
+            //               (`repo`→`repository`, `pack mine`→`pack of mine`,
+            //               `cloud.md`→`cloud code`)
+            //   gpt-oss-120b: clean across the board — applies glossary,
+            //               preserves abbreviations, doesn't invent.
+            // Override at runtime via `ALWAYS_GROQ_MODEL=<id>`.
+            groq_model: "openai/gpt-oss-120b".to_string(),
             learning_history_limit: 1000,
-            // Default OFF. The post-process LLM (Groq llama-3.1-8b-instant)
-            // is small and unreliable: it pattern-matches on glossary
-            // entries and aggressively rewrites ordinary English words
-            // to proper-noun terms that were merely *mentioned* in the
-            // system prompt (e.g. `idea` → `IntelliJ IDEA`). Voice-to-text
-            // tools should deliver what the user said, not a paraphrase.
-            //
-            // Users who want grammar/vocab cleanup can opt in via:
-            //   always config set postprocess_enabled true
-            // The Whisper bias prompt (initial_prompt) still helps —
-            // Whisper biases gently rather than rewriting.
-            grammar_correction_enabled: false,
+            // Default ON. The LLM postprocess pass is the single
+            // glossary-aware cleanup layer in the pipeline. Quality
+            // hinges entirely on the system prompt in
+            // `glossary::build_postprocess_prompt` — that's the
+            // surface to iterate on when transcripts are wrong.
+            grammar_correction_enabled: true,
             cache_ttl_seconds: 300,
         }
     }
@@ -260,8 +263,16 @@ impl AlwaysConfig {
         let mut effective_postprocess = postprocess_config.clone();
         effective_postprocess.grammar_correction_enabled = postprocess_enabled;
 
-        let post_processor = if let (Some(vocab), Some(context_vocab)) = (&vocab, &context_vocab) {
-            // Reuse the STT API key for LLM postprocess (same Groq account).
+        // Construct the post-processor whenever grammar_correction is
+        // enabled. The previous gate required BOTH a loaded
+        // vocabulary.json AND a detected project root (`.git`
+        // ancestor of cwd) — but the daemon is launched by the Mac
+        // app from /Applications, where cwd has no `.git` ancestor,
+        // so the post_processor was permanently None and the LLM
+        // cleanup never fired regardless of the user's pref. We now
+        // build it with sensible empty defaults so the prompt-driven
+        // glossary cleanup always runs when enabled.
+        let post_processor = {
             let groq_api_key = std::env::var("GROQ_API_KEY").ok().or_else(|| {
                 if groq_stt_api_key.is_empty() {
                     None
@@ -269,14 +280,22 @@ impl AlwaysConfig {
                     Some(groq_stt_api_key.clone())
                 }
             });
+            let vocab_for_pp = vocab.clone().unwrap_or_else(Vocabulary::default_patterns);
+            let context_vocab_for_pp = context_vocab
+                .clone()
+                .unwrap_or_else(|| Arc::new(Mutex::new(ContextVocabulary::new(None))));
+            tracing::info!(
+                grammar_correction_enabled = effective_postprocess.grammar_correction_enabled,
+                has_api_key = groq_api_key.is_some(),
+                project_root = project_root.is_some(),
+                "post_processor_init"
+            );
             Some(Arc::new(PostProcessor::new_with_config(
-                vocab.clone(),
-                Arc::clone(context_vocab),
+                vocab_for_pp,
+                context_vocab_for_pp,
                 effective_postprocess.clone(),
                 groq_api_key,
             )))
-        } else {
-            None
         };
 
         let config = Self {
@@ -438,9 +457,9 @@ fn log_path_from_preferences(prefs: &Preferences) -> PathBuf {
 }
 
 fn default_log_path() -> PathBuf {
-    // Tracing-appender rotates daily and suffixes with the current date,
-    // so the actual file is `always.YYYY-MM-DD`, not `always.log`.
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    // tracing-appender rotates daily on UTC and suffixes with the UTC date,
+    // so the actual file is `always.YYYY-MM-DD` in UTC, not local time.
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
     crate::always::telemetry::get_log_directory().join(format!("always.{date}"))
 }
 

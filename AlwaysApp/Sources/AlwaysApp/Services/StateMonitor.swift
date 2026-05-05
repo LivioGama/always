@@ -196,6 +196,43 @@ class StateMonitor: ObservableObject {
                 self.isVoiceActivity = false
                 let reason = event.data?["reason"] ?? ""
                 StatusOverlayController.shared.flash(state: .filtered(reason: reason), duration: 1.8)
+            case .correctionLogged:
+                // Per-pair confirmation (⌃⌥X applied a wrong→right
+                // substitution to glossary.json). Flash the actual
+                // pair text so the user sees what was learned, not
+                // just that something happened.
+                if let payload = event.correctionLogged {
+                    StatusOverlayController.shared.flash(
+                        state: .correctionSaved(wrong: payload.wrong, right: payload.right),
+                        duration: 2.5
+                    )
+                }
+            case .correctionCaptureResult:
+                // Summary outcome of a ⌃⌥X press. The "applied" case
+                // is already covered by per-pair `.correctionLogged`
+                // overlays above; here we only surface the
+                // negative outcomes so the user knows their press
+                // registered but produced no change.
+                let outcome = event.data?["outcome"] ?? ""
+                let label: String
+                switch outcome {
+                case "applied":
+                    return  // already handled per-pair
+                case "no_recent_paste":
+                    label = "No recent paste to compare"
+                case "no_change":
+                    label = "Selection matches paste"
+                case "no_correction_pairs":
+                    label = "No clear corrections found"
+                case "error":
+                    label = "Capture failed"
+                default:
+                    label = "Capture: \(outcome)"
+                }
+                StatusOverlayController.shared.flash(
+                    state: .correctionEmpty(reason: label),
+                    duration: 1.8
+                )
             default:
                 break
             }

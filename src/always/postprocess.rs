@@ -115,7 +115,7 @@ impl PostProcessor {
                     },
                     {
                         "role": "user",
-                        "content": text
+                        "content": format!("<transcript>{}</transcript>", text)
                     }
                 ],
                 "temperature": 0.1,

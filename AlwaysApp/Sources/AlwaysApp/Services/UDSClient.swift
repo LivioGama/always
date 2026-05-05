@@ -32,6 +32,7 @@ enum DaemonEventType: String, Codable {
     // pulled from a recent paste edit (Pending) for the user to confirm.
     case correctionLogged = "CorrectionLogged"
     case correctionPending = "CorrectionPending"
+    case correctionCaptureResult = "CorrectionCaptureResult"
 }
 
 // Event data structures

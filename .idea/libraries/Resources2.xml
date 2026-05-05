@@ -1,0 +1,13 @@
+<component name="libraryTable">
+  <library name="Resources2">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/AlwaysApp/.build/checkouts/Sparkle/Tests/Resources/SparkleTestCodeSignApp_bad_extraneous.zip!/" />
+      <root url="jar://$PROJECT_DIR$/AlwaysApp/.build/checkouts/Sparkle/Tests/Resources/DevSignedApp.zip!/" />
+      <root url="jar://$PROJECT_DIR$/AlwaysApp/.build/checkouts/Sparkle/Tests/Resources/SparkleTestCodeSignApp.zip!/" />
+      <root url="jar://$PROJECT_DIR$/AlwaysApp/.build/checkouts/Sparkle/Tests/Resources/SparkleTestCodeSignApp_bad_header.zip!/" />
+      <root url="jar://$PROJECT_DIR$/AlwaysApp/.build/checkouts/Sparkle/Tests/Resources/DevSignedAppVersion2.zip!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>
