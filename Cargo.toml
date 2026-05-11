@@ -52,7 +52,7 @@ tracing-appender = "0.2"
 keyring = "2.3"
 humantime = "2"
 # Optional, gated by the `macos` feature.
-core-graphics = { version = "0.24", optional = true }
+core-graphics = { version = "0.25", optional = true }
 rdev = { version = "0.5", optional = true }
 transcribe-rs = { version = "0.3", features = ["whisper-cpp"], optional = true }
 
