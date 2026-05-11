@@ -119,6 +119,31 @@ pub fn paste(text: &str, auto_enter: bool) -> Result<()> {
     Ok(())
 }
 
+/// Synthesize a single Return keypress in the focused app. Used to
+/// commit auto-enter after a countdown overlay completes (vs.
+/// inline in `paste_text(auto_enter=true)`).
+#[cfg(feature = "macos")]
+pub fn press_return() -> Result<()> {
+    use core_graphics::event::{CGEvent, CGEventTapLocation, CGKeyCode};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| anyhow::anyhow!("Failed to create CGEventSource"))?;
+    let enter_keycode: CGKeyCode = 36;
+    let enter_down = CGEvent::new_keyboard_event(source.clone(), enter_keycode, true)
+        .map_err(|_| anyhow::anyhow!("Failed to create enter key down event"))?;
+    enter_down.post(CGEventTapLocation::HID);
+    let enter_up = CGEvent::new_keyboard_event(source, enter_keycode, false)
+        .map_err(|_| anyhow::anyhow!("Failed to create enter key up event"))?;
+    enter_up.post(CGEventTapLocation::HID);
+    Ok(())
+}
+
+#[cfg(not(feature = "macos"))]
+pub fn press_return() -> Result<()> {
+    anyhow::bail!("press_return not implemented for this platform")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

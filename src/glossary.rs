@@ -18,6 +18,16 @@ struct Entry {
     mistranscriptions: Vec<String>,
     #[serde(default)]
     frequency: i64,
+    /// User-bumped priority. Higher = surfaced earlier in both the
+    /// Whisper bias prompt and the LLM cleanup prompt. Bumped each
+    /// time the manual correction dialog re-confirms this canonical
+    /// form; defaults to `1`.
+    #[serde(default = "default_weight")]
+    weight: i64,
+}
+
+fn default_weight() -> i64 {
+    1
 }
 
 static ENTRIES: OnceLock<Vec<Entry>> = OnceLock::new();
@@ -28,7 +38,10 @@ static AI_FILTER_CONTEXT: OnceLock<String> = OnceLock::new();
 fn entries() -> &'static [Entry] {
     ENTRIES.get_or_init(|| match load_entries() {
         Ok(mut v) => {
-            v.sort_by(|a, b| b.frequency.cmp(&a.frequency));
+            // Primary sort: weight (user-curated importance). Secondary:
+            // frequency (auto-tracked usage). Both descending — the
+            // most-trusted terms go first into the prompt budget.
+            v.sort_by(|a, b| b.weight.cmp(&a.weight).then(b.frequency.cmp(&a.frequency)));
             v
         }
         Err(e) => {
@@ -264,6 +277,7 @@ mod tests {
             term: term.to_string(),
             mistranscriptions: miss.iter().map(|s| s.to_string()).collect(),
             frequency: 100,
+            weight: 1,
         }
     }
 

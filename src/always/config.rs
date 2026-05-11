@@ -175,6 +175,14 @@ pub struct AlwaysConfig {
     pub silero_threshold: f32,
     pub vocab_config: VocabConfig,
     pub postprocess_config: PostprocessConfig,
+    /// Delay (ms) between paste and the synthesized Return when
+    /// `auto_enter` is on. `0` = press Return immediately (legacy
+    /// behavior). When > 0, a countdown overlay is shown; any key
+    /// press cancels.
+    pub auto_enter_delay_ms: u32,
+    /// Auto-pause the daemon after this many seconds with no voice
+    /// activity. `0` = disabled. Default 120 (matches requirement).
+    pub idle_pause_secs: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -318,6 +326,8 @@ impl AlwaysConfig {
             silero_threshold: prefs.silero_threshold.unwrap_or(0.5) as f32,
             vocab_config,
             postprocess_config: effective_postprocess,
+            auto_enter_delay_ms: prefs.auto_enter_delay_ms.unwrap_or(0),
+            idle_pause_secs: prefs.idle_pause_secs.unwrap_or(120),
         };
 
         Ok(config)
@@ -355,6 +365,8 @@ impl Default for AlwaysConfig {
             silero_threshold: 0.5,
             vocab_config,
             postprocess_config,
+            auto_enter_delay_ms: 0,
+            idle_pause_secs: 120,
         }
     }
 }

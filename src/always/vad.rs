@@ -8,6 +8,7 @@ use crate::always::audio::{self, FRAME_BYTES, FRAME_MS, FRAME_SAMPLES};
 use crate::always::config::AlwaysConfig;
 use crate::always::event;
 use crate::always::log::{Event, Logger};
+use crate::always::pause;
 
 /// Speculative transcription result, populated by a background thread.
 type SpeculationSlot = Arc<Mutex<Option<Result<crate::stt::TranscriptionResult>>>>;
@@ -182,6 +183,9 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
 
                         // Send voice activity detected event
                         event::global_broadcaster().voice_activity_detected();
+                        // Anchor the idle-pause watchdog: real voice
+                        // arrived right now, so any prior gap is reset.
+                        pause::mark_voice_seen();
                     }
                 }
                 // Prepend pre-buffer to capture audio before VAD triggered

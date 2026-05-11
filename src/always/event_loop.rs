@@ -5,8 +5,8 @@ use tokio::runtime::{Handle, Runtime};
 
 use crate::always::log::{Event, Logger};
 use crate::always::{
-    AlwaysConfig, clipboard_watcher, daemon, event, filter, keyboard, mic_monitor, paste, pause,
-    uds_server, vad,
+    AlwaysConfig, auto_enter_countdown, clipboard_watcher, daemon, event, filter, idle_watcher,
+    keyboard, mic_monitor, paste, pause, per_app, uds_server, vad,
 };
 
 pub fn run(cfg: &AlwaysConfig) -> Result<()> {
@@ -67,6 +67,10 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         .and_then(|p| p.passive_correction_capture)
         .unwrap_or(false);
     clipboard_watcher::spawn_if_enabled(rt.handle(), passive_correction_enabled);
+
+    // Idle-pause watchdog. Spawns at most one task; no-op when
+    // `idle_pause_secs == 0`. Lives for the daemon lifetime.
+    idle_watcher::spawn(rt.handle(), cfg.idle_pause_secs);
 
     // Send initial state events
     event::global_broadcaster().listening_started();
@@ -310,7 +314,18 @@ fn handle_speech(
                 return Ok(());
             }
 
-            paste::paste_text(pause::is_auto_enter_enabled())?;
+            // Always paste WITHOUT enter — the auto-enter Return key
+            // is now decoupled, gated behind an optional countdown so
+            // the user can intercept (any key cancels). When
+            // `auto_enter_delay_ms == 0` the countdown helper presses
+            // Return immediately, preserving the legacy behavior.
+            paste::paste_text(false)?;
+
+            let auto_enter_effective = per_app::effective_auto_enter(pause::is_auto_enter_enabled());
+            if auto_enter_effective {
+                let delay = per_app::effective_auto_enter_delay_ms(cfg.auto_enter_delay_ms);
+                auto_enter_countdown::schedule(rt, delay);
+            }
 
             // Snapshot the freshly-pasted text as the diff baseline for
             // the manual-correction capture pipeline. We store the
@@ -391,6 +406,8 @@ mod tests {
             silero_threshold: 0.5,
             vocab_config: VocabConfig::default(),
             postprocess_config: PostprocessConfig::default(),
+            auto_enter_delay_ms: 0,
+            idle_pause_secs: 0,
         }
     }
 

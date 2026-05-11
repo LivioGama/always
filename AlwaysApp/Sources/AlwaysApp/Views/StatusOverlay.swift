@@ -11,6 +11,10 @@ enum OverlayState: Equatable, Hashable {
     case filtered(reason: String)
     case correctionSaved(wrong: String, right: String)
     case correctionEmpty(reason: String)
+    /// Auto-enter countdown overlay. Whole seconds remaining.
+    case autoEnterCountdown(secondsRemaining: Int)
+    /// Idle auto-pause notice (briefly shown when daemon goes idle).
+    case idleAutoPaused(seconds: Int)
 
     var rawValue: String {
         switch self {
@@ -24,6 +28,8 @@ enum OverlayState: Equatable, Hashable {
         case .filtered(let reason): return reason.isEmpty ? "Filtered" : "Filtered · \(reason)"
         case .correctionSaved(let wrong, let right): return "Saved: \(wrong) → \(right)"
         case .correctionEmpty(let reason): return reason.isEmpty ? "Nothing to fix" : reason
+        case .autoEnterCountdown(let s): return "Auto-Enter in \(s)s · any key cancels"
+        case .idleAutoPaused(let s): return "Idle for \(s)s · paused"
         }
     }
 
@@ -39,6 +45,8 @@ enum OverlayState: Equatable, Hashable {
         case .filtered: return "xmark.octagon.fill"
         case .correctionSaved: return "checkmark.seal.fill"
         case .correctionEmpty: return "questionmark.circle"
+        case .autoEnterCountdown: return "return"
+        case .idleAutoPaused: return "moon.zzz.fill"
         }
     }
 
@@ -54,6 +62,8 @@ enum OverlayState: Equatable, Hashable {
         case .filtered: return .systemPink
         case .correctionSaved: return .systemGreen
         case .correctionEmpty: return .systemGray
+        case .autoEnterCountdown: return .systemYellow
+        case .idleAutoPaused: return .systemOrange
         }
     }
 }

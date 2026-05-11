@@ -5,7 +5,7 @@ use tokio::sync::broadcast;
 /// [`DaemonEvent`] or [`DaemonCommand`]. The daemon sends a `Hello` event
 /// as the first frame of every UDS connection so GUI clients can refuse
 /// to talk to a daemon they were not built against.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Event types for daemon-to-GUI communication
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +70,26 @@ pub enum DaemonEvent {
     },
     /// Heartbeat for connection health
     Heartbeat,
+    /// Auto-enter delay started — countdown overlay is now active.
+    /// `total_ms` is the full delay; `remaining_ms == total_ms` on start.
+    AutoEnterCountdownStarted { remaining_ms: u32, total_ms: u32 },
+    /// Tick of the auto-enter countdown.
+    AutoEnterCountdownTick { remaining_ms: u32 },
+    /// Auto-enter countdown cancelled by user (key press) or override.
+    AutoEnterCountdownCancelled,
+    /// Auto-enter countdown reached zero — Return was just synthesized.
+    AutoEnterCountdownFinished,
+    /// Daemon auto-paused after going `seconds` with no voice activity.
+    IdleAutoPaused { seconds: u32 },
+    /// Daemon auto-resumed after the idle-pause condition cleared.
+    IdleAutoResumed,
+    /// Focused application changed (macOS only).
+    FocusedAppChanged { bundle_id: Option<String> },
+    /// Daemon wants the GUI to open the correction dialog. Carries the
+    /// most recently-pasted transcript so the dialog can offer a
+    /// best-guess match for the wrong word once the user types the
+    /// intended one.
+    CorrectionDialogRequested { last_transcript: String },
 }
 
 impl DaemonEvent {
@@ -106,6 +126,22 @@ pub enum DaemonCommand {
     /// diff vs `last_pasted`, apply). Useful for clients without the
     /// global hotkey installed.
     CaptureCorrection,
+    /// Explicit pause set/clear with optional reason string (for logs).
+    /// Used by the Swift audio-output monitor and per-app overrides.
+    SetPaused { paused: bool, reason: Option<String> },
+    /// Cancel the active auto-enter countdown (e.g. Mac app saw a
+    /// keystroke land in the focused app).
+    CancelAutoEnterCountdown,
+    /// macOS Swift app reports the user switched focused application.
+    NotifyFocusedAppChanged { bundle_id: Option<String> },
+    /// macOS Swift app reports the system audio-output device started
+    /// or stopped producing sound. Daemon may auto-pause/resume.
+    NotifySystemAudioState { playing: bool },
+    /// User submitted the correction dialog with the intended spelling.
+    /// Daemon diffs against `last_pasted`/`last_transcript`, finds the
+    /// closest wrong-word match, and updates the glossary (add entry,
+    /// remove over-fired entry, or bump weight).
+    LogCorrection { intended: String },
 }
 
 impl DaemonCommand {
@@ -246,6 +282,43 @@ impl EventBroadcaster {
     pub fn correction_capture_result(&self, outcome: impl Into<String>) {
         self.send(DaemonEvent::CorrectionCaptureResult {
             outcome: outcome.into(),
+        });
+    }
+
+    pub fn auto_enter_countdown_started(&self, remaining_ms: u32, total_ms: u32) {
+        self.send(DaemonEvent::AutoEnterCountdownStarted {
+            remaining_ms,
+            total_ms,
+        });
+    }
+
+    pub fn auto_enter_countdown_tick(&self, remaining_ms: u32) {
+        self.send(DaemonEvent::AutoEnterCountdownTick { remaining_ms });
+    }
+
+    pub fn auto_enter_countdown_cancelled(&self) {
+        self.send(DaemonEvent::AutoEnterCountdownCancelled);
+    }
+
+    pub fn auto_enter_countdown_finished(&self) {
+        self.send(DaemonEvent::AutoEnterCountdownFinished);
+    }
+
+    pub fn idle_auto_paused(&self, seconds: u32) {
+        self.send(DaemonEvent::IdleAutoPaused { seconds });
+    }
+
+    pub fn idle_auto_resumed(&self) {
+        self.send(DaemonEvent::IdleAutoResumed);
+    }
+
+    pub fn focused_app_changed(&self, bundle_id: Option<String>) {
+        self.send(DaemonEvent::FocusedAppChanged { bundle_id });
+    }
+
+    pub fn correction_dialog_requested(&self, last_transcript: impl Into<String>) {
+        self.send(DaemonEvent::CorrectionDialogRequested {
+            last_transcript: last_transcript.into(),
         });
     }
 }

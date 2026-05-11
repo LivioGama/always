@@ -22,6 +22,10 @@ default = ["macos"]
 macos = ["dep:core-graphics", "dep:oslog", "dep:rdev"]
 linux = []
 windows = []
+# Opt-in offline transcription via `transcribe-rs` (whisper.cpp wrapper,
+# same crate used by Handy). Off by default because it pulls a heavy
+# native dep. Enable with `cargo build --features local-stt`.
+local-stt = ["dep:transcribe-rs"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -50,6 +54,7 @@ humantime = "2"
 # Optional, gated by the `macos` feature.
 core-graphics = { version = "0.24", optional = true }
 rdev = { version = "0.5", optional = true }
+transcribe-rs = { version = "0.3", features = ["whisper-cpp"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # `oslog` is target-gated AND feature-gated so a future macOS user can
