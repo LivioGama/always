@@ -12,6 +12,7 @@ struct Config: Codable {
     var shortcutPause: String
     var shortcutAutoEnter: String
     var shortcutForcePaste: String
+    var shortcutCorrectionDialog: String
     var postprocessEnabled: Bool
 
     // Defaults match `SensitivityPreset::Normal` and the Rust
@@ -28,6 +29,7 @@ struct Config: Codable {
         shortcutPause: "ctrl+alt+p",
         shortcutAutoEnter: "ctrl+alt+a",
         shortcutForcePaste: "ctrl+alt+v",
+        shortcutCorrectionDialog: "ctrl+alt+w",
         postprocessEnabled: true
     )
 
@@ -71,6 +73,10 @@ struct Config: Codable {
                 case "shortcut_force_paste":
                     if !value.contains("(not set)") {
                         config.shortcutForcePaste = value
+                    }
+                case "shortcut_correction_dialog":
+                    if !value.contains("(not set)") {
+                        config.shortcutCorrectionDialog = value
                     }
                 case "postprocess_enabled":
                     config.postprocessEnabled = (value == "true" || value == "1")

@@ -335,6 +335,13 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .unwrap_or("ctrl+alt+x")
             );
             println!(
+                "shortcut_correction_dialog: {}",
+                prefs
+                    .shortcut_correction_dialog
+                    .as_deref()
+                    .unwrap_or("ctrl+alt+w")
+            );
+            println!(
                 "passive_correction_capture: {}",
                 prefs
                     .passive_correction_capture

@@ -577,6 +577,13 @@ struct SettingsWindow: View {
                     _ = try? await cliService.setConfig(key: "shortcut_force_paste", value: value)
                 }
             )
+            KeyCaptureButton(
+                label: "Correction Dialog",
+                shortcut: $config.shortcutCorrectionDialog,
+                onSave: { value in
+                    _ = try? await cliService.setConfig(key: "shortcut_correction_dialog", value: value)
+                }
+            )
             Text("Shortcut changes take effect on next launch.")
                 .font(.caption2)
                 .foregroundColor(.secondary)
