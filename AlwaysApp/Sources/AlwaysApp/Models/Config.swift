@@ -34,7 +34,7 @@ struct Config: Codable {
         sttEnergyThreshold: 0.012,
         hearEnergyThreshold: 0.001,
         sttCooldownMs: 150,
-        sttSilence: 1.5,
+        sttSilence: 2.0,
         sttAutoEnter: true,
         sttAutoEnterDelaySecs: 4,
         groqApiKey: nil,

@@ -40,11 +40,15 @@ pub fn record_utterance(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordRe
 const SHORT_SPEECH_MS: u32 = 600;
 /// Silence-after-speech window for short utterances. Standard window
 /// is `cfg.silence_secs` (1.5s default); for a short utterance we cut
-/// at 400ms so "yes" pastes in ~700ms total instead of ~1.8s. Cost:
-/// if the user pauses >400ms mid-thought after a short opener
-/// ("yes, … actually no"), we paste the opener and start a fresh
-/// utterance for the rest. Acceptable for the latency win.
-const SHORT_SILENCE_MS: u32 = 400;
+/// at 700ms so "yes" pastes in ~1s total. Cost: if the user pauses
+/// >700ms mid-thought after a short opener ("yes, … actually no"),
+/// we paste the opener and start a fresh utterance for the rest.
+///
+/// History: 400ms was too aggressive — users dictating prose with
+/// brief thinking pauses ("So, …", "And, …") would get cut off after
+/// the opener. 700ms still gives a snappy ~1s round-trip for single
+/// words while leaving headroom for natural mid-thought micropauses.
+const SHORT_SILENCE_MS: u32 = 700;
 
 fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordResult> {
     let silence_frames = ((cfg.silence_secs * 1000.0) / FRAME_MS as f64).ceil() as usize;
@@ -87,9 +91,10 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     // Silero's probability naturally dips below 0.5 during voiceless consonants
     // (h, s, f), inter-syllable pauses, and quiet syllables — without hysteresis,
     // these brief dips accumulate consecutive_silence and prematurely cut the
-    // utterance mid-sentence. Tighter threshold (75% vs 60%) prevents cutoff on
-    // trailing soft consonants like 's' in "models", 'f' in "leaf", 'h' in "with".
-    let silence_threshold: f32 = speech_threshold * 0.75;
+    // utterance mid-sentence. 0.60 (vs prior 0.75) gives more headroom for
+    // natural "thinking" speech with brief breath pauses: trailing soft speech
+    // below 0.45 (when speech_threshold=0.5) still keeps the utterance alive.
+    let silence_threshold: f32 = speech_threshold * 0.60;
     let mut vad_accum: Vec<i16> = Vec::with_capacity(1024);
     let mut last_prob: f32 = 0.0;
     // Probability smoothing window. Silero outputs per-512-sample (32ms) chunks;
