@@ -70,7 +70,7 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
 
     // Idle-pause watchdog. Spawns at most one task; no-op when
     // `idle_pause_secs == 0`. Lives for the daemon lifetime.
-    idle_watcher::spawn(rt.handle(), cfg.idle_pause_secs);
+    idle_watcher::spawn(rt.handle(), cfg.idle_pause_secs, cfg.idle_pause_action);
 
     // Send initial state events
     event::global_broadcaster().listening_started();

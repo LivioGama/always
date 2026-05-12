@@ -33,6 +33,8 @@ pub struct Preferences {
     pub auto_enter_delay_ms: Option<u32>,
     /// Auto-pause after no voice for this many seconds. 0 = disabled.
     pub idle_pause_secs: Option<u32>,
+    /// Action to take when idle timeout occurs: "pause" or "pause_and_mute".
+    pub idle_pause_action: Option<String>,
     /// Shortcut to open the manual correction dialog (intended-word input).
     pub shortcut_correction_dialog: Option<String>,
     /// JSON-encoded per-app overrides: `{ "<bundle_id>": { "auto_enter": bool, "paused": bool } }`.
@@ -177,6 +179,13 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN idle_pause_secs INTEGER;")?;
     }
 
+    let has_idle_pause_action = conn
+        .prepare("SELECT idle_pause_action FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_idle_pause_action {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN idle_pause_action TEXT;")?;
+    }
+
     let has_shortcut_correction_dialog = conn
         .prepare("SELECT shortcut_correction_dialog FROM preferences LIMIT 0")
         .is_ok();
@@ -209,7 +218,7 @@ fn migrate(conn: &Connection) -> Result<()> {
 
 pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
     let mut stmt = conn.prepare(
-        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, shortcut_correction_dialog, per_app_settings_json, stt_auto_enter_delay_secs FROM preferences WHERE id = 1",
+        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, idle_pause_action, shortcut_correction_dialog, per_app_settings_json FROM preferences WHERE id = 1",
     )?;
     let result = stmt.query_row([], |row| {
         Ok(Preferences {
@@ -234,9 +243,9 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             passive_correction_capture: row.get::<_, Option<i64>>(18)?.map(|v| v != 0),
             auto_enter_delay_ms: row.get::<_, Option<i64>>(19)?.map(|v| v as u32),
             idle_pause_secs: row.get::<_, Option<i64>>(20)?.map(|v| v as u32),
-            shortcut_correction_dialog: row.get(21)?,
-            per_app_settings_json: row.get(22)?,
-            stt_auto_enter_delay_secs: row.get::<_, Option<i64>>(23)?.map(|v| v as u64),
+            idle_pause_action: row.get(21)?,
+            shortcut_correction_dialog: row.get(22)?,
+            per_app_settings_json: row.get(23)?,
         })
     });
     match result {
@@ -269,6 +278,7 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "passive_correction_capture",
         "auto_enter_delay_ms",
         "idle_pause_secs",
+        "idle_pause_action",
         "shortcut_correction_dialog",
         "per_app_settings_json",
     ];
@@ -361,6 +371,11 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
                 .context("idle_pause_secs must be a non-negative integer")?;
             if parsed > 86_400 {
                 anyhow::bail!("idle_pause_secs must be <= 86400 (1 day)");
+            }
+        }
+        "idle_pause_action" => {
+            if !matches!(value, "pause" | "pause_and_mute") {
+                anyhow::bail!("idle_pause_action must be one of: pause, pause_and_mute");
             }
         }
         "per_app_settings_json" => {

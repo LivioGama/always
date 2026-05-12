@@ -362,6 +362,13 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .as_deref()
                     .unwrap_or("{}")
             );
+            println!(
+                "idle_pause_action: {}",
+                prefs
+                    .idle_pause_action
+                    .as_deref()
+                    .unwrap_or("pause")
+            );
         }
         ConfigAction::Set { key, value } => {
             // Handle API keys specially - store in keychain

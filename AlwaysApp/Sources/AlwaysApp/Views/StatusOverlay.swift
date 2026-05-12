@@ -428,11 +428,187 @@ class StatusOverlayWindow: NSWindow {
     }
 }
 
+/// Small persistent corner widget shown after idle timeout animation.
+/// Contains moon icon and play button to manually resume.
+class IdleResumeWidget: NSView {
+    private let blurView: NSVisualEffectView
+    private let stackView: NSStackView
+    private let iconView: NSImageView
+    private let playButton: NSButton
+
+    private static let widgetWidth: CGFloat = 60
+    private static let widgetHeight: CGFloat = 50
+    private static let cornerRadius: CGFloat = 12
+    private static let iconSize: CGFloat = 24
+
+    var onPlayButtonClicked: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        self.blurView = NSVisualEffectView(frame: frameRect)
+        self.stackView = NSStackView()
+        self.iconView = NSImageView()
+        self.playButton = NSButton()
+        super.init(frame: frameRect)
+
+        wantsLayer = true
+        layer?.cornerRadius = Self.cornerRadius
+        layer?.masksToBounds = true
+
+        // Frosted backdrop
+        blurView.autoresizingMask = [.width, .height]
+        blurView.material = .hudWindow
+        blurView.blendingMode = .behindWindow
+        blurView.state = .active
+        blurView.wantsLayer = true
+        blurView.layer?.cornerRadius = Self.cornerRadius
+        blurView.layer?.masksToBounds = true
+        addSubview(blurView)
+
+        // Moon icon
+        let config = NSImage.SymbolConfiguration(pointSize: Self.iconSize, weight: .regular)
+        let image = NSImage(systemSymbolName: "moon.zzz.fill", accessibilityDescription: "Paused")?
+            .withSymbolConfiguration(config)
+        image?.isTemplate = true
+        iconView.image = image
+        iconView.contentTintColor = .white
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+
+        // Play button
+        playButton.title = "▶"
+        playButton.setButtonType(.momentaryPushIn)
+        playButton.bezelStyle = .circular
+        playButton.isBordered = true
+        playButton.target = self
+        playButton.action = #selector(playButtonClicked)
+        playButton.translatesAutoresizingMaskIntoConstraints = false
+
+        // Stack layout
+        stackView.orientation = .horizontal
+        stackView.alignment = .centerY
+        stackView.spacing = 4
+        stackView.translatesAutoresizingMaskIntoConstraints = false
+        stackView.addArrangedSubview(iconView)
+        stackView.addArrangedSubview(playButton)
+        addSubview(stackView)
+
+        NSLayoutConstraint.activate([
+            stackView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            stackView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: Self.iconSize),
+            iconView.heightAnchor.constraint(equalToConstant: Self.iconSize),
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) not implemented")
+    }
+
+    @objc private func playButtonClicked() {
+        onPlayButtonClicked?()
+    }
+}
+
+class IdleResumeWindow: NSWindow {
+    private var widgetView: IdleResumeWidget?
+
+    static let widgetWidth: CGFloat = 60
+    static let widgetHeight: CGFloat = 50
+
+    init() {
+        super.init(
+            contentRect: NSRect(x: 0, y: 0, width: Self.widgetWidth, height: Self.widgetHeight),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+
+        self.backgroundColor = NSColor.clear
+        self.isOpaque = false
+        self.level = .popUpMenu
+        self.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        self.ignoresMouseEvents = false
+        self.hasShadow = true
+        self.isReleasedWhenClosed = false
+
+        positionInBottomRight()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) not implemented")
+    }
+
+    func show(onPlayClicked: @escaping () -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            if self.widgetView == nil {
+                let frame = NSRect(x: 0, y: 0,
+                                   width: Self.widgetWidth,
+                                   height: Self.widgetHeight)
+                let widget = IdleResumeWidget(frame: frame)
+                widget.onPlayButtonClicked = onPlayClicked
+                self.widgetView = widget
+                self.contentView = widget
+            }
+
+            self.positionInBottomRight()
+
+            if !self.isVisible {
+                self.alphaValue = 0.0
+                self.orderFrontRegardless()
+            }
+
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.15
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                self.animator().alphaValue = 1.0
+            })
+        }
+    }
+
+    func hide() {
+        fadeOut(duration: 0.3)
+    }
+
+    func fadeOut(duration: TimeInterval = 0.3) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.isVisible else { return }
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = duration
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                self.animator().alphaValue = 0.0
+            }, completionHandler: { [weak self] in
+                guard let self = self else { return }
+                if self.alphaValue == 0.0 {
+                    self.orderOut(nil)
+                    self.alphaValue = 1.0
+                }
+            })
+        }
+    }
+
+    private func positionInBottomRight() {
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) })
+            ?? NSScreen.main
+        guard let screen = screen else { return }
+
+        let screenFrame = screen.visibleFrame
+        let margin: CGFloat = 20
+        let targetX = screenFrame.maxX - Self.widgetWidth - margin
+        let targetY = screenFrame.minY + margin
+
+        self.setFrame(NSRect(x: targetX, y: targetY, width: Self.widgetWidth, height: Self.widgetHeight), display: true)
+    }
+}
+
 class StatusOverlayController {
     static let shared = StatusOverlayController()
 
     private var window: StatusOverlayWindow?
+    private var idleResumeWindow: IdleResumeWindow?
     private var hideWorkItem: DispatchWorkItem?
+    private var idleAnimationWorkItem: DispatchWorkItem?
     private var flashEndsAt: Date?
     private var pendingShowState: OverlayState?
 
@@ -486,6 +662,72 @@ class StatusOverlayController {
         DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
     }
 
+    /// Special handler for idle timeout: two-phase animation.
+    /// Phase 1 (0-2s): Show full overlay with idle state
+    /// Phase 2 (2s+): Hide main overlay, animate corner widget with play button
+    func showIdleTimeoutAnimation(seconds: Int) {
+        ensureWindow()
+        cancelPendingHide()
+        cancelIdleAnimation()
+
+        // Phase 1: Show full overlay for 2 seconds
+        window?.show(state: .idleAutoPaused(seconds: seconds))
+
+        let endsAt = Date(timeIntervalSinceNow: 2.0)
+        flashEndsAt = endsAt
+
+        // Schedule phase 2 transition at 2-second mark
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.flashEndsAt = nil
+            self.window?.hide()
+
+            // Phase 2: Show corner widget with play button
+            self.showIdleResumeWidget()
+        }
+        idleAnimationWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: work)
+    }
+
+    /// Show the persistent corner widget for manual resume during idle timeout.
+    private func showIdleResumeWidget() {
+        if idleResumeWindow == nil {
+            NSLog("StatusOverlayController: Creating idle resume widget")
+            idleResumeWindow = IdleResumeWindow()
+        }
+
+        idleResumeWindow?.show { [weak self] in
+            self?.handleIdleResumeClicked()
+        }
+    }
+
+    /// Called when user clicks the play button in the idle resume widget.
+    private func handleIdleResumeClicked() {
+        // Send toggle-pause command to resume (unpause) the daemon
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/Applications/AlwaysApp.app/Contents/MacOS/always")
+            task.arguments = ["toggle-pause"]
+            do {
+                try task.run()
+                task.waitUntilExit()
+
+                // Hide the widget after successful unpause
+                DispatchQueue.main.async {
+                    self?.idleResumeWindow?.hide()
+                }
+            } catch {
+                NSLog("Error sending toggle-pause command: \(error)")
+            }
+        }
+    }
+
+    /// Cancel any in-flight idle animation.
+    private func cancelIdleAnimation() {
+        idleAnimationWorkItem?.cancel()
+        idleAnimationWorkItem = nil
+    }
+
     func hide() {
         // If a flash is active, let it complete naturally — don't kill it
         // mid-flash because of a stale voice-activity-ended.
@@ -494,7 +736,9 @@ class StatusOverlayController {
             return
         }
         cancelPendingHide()
+        cancelIdleAnimation()
         window?.hide()
+        idleResumeWindow?.hide()
     }
 
     /// Internal so `@testable import AlwaysApp` can verify flash protection
@@ -510,5 +754,6 @@ class StatusOverlayController {
         hideWorkItem = nil
         flashEndsAt = nil
         pendingShowState = nil
+        cancelIdleAnimation()
     }
 }
