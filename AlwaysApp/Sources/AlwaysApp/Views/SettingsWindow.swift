@@ -267,6 +267,8 @@ struct SettingsWindow: View {
             Divider()
             behaviorRow
             Divider()
+            perAppSection
+            Divider()
             apiSection
             Divider()
             vocabularySection
@@ -358,6 +360,93 @@ struct SettingsWindow: View {
                 Spacer()
             }
         }
+    }
+
+    private var perAppSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Per-App Settings").font(.headline)
+            if let jsonStr = config.perAppSettingsJson, !jsonStr.isEmpty, jsonStr != "{}" {
+                if let data = jsonStr.data(using: .utf8),
+                   let overrides = try? JSONDecoder().decode([String: AppOverride].self, from: data) {
+                    if overrides.isEmpty {
+                        Text("No per-app overrides")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(Array(overrides.sorted { $0.key < $1.key }), id: \.key) { bundleId, override in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(appNameForBundle(bundleId))
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(.secondary)
+
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        if let paused = override.paused {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: paused ? "pause.circle.fill" : "play.circle.fill")
+                                                    .font(.caption2)
+                                                Text(paused ? "Paused" : "Active")
+                                                    .font(.caption2)
+                                            }
+                                            .foregroundColor(paused ? .orange : .green)
+                                        }
+
+                                        if let autoEnter = override.autoEnter {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: autoEnter ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                                    .font(.caption2)
+                                                Text("Auto-Enter: \(autoEnter ? "On" : "Off")")
+                                                    .font(.caption2)
+                                            }
+                                            .foregroundColor(autoEnter ? .green : .gray)
+                                        }
+
+                                        if let delay = override.autoEnterDelayMs {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "timer")
+                                                    .font(.caption2)
+                                                Text("Delay: \(delay)ms")
+                                                    .font(.caption2)
+                                            }
+                                            .foregroundColor(.secondary)
+                                        }
+                                    }
+                                }
+                                .padding(.vertical, 6)
+                                .padding(.horizontal, 8)
+                                .background(Color.secondary.opacity(0.1))
+                                .cornerRadius(4)
+                            }
+                        }
+                    }
+                } else {
+                    Text("No per-app overrides")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            } else {
+                Text("No per-app overrides")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private func appNameForBundle(_ bundleId: String) -> String {
+        let workspace = NSWorkspace.shared
+        if let bundle = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first {
+            return bundle.localizedName ?? bundleId
+        }
+        if let app = workspace.urlForApplication(withBundleIdentifier: bundleId),
+           let bundle = Bundle(url: app),
+           let displayName = bundle.infoDictionary?["CFBundleDisplayName"] as? String {
+            return displayName
+        }
+        if let app = workspace.urlForApplication(withBundleIdentifier: bundleId) {
+            return FileManager.default.displayName(atPath: app.path)
+        }
+        return bundleId
     }
 
     private var apiSection: some View {
@@ -640,7 +729,7 @@ struct SettingsWindow: View {
                 _ = try await cliService.setConfig(key: "stt_silence", value: String(config.sttSilence))
                 _ = try await cliService.setConfig(key: "stt_cooldown_ms", value: String(config.sttCooldownMs))
                 _ = try await cliService.setConfig(key: "stt_auto_enter", value: String(config.sttAutoEnter))
-                _ = try await cliService.setConfig(key: "stt_auto_enter_delay_secs", value: String(config.sttAutoEnterDelaySecs))
+                _ = try await cliService.setConfig(key: "auto_enter_delay_ms", value: String(config.sttAutoEnterDelaySecs * 1000))
                 _ = try await cliService.setConfig(key: "silero_threshold", value: String(config.sileroThreshold))
                 _ = try await cliService.setConfig(key: "postprocess_enabled", value: String(config.postprocessEnabled))
                 // Only save API key if it's not masked (doesn't contain only dots)

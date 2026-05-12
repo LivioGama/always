@@ -291,9 +291,9 @@ fn handle_config(action: ConfigAction) -> Result<()> {
             println!(
                 "stt_auto_enter_delay_secs: {}",
                 prefs
-                    .stt_auto_enter_delay_secs
+                    .auto_enter_delay_ms
                     .map(|v| v.to_string())
-                    .unwrap_or_else(|| "2".to_string())
+                    .unwrap_or_else(|| "2000".to_string())
             );
             println!(
                 "groq_api_key: {}",
@@ -354,6 +354,13 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .postprocess_enabled
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "true".to_string())
+            );
+            println!(
+                "per_app_settings_json: {}",
+                prefs
+                    .per_app_settings_json
+                    .as_deref()
+                    .unwrap_or("{}")
             );
         }
         ConfigAction::Set { key, value } => {

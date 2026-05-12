@@ -18,8 +18,12 @@ const TICK_MS: u32 = 100;
 /// utterance. If a countdown is already active, the new one supersedes
 /// it (we cancel the previous so it doesn't fire after the new paste).
 pub fn schedule(rt: &Handle, delay_ms: u32) {
+    tracing::info!(delay_ms, "auto_enter_countdown_schedule");
     if delay_ms == 0 {
-        // Fast path: bypass the timer entirely.
+        // Fast path: bypass the timer entirely, but wait for paste to complete.
+        // Even with 0 delay, we need a minimum wait to ensure the Cmd+V event
+        // has been delivered to the target application before Return is pressed.
+        std::thread::sleep(Duration::from_millis(50));
         let _ = press_return_now();
         return;
     }
@@ -34,6 +38,7 @@ pub fn schedule(rt: &Handle, delay_ms: u32) {
     let _ = pause::countdown_take_cancel();
 
     let total = delay_ms;
+    tracing::info!("auto_enter_countdown_started");
     global_broadcaster().auto_enter_countdown_started(delay_ms, total);
 
     rt.spawn(async move {

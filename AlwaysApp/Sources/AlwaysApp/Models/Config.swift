@@ -1,5 +1,17 @@
 import Foundation
 
+struct AppOverride: Codable {
+    var autoEnter: Bool?
+    var paused: Bool?
+    var autoEnterDelayMs: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case autoEnter = "auto_enter"
+        case paused
+        case autoEnterDelayMs = "auto_enter_delay_ms"
+    }
+}
+
 struct Config: Codable {
     var sttEnergyThreshold: Double
     var hearEnergyThreshold: Double
@@ -14,6 +26,7 @@ struct Config: Codable {
     var shortcutForcePaste: String
     var shortcutCorrectionDialog: String
     var postprocessEnabled: Bool
+    var perAppSettingsJson: String?
 
     // Defaults match `SensitivityPreset::Normal` and the Rust
     // `AlwaysConfig::default()` values.
@@ -30,7 +43,8 @@ struct Config: Codable {
         shortcutAutoEnter: "ctrl+alt+a",
         shortcutForcePaste: "ctrl+alt+v",
         shortcutCorrectionDialog: "ctrl+alt+w",
-        postprocessEnabled: true
+        postprocessEnabled: true,
+        perAppSettingsJson: nil
     )
 
     static func fromCLI(output: String) -> Config? {
@@ -54,6 +68,12 @@ struct Config: Codable {
                     config.sttSilence = Double(value.replacingOccurrences(of: "s", with: "")) ?? defaultConfig.sttSilence
                 case "stt_auto_enter":
                     config.sttAutoEnter = value == "true"
+                case "auto_enter_delay_ms":
+                    if let ms = Int(value) {
+                        config.sttAutoEnterDelaySecs = ms / 1000
+                    } else {
+                        config.sttAutoEnterDelaySecs = defaultConfig.sttAutoEnterDelaySecs
+                    }
                 case "stt_auto_enter_delay_secs":
                     config.sttAutoEnterDelaySecs = Int(value) ?? defaultConfig.sttAutoEnterDelaySecs
                 case "groq_api_key":
@@ -80,6 +100,8 @@ struct Config: Codable {
                     }
                 case "postprocess_enabled":
                     config.postprocessEnabled = (value == "true" || value == "1")
+                case "per_app_settings_json":
+                    config.perAppSettingsJson = value == "{}" ? nil : value
                 default:
                     break
                 }

@@ -22,7 +22,15 @@ class CLIService: ObservableObject {
     }
 
     func startDaemon() async throws -> String {
-        try await runCLI(arguments: ["start"])
+        // Read current config to pass to daemon
+        let config = try await getConfig()
+        var args = ["start"]
+        args.append("--silence")
+        args.append("1.5") // Default silence threshold
+        if config.sttAutoEnter {
+            args.append("--auto-enter")
+        }
+        return try await runCLI(arguments: args)
     }
 
     func stopDaemon() async throws -> String {
@@ -35,7 +43,7 @@ class CLIService: ObservableObject {
         AppDelegate.killStaleDaemon()
         // Brief pause so the OS reclaims the socket and PID file
         try await Task.sleep(nanoseconds: 300_000_000) // 300ms
-        return try await runCLI(arguments: ["start"])
+        return try await startDaemon()
     }
 
     func getStatus() async throws -> DaemonStatus {

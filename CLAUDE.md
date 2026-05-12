@@ -1,33 +1,17 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **always** (1612 symbols, 3794 relationships, 137 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **always** (1694 symbols, 4075 relationships, 144 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
 ## Always Do
-
-## Mandatory GitNexus enforcement (hard rule)
-
-- **REQUIRED** Start every repository-research action with `bunx gitnexus status` (or `bunx gitnexus analyze --force` if stale).
-- **REQUIRED** Use `gitnexus_query({query: "..."} )` for feature discovery and unfamiliar code paths.
-- **REQUIRED** Use `gitnexus_context({name: "symbol"})` before modifying implementations.
-- **REQUIRED** Do not begin implementation without completing the flow above.
-- **FORBIDDEN** treating `rg`/`grep` as the primary exploration mechanism for repository logic.
-- **ALLOWED** `rg`/`grep` only as a narrow fallback, and only after GitNexus steps are attempted and incomplete.
 
 - **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
 - **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
 - **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
 - When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
 - When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
-- For every repo-research session, enforce GitNexus-first flow:
-  1. `bunx gitnexus status` (or `bunx gitnexus analyze --force` if stale).
-  2. `gitnexus_query` by the user concept.
-  3. `gitnexus_context` for target symbols before touching implementation.
-  4. Continue validation with GitNexus and, only if needed, external web research.
-- NEVER use shell search (`rg`/`grep`) as primary repo exploration; use GitNexus discovery first.
-- Shell search is only acceptable if GitNexus cannot answer a concrete question and still requires one targeted `rg` probe.
 
 ## Never Do
 
