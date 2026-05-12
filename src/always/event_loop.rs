@@ -267,6 +267,13 @@ fn handle_speech(
             Ok(())
         }
         SpeechAction::Paste { text: transformed } => {
+            // Log the raw Whisper transcript for debugging STT quality issues
+            tracing::info!(
+                stage = "whisper_raw",
+                transcript = %text,
+                "speech-to-text output"
+            );
+
             // Pre-LLM acoustic fix-up (ported from Handy):
             // Soundex + Levenshtein + n-gram fusion against the user's
             // curated glossary terms. Catches Whisper acoustic
@@ -291,7 +298,13 @@ fn handle_speech(
                     after = %acoustic,
                     count = acoustic_subs.len(),
                     pairs = %pairs.join(", "),
-                    "extraction_applied"
+                    "glossary corrections applied"
+                );
+            } else {
+                tracing::debug!(
+                    stage = "acoustic_match",
+                    text = %acoustic,
+                    "no glossary corrections needed"
                 );
             }
 
@@ -303,22 +316,49 @@ fn handle_speech(
                 let started = Instant::now();
                 match rt.block_on(pp.process(&acoustic, None)) {
                     Ok(cleaned) => {
-                        tracing::debug!(
-                            elapsed_ms = started.elapsed().as_millis() as u64,
-                            "postprocess_applied"
-                        );
+                        let elapsed_ms = started.elapsed().as_millis() as u64;
+                        if acoustic != cleaned {
+                            tracing::info!(
+                                stage = "grammar_correction",
+                                before = %acoustic,
+                                after = %cleaned,
+                                elapsed_ms = elapsed_ms,
+                                "grammar correction applied"
+                            );
+                        } else {
+                            tracing::debug!(
+                                stage = "grammar_correction",
+                                text = %cleaned,
+                                elapsed_ms = elapsed_ms,
+                                "no grammar changes"
+                            );
+                        }
                         cleaned
                     }
                     Err(err) => {
-                        tracing::warn!(error = %err, "postprocess_failed_fallback_to_vocab");
+                        tracing::warn!(
+                            error = %err,
+                            fallback_text = %acoustic,
+                            "grammar correction failed, using acoustic match result"
+                        );
                         acoustic
                     }
                 }
             } else {
+                tracing::debug!(
+                    stage = "grammar_correction",
+                    text = %acoustic,
+                    "grammar correction disabled"
+                );
                 acoustic
             };
 
-            tracing::debug!(final_text = %final_text, energy, "pasting");
+            tracing::info!(
+                stage = "final_result",
+                text = %final_text,
+                energy = energy,
+                "transcript ready for pasting"
+            );
             log.write(Event::Pasting {
                 raw: text,
                 processed: &final_text,
