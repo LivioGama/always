@@ -331,7 +331,7 @@ impl AlwaysConfig {
             silero_threshold: prefs.silero_threshold.unwrap_or(0.5) as f32,
             vocab_config,
             postprocess_config: effective_postprocess,
-            auto_enter_delay_ms: prefs.auto_enter_delay_ms.unwrap_or(0),
+            auto_enter_delay_ms: prefs.auto_enter_delay_ms.unwrap_or(4000),
             idle_pause_secs: prefs.idle_pause_secs.unwrap_or(120),
         };
 
@@ -354,8 +354,8 @@ impl Default for AlwaysConfig {
             // kicks off at 75% of this (≈1.1s) so end-to-end paste
             // latency rarely exceeds ~1.5s after the user stops talking.
             silence_secs: 1.5,
-            auto_enter: false,
-            auto_enter_delay_secs: 2,
+            auto_enter: true,
+            auto_enter_delay_secs: 4,
             filter_enabled: true,
             energy_threshold: 0.012,
             onset_ms: 30,
@@ -371,7 +371,7 @@ impl Default for AlwaysConfig {
             silero_threshold: 0.5,
             vocab_config,
             postprocess_config,
-            auto_enter_delay_ms: 0,
+            auto_enter_delay_ms: 4000,
             idle_pause_secs: 120,
         }
     }
