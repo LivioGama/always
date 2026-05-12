@@ -267,17 +267,41 @@ fn handle_speech(
             Ok(())
         }
         SpeechAction::Paste { text: transformed } => {
-            // Single optional cleanup: LLM postprocess (off by default).
-            // The Whisper transcript is otherwise pasted verbatim. The
-            // glossary's curated `mistranscriptions` are surfaced to the
-            // LLM via the postprocess prompt; deterministic regex
-            // substitution was tried and removed because it kept firing
-            // on natural speech ("structure" → "struct" etc.).
+            // Pre-LLM acoustic fix-up (ported from Handy):
+            // Soundex + Levenshtein + n-gram fusion against the user's
+            // curated glossary terms. Catches Whisper acoustic
+            // mishears like `cloud → Claude`, `kubernetics → Kubernetes`
+            // BEFORE we pay the LLM round-trip. Cheap, deterministic,
+            // doesn't invent — purely substitutes from the user's
+            // approved canonical list.
+            let custom_words = crate::glossary::user_glossary_terms();
+            let (acoustic, acoustic_subs) = crate::always::text_match::apply_custom_words(
+                &transformed,
+                &custom_words,
+                crate::always::text_match::DEFAULT_THRESHOLD,
+            );
+            if !acoustic_subs.is_empty() {
+                let pairs: Vec<String> = acoustic_subs
+                    .iter()
+                    .map(|(w, r)| format!("{w}->{r}"))
+                    .collect();
+                tracing::info!(
+                    stage = "acoustic_match",
+                    before = %transformed,
+                    after = %acoustic,
+                    count = acoustic_subs.len(),
+                    pairs = %pairs.join(", "),
+                    "extraction_applied"
+                );
+            }
+
+            // Optional LLM postprocess on top of the acoustic-fixed
+            // text. Default ON via `grammar_correction_enabled`.
             let final_text = if cfg.postprocess_config.grammar_correction_enabled
                 && let Some(ref pp) = cfg.post_processor
             {
                 let started = Instant::now();
-                match rt.block_on(pp.process(&transformed, None)) {
+                match rt.block_on(pp.process(&acoustic, None)) {
                     Ok(cleaned) => {
                         tracing::debug!(
                             elapsed_ms = started.elapsed().as_millis() as u64,
@@ -287,11 +311,11 @@ fn handle_speech(
                     }
                     Err(err) => {
                         tracing::warn!(error = %err, "postprocess_failed_fallback_to_vocab");
-                        transformed
+                        acoustic
                     }
                 }
             } else {
-                transformed
+                acoustic
             };
 
             tracing::debug!(final_text = %final_text, energy, "pasting");
@@ -391,6 +415,7 @@ mod tests {
             timeout_secs: 30,
             silence_secs: 2.0,
             auto_enter: false,
+            auto_enter_delay_secs: 2,
             filter_enabled: true,
             energy_threshold: 0.05,
             onset_ms: 50,

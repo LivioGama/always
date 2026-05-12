@@ -160,6 +160,7 @@ pub struct AlwaysConfig {
     pub timeout_secs: u32,
     pub silence_secs: f64,
     pub auto_enter: bool,
+    pub auto_enter_delay_secs: u64,
     pub filter_enabled: bool,
     pub energy_threshold: f64,
     pub onset_ms: u32,
@@ -311,6 +312,9 @@ impl AlwaysConfig {
             timeout_secs,
             silence_secs: prefs.stt_silence.unwrap_or(silence_secs),
             auto_enter,
+            auto_enter_delay_secs: prefs
+                .stt_auto_enter_delay_secs
+                .unwrap_or(2),
             filter_enabled: true, // Always enabled - filter is always on
             energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.012),
             onset_ms: 30,
@@ -350,6 +354,7 @@ impl Default for AlwaysConfig {
             // latency rarely exceeds ~1.5s after the user stops talking.
             silence_secs: 1.5,
             auto_enter: false,
+            auto_enter_delay_secs: 2,
             filter_enabled: true,
             energy_threshold: 0.012,
             onset_ms: 30,

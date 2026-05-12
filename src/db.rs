@@ -19,6 +19,7 @@ pub struct Preferences {
     pub stt_silence: Option<f64>,
     pub stt_trim_silence: Option<bool>,
     pub stt_auto_enter: Option<bool>,
+    pub stt_auto_enter_delay_secs: Option<u64>,
     pub deepgram_api_key: Option<String>,
     pub groq_api_key: Option<String>,
     pub deepgram_model: Option<String>,
@@ -226,7 +227,7 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             auto_enter_delay_ms: row.get::<_, Option<i64>>(19)?.map(|v| v as u32),
             idle_pause_secs: row.get::<_, Option<i64>>(20)?.map(|v| v as u32),
             shortcut_correction_dialog: row.get(21)?,
-            per_app_settings_json: row.get(22)?,
+            per_app_settings_json: row.get(22)?
         })
     });
     match result {
@@ -248,6 +249,7 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "stt_trim_silence",
         "stt_auto_enter",
         "deepgram_api_key",
+        "stt_auto_enter_delay_secs",
         "groq_api_key",
         "deepgram_model",
         "silero_threshold",
@@ -332,10 +334,7 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
                 anyhow::bail!("silero_threshold must be between 0.1 and 0.9");
             }
         }
-        "stt_trim_silence"
-        | "stt_auto_enter"
-        | "postprocess_enabled"
-        | "passive_correction_capture" => {
+        "stt_trim_silence" | "stt_auto_enter" | "postprocess_enabled" | "passive_correction_capture" => {
             if !matches!(value, "true" | "false" | "1" | "0") {
                 anyhow::bail!("{key} must be one of: true, false, 1, 0");
             }

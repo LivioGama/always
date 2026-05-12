@@ -1,17 +1,33 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **always** (1049 symbols, 2457 relationships, 88 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **always** (1612 symbols, 3794 relationships, 137 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
 ## Always Do
+
+## Mandatory GitNexus enforcement (hard rule)
+
+- **REQUIRED** Start every repository-research action with `bunx gitnexus status` (or `bunx gitnexus analyze --force` if stale).
+- **REQUIRED** Use `gitnexus_query({query: "..."} )` for feature discovery and unfamiliar code paths.
+- **REQUIRED** Use `gitnexus_context({name: "symbol"})` before modifying implementations.
+- **REQUIRED** Do not begin implementation without completing the flow above.
+- **FORBIDDEN** treating `rg`/`grep` as the primary exploration mechanism for repository logic.
+- **ALLOWED** `rg`/`grep` only as a narrow fallback, and only after GitNexus steps are attempted and incomplete.
 
 - **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
 - **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
 - **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
 - When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
 - When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
+- For every repo-research session, enforce GitNexus-first flow:
+  1. `bunx gitnexus status` (or `bunx gitnexus analyze --force` if stale).
+  2. `gitnexus_query` by the user concept.
+  3. `gitnexus_context` for target symbols before touching implementation.
+  4. Continue validation with GitNexus and, only if needed, external web research.
+- NEVER use shell search (`rg`/`grep`) as primary repo exploration; use GitNexus discovery first.
+- Shell search is only acceptable if GitNexus cannot answer a concrete question and still requires one targeted `rg` probe.
 
 ## Never Do
 
@@ -44,6 +60,10 @@ This project is indexed by GitNexus as **always** (1049 symbols, 2457 relationsh
 
 # Always Voice-to-Text Development
 
+## Terminology Conventions
+
+- **`dep`** — In the crate process, refers to checking a node of type "dependency". When we say "do it in dep", it means we check the dependency node in the dependency graph/crate system.
+
 ## What Must Be Rebuilt Together
 
 The overlay system depends on TWO binaries that must be in sync:
@@ -69,21 +89,19 @@ Local development uses the **debug** profile so `cfg!(debug_assertions)` is `tru
 
 ### Simple Workflow (Do This Every Time)
 
-**Preferred — `scripts/dev-rebuild.sh`:**
+**Required — use `scripts/dev-rebuild.sh` for every Rust+Swift rebuild.**
 ```bash
 scripts/dev-rebuild.sh            # debug profile (default — transcripts visible)
 scripts/dev-rebuild.sh release    # release profile (transcripts hidden)
 ```
 The script kills the running app, rebuilds Rust + Swift, redeploys to `/Applications/AlwaysApp.app`, and relaunches. It plays a short macOS system sound at each lifecycle marker (kill / compiled / up / fail) so you can hear progress while looking at logs. Mute with `ALWAYS_REBUILD_SILENT=1`.
 
-**Manual equivalent (after Rust changes, debug):**
+**Do not use the manual equivalent for normal rebuilds.**
 ```bash
-pkill -f AlwaysApp
-cargo build --lib --bin always
-cd AlwaysApp && ./build.sh && open -a AlwaysApp
+DO NOT run the manual equivalent for routine rebuilds.
 ```
 
-**Manual equivalent (release for distribution):**
+**Manual equivalent (release for distribution) is only for special cases:**
 ```bash
 pkill -f AlwaysApp
 cargo build --release --lib --bin always

@@ -289,6 +289,13 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .unwrap_or_else(|| "false".to_string())
             );
             println!(
+                "stt_auto_enter_delay_secs: {}",
+                prefs
+                    .stt_auto_enter_delay_secs
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "2".to_string())
+            );
+            println!(
                 "groq_api_key: {}",
                 if groq_in_keychain {
                     "*** (in keychain)".to_string()

@@ -293,6 +293,7 @@ struct SettingsWindow: View {
         .onChange(of: config.hearEnergyThreshold) { _, _ in saveConfig() }
         .onChange(of: config.sttSilence) { _, _ in saveConfig() }
         .onChange(of: config.sttCooldownMs) { _, _ in saveConfig() }
+        .onChange(of: config.sttAutoEnterDelaySecs) { _, _ in saveConfig() }
         .onChange(of: config.sileroThreshold) { _, _ in saveConfig() }
         .onChange(of: config.postprocessEnabled) { _, _ in saveConfig() }
     }
@@ -339,6 +340,16 @@ struct SettingsWindow: View {
                 )
                 Spacer()
             }
+            NumericSettingRow(
+                title: "Auto-Enter Delay",
+                help: "Seconds before auto-enter. Set to 0 to disable.",
+                unit: "s",
+                formatter: Self.intFormatter,
+                value: $config.sttAutoEnterDelaySecs,
+                defaultValue: 2,
+                range: 0...86_400
+            )
+            .padding(.top, 4)
             HStack {
                 Toggle(
                     "Smart Postprocess (LLM grammar + glossary fixes)",
@@ -622,6 +633,7 @@ struct SettingsWindow: View {
                 _ = try await cliService.setConfig(key: "stt_silence", value: String(config.sttSilence))
                 _ = try await cliService.setConfig(key: "stt_cooldown_ms", value: String(config.sttCooldownMs))
                 _ = try await cliService.setConfig(key: "stt_auto_enter", value: String(config.sttAutoEnter))
+                _ = try await cliService.setConfig(key: "stt_auto_enter_delay_secs", value: String(config.sttAutoEnterDelaySecs))
                 _ = try await cliService.setConfig(key: "silero_threshold", value: String(config.sileroThreshold))
                 _ = try await cliService.setConfig(key: "postprocess_enabled", value: String(config.postprocessEnabled))
                 // Only save API key if it's not masked (doesn't contain only dots)

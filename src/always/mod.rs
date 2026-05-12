@@ -30,6 +30,7 @@ pub mod smart_filter;
 pub mod stt_local;
 pub mod telemetry;
 pub mod text;
+pub mod text_match;
 pub mod uds_server;
 pub mod vad;
 pub mod vocab;

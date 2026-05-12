@@ -6,6 +6,7 @@ struct Config: Codable {
     var sttCooldownMs: Int
     var sttSilence: Double
     var sttAutoEnter: Bool
+    var sttAutoEnterDelaySecs: Int
     var groqApiKey: String?
     var sileroThreshold: Float
     var shortcutPause: String
@@ -21,6 +22,7 @@ struct Config: Codable {
         sttCooldownMs: 150,
         sttSilence: 1.5,
         sttAutoEnter: false,
+        sttAutoEnterDelaySecs: 2,
         groqApiKey: nil,
         sileroThreshold: 0.5,
         shortcutPause: "ctrl+alt+p",
@@ -50,6 +52,8 @@ struct Config: Codable {
                     config.sttSilence = Double(value.replacingOccurrences(of: "s", with: "")) ?? defaultConfig.sttSilence
                 case "stt_auto_enter":
                     config.sttAutoEnter = value == "true"
+                case "stt_auto_enter_delay_secs":
+                    config.sttAutoEnterDelaySecs = Int(value) ?? defaultConfig.sttAutoEnterDelaySecs
                 case "groq_api_key":
                     if !value.contains("(not set)") {
                         config.groqApiKey = value

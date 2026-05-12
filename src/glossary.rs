@@ -71,6 +71,28 @@ pub fn ai_filter_vocabulary_context() -> &'static str {
     AI_FILTER_CONTEXT.get_or_init(|| build_ai_filter_context(entries()))
 }
 
+/// All canonical `term` strings from the loaded glossary, deduped
+/// (case-insensitive) and non-empty. Restricted to entries with
+/// non-empty `mistranscriptions` so the acoustic-match pass only
+/// fires on user-curated terms — bare auto-imported app names
+/// (`IntelliJ IDEA`, etc.) would over-trigger the Soundex matcher
+/// on common English words. Returned in glossary order
+/// (`entries()` is sorted frequency-desc).
+pub fn user_glossary_terms() -> Vec<String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for e in entries() {
+        let term = e.term.trim();
+        if term.is_empty() || e.mistranscriptions.is_empty() {
+            continue;
+        }
+        if seen.insert(term.to_lowercase()) {
+            out.push(term.to_string());
+        }
+    }
+    out
+}
+
 fn build_whisper_bias_prompt(entries: &[Entry]) -> Option<String> {
     if entries.is_empty() {
         return None;
