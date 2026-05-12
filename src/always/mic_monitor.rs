@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::time::{Duration, Instant};
 
 /// Cross-platform microphone usage monitor

@@ -313,7 +313,8 @@ impl AlwaysConfig {
             silence_secs: prefs.stt_silence.unwrap_or(silence_secs),
             auto_enter,
             auto_enter_delay_secs: prefs
-                .stt_auto_enter_delay_secs
+                .auto_enter_delay_ms
+                .map(|ms| (ms as u64 + 999) / 1000) // Convert ms to seconds, round up
                 .unwrap_or(2),
             filter_enabled: true, // Always enabled - filter is always on
             energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.012),
