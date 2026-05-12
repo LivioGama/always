@@ -13,6 +13,7 @@ final class CorrectionDialog {
     static let shared = CorrectionDialog()
 
     private var window: NSWindow?
+    private var buttonTarget: ButtonTarget?
 
     private init() {}
 
@@ -72,8 +73,9 @@ final class CorrectionDialog {
 
         panel.contentView = container
 
-        // Use a holder to keep target alive while window is open.
+        // Keep target alive for the lifetime of the panel.
         let target = ButtonTarget()
+        self.buttonTarget = target
         cancel.target = target
         cancel.action = #selector(ButtonTarget.cancelTapped(_:))
         submit.target = target
@@ -83,13 +85,13 @@ final class CorrectionDialog {
             onSubmit(text)
             panel.close()
             self.window = nil
+            self.buttonTarget = nil
         }
         target.onCancel = {
             panel.close()
             self.window = nil
+            self.buttonTarget = nil
         }
-        // Retain target via associated object — set as represented object.
-        panel.contentView?.layer?.setValue(target, forKey: "buttonTarget")
 
         self.window = panel
         NSApp.activate(ignoringOtherApps: true)
