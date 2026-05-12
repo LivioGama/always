@@ -10,6 +10,10 @@ use super::text::Vocabulary;
 use crate::db;
 use crate::db::Preferences;
 
+// Default configuration values
+const DEFAULT_AUTO_ENTER_DELAY_MS: u32 = 4000;
+const DEFAULT_IDLE_PAUSE_SECS: u32 = 120;
+
 #[derive(Debug, Clone, Default)]
 pub enum VadMode {
     #[default]
@@ -331,8 +335,8 @@ impl AlwaysConfig {
             silero_threshold: prefs.silero_threshold.unwrap_or(0.5) as f32,
             vocab_config,
             postprocess_config: effective_postprocess,
-            auto_enter_delay_ms: prefs.auto_enter_delay_ms.unwrap_or(4000),
-            idle_pause_secs: prefs.idle_pause_secs.unwrap_or(120),
+            auto_enter_delay_ms: prefs.auto_enter_delay_ms.unwrap_or(DEFAULT_AUTO_ENTER_DELAY_MS),
+            idle_pause_secs: prefs.idle_pause_secs.unwrap_or(DEFAULT_IDLE_PAUSE_SECS),
         };
 
         Ok(config)
@@ -371,8 +375,8 @@ impl Default for AlwaysConfig {
             silero_threshold: 0.5,
             vocab_config,
             postprocess_config,
-            auto_enter_delay_ms: 4000,
-            idle_pause_secs: 120,
+            auto_enter_delay_ms: DEFAULT_AUTO_ENTER_DELAY_MS,
+            idle_pause_secs: DEFAULT_IDLE_PAUSE_SECS,
         }
     }
 }
