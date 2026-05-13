@@ -188,7 +188,7 @@ struct NumericSettingRow<T: Numeric & LosslessStringConvertible>: View where T: 
                         .frame(width: 22, alignment: .leading)
                 }
             }
-            Text("Default: \(formatter.string(for: defaultValue) ?? "")")
+            Text("Default: \(formatter.string(for: defaultValue) ?? "")\(unit.isEmpty ? "" : " \(unit)")")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .frame(width: 100, alignment: .trailing)
