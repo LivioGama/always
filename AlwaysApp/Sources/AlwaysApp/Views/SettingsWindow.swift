@@ -298,6 +298,8 @@ struct SettingsWindow: View {
         .onChange(of: config.sttAutoEnterDelaySecs) { _, _ in saveConfig() }
         .onChange(of: config.sileroThreshold) { _, _ in saveConfig() }
         .onChange(of: config.postprocessEnabled) { _, _ in saveConfig() }
+        .onChange(of: config.idlePauseSecs) { _, _ in saveConfig() }
+        .onChange(of: config.idlePauseAction) { _, _ in saveConfig() }
     }
 
     // MARK: Sections
@@ -359,6 +361,36 @@ struct SettingsWindow: View {
                 )
                 Spacer()
             }
+
+            Divider().padding(.vertical, 2)
+
+            // Idle Auto-Pause Section
+            Text("Idle Auto-Pause")
+                .font(.subheadline.bold())
+                .foregroundColor(.secondary)
+
+            NumericSettingRow(
+                title: "Pause After Inactivity",
+                help: "Seconds of no voice before the daemon auto-pauses. Set to 0 to disable.",
+                unit: "s",
+                formatter: Self.intFormatter,
+                value: $config.idlePauseSecs,
+                defaultValue: 120,
+                range: 0...86_400
+            )
+
+            HStack {
+                Text("On Idle Timeout:")
+                    .help("What happens when idle timeout occurs. 'Pause' just pauses listening. 'Pause + Mute' also mutes input audio.")
+                Picker("", selection: $config.idlePauseAction) {
+                    Text("Pause Only").tag("pause")
+                    Text("Pause + Mute").tag("pause_and_mute")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Spacer()
+            }
+            .padding(.top, 2)
         }
     }
 
@@ -732,6 +764,8 @@ struct SettingsWindow: View {
                 _ = try await cliService.setConfig(key: "auto_enter_delay_ms", value: String(config.sttAutoEnterDelaySecs * 1000))
                 _ = try await cliService.setConfig(key: "silero_threshold", value: String(config.sileroThreshold))
                 _ = try await cliService.setConfig(key: "postprocess_enabled", value: String(config.postprocessEnabled))
+                _ = try await cliService.setConfig(key: "idle_pause_secs", value: String(config.idlePauseSecs))
+                _ = try await cliService.setConfig(key: "idle_pause_action", value: config.idlePauseAction)
                 // Only save API key if it's not masked (doesn't contain only dots)
                 if shouldPersistApiKey(apiKey) {
                     _ = try await cliService.setConfig(key: "groq_api_key", value: apiKey.isEmpty ? "" : apiKey)

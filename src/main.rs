@@ -363,6 +363,13 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .unwrap_or("{}")
             );
             println!(
+                "idle_pause_secs: {}",
+                prefs
+                    .idle_pause_secs
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "120".to_string())
+            );
+            println!(
                 "idle_pause_action: {}",
                 prefs
                     .idle_pause_action
