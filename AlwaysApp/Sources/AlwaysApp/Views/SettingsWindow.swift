@@ -243,6 +243,17 @@ struct SettingsWindow: View {
         return f
     }()
 
+    /// Cooldown uses 3 decimal places because typical values are ~0.150s.
+    private static let cooldownSecondsFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.minimumFractionDigits = 3
+        f.maximumFractionDigits = 3
+        f.minimum = 0
+        f.maximum = 60
+        return f
+    }()
+
     private static let intFormatter: NumberFormatter = {
         let f = NumberFormatter()
         f.numberStyle = .none
@@ -623,18 +634,21 @@ struct SettingsWindow: View {
                         unit: "s",
                         formatter: Self.secondsFormatter,
                         value: $config.sttSilence,
-                        defaultValue: 1.5,
+                        defaultValue: 2.0,
                         range: 0.1...10
                     )
 
                     NumericSettingRow(
                         title: "Cooldown",
-                        help: "Min ms between consecutive pastes",
-                        unit: "ms",
-                        formatter: Self.intFormatter,
-                        value: $config.sttCooldownMs,
-                        defaultValue: 150,
-                        range: 0...60_000
+                        help: "Min seconds between consecutive pastes",
+                        unit: "s",
+                        formatter: Self.cooldownSecondsFormatter,
+                        value: Binding(
+                            get: { Double(config.sttCooldownMs) / 1000.0 },
+                            set: { config.sttCooldownMs = Int(($0 * 1000).rounded()) }
+                        ),
+                        defaultValue: 0.150,
+                        range: 0...60.0
                     )
 
                     NumericSettingRow(
