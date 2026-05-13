@@ -27,6 +27,18 @@ struct AlwaysApp: App {
     }
     
     init() {
+        // CRITICAL: set accessory policy BEFORE SwiftUI evaluates scenes.
+        // If we wait until applicationDidFinishLaunching, AppKit/SwiftUI on
+        // macOS 26 may have already decided the app should quit because no
+        // Window scene is currently presented (MenuBarExtra alone doesn't
+        // count). Setting it here makes the process status-bar-only from
+        // the very first runloop turn.
+        NSApplication.shared.setActivationPolicy(.accessory)
+        // Refuse sudden/auto termination at the framework level too —
+        // belt-and-suspenders alongside the Info.plist keys.
+        ProcessInfo.processInfo.disableSuddenTermination()
+        ProcessInfo.processInfo.disableAutomaticTermination("AlwaysApp must keep its status bar item alive")
+
         // Inject onboarding state into appDelegate after initialization
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [self] in
             appDelegate.setOnboardingState(onboardingState)
@@ -65,6 +77,10 @@ class OnboardingState: ObservableObject {
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var cliService: CLIService?
     private var onboardingState: OnboardingState?
+    /// Set true by the Quit menu item so we know a termination request is
+    /// user-initiated and should be honored. Anything else (system idle
+    /// reaper, SwiftUI scene lifecycle, etc.) is refused.
+    static var userInitiatedQuit = false
 
     func setOnboardingState(_ state: OnboardingState) {
         onboardingState = state
@@ -109,6 +125,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         Self.killStaleDaemon()
+    }
+
+    /// Menu-bar (LSUIElement) apps must NOT quit when the last window
+    /// closes — they live in the status bar. The default value is true,
+    /// which caused the GUI to auto-quit moments after launch on macOS
+    /// 26.x: SwiftUI briefly considers all `Window` scenes "closed"
+    /// during the MenuBarExtra-only steady state, and AppKit honors the
+    /// default by terminating the process. Returning false keeps the
+    /// status-bar item alive.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    /// Reject every termination request that wasn't initiated by the Quit
+    /// menu item. On macOS 26 SwiftUI's MenuBarExtra appears to send a
+    /// terminate: right after `NSStatusItemChangeVisibilityAction`, which
+    /// kills the app moments after launch. Honoring only user-initiated
+    /// quits prevents that.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if Self.userInitiatedQuit {
+            return .terminateNow
+        }
+        NSLog("AlwaysApp: refusing non-user terminate request")
+        return .terminateCancel
     }
 
     /// Read the daemon PID file and send SIGTERM. Synchronous so it works

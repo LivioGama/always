@@ -18,10 +18,16 @@
     <string>1.0</string>
     <key>LSUIElement</key>
     <true/>
+    <!--
+      Menu-bar apps (LSUIElement) must opt OUT of automatic and sudden
+      termination, otherwise AppKit kills the process moments after
+      status-item creation because there are no visible windows.
+      Symptom: app launches, status icon flashes, immediately disappears.
+    -->
     <key>NSSupportsAutomaticTermination</key>
-    <true/>
+    <false/>
     <key>NSSupportsSuddenTermination</key>
-    <true/>
+    <false/>
     <key>NSAccessibilityUsageDescription</key>
     <string>AlwaysApp needs accessibility access to position the voice indicator near your active text cursor.</string>
     <key>NSAppleEventsUsageDescription</key>
