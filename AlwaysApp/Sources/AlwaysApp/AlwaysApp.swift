@@ -7,10 +7,10 @@ struct AlwaysApp: App {
     @StateObject private var onboardingState = OnboardingState()
 
     var body: some Scene {
-        MenuBarExtra("Always", systemImage: "mic.fill") {
-            MenuBarView()
-        }
-        .menuBarExtraStyle(.menu)
+        // Status-bar item is created manually in AppDelegate via NSStatusBar
+        // (see installStatusItem). SwiftUI's MenuBarExtra was unreliable on
+        // macOS 26 — the icon would disappear or get hidden behind the notch
+        // moments after launch. NSStatusItem is the production-grade path.
 
         Window("Always Settings", id: "settings") {
             SettingsWindow(cliService: CLIService())
@@ -82,6 +82,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// reaper, SwiftUI scene lifecycle, etc.) is refused.
     static var userInitiatedQuit = false
 
+    /// Status bar item — pinned to a strong reference so AppKit doesn't
+    /// dealloc it. macOS 26 broke SwiftUI's MenuBarExtra in subtle ways
+    /// (icon hidden behind notch / Control Center overflow); managing
+    /// the NSStatusItem directly is reliable.
+    private var statusItem: NSStatusItem?
+    /// Popover that hosts the SwiftUI MenuBarView when the icon is clicked.
+    private var menuPopover: NSPopover?
+    /// Monitor that closes the popover when the user clicks outside it.
+    private var popoverDismissMonitor: Any?
+
     func setOnboardingState(_ state: OnboardingState) {
         onboardingState = state
     }
@@ -89,6 +99,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         cliService = CLIService()
+
+        // Manually install the status bar item. Must run on the main thread
+        // and happens here (post-launch) rather than in init so NSApp is
+        // fully wired.
+        installStatusItem()
 
         // Check if onboarding is needed
         onboardingState?.checkAndShowOnboardingIfNeeded()
@@ -149,6 +164,55 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         NSLog("AlwaysApp: refusing non-user terminate request")
         return .terminateCancel
+    }
+
+    /// Create the NSStatusItem and wire up the click handler that toggles
+    /// the MenuBarView popover.
+    private func installStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = item.button {
+            let symbol = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Always")
+            button.image = symbol
+            button.imagePosition = .imageOnly
+            button.toolTip = "Always — voice activation"
+            button.target = self
+            button.action = #selector(statusItemClicked(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        }
+        statusItem = item
+
+        // Pre-build the popover. NSHostingController hosts SwiftUI content.
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentSize = NSSize(width: 240, height: 320)
+        popover.contentViewController = NSHostingController(rootView: MenuBarView())
+        menuPopover = popover
+    }
+
+    @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
+        guard let popover = menuPopover else { return }
+        if popover.isShown {
+            popover.performClose(nil)
+            removeDismissMonitor()
+        } else {
+            popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+            // Auto-close when the user clicks outside the popover.
+            popoverDismissMonitor = NSEvent.addGlobalMonitorForEvents(
+                matching: [.leftMouseDown, .rightMouseDown]
+            ) { [weak self] _ in
+                self?.menuPopover?.performClose(nil)
+                self?.removeDismissMonitor()
+            }
+            // Bring popover to front so the SwiftUI controls receive events.
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    private func removeDismissMonitor() {
+        if let monitor = popoverDismissMonitor {
+            NSEvent.removeMonitor(monitor)
+            popoverDismissMonitor = nil
+        }
     }
 
     /// Read the daemon PID file and send SIGTERM. Synchronous so it works
