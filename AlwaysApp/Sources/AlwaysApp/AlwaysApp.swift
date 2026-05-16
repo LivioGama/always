@@ -178,16 +178,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// status-bar apps (Slack, Discord, Zoom) use the bare-bones recipe
     /// below and stay visible reliably.
     private func installStatusItem() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        // Use variableLength + a text+icon combo so the item is
+        // visually distinctive. The user already has multiple voice
+        // apps (superwhisper, Whispering, Handy) whose mic-only icons
+        // are easy to confuse — adding "ALW" text makes ours obvious.
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
             let symbol = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Always")
             symbol?.isTemplate = true
             button.image = symbol
-            // Fallback so the item still has SOMETHING measurable if the
-            // symbol fails to load on a future macOS.
-            if symbol == nil {
-                button.title = "AL"
-            }
+            button.imagePosition = .imageLeading
+            button.title = " ALW"  // Leading space separates from icon.
+            button.font = .systemFont(ofSize: 12, weight: .semibold)
             button.toolTip = "Always — voice activation"
             button.target = self
             button.action = #selector(statusItemClicked(_:))
