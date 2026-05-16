@@ -108,20 +108,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         cliService = CLIService()
 
-        // Install the status item FIRST, while we're still `.accessory`
-        // (set in App.init()). This is the Tahoe 26 fix: switching to
-        // `.regular` before status-item registration leaves the item
-        // unrendered (Apple Forums 650270, confirmed by Stats / Maccy /
-        // Ice / AeroSpace devs).
+        // Install the status item under .accessory (set in App.init())
+        // and STAY .accessory permanently. Confirmed Tahoe 26 bug: any
+        // later upgrade to .regular leaves the status item un-slotted
+        // in the menu bar so it renders at screen origin (0,0 → bottom
+        // left) instead of the top right. User verified this by
+        // clicking the "invisible" icon and seeing the popover appear
+        // at the bottom-left corner of the screen.
+        //
+        // Trade-off: no Dock icon. Settings WindowGroup still
+        // auto-opens for both .accessory and .regular, so the user
+        // still gets an undeniable visible window on launch.
         installStatusItem()
-
-        // NOW upgrade to .regular for the Dock running-dot. Deferred
-        // 200ms so the status item's scene fence completes first. Also
-        // re-activate so AppKit re-renders the menu bar to include us.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            NSApp.setActivationPolicy(.regular)
-            NSApp.activate(ignoringOtherApps: true)
-        }
 
         // Check if onboarding is needed
         onboardingState?.checkAndShowOnboardingIfNeeded()
@@ -458,10 +456,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // Approach 4: Force layout
             button.layout()
 
-            // Approach 5: Update entire button - remove title
+            // Approach 5: Match original installStatusItem setup
             button.imagePosition = .imageOnly
             button.title = ""
-            button.font = .systemFont(ofSize: 12, weight: .semibold)
 
             // Approach 6: Force window update
             if let window = button.window {
@@ -471,34 +468,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             // Approach 7: Force button to redraw
             button.needsDisplay = true
-
-            // Approach 8: Force CALayer update
-            if let layer = button.layer {
-                layer.setNeedsDisplay()
-                layer.displayIfNeeded()
-            }
-
-            // Approach 9: Force entire view hierarchy update
-            button.superview?.setNeedsDisplay(button.bounds)
-            button.superview?.displayIfNeeded()
-
-            // Approach 10: Force NSRunLoop to process immediately
-            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
-
-            // Approach 11: Force CATransaction with disableActions
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            button.needsDisplay = true
-            button.layout()
-            CATransaction.commit()
-
-            // Approach 12: Force status item visibility toggle
-            statusItem.isVisible = false
-            statusItem.isVisible = true
-
-            // Approach 13: Force button wantsLayer
-            button.wantsLayer = true
-            button.layer?.setNeedsDisplay()
 
             os_log("Icon set successfully, button.image=%{public}@, statusItem.isVisible=%{public}@",
                    log: logger, type: .info,
@@ -514,16 +483,38 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             popover.performClose(nil)
             removeDismissMonitor()
         } else {
-            popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
-            // Auto-close when the user clicks outside the popover.
-            popoverDismissMonitor = NSEvent.addGlobalMonitorForEvents(
-                matching: [.leftMouseDown, .rightMouseDown]
-            ) { [weak self] _ in
-                self?.menuPopover?.performClose(nil)
-                self?.removeDismissMonitor()
+            // Nuclear approach: completely recreate popover to force correct positioning
+            popover.performClose(nil)
+            removeDismissMonitor()
+
+            // Create fresh popover
+            let freshPopover = NSPopover()
+            freshPopover.behavior = .transient
+            freshPopover.contentSize = NSSize(width: 240, height: 320)
+            freshPopover.contentViewController = NSHostingController(rootView: MenuBarView())
+            menuPopover = freshPopover
+
+            // Force NSApp to deactivate and reactivate
+            NSApp.hide(nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                NSApp.activate(ignoringOtherApps: true)
+                NSApp.setActivationPolicy(.regular)
+
+                // Show popover with multiple positioning attempts
+                if let window = sender.window {
+                    freshPopover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+                } else {
+                    freshPopover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+                }
+
+                // Auto-close when the user clicks outside the popover.
+                self.popoverDismissMonitor = NSEvent.addGlobalMonitorForEvents(
+                    matching: [.leftMouseDown, .rightMouseDown]
+                ) { [weak self] _ in
+                    self?.menuPopover?.performClose(nil)
+                    self?.removeDismissMonitor()
+                }
             }
-            // Bring popover to front so the SwiftUI controls receive events.
-            NSApp.activate(ignoringOtherApps: true)
         }
     }
 
