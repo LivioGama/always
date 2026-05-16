@@ -27,13 +27,13 @@ struct AlwaysApp: App {
     }
     
     init() {
-        // CRITICAL: set accessory policy BEFORE SwiftUI evaluates scenes.
-        // If we wait until applicationDidFinishLaunching, AppKit/SwiftUI on
-        // macOS 26 may have already decided the app should quit because no
-        // Window scene is currently presented (MenuBarExtra alone doesn't
-        // count). Setting it here makes the process status-bar-only from
-        // the very first runloop turn.
-        NSApplication.shared.setActivationPolicy(.accessory)
+        // Run as a regular app so the Dock shows our icon with the
+        // standard "running" indicator dot AND we keep the status bar
+        // item (installed manually by AppDelegate). `.regular` is the
+        // default for non-LSUIElement apps but we set it explicitly to
+        // override any inherited state from the previous LSUIElement
+        // build.
+        NSApplication.shared.setActivationPolicy(.regular)
         // Refuse sudden/auto termination at the framework level too —
         // belt-and-suspenders alongside the Info.plist keys.
         ProcessInfo.processInfo.disableSuddenTermination()
@@ -97,7 +97,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        // `.regular` activation policy was already applied in App.init();
+        // we don't re-set it here so the policy decided pre-runloop
+        // stays the single source of truth.
         cliService = CLIService()
 
         // Manually install the status bar item. Must run on the main thread

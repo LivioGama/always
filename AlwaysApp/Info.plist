@@ -16,13 +16,18 @@
     <string>1.0</string>
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
-    <key>LSUIElement</key>
-    <true/>
     <!--
-      Menu-bar apps (LSUIElement) must opt OUT of automatic and sudden
-      termination, otherwise AppKit kills the process moments after
-      status-item creation because there are no visible windows.
-      Symptom: app launches, status icon flashes, immediately disappears.
+      `LSUIElement` was previously `true` (status-bar-only). User wants
+      a Dock icon (with the "running" indicator dot) AND a status-bar
+      icon, so we run as a regular app. The status bar item is still
+      installed manually in AppDelegate.installStatusItem().
+    -->
+    <key>LSUIElement</key>
+    <false/>
+    <!--
+      Even as a regular app, keep automatic/sudden termination disabled
+      so the background voice daemon survives idle periods and macOS
+      doesn't reap the GUI when no windows are open.
     -->
     <key>NSSupportsAutomaticTermination</key>
     <false/>
