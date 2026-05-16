@@ -27,13 +27,13 @@ struct AlwaysApp: App {
     }
     
     init() {
-        // Run as a regular app so the Dock shows our icon with the
-        // standard "running" indicator dot AND we keep the status bar
-        // item (installed manually by AppDelegate). `.regular` is the
-        // default for non-LSUIElement apps but we set it explicitly to
-        // override any inherited state from the previous LSUIElement
-        // build.
-        NSApplication.shared.setActivationPolicy(.regular)
+        // Status-bar-only app (LSUIElement). The `.regular` experiment
+        // (16 May) broke status-item visibility on macOS Tahoe — the
+        // item registered with com.apple.controlcenter but never showed
+        // in the visible menu bar. `.accessory` is the proven-working
+        // policy from the May-14 build that displayed the orange mic
+        // icon reliably.
+        NSApplication.shared.setActivationPolicy(.accessory)
         // Refuse sudden/auto termination at the framework level too —
         // belt-and-suspenders alongside the Info.plist keys.
         ProcessInfo.processInfo.disableSuddenTermination()
