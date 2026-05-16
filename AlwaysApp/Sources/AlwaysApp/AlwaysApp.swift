@@ -7,18 +7,19 @@ struct AlwaysApp: App {
     @StateObject private var onboardingState = OnboardingState()
 
     var body: some Scene {
-        // Status-bar item is created manually in AppDelegate via NSStatusBar
-        // (see installStatusItem). SwiftUI's MenuBarExtra was unreliable on
-        // macOS 26 — the icon would disappear or get hidden behind the notch
-        // moments after launch. NSStatusItem is the production-grade path.
-
-        Window("Always Settings", id: "settings") {
+        // WindowGroup (not Window) so SwiftUI auto-opens the
+        // primary window on launch for `.regular` activation
+        // policy. Single-window UX is enforced by `.commandsRemoved`
+        // (no File→New) and the menubar control having no
+        // "New Settings Window" item.
+        WindowGroup("Always Settings", id: "settings") {
             SettingsWindow(cliService: CLIService())
         }
         // `.contentSize` makes the window grow to exactly fit its SwiftUI
         // content and disables manual resize handles. The settings view
         // is laid out to fit on a 14" laptop without any scrolling.
         .windowResizability(.contentSize)
+        .commandsRemoved()
 
         Window("Welcome to Always", id: "onboarding") {
             OnboardingView()
@@ -27,13 +28,9 @@ struct AlwaysApp: App {
     }
     
     init() {
-        // Status-bar-only app (LSUIElement). The `.regular` experiment
-        // (16 May) broke status-item visibility on macOS Tahoe — the
-        // item registered with com.apple.controlcenter but never showed
-        // in the visible menu bar. `.accessory` is the proven-working
-        // policy from the May-14 build that displayed the orange mic
-        // icon reliably.
-        NSApplication.shared.setActivationPolicy(.accessory)
+        // Regular app: keep the Dock tile/running dot while the
+        // AppDelegate-owned NSStatusItem provides the menu bar control.
+        NSApplication.shared.setActivationPolicy(.regular)
         // Refuse sudden/auto termination at the framework level too —
         // belt-and-suspenders alongside the Info.plist keys.
         ProcessInfo.processInfo.disableSuddenTermination()
@@ -138,6 +135,54 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Task {
             _ = try? await cliService?.startDaemon()
         }
+
+        // Force-open Settings on launch so the user has an
+        // undeniable entry point even if the menu-bar item is
+        // hidden by a third-party menu-bar manager or macOS
+        // overflow logic. The Dock icon + Settings window are now
+        // the primary surface; the status item is a bonus.
+        DispatchQueue.main.async {
+            self.openSettingsWindow()
+        }
+    }
+
+    /// Open (or focus) the Settings window. Called on launch and
+    /// from `applicationShouldHandleReopen` when the user clicks
+    /// the Dock icon. SwiftUI auto-instantiates the `Window(id:)`
+    /// scene's content the first time we surface a window via the
+    /// app activation path.
+    private func openSettingsWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        // Bring any matching window forward.
+        if let existing = NSApp.windows.first(where: {
+            $0.title == "Always Settings" || $0.identifier?.rawValue == "settings"
+        }) {
+            existing.makeKeyAndOrderFront(nil)
+            return
+        }
+        // No window yet — synthesise the standard "show new window"
+        // action AppKit binds to Cmd+N. SwiftUI's Window scene
+        // intercepts this and creates the first instance.
+        NSApp.sendAction(#selector(NSApplication.newWindowForTab(_:)), to: nil, from: nil)
+        // Retry the lookup after a frame so the window is in
+        // NSApp.windows by the time we activate it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            NSApp.windows.first(where: {
+                $0.title == "Always Settings" || $0.identifier?.rawValue == "settings"
+            })?.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// Dock-icon click handler. With `.regular` activation policy,
+    /// clicking the Dock icon while the app has no visible window
+    /// fires this — open Settings as the canonical entry point.
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication, hasVisibleWindows: Bool
+    ) -> Bool {
+        if !hasVisibleWindows {
+            openSettingsWindow()
+        }
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -155,47 +200,59 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
-    /// Reject every termination request that wasn't initiated by the Quit
-    /// menu item. On macOS 26 SwiftUI's MenuBarExtra appears to send a
-    /// terminate: right after `NSStatusItemChangeVisibilityAction`, which
-    /// kills the app moments after launch. Honoring only user-initiated
-    /// quits prevents that.
+    /// With `.regular` activation policy we don't suffer from the
+    /// SwiftUI MenuBarExtra phantom-terminate bug, so accept legitimate
+    /// quit requests: explicit Quit menu / Cmd+Q from the foreground
+    /// app, plus the userInitiatedQuit flag used by our own menu items.
+    /// Only refuse "ghost" termination requests that arrive with no
+    /// active user event AND no visible window — that pattern is the
+    /// macOS idle reaper trying to kill a backgrounded app.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if Self.userInitiatedQuit {
             return .terminateNow
         }
-        NSLog("AlwaysApp: refusing non-user terminate request")
-        return .terminateCancel
+        // User-driven quit (Cmd+Q, menu, Dock right-click → Quit) always
+        // arrives with a current event. Honor it.
+        if NSApp.currentEvent != nil {
+            return .terminateNow
+        }
+        // System idle reaper: no event, no visible window — refuse.
+        let visibleWindows = NSApp.windows.contains { $0.isVisible }
+        if !visibleWindows {
+            NSLog("AlwaysApp: refusing background terminate (no event, no window)")
+            return .terminateCancel
+        }
+        return .terminateNow
     }
 
     /// Create the NSStatusItem and wire up the click handler that toggles
     /// the MenuBarView popover.
     ///
-    /// Kept deliberately minimal. The earlier "robust" version with
-    /// `autosaveName`, `isVisible = true`, and `behavior = []` triggered
-    /// the system to repeatedly fire `NSStatusItemClearAutosaveStateAction`,
-    /// which made the icon flash then disappear after ~100 ms. Standard
-    /// status-bar apps (Slack, Discord, Zoom) use the bare-bones recipe
-    /// below and stay visible reliably.
+    /// Kept deliberately minimal. Standard status-bar apps (Slack,
+    /// Discord, Zoom) use the bare-bones recipe below and stay visible
+    /// reliably when a third-party menu bar manager is not hiding them.
     private func installStatusItem() {
-        // Use variableLength + a text+icon combo so the item is
-        // visually distinctive. The user already has multiple voice
-        // apps (superwhisper, Whispering, Handy) whose mic-only icons
-        // are easy to confuse — adding "ALW" text makes ours obvious.
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        NSLog("AlwaysApp.installStatusItem: called")
+        // Fixed 60pt length guarantees the menu bar reserves space — no
+        // chance of variableLength collapsing to 0 due to layout race.
+        let item = NSStatusBar.system.statusItem(withLength: 60)
+        NSLog("AlwaysApp.installStatusItem: item length=\(item.length) visible=\(item.isVisible)")
         if let button = item.button {
             let symbol = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Always")
             symbol?.isTemplate = true
             button.image = symbol
             button.imagePosition = .imageLeading
-            button.title = " ALW"  // Leading space separates from icon.
+            button.title = " ALW"
             button.font = .systemFont(ofSize: 12, weight: .semibold)
             button.toolTip = "Always — voice activation"
             button.target = self
             button.action = #selector(statusItemClicked(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            NSLog("AlwaysApp.installStatusItem: button frame=\(button.frame) image=\(button.image != nil) title='\(button.title)'")
         }
+        item.isVisible = true
         statusItem = item
+        NSLog("AlwaysApp.installStatusItem: done visible=\(item.isVisible) length=\(item.length)")
 
         // Pre-build the popover. NSHostingController hosts SwiftUI content.
         let popover = NSPopover()
