@@ -1,5 +1,7 @@
 import SwiftUI
 import AppKit
+import Combine
+import os.log
 
 @main
 struct AlwaysApp: App {
@@ -28,9 +30,15 @@ struct AlwaysApp: App {
     }
     
     init() {
-        // Regular app: keep the Dock tile/running dot while the
-        // AppDelegate-owned NSStatusItem provides the menu bar control.
-        NSApplication.shared.setActivationPolicy(.regular)
+        // CRITICAL — start as `.accessory` so the status item registers
+        // correctly. Switching to `.regular` synchronously here is a
+        // confirmed macOS Tahoe 26 bug (Stats #3120, Maccy #1224, Ice
+        // #711, AeroSpace #1968, Apple Forums 650270): the status item
+        // gets created in com.apple.controlcenter.statusitems but never
+        // renders in the visible menu bar. The AppDelegate upgrades the
+        // policy to `.regular` asynchronously AFTER the status item is
+        // installed, so we still get the Dock running-dot.
+        NSApplication.shared.setActivationPolicy(.accessory)
         // Refuse sudden/auto termination at the framework level too —
         // belt-and-suspenders alongside the Info.plist keys.
         ProcessInfo.processInfo.disableSuddenTermination()
@@ -88,21 +96,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuPopover: NSPopover?
     /// Monitor that closes the popover when the user clicks outside it.
     private var popoverDismissMonitor: Any?
+    /// State monitor for updating the status bar icon dynamically.
+    private var stateMonitor: StateMonitor?
+    private var cancellables = Set<AnyCancellable>()
+    private let logger = OSLog(subsystem: "com.always.app", category: "status-bar-icon")
 
     func setOnboardingState(_ state: OnboardingState) {
         onboardingState = state
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // `.regular` activation policy was already applied in App.init();
-        // we don't re-set it here so the policy decided pre-runloop
-        // stays the single source of truth.
         cliService = CLIService()
 
-        // Manually install the status bar item. Must run on the main thread
-        // and happens here (post-launch) rather than in init so NSApp is
-        // fully wired.
+        // Install the status item FIRST, while we're still `.accessory`
+        // (set in App.init()). This is the Tahoe 26 fix: switching to
+        // `.regular` before status-item registration leaves the item
+        // unrendered (Apple Forums 650270, confirmed by Stats / Maccy /
+        // Ice / AeroSpace devs).
         installStatusItem()
+
+        // NOW upgrade to .regular for the Dock running-dot. Deferred
+        // 200ms so the status item's scene fence completes first. Also
+        // re-activate so AppKit re-renders the menu bar to include us.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+        }
 
         // Check if onboarding is needed
         onboardingState?.checkAndShowOnboardingIfNeeded()
@@ -123,6 +142,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // which connects to the daemon over UDS and wires the overlay
         // subscription. Without this access nothing else triggers it.
         let monitor = StateMonitor.shared
+        stateMonitor = monitor
 
         // System audio output watcher — auto-pauses the daemon when
         // any app starts producing sound. Idempotent: start() is
@@ -131,6 +151,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Push the frontmost app's bundle id to the daemon so per-app
         // settings overlay applies from the first paste.
         FocusedAppMonitor.shared.start(stateMonitor: monitor)
+
+        // Subscribe to state changes to update the status bar icon
+        setupStatusBarIconUpdates()
 
         Task {
             _ = try? await cliService?.startDaemon()
@@ -233,17 +256,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// reliably when a third-party menu bar manager is not hiding them.
     private func installStatusItem() {
         NSLog("AlwaysApp.installStatusItem: called")
-        // Fixed 60pt length guarantees the menu bar reserves space — no
-        // chance of variableLength collapsing to 0 due to layout race.
-        let item = NSStatusBar.system.statusItem(withLength: 60)
+        // variableLength per the Tahoe 26 research: fixed lengths
+        // (60, squareLength) are more frequently dropped by ControlCenter
+        // on 26.x — Stats devs flagged the same issue.
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         NSLog("AlwaysApp.installStatusItem: item length=\(item.length) visible=\(item.isVisible)")
         if let button = item.button {
             let symbol = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Always")
             symbol?.isTemplate = true
             button.image = symbol
-            button.imagePosition = .imageLeading
-            button.title = " ALW"
-            button.font = .systemFont(ofSize: 12, weight: .semibold)
+            button.imagePosition = .imageOnly
+            button.title = ""
             button.toolTip = "Always — voice activation"
             button.target = self
             button.action = #selector(statusItemClicked(_:))
@@ -260,6 +283,229 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentSize = NSSize(width: 240, height: 320)
         popover.contentViewController = NSHostingController(rootView: MenuBarView())
         menuPopover = popover
+    }
+
+    /// Subscribe to StateMonitor changes to update the status bar icon dynamically.
+    private func setupStatusBarIconUpdates() {
+        guard let monitor = stateMonitor else {
+            os_log("ERROR - stateMonitor is nil", log: logger, type: .error)
+            return
+        }
+
+        os_log("Setting up subscription", log: logger, type: .info)
+
+        Publishers.CombineLatest3(monitor.$isDaemonConnected, monitor.$isPaused, monitor.$isDaemonDegraded)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isConnected, isPaused, isDegraded in
+                guard let self = self else { return }
+                os_log("State changed - connected=%{public}@, paused=%{public}@, degraded=%{public}@",
+                       log: self.logger, type: .info,
+                       String(isConnected), String(isPaused), String(isDegraded))
+                self.updateStatusBarIcon(isConnected: isConnected, isPaused: isPaused, isDegraded: isDegraded)
+            }
+            .store(in: &cancellables)
+
+        os_log("Subscription stored, cancellables count=%lu", log: logger, type: .info, cancellables.count)
+
+        // Force immediate update after subscription
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self else { return }
+            os_log("Forcing immediate icon update", log: self.logger, type: .info)
+            self.updateStatusBarIcon(isConnected: monitor.isDaemonConnected, isPaused: monitor.isPaused, isDegraded: monitor.isDaemonDegraded)
+        }
+
+        // Add periodic updates as a fallback
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            self.updateStatusBarIcon(isConnected: monitor.isDaemonConnected, isPaused: monitor.isPaused, isDegraded: monitor.isDaemonDegraded)
+        }
+    }
+
+    /// Nuclear option: completely remove and recreate the status item
+    private func recreateStatusItem() {
+        guard let monitor = stateMonitor else { return }
+
+        // Remove old status item
+        if let oldItem = statusItem {
+            NSStatusBar.system.removeStatusItem(oldItem)
+            os_log("Removed old status item", log: logger, type: .info)
+        }
+
+        // Create new status item with unique autosave name to force macOS to treat it as new
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.autosaveName = "AlwaysApp-\(timestamp)"
+        os_log("Created new status item with autosave name", log: logger, type: .info)
+
+        // Create new status item
+        let iconName: String
+        if monitor.isDaemonDegraded {
+            iconName = "exclamationmark.triangle.fill"
+        } else if !monitor.isDaemonConnected {
+            iconName = "exclamationmark.triangle"
+        } else if monitor.isPaused {
+            iconName = "pause.circle.fill"
+        } else {
+            iconName = "mic.fill"
+        }
+
+        os_log("Setting icon to '%{public}@'", log: logger, type: .info, iconName)
+
+        if let button = item.button {
+            // Try using a custom view instead of just an image
+            let config = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
+            let symbol = NSImage(systemSymbolName: iconName, accessibilityDescription: "Always")?
+                .withSymbolConfiguration(config)
+            symbol?.isTemplate = true
+
+            button.image = symbol
+            button.imagePosition = .imageOnly  // Remove title, show only icon
+            button.imageScaling = .scaleProportionallyUpOrDown
+            button.toolTip = "Always — voice activation"
+            button.target = self
+            button.action = #selector(statusItemClicked(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+
+            // Force button to update
+            button.needsDisplay = true
+            button.layout()
+
+            // Force CALayer
+            button.wantsLayer = true
+            button.layer?.setNeedsDisplay()
+        }
+
+        item.isVisible = true
+        statusItem = item
+
+        // Recreate popover
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentSize = NSSize(width: 240, height: 320)
+        popover.contentViewController = NSHostingController(rootView: MenuBarView())
+        menuPopover = popover
+
+        os_log("Recreated status item and popover", log: logger, type: .info)
+    }
+
+    /// Update the status bar icon based on current state.
+    private func updateStatusBarIcon(isConnected: Bool, isPaused: Bool, isDegraded: Bool) {
+        os_log("Called with connected=%{public}@, paused=%{public}@, degraded=%{public}@",
+               log: logger, type: .info,
+               String(isConnected), String(isPaused), String(isDegraded))
+
+        guard let statusItem = statusItem else {
+            os_log("ERROR - statusItem is nil", log: logger, type: .error)
+            return
+        }
+
+        guard let button = statusItem.button else {
+            os_log("ERROR - statusItem.button is nil", log: logger, type: .error)
+            return
+        }
+
+        let iconName: String
+        if isDegraded {
+            iconName = "exclamationmark.triangle.fill"
+        } else if !isConnected {
+            iconName = "exclamationmark.triangle"
+        } else if isPaused {
+            iconName = "pause.circle.fill"
+        } else {
+            iconName = "mic.fill"
+        }
+
+        os_log("Setting icon to '%{public}@'", log: logger, type: .info, iconName)
+
+        // Force status item to be visible
+        statusItem.isVisible = true
+
+        // Try multiple approaches to update the icon
+        var image: NSImage?
+
+        // Approach A: Try system symbol with different configurations
+        if let symbol = NSImage(systemSymbolName: iconName, accessibilityDescription: "Always") {
+            symbol.isTemplate = true
+            image = symbol
+            os_log("Created system symbol", log: logger, type: .info)
+        }
+
+        // Approach B: Try with different point sizes
+        if image == nil {
+            let config = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
+            image = NSImage(systemSymbolName: iconName, accessibilityDescription: "Always")?
+                .withSymbolConfiguration(config)
+            image?.isTemplate = true
+            os_log("Created system symbol with config", log: logger, type: .info)
+        }
+
+        // Approach C: Try without template
+        if image == nil {
+            image = NSImage(systemSymbolName: iconName, accessibilityDescription: "Always")
+            os_log("Created system symbol without template", log: logger, type: .info)
+        }
+
+        if let finalImage = image {
+            // Approach 1: Direct image assignment
+            button.image = finalImage
+
+            // Approach 2: Force display update
+            button.needsDisplay = true
+
+            // Approach 3: Update image scaling
+            button.imageScaling = .scaleProportionallyUpOrDown
+
+            // Approach 4: Force layout
+            button.layout()
+
+            // Approach 5: Update entire button - remove title
+            button.imagePosition = .imageOnly
+            button.title = ""
+            button.font = .systemFont(ofSize: 12, weight: .semibold)
+
+            // Approach 6: Force window update
+            if let window = button.window {
+                window.contentView?.needsDisplay = true
+                window.update()
+            }
+
+            // Approach 7: Force button to redraw
+            button.needsDisplay = true
+
+            // Approach 8: Force CALayer update
+            if let layer = button.layer {
+                layer.setNeedsDisplay()
+                layer.displayIfNeeded()
+            }
+
+            // Approach 9: Force entire view hierarchy update
+            button.superview?.setNeedsDisplay(button.bounds)
+            button.superview?.displayIfNeeded()
+
+            // Approach 10: Force NSRunLoop to process immediately
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
+
+            // Approach 11: Force CATransaction with disableActions
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            button.needsDisplay = true
+            button.layout()
+            CATransaction.commit()
+
+            // Approach 12: Force status item visibility toggle
+            statusItem.isVisible = false
+            statusItem.isVisible = true
+
+            // Approach 13: Force button wantsLayer
+            button.wantsLayer = true
+            button.layer?.setNeedsDisplay()
+
+            os_log("Icon set successfully, button.image=%{public}@, statusItem.isVisible=%{public}@",
+                   log: logger, type: .info,
+                   String(button.image != nil), String(statusItem.isVisible))
+        } else {
+            os_log("ERROR - Failed to create NSImage for '%{public}@'", log: logger, type: .error, iconName)
+        }
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
