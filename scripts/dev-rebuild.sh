@@ -47,8 +47,19 @@ echo "▶ Swift bundle + deploy..."
     ALWAYS_BUILD_PROFILE="$PROFILE" ./build.sh
 )
 
+# CRITICAL: remove the intermediate project-dir bundle. If it lives on,
+# LaunchServices re-discovers it on every seed-rescan and `open -a
+# AlwaysApp` may resolve to it instead of /Applications. Three duplicate
+# "AlwaysApp" entries in System Settings → Control Center →
+# "Allow in the Menu Bar" came from this — the resulting status-item
+# registration conflict made the menu-bar icon invisible.
+echo "▶ removing intermediate bundle..."
+rm -rf "$REPO_ROOT/AlwaysApp/AlwaysApp.app"
+
 echo "▶ launching AlwaysApp..."
-open -a AlwaysApp
+# Use explicit path, not `open -a AlwaysApp` (name lookup can resolve
+# to a stale LaunchServices entry).
+open /Applications/AlwaysApp.app
 sleep 1.5
 play "$SOUND_UP"
 echo "✓ done"
