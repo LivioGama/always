@@ -283,40 +283,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menuPopover = popover
     }
 
-    /// Subscribe to StateMonitor changes to update the status bar icon dynamically.
+    /// Subscribe to StateMonitor changes to update the status bar icon
+    /// dynamically. Match the canonical Tahoe-working pattern (MeetingBar,
+    /// TahoeMenuDemo, HelloStatus): subscribe ONCE via Combine, update
+    /// the image ONLY when state actually changes via `removeDuplicates`.
+    /// NO periodic timer, NO force-update DispatchQueue.asyncAfter, NO
+    /// `isVisible` toggling. Those were the bug — Tahoe 26 interprets
+    /// each as a state change and re-runs the menu-bar slot allocation,
+    /// which never converges. Proven by the minimal HELLO test app
+    /// rendering correctly while AlwaysApp didn't.
     private func setupStatusBarIconUpdates() {
-        guard let monitor = stateMonitor else {
-            os_log("ERROR - stateMonitor is nil", log: logger, type: .error)
-            return
-        }
-
-        os_log("Setting up subscription", log: logger, type: .info)
-
+        guard let monitor = stateMonitor else { return }
         Publishers.CombineLatest3(monitor.$isDaemonConnected, monitor.$isPaused, monitor.$isDaemonDegraded)
+            .removeDuplicates { lhs, rhs in lhs == rhs }
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isConnected, isPaused, isDegraded in
-                guard let self = self else { return }
-                os_log("State changed - connected=%{public}@, paused=%{public}@, degraded=%{public}@",
-                       log: self.logger, type: .info,
-                       String(isConnected), String(isPaused), String(isDegraded))
-                self.updateStatusBarIcon(isConnected: isConnected, isPaused: isPaused, isDegraded: isDegraded)
+                self?.updateStatusBarIcon(isConnected: isConnected, isPaused: isPaused, isDegraded: isDegraded)
             }
             .store(in: &cancellables)
-
-        os_log("Subscription stored, cancellables count=%lu", log: logger, type: .info, cancellables.count)
-
-        // Force immediate update after subscription
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self = self else { return }
-            os_log("Forcing immediate icon update", log: self.logger, type: .info)
-            self.updateStatusBarIcon(isConnected: monitor.isDaemonConnected, isPaused: monitor.isPaused, isDegraded: monitor.isDaemonDegraded)
-        }
-
-        // Add periodic updates as a fallback
-        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            self.updateStatusBarIcon(isConnected: monitor.isDaemonConnected, isPaused: monitor.isPaused, isDegraded: monitor.isDaemonDegraded)
-        }
     }
 
     /// Nuclear option: completely remove and recreate the status item
@@ -386,22 +370,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         os_log("Recreated status item and popover", log: logger, type: .info)
     }
 
-    /// Update the status bar icon based on current state.
+    /// Update the status bar icon — strictly minimal, matching the
+    /// MeetingBar / TahoeMenuDemo / HelloStatus pattern. Just assign
+    /// the image. Don't touch `isVisible`, `needsDisplay`, `layout()`,
+    /// `window.update()` — Tahoe 26 treats each as a state change and
+    /// re-runs slot allocation which never settles.
     private func updateStatusBarIcon(isConnected: Bool, isPaused: Bool, isDegraded: Bool) {
-        os_log("Called with connected=%{public}@, paused=%{public}@, degraded=%{public}@",
-               log: logger, type: .info,
-               String(isConnected), String(isPaused), String(isDegraded))
-
-        guard let statusItem = statusItem else {
-            os_log("ERROR - statusItem is nil", log: logger, type: .error)
-            return
-        }
-
-        guard let button = statusItem.button else {
-            os_log("ERROR - statusItem.button is nil", log: logger, type: .error)
-            return
-        }
-
+        guard let button = statusItem?.button else { return }
         let iconName: String
         if isDegraded {
             iconName = "exclamationmark.triangle.fill"
@@ -412,71 +387,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             iconName = "mic.fill"
         }
-
-        os_log("Setting icon to '%{public}@'", log: logger, type: .info, iconName)
-
-        // Force status item to be visible
-        statusItem.isVisible = true
-
-        // Try multiple approaches to update the icon
-        var image: NSImage?
-
-        // Approach A: Try system symbol with different configurations
-        if let symbol = NSImage(systemSymbolName: iconName, accessibilityDescription: "Always") {
-            symbol.isTemplate = true
-            image = symbol
-            os_log("Created system symbol", log: logger, type: .info)
-        }
-
-        // Approach B: Try with different point sizes
-        if image == nil {
-            let config = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
-            image = NSImage(systemSymbolName: iconName, accessibilityDescription: "Always")?
-                .withSymbolConfiguration(config)
-            image?.isTemplate = true
-            os_log("Created system symbol with config", log: logger, type: .info)
-        }
-
-        // Approach C: Try without template
-        if image == nil {
-            image = NSImage(systemSymbolName: iconName, accessibilityDescription: "Always")
-            os_log("Created system symbol without template", log: logger, type: .info)
-        }
-
-        if let finalImage = image {
-            // Approach 1: Direct image assignment
-            button.image = finalImage
-
-            // Approach 2: Force display update
-            button.needsDisplay = true
-
-            // Approach 3: Update image scaling
-            button.imageScaling = .scaleProportionallyUpOrDown
-
-            // Approach 4: Force layout
-            button.layout()
-
-            // Approach 5: Match original installStatusItem setup
-            button.imagePosition = .imageOnly
-            button.title = ""
-
-            // Approach 6: Force window update
-            if let window = button.window {
-                window.contentView?.needsDisplay = true
-                window.update()
-            }
-
-            // Approach 7: Force button to redraw
-            button.needsDisplay = true
-
-            os_log("Icon set successfully, button.image=%{public}@, statusItem.isVisible=%{public}@",
-                   log: logger, type: .info,
-                   String(button.image != nil), String(statusItem.isVisible))
-        } else {
-            os_log("ERROR - Failed to create NSImage for '%{public}@'", log: logger, type: .error, iconName)
-        }
+        let image = NSImage(systemSymbolName: iconName, accessibilityDescription: "Always")
+        image?.isTemplate = true
+        button.image = image
     }
-
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
         guard let popover = menuPopover else { return }
         if popover.isShown {
