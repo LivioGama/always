@@ -170,51 +170,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Create the NSStatusItem and wire up the click handler that toggles
     /// the MenuBarView popover.
+    ///
+    /// Kept deliberately minimal. The earlier "robust" version with
+    /// `autosaveName`, `isVisible = true`, and `behavior = []` triggered
+    /// the system to repeatedly fire `NSStatusItemClearAutosaveStateAction`,
+    /// which made the icon flash then disappear after ~100 ms. Standard
+    /// status-bar apps (Slack, Discord, Zoom) use the bare-bones recipe
+    /// below and stay visible reliably.
     private func installStatusItem() {
-        NSLog("AlwaysApp: installStatusItem starting")
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        // CRITICAL: assign an `autosaveName` BEFORE setting isVisible.
-        // Without this, macOS Sequoia+ auto-assigns the item to a generic
-        // "Item-N" slot whose visibility key may already be 0 (the user
-        // hid some unrelated status item previously), so the icon never
-        // appears. Use a fully-qualified, app-unique name so it can't
-        // collide with anything else in com.apple.controlcenter.
-        item.autosaveName = "com.alwaysapp.statusitem"
-        NSLog("AlwaysApp: got NSStatusItem visible=\(item.isVisible) length=\(item.length)")
-        // Force visibility for first-run and to override any stale "hidden"
-        // pref from previous installs.
-        item.isVisible = true
-        item.behavior = []
-
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
-            // Configure the SF Symbol with explicit point size — without
-            // this, some macOS 26 builds render an empty image that doesn't
-            // take any space in the menu bar, making the item invisible.
-            let symbolConfig = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
-            let symbol = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Always")?
-                .withSymbolConfiguration(symbolConfig)
+            let symbol = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Always")
             symbol?.isTemplate = true
-
             button.image = symbol
-            // Always set a title fallback — if the image fails to render
-            // we want SOMETHING in the bar so the icon is discoverable.
+            // Fallback so the item still has SOMETHING measurable if the
+            // symbol fails to load on a future macOS.
             if symbol == nil {
-                NSLog("AlwaysApp: mic.fill failed to load, falling back to text title")
                 button.title = "AL"
-                button.imagePosition = .noImage
-            } else {
-                button.imagePosition = .imageOnly
             }
             button.toolTip = "Always — voice activation"
             button.target = self
             button.action = #selector(statusItemClicked(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-            NSLog("AlwaysApp: status button configured image=\(symbol != nil) frame=\(button.frame)")
-        } else {
-            NSLog("AlwaysApp: ERROR — NSStatusItem.button is nil")
         }
         statusItem = item
-        NSLog("AlwaysApp: installStatusItem complete; visible=\(item.isVisible)")
 
         // Pre-build the popover. NSHostingController hosts SwiftUI content.
         let popover = NSPopover()
