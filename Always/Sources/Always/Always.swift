@@ -11,12 +11,13 @@ struct Always: App {
     @StateObject private var onboardingState = OnboardingState()
 
     var body: some Scene {
-        // WindowGroup (not Window) so SwiftUI auto-opens the
-        // primary window on launch for `.regular` activation
-        // policy. Single-window UX is enforced by `.commandsRemoved`
-        // (no File→New) and the menubar control having no
-        // "New Settings Window" item.
-        WindowGroup("Always Settings", id: "settings") {
+        // `Window` (not `WindowGroup`) — singleton settings scene.
+        // WindowGroup allows multiple instances, which let the user
+        // end up with two Settings panels open at once via Cmd+N,
+        // repeated `openWindow(id:)` calls from the menu, or Dock
+        // re-open paths. Switching to `Window` makes SwiftUI focus
+        // the existing instance instead of creating a new one.
+        Window("Always Settings", id: "settings") {
             SettingsWindow(cliService: CLIService())
         }
         // `.contentSize` makes the window grow to exactly fit its SwiftUI
@@ -188,23 +189,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// app activation path.
     private func openSettingsWindow() {
         NSApp.activate(ignoringOtherApps: true)
-        // Bring any matching window forward.
+        // Bring any matching window forward. With the scene declared
+        // as `Window` (singleton), SwiftUI keeps a single instance
+        // alive across the app's lifetime — focusing it is enough; no
+        // need to synthesise a "new window" action (which used to
+        // spawn duplicates under WindowGroup).
         if let existing = NSApp.windows.first(where: {
             $0.title == "Always Settings" || $0.identifier?.rawValue == "settings"
         }) {
             existing.makeKeyAndOrderFront(nil)
-            return
-        }
-        // No window yet — synthesise the standard "show new window"
-        // action AppKit binds to Cmd+N. SwiftUI's Window scene
-        // intercepts this and creates the first instance.
-        NSApp.sendAction(#selector(NSApplication.newWindowForTab(_:)), to: nil, from: nil)
-        // Retry the lookup after a frame so the window is in
-        // NSApp.windows by the time we activate it.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            NSApp.windows.first(where: {
-                $0.title == "Always Settings" || $0.identifier?.rawValue == "settings"
-            })?.makeKeyAndOrderFront(nil)
+            existing.orderFrontRegardless()
         }
     }
 

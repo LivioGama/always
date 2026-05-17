@@ -148,14 +148,27 @@ struct MenuBarView: View {
     }
 
     private func openSettings() {
-        openWindow(id: "settings")
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        // Prefer focusing an existing instance over `openWindow(id:)`.
+        // The scene is declared as `Window` (singleton), so SwiftUI
+        // keeps a single Settings window alive across the app's
+        // lifetime — calling `openWindow` again would normally just
+        // raise it, but adding a focus pass after a 50ms tick is the
+        // robust path under the macOS 26 multi-screen / spaces edge
+        // cases we hit during testing.
+        if let window = NSApp.windows.first(where: {
+            $0.title == "Always Settings" || $0.identifier?.rawValue == "settings"
+        }) {
             NSApp.activate(ignoringOtherApps: true)
-            if let window = NSApp.windows.first(where: { $0.title == "Always Settings" }) {
-                window.makeKeyAndOrderFront(nil)
-                window.orderFrontRegardless()
-            }
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+            return
+        }
+        openWindow(id: "settings")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.windows.first(where: {
+                $0.title == "Always Settings" || $0.identifier?.rawValue == "settings"
+            })?.makeKeyAndOrderFront(nil)
         }
     }
 

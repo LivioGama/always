@@ -429,8 +429,16 @@ fn handle_speech(
             // re-capitalized sentence. Cancels the in-flight countdown
             // and reschedules so the timer restarts from the resumed
             // speech, giving the user the full delay to keep going.
-            let merge_active =
-                pause::countdown_active() && pause::dictation_buffer_text().is_some();
+            // Merge whenever the dictation buffer still holds the
+            // previous paste — not just when the countdown is still
+            // ticking. The voice-activity hook in `vad.rs` cancels
+            // the countdown as soon as the user resumes speaking,
+            // which previously broke the merge gate (countdown_active
+            // flipped to false before the new utterance finalised) and
+            // produced split-sentence pastes. The buffer is still
+            // cleared on Return commit / pause / explicit user cancel,
+            // so this can't leak across sessions.
+            let merge_active = pause::dictation_buffer_text().is_some();
             let (paste_clipboard, buffer_text) = if merge_active {
                 let previous = pause::dictation_buffer_text().unwrap_or_default();
                 let (joined, delta) = merge_dictation(&previous, &final_text);
@@ -457,11 +465,20 @@ fn handle_speech(
             paste::copy_to_clipboard(paste_clipboard)?;
 
             // Skip paste if Command is held — likely a shortcut in flight.
+            // Surface the drop on the status overlay (same channel as
+            // hallucination / hard-filter rejections) so the user knows
+            // their utterance was heard but intentionally not pasted.
             if keyboard::is_cmd_held() {
                 tracing::debug!("skipped_paste_cmd_held");
                 log.write(Event::Error {
                     message: "Skipped paste: Command key held",
                 });
+                event::global_broadcaster()
+                    .transcription_filtered("Held Command key — not pasted");
+                // Drop the merge buffer too: the user is in the middle of
+                // a shortcut, the next utterance shouldn't try to append
+                // to text that never reached the field.
+                pause::dictation_buffer_clear();
                 return Ok(());
             }
 

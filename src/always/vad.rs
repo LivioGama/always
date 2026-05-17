@@ -218,6 +218,19 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
                         // wire and that was leaving us stuck in idle-pause
                         // after the audio-output auto-resume path.
                         pause::set_idle_auto_paused(false);
+                        // Cancel any in-flight auto-enter countdown — the
+                        // user is clearly still speaking. The dictation
+                        // buffer is intentionally NOT cleared (cancel
+                        // path in auto_enter_countdown leaves it), so
+                        // when this fresh utterance finalises the
+                        // dictation-merge gate in `handle_speech` picks
+                        // up the previous text and appends. Without this
+                        // cancel, a Return would fire mid-sentence and
+                        // split the user's utterance in two.
+                        if pause::countdown_active() {
+                            pause::countdown_request_cancel();
+                            tracing::info!("countdown_cancel_on_voice_resume");
+                        }
                     }
                 }
                 // Anchor the idle-pause watchdog: refresh on EVERY confirmed
