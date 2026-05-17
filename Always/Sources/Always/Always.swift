@@ -4,7 +4,7 @@ import Combine
 import os.log
 
 @main
-struct AlwaysApp: App {
+struct Always: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var onboardingState = OnboardingState()
 
@@ -42,7 +42,7 @@ struct AlwaysApp: App {
         // Refuse sudden/auto termination at the framework level too —
         // belt-and-suspenders alongside the Info.plist keys.
         ProcessInfo.processInfo.disableSuddenTermination()
-        ProcessInfo.processInfo.disableAutomaticTermination("AlwaysApp must keep its status bar item alive")
+        ProcessInfo.processInfo.disableAutomaticTermination("Always must keep its status bar item alive")
 
         // Inject onboarding state into appDelegate after initialization
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [self] in
@@ -240,7 +240,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // System idle reaper: no event, no visible window — refuse.
         let visibleWindows = NSApp.windows.contains { $0.isVisible }
         if !visibleWindows {
-            NSLog("AlwaysApp: refusing background terminate (no event, no window)")
+            NSLog("Always: refusing background terminate (no event, no window)")
             return .terminateCancel
         }
         return .terminateNow
@@ -253,12 +253,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Discord, Zoom) use the bare-bones recipe below and stay visible
     /// reliably when a third-party menu bar manager is not hiding them.
     private func installStatusItem() {
-        NSLog("AlwaysApp.installStatusItem: called")
+        NSLog("Always.installStatusItem: called")
         // variableLength per the Tahoe 26 research: fixed lengths
         // (60, squareLength) are more frequently dropped by ControlCenter
         // on 26.x — Stats devs flagged the same issue.
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        NSLog("AlwaysApp.installStatusItem: item length=\(item.length) visible=\(item.isVisible)")
+        NSLog("Always.installStatusItem: item length=\(item.length) visible=\(item.isVisible)")
         if let button = item.button {
             let symbol = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Always")
             symbol?.isTemplate = true
@@ -269,11 +269,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.target = self
             button.action = #selector(statusItemClicked(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-            NSLog("AlwaysApp.installStatusItem: button frame=\(button.frame) image=\(button.image != nil) title='\(button.title)'")
+            NSLog("Always.installStatusItem: button frame=\(button.frame) image=\(button.image != nil) title='\(button.title)'")
         }
         item.isVisible = true
         statusItem = item
-        NSLog("AlwaysApp.installStatusItem: done visible=\(item.isVisible) length=\(item.length)")
+        NSLog("Always.installStatusItem: done visible=\(item.isVisible) length=\(item.length)")
 
         // Pre-build the popover. NSHostingController hosts SwiftUI content.
         let popover = NSPopover()
@@ -291,7 +291,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// `isVisible` toggling. Those were the bug — Tahoe 26 interprets
     /// each as a state change and re-runs the menu-bar slot allocation,
     /// which never converges. Proven by the minimal HELLO test app
-    /// rendering correctly while AlwaysApp didn't.
+    /// rendering correctly while Always didn't.
     private func setupStatusBarIconUpdates() {
         guard let monitor = stateMonitor else { return }
         Publishers.CombineLatest3(monitor.$isDaemonConnected, monitor.$isPaused, monitor.$isDaemonDegraded)
@@ -316,7 +316,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Create new status item with unique autosave name to force macOS to treat it as new
         let timestamp = Int(Date().timeIntervalSince1970)
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.autosaveName = "AlwaysApp-\(timestamp)"
+        item.autosaveName = "Always-\(timestamp)"
         os_log("Created new status item with autosave name", log: logger, type: .info)
 
         // Create new status item
@@ -397,37 +397,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             popover.performClose(nil)
             removeDismissMonitor()
         } else {
-            // Nuclear approach: completely recreate popover to force correct positioning
-            popover.performClose(nil)
-            removeDismissMonitor()
-
-            // Create fresh popover
-            let freshPopover = NSPopover()
-            freshPopover.behavior = .transient
-            freshPopover.contentSize = NSSize(width: 240, height: 320)
-            freshPopover.contentViewController = NSHostingController(rootView: MenuBarView())
-            menuPopover = freshPopover
-
-            // Force NSApp to deactivate and reactivate
-            NSApp.hide(nil)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                NSApp.activate(ignoringOtherApps: true)
-                NSApp.setActivationPolicy(.regular)
-
-                // Show popover with multiple positioning attempts
-                if let window = sender.window {
-                    freshPopover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
-                } else {
-                    freshPopover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
-                }
-
-                // Auto-close when the user clicks outside the popover.
-                self.popoverDismissMonitor = NSEvent.addGlobalMonitorForEvents(
-                    matching: [.leftMouseDown, .rightMouseDown]
-                ) { [weak self] _ in
-                    self?.menuPopover?.performClose(nil)
-                    self?.removeDismissMonitor()
-                }
+            popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+            // Auto-close when the user clicks outside the popover.
+            popoverDismissMonitor = NSEvent.addGlobalMonitorForEvents(
+                matching: [.leftMouseDown, .rightMouseDown]
+            ) { [weak self] _ in
+                self?.menuPopover?.performClose(nil)
+                self?.removeDismissMonitor()
             }
         }
     }

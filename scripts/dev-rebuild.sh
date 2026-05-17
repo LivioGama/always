@@ -28,9 +28,9 @@ trap 'play "$SOUND_FAIL"; echo "✗ rebuild failed"' ERR
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-echo "▶ killing AlwaysApp..."
+echo "▶ killing Always..."
 play "$SOUND_KILL"
-pkill -f AlwaysApp 2>/dev/null || true
+pkill -f "Always.app" 2>/dev/null || true
 sleep 0.3   # let processes actually die before rebuild
 
 echo "▶ cargo build ($PROFILE)..."
@@ -43,23 +43,23 @@ play "$SOUND_COMPILED"
 
 echo "▶ Swift bundle + deploy..."
 (
-    cd AlwaysApp
+    cd Always
     ALWAYS_BUILD_PROFILE="$PROFILE" ./build.sh
 )
 
 # CRITICAL: remove the intermediate project-dir bundle. If it lives on,
 # LaunchServices re-discovers it on every seed-rescan and `open -a
-# AlwaysApp` may resolve to it instead of /Applications. Three duplicate
-# "AlwaysApp" entries in System Settings → Control Center →
+# Always` may resolve to it instead of /Applications. Three duplicate
+# "Always" entries in System Settings → Control Center →
 # "Allow in the Menu Bar" came from this — the resulting status-item
 # registration conflict made the menu-bar icon invisible.
 echo "▶ removing intermediate bundle..."
-rm -rf "$REPO_ROOT/AlwaysApp/AlwaysApp.app"
+rm -rf "$REPO_ROOT/Always/Always.app"
 
-echo "▶ launching AlwaysApp..."
-# Use explicit path, not `open -a AlwaysApp` (name lookup can resolve
+echo "▶ launching Always..."
+# Use explicit path, not `open -a Always` (name lookup can resolve
 # to a stale LaunchServices entry).
-open /Applications/AlwaysApp.app
+open /Applications/Always.app
 sleep 1.5
 play "$SOUND_UP"
 echo "✓ done"

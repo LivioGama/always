@@ -1,9 +1,9 @@
 import XCTest
 import AppKit
 import Combine
-@testable import AlwaysApp
+@testable import Always
 
-final class AlwaysAppTests: XCTestCase {
+final class AlwaysTests: XCTestCase {
 
     // MARK: - DaemonEvent codable round-trip
 

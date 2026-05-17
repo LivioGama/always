@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.alwaysapp.daemon</string>
+    <string>com.always</string>
     <key>CFBundleName</key>
-    <string>AlwaysApp</string>
+    <string>Always</string>
     <key>CFBundleDisplayName</key>
     <string>Always</string>
     <key>CFBundleExecutable</key>
-    <string>AlwaysApp</string>
+    <string>Always</string>
     <key>CFBundleIconFile</key>
     <string>AlwaysIcon</string>
     <key>CFBundleVersion</key>
@@ -41,9 +41,9 @@
     <key>NSSupportsSuddenTermination</key>
     <false/>
     <key>NSAccessibilityUsageDescription</key>
-    <string>AlwaysApp needs accessibility access to position the voice indicator near your active text cursor.</string>
+    <string>Always needs accessibility access to position the voice indicator near your active text cursor.</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>AlwaysApp needs accessibility access to position the voice indicator near your active text field.</string>
+    <string>Always needs accessibility access to position the voice indicator near your active text field.</string>
     <!--
       Sparkle auto-update settings.
 

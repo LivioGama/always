@@ -2,14 +2,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "AlwaysApp",
+    name: "Always",
     platforms: [
         .macOS(.v14)
     ],
     products: [
         .executable(
-            name: "AlwaysApp",
-            targets: ["AlwaysApp"]
+            name: "Always",
+            targets: ["Always"]
         )
     ],
     dependencies: [
@@ -20,15 +20,15 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "AlwaysApp",
+            name: "Always",
             dependencies: [
                 .product(name: "Sparkle", package: "Sparkle")
             ],
             path: "Sources"
         ),
         .testTarget(
-            name: "AlwaysAppTests",
-            dependencies: ["AlwaysApp"],
+            name: "AlwaysTests",
+            dependencies: ["Always"],
             path: "Tests"
         )
     ]

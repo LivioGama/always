@@ -31,7 +31,7 @@ print_error() {
 
 # Step 1: Kill existing processes
 print_step "Stopping existing Always processes..."
-pkill -f "AlwaysApp" 2>/dev/null && print_success "Killed AlwaysApp" || echo "  No AlwaysApp running"
+pkill -f "Always.app" 2>/dev/null && print_success "Killed Always" || echo "  No Always running"
 pkill -f "always run" 2>/dev/null && print_success "Killed always daemon" || echo "  No always daemon running"
 sleep 1
 
@@ -54,27 +54,27 @@ else
 fi
 
 # Step 4: Build macOS App
-print_step "Building AlwaysApp (Swift/SwiftUI)..."
-cd AlwaysApp
+print_step "Building Always (Swift/SwiftUI)..."
+cd Always
 if ./build.sh; then
-    print_success "AlwaysApp built and installed successfully"
+    print_success "Always built and installed successfully"
 else
-    print_error "Failed to build AlwaysApp"
+    print_error "Failed to build Always"
     exit 1
 fi
 cd ..
 
 # Step 5: Verify app installation
-if [[ -d "/Applications/AlwaysApp.app" ]]; then
-    print_success "AlwaysApp installed at /Applications/AlwaysApp.app"
+if [[ -d "/Applications/Always.app" ]]; then
+    print_success "Always installed at /Applications/Always.app"
 else
-    print_error "AlwaysApp not found in Applications folder"
+    print_error "Always not found in Applications folder"
     exit 1
 fi
 
 # Step 6: Launch the integrated system
 print_step "Launching integrated Always system..."
-open -a AlwaysApp
+open -a Always
 
 # Wait for app to start
 sleep 3
@@ -82,16 +82,16 @@ sleep 3
 # Step 7: Verify everything is running
 print_step "Verifying system status..."
 
-# Check if AlwaysApp is running
-if pgrep -f "AlwaysApp" > /dev/null; then
-    ALWAYSAPP_PID=$(pgrep -f "AlwaysApp")
-    print_success "AlwaysApp running (PID: $ALWAYSAPP_PID)"
+# Check if Always is running
+if pgrep -f "Always.app" > /dev/null; then
+    ALWAYS_PID=$(pgrep -f "Always.app")
+    print_success "Always running (PID: $ALWAYS_PID)"
 else
-    print_error "AlwaysApp failed to start"
+    print_error "Always failed to start"
     exit 1
 fi
 
-# Check if daemon is running (should be auto-started by AlwaysApp)
+# Check if daemon is running (should be auto-started by Always)
 sleep 2  # Give daemon time to start
 if pgrep -f "always run" > /dev/null; then
     DAEMON_PID=$(pgrep -f "always run")
@@ -117,7 +117,7 @@ echo "  • Ctrl+Shift+P to pause/resume"
 echo "  • Ctrl+Shift+A to toggle auto-enter"
 echo ""
 echo -e "${BLUE}📊 Current processes:${NC}"
-ps aux | grep -E "(AlwaysApp|always run)" | grep -v grep | while read line; do
+ps aux | grep -E "(Always.app|always run)" | grep -v grep | while read line; do
     echo "  $line"
 done
 echo ""
@@ -131,4 +131,4 @@ fi
 
 echo -e "${GREEN}✓ Always is ready for voice detection!${NC}"
 echo ""
-echo "To stop: Click menu bar icon → Quit, or run 'pkill -f AlwaysApp'"
+echo "To stop: Click menu bar icon → Quit, or run 'pkill -f Always.app'"

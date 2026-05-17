@@ -29,14 +29,14 @@ make help     # Show help
 1. **Stops** any existing Always processes
 2. **Builds** Rust CLI binary (`cargo build --release`)
 3. **Builds** macOS app (Swift/SwiftUI) 
-4. **Installs** AlwaysApp to `/Applications/`
-5. **Launches** AlwaysApp which auto-starts the voice daemon
+4. **Installs** Always to `/Applications/`
+5. **Launches** Always which auto-starts the voice daemon
 6. **Verifies** both processes are running
 7. **Shows** status and usage instructions
 
 ## 🎯 Auto-Start Integration
 
-The AlwaysApp is configured to:
+The Always is configured to:
 - ✅ **Auto-start daemon** when the app launches
 - ✅ **Auto-stop daemon** when the app quits  
 - ✅ **Manage lifecycle** of the voice detection system
@@ -65,7 +65,7 @@ After running the build script:
 ```bash
 make stop
 # or
-pkill -f AlwaysApp
+pkill -f Always
 # or 
 Click menu bar icon → Quit
 ```

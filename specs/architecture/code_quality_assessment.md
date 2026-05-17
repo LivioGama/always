@@ -10,12 +10,12 @@ Primary focus: Stabilization and safe high-impact improvements
 | --- | ---: |
 | Rust production LOC (`src/`) | 8,176 |
 | Rust integration test LOC (`tests/`) | 317 |
-| Swift production LOC (`AlwaysApp/Sources`) | 2,557 |
-| Swift test LOC (`AlwaysApp/Tests`) | 248 |
+| Swift production LOC (`Always/Sources`) | 2,557 |
+| Swift test LOC (`Always/Tests`) | 248 |
 | Test assertions/cases detected | 109 |
 | Direct Cargo dependencies | 27 |
 | Largest Rust file | `src/always/vocab/plugins.rs` — 705 LOC |
-| Largest Swift file | `AlwaysApp/Sources/AlwaysApp/Views/SettingsWindow.swift` — 493 LOC |
+| Largest Swift file | `Always/Sources/Always/Views/SettingsWindow.swift` — 493 LOC |
 
 Verification snapshot after stabilization:
 
@@ -47,7 +47,7 @@ Concerns:
 - CLI code still has mixed command dispatch and operational behavior in `src/main.rs` at 371 LOC.
 - The logs command had a stale namespace path that only surfaced when compiling the binary test target, showing that CLI module coverage needs to stay part of routine verification.
 
-### Swift App (`AlwaysApp/Sources/AlwaysApp/`) ★★★☆☆
+### Swift App (`Always/Sources/Always/`) ★★★☆☆
 
 Strengths:
 - The app has tests for event decoding, UDS defaults, overlay flash behavior, state monitor reactions, shortcut formatting, key persistence decisions, and Groq validation mapping.
@@ -94,7 +94,7 @@ Concerns:
 
 ### P1: Add Release-Mode Swift Verification
 
-- **What**: Add a documented local release build check for `AlwaysApp`, then promote it to CI once the overlay release-mode regression is resolved.
+- **What**: Add a documented local release build check for `Always`, then promote it to CI once the overlay release-mode regression is resolved.
 - **Risk**: Medium — may expose the known overlay issue.
 - **Impact**: Closes the most visible confidence gap for shipping the macOS app.
 
