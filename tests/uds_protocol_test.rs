@@ -8,9 +8,9 @@
 use always::always::event::{DaemonCommand, DaemonEvent, PROTOCOL_VERSION};
 
 #[test]
-fn protocol_version_is_one() {
+fn protocol_version_is_two() {
     assert_eq!(
-        PROTOCOL_VERSION, 1,
+        PROTOCOL_VERSION, 2,
         "protocol version bumped without updating UDSClient.swift?"
     );
 }
@@ -21,7 +21,7 @@ fn hello_serializes_with_version_in_data() {
         version: PROTOCOL_VERSION,
     };
     let json = serde_json::to_string(&hello).unwrap();
-    assert_eq!(json, r#"{"type":"Hello","data":{"version":1}}"#);
+    assert_eq!(json, r#"{"type":"Hello","data":{"version":2}}"#);
 }
 
 #[test]

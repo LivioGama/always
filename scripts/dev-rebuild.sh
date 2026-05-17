@@ -31,7 +31,15 @@ cd "$REPO_ROOT"
 echo "▶ killing Always..."
 play "$SOUND_KILL"
 pkill -f "Always.app" 2>/dev/null || true
-sleep 0.3   # let processes actually die before rebuild
+# Kill the Rust daemon too. The GUI's applicationWillTerminate handler
+# usually does this, but a hard pkill on Always.app skips it, so the
+# daemon outlives the rebuild and the next launch hits a stale UDS
+# socket / pid file. Send SIGTERM first (lets PidGuard::Drop fire),
+# then SIGKILL if still alive.
+pkill -TERM -f "MacOS/always run" 2>/dev/null || true
+sleep 0.5   # PidGuard::Drop + socket cleanup
+pkill -KILL -f "MacOS/always run" 2>/dev/null || true
+sleep 0.2   # let processes actually die before rebuild
 
 echo "▶ cargo build ($PROFILE)..."
 case "$PROFILE" in

@@ -321,3 +321,34 @@ pub fn set_current_app(bundle_id: Option<String>) {
 pub fn last_transcript_for_correction() -> Option<String> {
     LAST_PASTED.lock().as_ref().map(|(t, _)| t.clone())
 }
+
+/// Active dictation session — the running buffer of text that has been
+/// pasted into the user's app since the last "committed" (auto-entered
+/// or cancelled) utterance group. Populated by `handle_speech`; consumed
+/// by the same function on a follow-up utterance while the auto-enter
+/// countdown is still in flight so the daemon can APPEND a continuation
+/// instead of pasting it as a fresh, capitalized sentence.
+///
+/// Cleared when:
+///   - the auto-enter countdown fires (Return key is pressed)
+///   - the auto-enter countdown is explicitly cancelled
+///   - the daemon pauses or the user toggles mute
+static DICTATION_BUFFER: std::sync::LazyLock<Mutex<Option<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+pub fn dictation_buffer_text() -> Option<String> {
+    DICTATION_BUFFER.lock().clone()
+}
+
+pub fn dictation_buffer_set(text: impl Into<String>) {
+    *DICTATION_BUFFER.lock() = Some(text.into());
+}
+
+pub fn dictation_buffer_clear() {
+    *DICTATION_BUFFER.lock() = None;
+}
+
+#[cfg(test)]
+pub fn clear_dictation_buffer_for_test() {
+    dictation_buffer_clear();
+}

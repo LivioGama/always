@@ -14,6 +14,25 @@ pub fn pid_path() -> PathBuf {
     config::config_dir().join("always.pid")
 }
 
+/// Best-effort UDS socket path. Mirrors `uds_server::socket_path` but is
+/// infallible so it can be used in cleanup paths where erroring is wrong
+/// (Drop, signal handlers). Returns `None` when `$HOME` is unset.
+pub fn socket_path() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        std::env::var("HOME").ok().map(|home| {
+            PathBuf::from(home)
+                .join("Library")
+                .join("Caches")
+                .join("Always")
+                .join("always.sock")
+        })
+    } else if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+        Some(PathBuf::from(runtime_dir).join("always.sock"))
+    } else {
+        Some(PathBuf::from("/tmp/always.sock"))
+    }
+}
+
 pub fn read_pid() -> Option<u32> {
     std::fs::read_to_string(pid_path())
         .ok()
@@ -99,6 +118,7 @@ pub struct PidGuard;
 impl PidGuard {
     pub fn install() -> Result<Self> {
         remove_stale_pid();
+        remove_stale_socket();
         if is_running() {
             anyhow::bail!("Always-on daemon already running");
         }
@@ -125,6 +145,14 @@ impl Drop for PidGuard {
             log.write(crate::always::log::Event::Stop);
         }
         let _ = std::fs::remove_file(pid_path());
+        // Socket file must die with the daemon — a stale socket left
+        // behind makes the next daemon's `bind()` race with the old
+        // inode (we already `remove_file` in `uds_server::start_server`,
+        // but cleaning up here closes the gap where the daemon exits
+        // before the server task ever ran).
+        if let Some(sock) = socket_path() {
+            let _ = std::fs::remove_file(sock);
+        }
     }
 }
 
@@ -132,6 +160,65 @@ fn remove_stale_pid() {
     if read_pid().is_some_and(|pid| !process_is_running(pid)) {
         let _ = std::fs::remove_file(pid_path());
     }
+}
+
+/// Remove the UDS socket file if no live daemon owns it. We can't tell
+/// directly which process owns a Unix socket, so we infer it from the
+/// PID file: if `pid_path()` is gone (or its PID is dead), the socket
+/// is by definition stale.
+fn remove_stale_socket() {
+    if read_pid().is_some_and(process_is_running) {
+        return; // live daemon — leave its socket alone
+    }
+    if let Some(sock) = socket_path() {
+        let _ = std::fs::remove_file(sock);
+    }
+}
+
+/// Install async signal handlers that translate SIGTERM/SIGINT into a
+/// graceful `std::process::exit(0)` so Rust runs `PidGuard::Drop` and
+/// cleans up the pid + socket files. Without this, the OS reaps the
+/// process abruptly and leaves stale files behind — that is exactly
+/// what makes the next Swift app launch hang on a phantom daemon.
+///
+/// Pass a tokio runtime handle — the signal listener task lives on it.
+pub fn install_signal_handlers(handle: &tokio::runtime::Handle) {
+    use tokio::signal::unix::{SignalKind, signal};
+    let _guard = handle.enter();
+    let mut term = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed_to_install_sigterm_handler");
+            return;
+        }
+    };
+    let mut int = match signal(SignalKind::interrupt()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed_to_install_sigint_handler");
+            return;
+        }
+    };
+    handle.spawn(async move {
+        tokio::select! {
+            _ = term.recv() => tracing::info!("received SIGTERM, shutting down"),
+            _ = int.recv()  => tracing::info!("received SIGINT, shutting down"),
+        }
+        // `std::process::exit` does NOT run Drop, so mirror everything
+        // PidGuard::Drop would do — including the Stop event, otherwise
+        // SIGTERM (the dominant shutdown path) leaves "started without
+        // stop" gaps in the log.
+        if let Ok(log_path) = always_config::configured_log_path()
+            && let Ok(mut log) = crate::always::log::Logger::open(&log_path)
+        {
+            log.write(crate::always::log::Event::Stop);
+        }
+        let _ = std::fs::remove_file(pid_path());
+        if let Some(sock) = socket_path() {
+            let _ = std::fs::remove_file(sock);
+        }
+        std::process::exit(0);
+    });
 }
 
 fn process_is_running(pid: u32) -> bool {

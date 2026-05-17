@@ -95,15 +95,26 @@ class StateMonitor: ObservableObject {
     }
 
     /// Same as togglePause, for auto-enter.
+    ///
+    /// Also persists the new value to the daemon's DB so it survives a
+    /// daemon restart. The UDS `ToggleAutoEnter` command only mutates
+    /// in-memory state — without the `setConfig` round-trip the
+    /// preference would reset to the CLI default on every launch.
     func toggleAutoEnter() {
         let newValue = !isAutoEnter
         isAutoEnter = newValue
         StatusOverlayController.shared.flash(state: newValue ? .autoEnterOn : .autoEnterOff)
         udsClient.sendCommand("ToggleAutoEnter")
+        Task { [cliService] in
+            _ = try? await cliService.setConfig(
+                key: "stt_auto_enter",
+                value: newValue ? "true" : "false"
+            )
+        }
     }
 
-    /// Send a parameterless command to the daemon (e.g. `CaptureCorrection`).
-    /// Exposed so `CorrectionsCenter` doesn't need its own UDSClient instance —
+    /// Send a parameterless command to the daemon.
+    /// Exposed so other services don't need their own UDSClient instance —
     /// only one connection should exist per app process.
     func sendCommand(_ name: String) {
         udsClient.sendCommand(name)

@@ -326,6 +326,10 @@ fn execute_command(cmd: DaemonCommand) {
                     pause::mark_voice_seen();
                 }
                 if paused {
+                    // Pause invalidates the dictation merge buffer — when
+                    // the user resumes, they're starting a fresh utterance,
+                    // not continuing a sentence from before the pause.
+                    pause::dictation_buffer_clear();
                     global_broadcaster().paused();
                 } else {
                     global_broadcaster().resumed();
@@ -336,6 +340,7 @@ fn execute_command(cmd: DaemonCommand) {
         DaemonCommand::CancelAutoEnterCountdown => {
             if pause::countdown_active() {
                 pause::countdown_request_cancel();
+                pause::dictation_buffer_clear();
                 tracing::info!("uds_cancel_auto_enter_countdown");
             }
         }

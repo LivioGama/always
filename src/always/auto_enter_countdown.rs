@@ -25,6 +25,9 @@ pub fn schedule(rt: &Handle, delay_ms: u32) {
         // has been delivered to the target application before Return is pressed.
         std::thread::sleep(Duration::from_millis(50));
         let _ = press_return_now();
+        // Return committed — the dictation buffer (used to merge follow-up
+        // utterances) is no longer valid; the next utterance starts fresh.
+        pause::dictation_buffer_clear();
         return;
     }
 
@@ -48,6 +51,11 @@ pub fn schedule(rt: &Handle, delay_ms: u32) {
 
             if pause::countdown_take_cancel() {
                 pause::countdown_set_active(false);
+                // Intentionally NOT clearing the dictation buffer here:
+                //   - keyboard/UDS cancels clear it at their call site
+                //     (user has taken control of the field)
+                //   - resume-merge cancels set a fresh buffer immediately
+                //     after, so this task dying without clearing is correct
                 global_broadcaster().auto_enter_countdown_cancelled();
                 tracing::info!("auto_enter_countdown_cancelled");
                 return;
@@ -65,6 +73,9 @@ pub fn schedule(rt: &Handle, delay_ms: u32) {
         if let Err(error) = press_return_now() {
             tracing::error!(?error, "auto_enter_countdown_press_return_failed");
         }
+        // Return committed — the dictation buffer (used to merge follow-up
+        // utterances) is no longer valid; the next utterance starts fresh.
+        pause::dictation_buffer_clear();
         pause::countdown_set_active(false);
         global_broadcaster().auto_enter_countdown_finished();
     });

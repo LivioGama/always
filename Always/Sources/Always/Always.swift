@@ -260,7 +260,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         NSLog("Always.installStatusItem: item length=\(item.length) visible=\(item.isVisible)")
         if let button = item.button {
-            let symbol = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Always")
+            // Initial icon is the listening/armed default; the Combine
+            // subscription in setupStatusBarIconUpdates() will swap it
+            // to the correct state-aware symbol once StateMonitor emits.
+            let symbol = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Always")
             symbol?.isTemplate = true
             button.image = symbol
             button.imagePosition = .imageOnly
@@ -294,13 +297,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// rendering correctly while Always didn't.
     private func setupStatusBarIconUpdates() {
         guard let monitor = stateMonitor else { return }
-        Publishers.CombineLatest3(monitor.$isDaemonConnected, monitor.$isPaused, monitor.$isDaemonDegraded)
-            .removeDuplicates { lhs, rhs in lhs == rhs }
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] isConnected, isPaused, isDegraded in
-                self?.updateStatusBarIcon(isConnected: isConnected, isPaused: isPaused, isDegraded: isDegraded)
-            }
-            .store(in: &cancellables)
+        // Fold all four state inputs into the SF Symbol name and dedupe on
+        // that. Critical for the Tahoe 26 slot-churn fix — we MUST NOT
+        // touch button.image unless the resolved icon actually changed.
+        // Mapping many bool transitions to a single string and applying
+        // `removeDuplicates` collapses redundant signals (e.g. transcribing
+        // ticks while paused still resolves to "pause.circle.fill") into a
+        // single assignment.
+        Publishers.CombineLatest4(
+            monitor.$isDaemonConnected,
+            monitor.$isPaused,
+            monitor.$isDaemonDegraded,
+            monitor.$isTranscribing
+        )
+        .map { isConnected, isPaused, isDegraded, isTranscribing in
+            StatusIconResolver.symbolName(
+                isConnected: isConnected,
+                isDegraded: isDegraded,
+                isPaused: isPaused,
+                isTranscribing: isTranscribing
+            )
+        }
+        .removeDuplicates()
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] iconName in
+            self?.applyStatusBarIcon(named: iconName)
+        }
+        .store(in: &cancellables)
     }
 
     /// Nuclear option: completely remove and recreate the status item
@@ -320,16 +343,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         os_log("Created new status item with autosave name", log: logger, type: .info)
 
         // Create new status item
-        let iconName: String
-        if monitor.isDaemonDegraded {
-            iconName = "exclamationmark.triangle.fill"
-        } else if !monitor.isDaemonConnected {
-            iconName = "exclamationmark.triangle"
-        } else if monitor.isPaused {
-            iconName = "pause.circle.fill"
-        } else {
-            iconName = "mic.fill"
-        }
+        let iconName = StatusIconResolver.symbolName(
+            isConnected: monitor.isDaemonConnected,
+            isDegraded: monitor.isDaemonDegraded,
+            isPaused: monitor.isPaused,
+            isTranscribing: monitor.isTranscribing
+        )
 
         os_log("Setting icon to '%{public}@'", log: logger, type: .info, iconName)
 
@@ -370,23 +389,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         os_log("Recreated status item and popover", log: logger, type: .info)
     }
 
-    /// Update the status bar icon — strictly minimal, matching the
-    /// MeetingBar / TahoeMenuDemo / HelloStatus pattern. Just assign
-    /// the image. Don't touch `isVisible`, `needsDisplay`, `layout()`,
-    /// `window.update()` — Tahoe 26 treats each as a state change and
-    /// re-runs slot allocation which never settles.
-    private func updateStatusBarIcon(isConnected: Bool, isPaused: Bool, isDegraded: Bool) {
+    /// Apply a resolved SF Symbol name to the status bar button. Strictly
+    /// minimal, matching the MeetingBar / TahoeMenuDemo / HelloStatus
+    /// pattern: just assign the image. Don't touch `isVisible`,
+    /// `needsDisplay`, `layout()`, `window.update()` — Tahoe 26 treats
+    /// each as a state change and re-runs slot allocation which never
+    /// settles. Dedup is enforced upstream in `setupStatusBarIconUpdates`
+    /// (Combine `removeDuplicates` on the resolved name), so by the time
+    /// we land here the icon really has changed.
+    private func applyStatusBarIcon(named iconName: String) {
         guard let button = statusItem?.button else { return }
-        let iconName: String
-        if isDegraded {
-            iconName = "exclamationmark.triangle.fill"
-        } else if !isConnected {
-            iconName = "exclamationmark.triangle"
-        } else if isPaused {
-            iconName = "pause.circle.fill"
-        } else {
-            iconName = "mic.fill"
-        }
         let image = NSImage(systemSymbolName: iconName, accessibilityDescription: "Always")
         image?.isTemplate = true
         button.image = image
@@ -418,28 +430,52 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Read the daemon PID file and send SIGTERM. Synchronous so it works
     /// in applicationWillTerminate (no time for async). Also removes the
     /// PID file so the next launch sees a clean slate.
+    ///
+    /// Belt-and-suspenders: after the PID-file-based kill, also sweep
+    /// any process whose argv matches the daemon path in the app bundle
+    /// ("MacOS/always run"). This catches orphans whose pid file was
+    /// deleted (e.g. user manually rm'd it) but whose process is still
+    /// alive holding the mic + UDS socket. The path-anchored pattern
+    /// avoids matching unrelated commands that happen to contain
+    /// "always run" in their argv.
     static func killStaleDaemon() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let pidPath = home
             .appendingPathComponent("Library/Application Support/always/always.pid")
             .path
 
-        guard let pidString = try? String(contentsOfFile: pidPath, encoding: .utf8)
+        if let pidString = try? String(contentsOfFile: pidPath, encoding: .utf8)
                 .trimmingCharacters(in: .whitespacesAndNewlines),
-              let pid = pid_t(pidString) else { return }
-
-        // Check if the process is actually running before killing
-        if kill(pid, 0) == 0 {
+           let pid = pid_t(pidString),
+           kill(pid, 0) == 0 {
             kill(pid, SIGTERM)
-            // Give it a moment to clean up, then force-kill if still alive
-            usleep(200_000) // 200ms
+            // Give it up to 2s to clean up, polling every 50ms. The
+            // daemon's signal handler removes pid + socket files
+            // before exiting, so we want to wait for that — yanking
+            // it with SIGKILL too fast leaves stale files.
+            for _ in 0..<40 {
+                usleep(50_000) // 50ms
+                if kill(pid, 0) != 0 { break }
+            }
             if kill(pid, 0) == 0 {
                 kill(pid, SIGKILL)
+                usleep(100_000)
             }
         }
 
         // Remove PID file regardless — it's stale either way
         try? FileManager.default.removeItem(atPath: pidPath)
+
+        // Belt-and-suspenders pkill in case pid file was missing or
+        // stale-but-the-process-is-actually-elsewhere.
+        let pkill = Process()
+        pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        pkill.arguments = ["-TERM", "-f", "MacOS/always run"]
+        pkill.standardOutput = FileHandle.nullDevice
+        pkill.standardError = FileHandle.nullDevice
+        try? pkill.run()
+        pkill.waitUntilExit()
+        usleep(200_000)
 
         // Remove socket file so daemon starts with clean socket
         let sockPath = home

@@ -3,12 +3,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use super::context_vocab::ContextVocabulary;
 use super::postprocess::PostProcessor;
-use super::text::Vocabulary;
 use crate::db;
 use crate::db::Preferences;
 
@@ -207,8 +204,6 @@ pub struct AlwaysConfig {
     pub onset_ms: u32,
     pub cooldown_ms: u32,
     pub log_path: PathBuf,
-    pub vocab: Option<Vocabulary>,
-    pub context_vocab: Option<Arc<Mutex<ContextVocabulary>>>,
     pub post_processor: Option<Arc<PostProcessor>>,
     pub project_root: Option<PathBuf>,
     pub learning_enabled: bool,
@@ -294,19 +289,11 @@ impl AlwaysConfig {
             .and_then(|s| s.parse().ok())
             .unwrap_or_default();
         let prefs = load_preferences()?;
-        let vocab = Vocabulary::load();
 
         let vocab_config = load_vocab_config();
         let postprocess_config = load_postprocess_config();
 
         let project_root = detect_project_root();
-
-        let context_vocab = project_root.as_ref().map(|root| {
-            Arc::new(Mutex::new(ContextVocabulary::new_with_config(
-                Some(root.clone()),
-                vocab_config.clone(),
-            )))
-        });
 
         // Honor user pref for LLM postprocess: DB > env > default true.
         let postprocess_enabled = prefs
@@ -332,10 +319,6 @@ impl AlwaysConfig {
                     Some(groq_stt_api_key.clone())
                 }
             });
-            let vocab_for_pp = vocab.clone().unwrap_or_else(Vocabulary::default_patterns);
-            let context_vocab_for_pp = context_vocab
-                .clone()
-                .unwrap_or_else(|| Arc::new(Mutex::new(ContextVocabulary::new(None))));
             tracing::info!(
                 grammar_correction_enabled = effective_postprocess.grammar_correction_enabled,
                 has_api_key = groq_api_key.is_some(),
@@ -343,8 +326,6 @@ impl AlwaysConfig {
                 "post_processor_init"
             );
             Some(Arc::new(PostProcessor::new_with_config(
-                vocab_for_pp,
-                context_vocab_for_pp,
                 effective_postprocess.clone(),
                 groq_api_key,
             )))
@@ -354,7 +335,11 @@ impl AlwaysConfig {
             lang,
             timeout_secs,
             silence_secs: prefs.stt_silence.unwrap_or(silence_secs),
-            auto_enter,
+            // Persisted DB value wins over the CLI flag — the GUI toggles
+            // this via `config set stt_auto_enter`, and the daemon must
+            // honor it on every restart, otherwise the user's choice
+            // silently resets to whatever flag the launcher passed.
+            auto_enter: prefs.stt_auto_enter.unwrap_or(auto_enter),
             auto_enter_delay_secs: prefs
                 .auto_enter_delay_ms
                 .map(|ms| (ms as u64 + 999) / 1000) // Convert ms to seconds, round up
@@ -364,8 +349,6 @@ impl AlwaysConfig {
             onset_ms: 30,
             cooldown_ms: prefs.stt_cooldown_ms.unwrap_or(150),
             log_path: log_path_from_preferences(&prefs),
-            vocab,
-            context_vocab,
             post_processor,
             project_root,
             learning_enabled: postprocess_config.learning_history_limit > 0,
@@ -410,8 +393,6 @@ impl Default for AlwaysConfig {
             onset_ms: 30,
             cooldown_ms: 150,
             log_path: default_log_path(),
-            vocab: Vocabulary::load(),
-            context_vocab: None,
             post_processor: None,
             project_root: detect_project_root(),
             learning_enabled: postprocess_config.learning_history_limit > 0,

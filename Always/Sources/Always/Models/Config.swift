@@ -70,18 +70,29 @@ struct Config: Codable {
                     config.hearEnergyThreshold = Double(value) ?? defaultConfig.hearEnergyThreshold
                 case "stt_cooldown_ms":
                     config.sttCooldownMs = Int(value) ?? defaultConfig.sttCooldownMs
-                case "stt_silence":
+                case "stt_cooldown_secs":
+                    // Daemon `config show` prints seconds; convert back to ms.
+                    if let secs = Double(value) {
+                        config.sttCooldownMs = Int((secs * 1000).rounded())
+                    }
+                case "stt_silence", "stt_silence_secs":
                     config.sttSilence = Double(value.replacingOccurrences(of: "s", with: "")) ?? defaultConfig.sttSilence
                 case "stt_auto_enter":
-                    config.sttAutoEnter = value == "true"
+                    config.sttAutoEnter = (value == "true" || value == "1")
                 case "auto_enter_delay_ms":
                     if let ms = Int(value) {
                         config.sttAutoEnterDelaySecs = ms / 1000
                     } else {
                         config.sttAutoEnterDelaySecs = defaultConfig.sttAutoEnterDelaySecs
                     }
-                case "stt_auto_enter_delay_secs":
-                    config.sttAutoEnterDelaySecs = Int(value) ?? defaultConfig.sttAutoEnterDelaySecs
+                case "auto_enter_delay_secs", "stt_auto_enter_delay_secs":
+                    // Daemon `config show` prints fractional seconds (e.g. "4.000").
+                    // Round to nearest int — the GUI control is integer-only.
+                    if let secs = Double(value) {
+                        config.sttAutoEnterDelaySecs = Int(secs.rounded())
+                    } else {
+                        config.sttAutoEnterDelaySecs = defaultConfig.sttAutoEnterDelaySecs
+                    }
                 case "groq_api_key":
                     if !value.contains("(not set)") {
                         config.groqApiKey = value

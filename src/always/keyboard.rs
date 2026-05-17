@@ -255,6 +255,9 @@ pub fn start_keyboard_listener() -> Result<()> {
                     // auto-Return.
                     if pause::countdown_active() {
                         pause::countdown_request_cancel();
+                        // User typed: drop dictation merge buffer — they've
+                        // taken control of the field.
+                        pause::dictation_buffer_clear();
                     }
                     return;
                 };
@@ -263,6 +266,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                     // the active auto-enter countdown. The user is
                     // typing — they don't want the synthesized Return.
                     pause::countdown_request_cancel();
+                    pause::dictation_buffer_clear();
                 }
                 if pause_combo.matches_name(ctrl_pressed, shift_pressed, alt_pressed, name) {
                     let new_state = pause::toggle_pause();
@@ -387,6 +391,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                 // not a quiescent "let auto-enter run" state.
                 if pause::countdown_active() && matches!(event.event_type, EventType::ButtonPress(_)) {
                     pause::countdown_request_cancel();
+                    pause::dictation_buffer_clear();
                 }
             }
         }) {
