@@ -19,8 +19,11 @@ class StateMonitor: ObservableObject {
     private let logger = Logger(subsystem: "com.always.app", category: "state-monitor")
     private var respawnInFlight = false
 
+    /// Diagnostic logger — goes only to `os.Logger`. The previous
+    /// implementation also wrote `/tmp/statemonitor.log`; that file
+    /// is now gone, see UDSClient's `log()` comment for rationale.
     private func log(_ message: String) {
-        logger.debug("\(message)")
+        logger.debug("\(message, privacy: .public)")
     }
 
     private init() {
@@ -36,9 +39,6 @@ class StateMonitor: ObservableObject {
         udsClient.onDaemonNeedsRespawn = { [weak self] in
             self?.respawnDaemonIfNeeded()
         }
-
-        // Clean up old log file on launch
-        try? FileManager.default.removeItem(atPath: "/tmp/statemonitor.log")
     }
 
     /// Mirror UDSClient connection state into @Published props for the UI.
@@ -76,7 +76,11 @@ class StateMonitor: ObservableObject {
     }
     
     deinit {
-        cancellables.forEach { $0.cancel() }
+        // `removeAll` cancels and drops every subscription atomically.
+        // Using `forEach { $0.cancel() }` left the array populated, so a
+        // late publisher emit could still reach a stale sink during
+        // teardown.
+        cancellables.removeAll()
     }
 
     /// Tell the daemon (in-process) to toggle pause. The daemon mutates its

@@ -1,207 +1,13 @@
 import SwiftUI
 import AppKit
+import os.log
 
-// MARK: - Shortcut formatting helpers
+// Helpers (KeyCaptureButton, NumericSettingRow, SensitivityPreset,
+// formatShortcut) live in `Views/Settings/` so this file holds only the
+// composition root and section bodies. Add new sections by extracting
+// another file in `Views/Settings/`, not by growing this struct.
 
-/// Format `"ctrl+alt+p"` → `"⌃⌥P"` for display.
-func formatShortcut(_ s: String) -> String {
-    let symbolMap: [String: String] = [
-        "ctrl": "⌃", "control": "⌃",
-        "alt": "⌥", "option": "⌥",
-        "shift": "⇧",
-        "meta": "⌘", "cmd": "⌘", "command": "⌘"
-    ]
-    let parts = s.lowercased().split(separator: "+").map(String.init)
-    return parts.map { symbolMap[$0] ?? $0.uppercased() }.joined()
-}
-
-// MARK: - Key capture button
-
-struct KeyCaptureButton: View {
-    let label: String
-    @Binding var shortcut: String
-    let onSave: (String) async -> Void
-
-    @State private var isRecording = false
-    @State private var monitor: Any?
-
-    var body: some View {
-        HStack {
-            Text(label)
-            Spacer()
-            Button(action: toggleRecording) {
-                Text(isRecording ? "Press keys…" : formatShortcut(shortcut))
-                    .monospacedDigit()
-                    .foregroundColor(isRecording ? .orange : .secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(isRecording ? Color.orange.opacity(0.08) : Color.clear)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 5)
-                            .stroke(
-                                isRecording ? Color.orange : Color.secondary.opacity(0.35),
-                                lineWidth: 1
-                            )
-                    )
-                    .cornerRadius(5)
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
-    private func toggleRecording() {
-        if isRecording { stopRecording(); return }
-        isRecording = true
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            let mods = event.modifierFlags
-            var parts: [String] = []
-            if mods.contains(.control) { parts.append("ctrl") }
-            if mods.contains(.option)  { parts.append("alt") }
-            if mods.contains(.shift)   { parts.append("shift") }
-            if mods.contains(.command) { parts.append("meta") }
-
-            let keyChar = event.charactersIgnoringModifiers?.lowercased() ?? ""
-            // require at least one modifier + a single printable key
-            if !keyChar.isEmpty, keyChar.count == 1, !parts.isEmpty {
-                let newShortcut = (parts + [keyChar]).joined(separator: "+")
-                shortcut = newShortcut
-                Task { await onSave(newShortcut) }
-            }
-            stopRecording()
-            return nil
-        }
-    }
-
-    private func stopRecording() {
-        isRecording = false
-        if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
-    }
-}
-
-// MARK: - Sensitivity preset
-//
-// Mirrors `SensitivityPreset` in `src/always/config.rs`. The threshold
-// pairs MUST stay in sync — both sides write the same daemon
-// preferences. Adding a new variant requires updating both files.
-
-enum SensitivityPreset: String, CaseIterable, Identifiable {
-    case high
-    case normal
-    case low
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .high:   return "High"
-        case .normal: return "Normal"
-        case .low:    return "Low"
-        }
-    }
-
-    /// `(stt_energy_threshold, hear_energy_threshold)`.
-    var thresholds: (stt: Double, hear: Double) {
-        switch self {
-        case .high:   return (0.005, 0.0005)
-        case .normal: return (0.012, 0.001)
-        case .low:    return (0.025, 0.002)
-        }
-    }
-
-    /// Reverse-lookup: which preset (if any) corresponds to the given
-    /// raw thresholds. Returns `nil` for custom values so the picker
-    /// can fall through to "Custom".
-    static func from(stt: Double, hear: Double) -> SensitivityPreset? {
-        for p in SensitivityPreset.allCases {
-            let (s, h) = p.thresholds
-            if abs(s - stt) < 1e-6 && abs(h - hear) < 1e-6 {
-                return p
-            }
-        }
-        return nil
-    }
-}
-
-// MARK: - Numeric setting row
-
-/// One sensitivity setting laid out as a single row:
-///   Label                                  [Number ⊕]  Default: x.xxxx  ⤺
-///
-/// Replaces the old slider style with a typed number input plus a reset
-/// button. The recommended default is shown alongside so users know what
-/// the safe value is. `recommended` is the value users should prefer
-/// (== `default` here, but kept separate so a future PR can recommend a
-/// per-environment override without touching the type-level default).
-struct NumericSettingRow<T: Numeric & LosslessStringConvertible>: View where T: Comparable {
-    let title: String
-    let help: String
-    let unit: String
-    let formatter: NumberFormatter
-    @Binding var value: T
-    let defaultValue: T
-    let range: ClosedRange<T>?
-
-    init(
-        title: String,
-        help: String = "",
-        unit: String = "",
-        formatter: NumberFormatter,
-        value: Binding<T>,
-        defaultValue: T,
-        range: ClosedRange<T>? = nil
-    ) {
-        self.title = title
-        self.help = help
-        self.unit = unit
-        self.formatter = formatter
-        self._value = value
-        self.defaultValue = defaultValue
-        self.range = range
-    }
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                    .font(.body)
-                if !help.isEmpty {
-                    Text(help)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-            }
-            Spacer(minLength: 8)
-            HStack(spacing: 4) {
-                TextField("", value: $value, formatter: formatter)
-                    .textFieldStyle(.roundedBorder)
-                    .multilineTextAlignment(.trailing)
-                    .frame(width: 80)
-                    .onChange(of: value) { _, new in
-                        if let range, !range.contains(new) {
-                            value = min(max(new, range.lowerBound), range.upperBound)
-                        }
-                    }
-                if !unit.isEmpty {
-                    Text(unit)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .frame(width: 22, alignment: .leading)
-                }
-            }
-            Text("Default: \(formatter.string(for: defaultValue) ?? "")\(unit.isEmpty ? "" : " \(unit)")")
-                .font(.caption2)
-                .foregroundColor(.secondary)
-                .frame(width: 100, alignment: .trailing)
-            Button {
-                value = defaultValue
-            } label: {
-                Image(systemName: "arrow.counterclockwise")
-            }
-            .buttonStyle(.borderless)
-            .help("Reset to recommended default")
-        }
-    }
-}
+private let settingsLogger = Logger(subsystem: "com.always.app", category: "settings")
 
 // MARK: - Settings window
 
@@ -209,7 +15,6 @@ struct SettingsWindow: View {
     @ObservedObject var cliService: CLIService
     @ObservedObject private var stateMonitor: StateMonitor = .shared
     @State private var config: Config = Config.defaultConfig
-    @State private var status: DaemonStatus?
     @State private var isLoading = false
     @State private var apiKey: String = ""
     @State private var showApiKey = false
@@ -274,6 +79,9 @@ struct SettingsWindow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            // Banner only renders when one or more permissions are
+            // missing — invisible afterwards.
+            PermissionsBanner()
             statusAndPauseRow
             Divider()
             behaviorRow
@@ -299,14 +107,13 @@ struct SettingsWindow: View {
             refreshVocabularyInfo()
             Task {
                 await loadConfig()
-                await refreshStatus()
             }
         }
         .onChange(of: config.sttEnergyThreshold) { _, _ in saveConfig() }
         .onChange(of: config.hearEnergyThreshold) { _, _ in saveConfig() }
         .onChange(of: config.sttSilence) { _, _ in saveConfig() }
         .onChange(of: config.sttCooldownMs) { _, _ in saveConfig() }
-        .onChange(of: config.sttAutoEnterDelaySecs) { _, _ in saveConfig() }
+        .onChange(of: config.autoEnterDelayMs) { _, _ in saveConfig() }
         .onChange(of: config.sileroThreshold) { _, _ in saveConfig() }
         .onChange(of: config.postprocessEnabled) { _, _ in saveConfig() }
         .onChange(of: config.idlePauseSecs) { _, _ in saveConfig() }
@@ -316,16 +123,36 @@ struct SettingsWindow: View {
     // MARK: Sections
 
     private var statusAndPauseRow: some View {
-        HStack(spacing: 12) {
-            Image(
-                systemName: status?.isRunning == true
-                    ? "checkmark.circle.fill"
-                    : "exclamationmark.triangle.fill"
-            )
-            .foregroundColor(status?.isRunning == true ? .green : .orange)
-            Text(status?.isRunning == true ? "Running" : "Reconnecting…")
+        // Bind to `stateMonitor` — the live UDS connection signal — instead
+        // of a one-shot `cliService.getStatus()` snapshot. The old version
+        // only ran on `.onAppear`, so the row stayed at "Reconnecting…" for
+        // the rest of the session if the daemon wasn't ready in that first
+        // second. `isDaemonConnected` flips via `UDSClient.$isConnected` and
+        // the watchdog `isDaemonDegraded` flag.
+        let isRunning = stateMonitor.isDaemonConnected
+        let isDegraded = stateMonitor.isDaemonDegraded
+        let displayLabel: String
+        let displayColor: Color
+        let symbol: String
+        if isRunning && !isDegraded {
+            displayLabel = "Running"
+            displayColor = .green
+            symbol = "checkmark.circle.fill"
+        } else if isDegraded {
+            displayLabel = "Reconnecting…"
+            displayColor = .orange
+            symbol = "arrow.triangle.2.circlepath"
+        } else {
+            displayLabel = "Disconnected"
+            displayColor = .orange
+            symbol = "exclamationmark.triangle.fill"
+        }
+        return HStack(spacing: 12) {
+            Image(systemName: symbol)
+                .foregroundColor(displayColor)
+            Text(displayLabel)
                 .font(.headline)
-                .foregroundColor(status?.isRunning == true ? .green : .orange)
+                .foregroundColor(displayColor)
             Spacer()
             Button {
                 stateMonitor.togglePause()
@@ -339,7 +166,7 @@ struct SettingsWindow: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .disabled(status?.isRunning != true)
+            .disabled(!isRunning)
         }
     }
 
@@ -360,9 +187,12 @@ struct SettingsWindow: View {
                 help: "Seconds before auto-enter. Set to 0 to disable.",
                 unit: "s",
                 formatter: Self.intFormatter,
-                value: $config.sttAutoEnterDelaySecs,
-                defaultValue: 2,
-                range: 0...86_400
+                value: Binding(
+                    get: { config.autoEnterDelayMs / 1000 },
+                    set: { config.autoEnterDelayMs = $0 * 1000 }
+                ),
+                defaultValue: 4,
+                range: 0...60
             )
             .padding(.top, 4)
             HStack {
@@ -736,18 +566,9 @@ struct SettingsWindow: View {
                 apiKey = ""
             }
         } catch {
-            print("Error loading config: \(error)")
+            settingsLogger.error("loadConfig failed: \(error.localizedDescription, privacy: .public)")
         }
         isLoading = false
-    }
-
-    private func refreshStatus() async {
-        do {
-            status = try await cliService.getStatus()
-        } catch {
-            print("Error refreshing status: \(error)")
-            status = DaemonStatus(isRunning: false, pid: nil, logPath: nil)
-        }
     }
 
     private func saveApiKey() {
@@ -761,7 +582,7 @@ struct SettingsWindow: View {
                 // Add a small delay to make the loader visible for testing
                 try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
             } catch {
-                print("Error saving API key: \(error)")
+                settingsLogger.error("saveApiKey failed: \(error.localizedDescription, privacy: .public)")
             }
             isSavingApiKey = false
         }
@@ -775,7 +596,7 @@ struct SettingsWindow: View {
                 _ = try await cliService.setConfig(key: "stt_silence", value: String(config.sttSilence))
                 _ = try await cliService.setConfig(key: "stt_cooldown_ms", value: String(config.sttCooldownMs))
                 _ = try await cliService.setConfig(key: "stt_auto_enter", value: String(config.sttAutoEnter))
-                _ = try await cliService.setConfig(key: "auto_enter_delay_ms", value: String(config.sttAutoEnterDelaySecs * 1000))
+                _ = try await cliService.setConfig(key: "auto_enter_delay_ms", value: String(config.autoEnterDelayMs))
                 _ = try await cliService.setConfig(key: "silero_threshold", value: String(config.sileroThreshold))
                 _ = try await cliService.setConfig(key: "postprocess_enabled", value: String(config.postprocessEnabled))
                 _ = try await cliService.setConfig(key: "idle_pause_secs", value: String(config.idlePauseSecs))
@@ -785,7 +606,7 @@ struct SettingsWindow: View {
                     _ = try await cliService.setConfig(key: "groq_api_key", value: apiKey.isEmpty ? "" : apiKey)
                 }
             } catch {
-                print("Error saving config: \(error)")
+                settingsLogger.error("saveConfig failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }

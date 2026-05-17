@@ -7,6 +7,11 @@ use serde_json::Value;
 
 use super::config::PostprocessConfig;
 
+/// Maximum number of cached (input → corrected) entries before we
+/// evict the oldest. Each entry is bounded by the LLM's max_tokens
+/// response cap (~500 chars) so 1 000 entries ~= 1 MB upper bound.
+const CACHE_MAX_ENTRIES: usize = 1_000;
+
 /// Optional LLM cleanup pass for the transcript.
 ///
 /// Single transformation: send the transcript to the Groq LLM with a
@@ -16,8 +21,13 @@ use super::config::PostprocessConfig;
 #[derive(Debug, Clone)]
 pub struct PostProcessor {
     groq_api_key: Option<String>,
+    /// Memoization of `(transcript → corrected)` pairs. Bounded by
+    /// `CACHE_MAX_ENTRIES`: the previous implementation never evicted
+    /// and grew unboundedly across long daemon sessions.
     cache: Arc<Mutex<HashMap<String, String>>>,
-    #[allow(dead_code)] // reserved for future LRU eviction policy
+    /// Insertion order used for LRU-style eviction. The pair
+    /// `(cache, cache_order)` is treated as a single unit; both locks
+    /// are taken together in `insert_cached`.
     cache_order: Arc<Mutex<VecDeque<String>>>,
     config: PostprocessConfig,
 }
@@ -100,12 +110,34 @@ impl PostProcessor {
             .trim()
             .to_string();
 
-        // Cache the result
-        self.cache
-            .lock()
-            .insert(text.to_string(), corrected.clone());
-
+        self.insert_cached(text.to_string(), corrected.clone());
         Ok(corrected)
+    }
+
+    /// Insert a `(input, corrected)` pair into the cache with LRU
+    /// eviction. The previous implementation only used the HashMap
+    /// half and the unbounded VecDeque was reserved-but-never-used.
+    /// Long daemon sessions accumulated entries indefinitely.
+    fn insert_cached(&self, text: String, corrected: String) {
+        let mut cache = self.cache.lock();
+        let mut order = self.cache_order.lock();
+        // Replace via `insert`: returns the previous value if the key was
+        // present, in which case we already had this entry and just need
+        // to bump its position in the LRU queue. Otherwise it's a fresh
+        // insert and we may need to evict.
+        if cache.insert(text.clone(), corrected).is_some() {
+            order.retain(|k| k != &text);
+            order.push_back(text);
+            return;
+        }
+        order.push_back(text);
+        while order.len() > CACHE_MAX_ENTRIES {
+            if let Some(victim) = order.pop_front() {
+                cache.remove(&victim);
+            } else {
+                break;
+            }
+        }
     }
 }
 

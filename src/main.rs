@@ -43,12 +43,17 @@ enum Commands {
         /// Maximum recording duration per phrase in seconds
         #[arg(short = 't', long, default_value = "30")]
         timeout: u32,
-        /// Seconds of silence before considering phrase complete
-        #[arg(short = 's', long, default_value = "1.5")]
+        /// Seconds of silence before considering phrase complete.
+        /// Default matches `AlwaysConfig::default().silence_secs` so the
+        /// CLI doesn't silently override the prefs/canonical default.
+        #[arg(short = 's', long, default_value = "2.0")]
         silence: f64,
-        /// Press Enter automatically after pasting transcript
-        #[arg(long, default_value_t = false)]
-        auto_enter: bool,
+        /// Press Enter automatically after pasting transcript. Omitting
+        /// the flag (the default) reads `stt_auto_enter` from the prefs
+        /// table — so the GUI toggle is the source of truth. Pass
+        /// `--auto-enter` or `--no-auto-enter` to override explicitly.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
+        auto_enter: Option<bool>,
     },
     /// Stop always-on daemon
     Stop,
@@ -65,12 +70,15 @@ enum Commands {
         /// Maximum recording duration per phrase in seconds
         #[arg(short = 't', long, default_value = "30")]
         timeout: u32,
-        /// Seconds of silence before considering phrase complete
-        #[arg(short = 's', long, default_value = "1.5")]
+        /// Seconds of silence before considering phrase complete.
+        /// Default matches `AlwaysConfig::default().silence_secs`.
+        #[arg(short = 's', long, default_value = "2.0")]
         silence: f64,
-        /// Press Enter automatically after pasting transcript
-        #[arg(long, default_value_t = false)]
-        auto_enter: bool,
+        /// Press Enter automatically after pasting transcript. See
+        /// `Start::auto_enter` — same opt-in semantics; DB pref wins
+        /// when the flag is omitted.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
+        auto_enter: Option<bool>,
     },
     /// Manage preferences
     Config {
@@ -249,26 +257,36 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     "(not set)".to_string()
                 }
             );
+            // Defaults below MUST match `AlwaysConfig::default` / the
+            // GUI `Config.defaultConfig` / the Normal sensitivity preset.
+            // Any drift here silently shows the user the wrong value in
+            // `always config show` when the DB column is NULL.
             println!(
                 "stt_energy_threshold: {}",
                 prefs
                     .stt_energy_threshold
                     .map(|v| v.to_string())
-                    .unwrap_or_else(|| "0.05".to_string())
+                    .unwrap_or_else(|| "0.012".to_string())
             );
             println!(
                 "hear_energy_threshold: {}",
                 prefs
                     .hear_energy_threshold
                     .map(|v| v.to_string())
-                    .unwrap_or_else(|| "0.002".to_string())
+                    .unwrap_or_else(|| "0.001".to_string())
             );
+            // Print the canonical `stt_cooldown_ms` key + value so the
+            // CLI ↔ Swift contract is unit-consistent. The previous
+            // output emitted `stt_cooldown_secs` with the value divided
+            // by 1000, which (a) Swift wasn't parsing, and (b) made
+            // CLI-only debugging misleading because the column is
+            // stored in milliseconds.
             println!(
-                "stt_cooldown_secs: {}",
+                "stt_cooldown_ms: {}",
                 prefs
                     .stt_cooldown_ms
-                    .map(|v| format!("{:.3}", v as f64 / 1000.0))
-                    .unwrap_or_else(|| "0.150".to_string())
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "150".to_string())
             );
             println!(
                 "always_log_path: {}",
@@ -289,11 +307,11 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .unwrap_or_else(|| "false".to_string())
             );
             println!(
-                "auto_enter_delay_secs: {}",
+                "auto_enter_delay_ms: {}",
                 prefs
                     .auto_enter_delay_ms
-                    .map(|v| format!("{:.3}", v as f64 / 1000.0))
-                    .unwrap_or_else(|| "2.0".to_string())
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "4000".to_string())
             );
             println!(
                 "groq_api_key: {}",
@@ -587,36 +605,60 @@ fn relative_queued(queued_at_unix_ms: u64) -> String {
 }
 
 fn handle_toggle_pause() -> Result<()> {
-    let new_state = always::always::pause::toggle_pause();
-
-    // Broadcast event via UDS (Swift app receives this and shows overlay)
-    if new_state {
-        always::always::event::global_broadcaster().paused();
-    } else {
-        always::always::event::global_broadcaster().resumed();
+    // The pause state lives in process-local atomics inside the running
+    // daemon. A fresh `always toggle-pause` invocation has its own
+    // empty atomics, so flipping them locally was a no-op. Send the
+    // toggle through the UDS socket so the actual daemon process
+    // receives it.
+    if always::always::daemon::is_running() {
+        send_uds_command(r#"{"type":"TogglePause"}"#)?;
+        println!("Sent TogglePause to running daemon.");
+        return Ok(());
     }
-
+    // No daemon: keep the legacy local toggle so downstream scripts
+    // that grep for "Pause state:" don't break.
+    let new_state = always::always::pause::toggle_pause();
     println!(
-        "Pause state: {}",
+        "Pause state: {} (no daemon running; toggle was local-only)",
         if new_state { "paused" } else { "resumed" }
     );
     Ok(())
 }
 
 fn handle_toggle_auto_enter() -> Result<()> {
-    let new_state = always::always::pause::toggle_auto_enter();
-
-    // Broadcast event via UDS (Swift app receives this and shows overlay)
-    if new_state {
-        always::always::event::global_broadcaster().auto_enter_enabled();
-    } else {
-        always::always::event::global_broadcaster().auto_enter_disabled();
+    // Same rationale as `handle_toggle_pause`: dial the running daemon
+    // when one exists so the toggle reaches the right process-local
+    // atomic.
+    if always::always::daemon::is_running() {
+        send_uds_command(r#"{"type":"ToggleAutoEnter"}"#)?;
+        println!("Sent ToggleAutoEnter to running daemon.");
+        return Ok(());
     }
-
+    let new_state = always::always::pause::toggle_auto_enter();
     println!(
-        "Auto-enter state: {}",
+        "Auto-enter state: {} (no daemon running; toggle was local-only)",
         if new_state { "enabled" } else { "disabled" }
     );
+    Ok(())
+}
+
+/// Send a single JSON line to the daemon's UDS socket. Caller is
+/// responsible for terminating with `\n`-or-not; we append one.
+/// Times out after 2 s so a stuck daemon doesn't hang the CLI.
+fn send_uds_command(json: &str) -> Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::net::UnixStream;
+    use anyhow::Context as _;
+
+    let Some(sock_path) = always::always::daemon::socket_path() else {
+        anyhow::bail!("no UDS socket path available on this platform");
+    };
+    let mut stream = UnixStream::connect(&sock_path)
+        .with_context(|| format!("failed to connect to daemon at {}", sock_path.display()))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .ok();
+    writeln!(stream, "{json}").context("failed to send UDS command")?;
     Ok(())
 }
 
@@ -634,7 +676,7 @@ fn always_config(
     lang: String,
     timeout: u32,
     silence: f64,
-    auto_enter: bool,
+    auto_enter: Option<bool>,
 ) -> Result<always::always::AlwaysConfig> {
     always::always::AlwaysConfig::from_cli(lang, timeout, silence, auto_enter)
 }

@@ -4,5 +4,14 @@
 <dict>
     <key>com.apple.security.app-sandbox</key>
     <false/>
+    <!--
+      Microphone capture. Info.plist NSMicrophoneUsageDescription is
+      what macOS shows the user at the TCC prompt; this entitlement is
+      what lets the hardened runtime actually grant mic access without
+      silently denying it. The bundled SoX `rec` subprocess inherits
+      TCC permission from this attribution.
+    -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
 </dict>
 </plist>

@@ -210,6 +210,14 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
 
                         // Send voice activity detected event
                         event::global_broadcaster().voice_activity_detected();
+                        // Clear the idle-auto-paused flag the moment we
+                        // see voice. Upstream calls `mark_voice_seen()`
+                        // unconditionally below (every confirmed speech
+                        // frame), so we only need to drop the idle flag
+                        // here — that's the one piece upstream didn't
+                        // wire and that was leaving us stuck in idle-pause
+                        // after the audio-output auto-resume path.
+                        pause::set_idle_auto_paused(false);
                     }
                 }
                 // Anchor the idle-pause watchdog: refresh on EVERY confirmed

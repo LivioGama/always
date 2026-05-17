@@ -72,6 +72,7 @@ pub struct RecChild {
 
 impl RecChild {
     pub fn spawn() -> Result<Self> {
+        tracing::info!("rec_spawn_starting");
         let mut child = std::process::Command::new("/opt/homebrew/bin/rec")
             .args([
                 "--no-show-progress",
@@ -92,10 +93,29 @@ impl RecChild {
                 "16000",
             ])
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            // Capture stderr instead of dropping it on the floor. SoX
+            // emits permission-denial / device-busy errors to stderr;
+            // previously those were silently lost which meant a mic TCC
+            // denial looked identical to a healthy idle daemon.
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .context("Failed to run 'rec' command. Install SoX: brew install sox")?;
         let stdout = child.stdout.take().context("sox stdout missing")?;
+        if let Some(stderr) = child.stderr.take() {
+            // Drain stderr on a background thread; log every non-empty
+            // line as a daemon warning so SoX/CoreAudio errors surface
+            // in the structured log instead of disappearing.
+            std::thread::spawn(move || {
+                use std::io::{BufRead, BufReader};
+                let reader = BufReader::new(stderr);
+                for line in reader.lines().map_while(Result::ok) {
+                    if !line.trim().is_empty() {
+                        tracing::warn!(line = %line, "rec_stderr");
+                    }
+                }
+            });
+        }
+        tracing::info!(pid = child.id(), "rec_spawned");
         Ok(Self {
             child,
             stdout,
@@ -144,7 +164,17 @@ impl RecChild {
         let mut read = 0;
         while read < FRAME_BYTES {
             match self.stdout.read(&mut buf[read..]) {
-                Ok(0) => break,
+                Ok(0) => {
+                    // EOF on rec's stdout means the recorder died — either
+                    // mic permission was denied (TCC), the audio device
+                    // was unplugged, or the user killed `rec`. Surface
+                    // this once per spawn so we can see it in the daemon
+                    // log instead of silently looping on empty reads.
+                    if read == 0 {
+                        tracing::warn!("rec_eof_on_read_frame");
+                    }
+                    break;
+                }
                 Ok(n) => read += n,
                 Err(e) => return Err(e),
             }

@@ -1,5 +1,7 @@
 import SwiftUI
 import AppKit
+import ApplicationServices
+import AVFoundation
 import Combine
 import os.log
 
@@ -44,10 +46,12 @@ struct Always: App {
         ProcessInfo.processInfo.disableSuddenTermination()
         ProcessInfo.processInfo.disableAutomaticTermination("Always must keep its status bar item alive")
 
-        // Inject onboarding state into appDelegate after initialization
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [self] in
-            appDelegate.setOnboardingState(onboardingState)
-        }
+        // Inject onboarding state into AppDelegate. SwiftUI guarantees that
+        // by the time `init()` runs, `@NSApplicationDelegateAdaptor` has
+        // already produced the delegate instance, so we can wire it
+        // synchronously instead of leaning on a 100ms timer that could
+        // miss its window if `applicationDidFinishLaunching` fires first.
+        appDelegate.setOnboardingState(onboardingState)
     }
 }
 
@@ -121,15 +125,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // still gets an undeniable visible window on launch.
         installStatusItem()
 
-        // Check if onboarding is needed
+        // Onboarding gating: if no Groq API key is in the keychain,
+        // surface the onboarding window. The scene id "onboarding"
+        // must match the `Window(id:)` registration in App.body.
         onboardingState?.checkAndShowOnboardingIfNeeded()
-
-        // Show onboarding window if needed
-        if onboardingState?.showOnboarding == true {
-            if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "AlwaysOnboarding" }) {
-                window.makeKeyAndOrderFront(nil)
-            }
+        if onboardingState?.showOnboarding == true,
+           let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "onboarding" }) {
+            window.makeKeyAndOrderFront(nil)
         }
+
+        // Permission flow lives in `PermissionsManager`. It seeds the
+        // current status (silent — no prompts) and triggers the system
+        // dialog for `notDetermined` cases. The Settings UI hosts a
+        // banner that surfaces "denied" / "not trusted" states and
+        // links the user to System Settings. We deliberately do NOT
+        // open modal alerts at launch — the user just sees the banner
+        // and can act when convenient.
+        let perms = PermissionsManager.shared
+        perms.requestMicrophoneIfNeeded()
+        perms.requestAccessibilityIfNeeded()
 
         // Kill any stale daemon from a previous session (crash, force-quit, etc.)
         // before starting fresh. This prevents the broken-pipe bug where a new
@@ -253,12 +267,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Discord, Zoom) use the bare-bones recipe below and stay visible
     /// reliably when a third-party menu bar manager is not hiding them.
     private func installStatusItem() {
-        NSLog("Always.installStatusItem: called")
         // variableLength per the Tahoe 26 research: fixed lengths
         // (60, squareLength) are more frequently dropped by ControlCenter
         // on 26.x — Stats devs flagged the same issue.
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        NSLog("Always.installStatusItem: item length=\(item.length) visible=\(item.isVisible)")
         if let button = item.button {
             // Initial icon is the listening/armed default; the Combine
             // subscription in setupStatusBarIconUpdates() will swap it
@@ -272,11 +284,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.target = self
             button.action = #selector(statusItemClicked(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-            NSLog("Always.installStatusItem: button frame=\(button.frame) image=\(button.image != nil) title='\(button.title)'")
         }
         item.isVisible = true
         statusItem = item
-        NSLog("Always.installStatusItem: done visible=\(item.isVisible) length=\(item.length)")
+        os_log("status item installed (length=%{public}d visible=%{public}@)",
+               log: logger, type: .info, item.length, String(describing: item.isVisible))
 
         // Pre-build the popover. NSHostingController hosts SwiftUI content.
         let popover = NSPopover()
@@ -324,69 +336,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.applyStatusBarIcon(named: iconName)
         }
         .store(in: &cancellables)
-    }
-
-    /// Nuclear option: completely remove and recreate the status item
-    private func recreateStatusItem() {
-        guard let monitor = stateMonitor else { return }
-
-        // Remove old status item
-        if let oldItem = statusItem {
-            NSStatusBar.system.removeStatusItem(oldItem)
-            os_log("Removed old status item", log: logger, type: .info)
-        }
-
-        // Create new status item with unique autosave name to force macOS to treat it as new
-        let timestamp = Int(Date().timeIntervalSince1970)
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.autosaveName = "Always-\(timestamp)"
-        os_log("Created new status item with autosave name", log: logger, type: .info)
-
-        // Create new status item
-        let iconName = StatusIconResolver.symbolName(
-            isConnected: monitor.isDaemonConnected,
-            isDegraded: monitor.isDaemonDegraded,
-            isPaused: monitor.isPaused,
-            isTranscribing: monitor.isTranscribing
-        )
-
-        os_log("Setting icon to '%{public}@'", log: logger, type: .info, iconName)
-
-        if let button = item.button {
-            // Try using a custom view instead of just an image
-            let config = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
-            let symbol = NSImage(systemSymbolName: iconName, accessibilityDescription: "Always")?
-                .withSymbolConfiguration(config)
-            symbol?.isTemplate = true
-
-            button.image = symbol
-            button.imagePosition = .imageOnly  // Remove title, show only icon
-            button.imageScaling = .scaleProportionallyUpOrDown
-            button.toolTip = "Always — voice activation"
-            button.target = self
-            button.action = #selector(statusItemClicked(_:))
-            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-
-            // Force button to update
-            button.needsDisplay = true
-            button.layout()
-
-            // Force CALayer
-            button.wantsLayer = true
-            button.layer?.setNeedsDisplay()
-        }
-
-        item.isVisible = true
-        statusItem = item
-
-        // Recreate popover
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.contentSize = NSSize(width: 240, height: 320)
-        popover.contentViewController = NSHostingController(rootView: MenuBarView())
-        menuPopover = popover
-
-        os_log("Recreated status item and popover", log: logger, type: .info)
     }
 
     /// Apply a resolved SF Symbol name to the status bar button. Strictly

@@ -83,10 +83,14 @@ jobs:
           ALWAYS_NOTARIZE_APP_PWD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           ALWAYS_BUILD_PROFILE: release
         run: |
-          cd AlwaysApp
+          cd Always
           ./build.sh
-          codesign -dv --verbose=2 AlwaysApp.app
-          spctl -a -t exec -vv AlwaysApp.app
+          # Verify post-notarization. Both checks must pass — staple is what
+          # makes the app gatekeeper-clean offline; spctl is what the
+          # OS actually evaluates at first launch. We run them only AFTER
+          # build.sh's notarize+staple step so the ticket is embedded.
+          codesign -dv --verbose=2 Always.app
+          spctl -a -t exec -vv Always.app
 
       - name: Build DMG
         id: dmg
@@ -94,7 +98,7 @@ jobs:
           set -euo pipefail
           DMG="always-${{ steps.version.outputs.value }}.dmg"
           mkdir -p target/dmg-staging
-          cp -R AlwaysApp/AlwaysApp.app target/dmg-staging/
+          cp -R Always/Always.app target/dmg-staging/
           ln -s /Applications target/dmg-staging/Applications || true
           hdiutil create -ov -volname "Always ${{ steps.version.outputs.value }}" \
             -srcfolder target/dmg-staging -format UDZO "$DMG"

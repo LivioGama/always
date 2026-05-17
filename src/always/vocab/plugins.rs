@@ -97,7 +97,7 @@ pub trait VocabPlugin {
             *counts.entry(term.clone()).or_insert(0) += 1;
         }
         let mut sorted: Vec<(String, usize)> = counts.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
         Ok(sorted.into_iter().take(200).map(|(t, _)| t).collect())
     }
 }

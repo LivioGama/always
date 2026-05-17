@@ -139,13 +139,16 @@ struct MenuBarView: View {
     }
 
     /// Path to the daemon CLI bundled inside this app's Contents/MacOS.
+    /// The binary is named `always-daemon` (not `always`) — macOS APFS is
+    /// case-insensitive by default and the GUI binary at `MacOS/Always`
+    /// would silently overwrite a `MacOS/always` file at bundle time.
     /// Falls back to `always` on PATH for `swift run` development builds
     /// where the binary lives elsewhere.
     private static func bundledDaemonPath() -> String {
         let bundled = Bundle.main.bundleURL
             .appendingPathComponent("Contents")
             .appendingPathComponent("MacOS")
-            .appendingPathComponent("always")
+            .appendingPathComponent("always-daemon")
             .path
         return FileManager.default.fileExists(atPath: bundled) ? bundled : "always"
     }

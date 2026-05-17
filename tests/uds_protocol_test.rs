@@ -8,7 +8,11 @@
 use always::always::event::{DaemonCommand, DaemonEvent, PROTOCOL_VERSION};
 
 #[test]
-fn protocol_version_is_two() {
+fn protocol_version_matches_swift_client() {
+    // Pinned to whatever value the Swift `UDS_PROTOCOL_VERSION` constant
+    // in `Always/Sources/Always/Services/UDSClient.swift` holds. Bumping
+    // one without the other will fail both this test and the Swift
+    // `testProtocolVersionMatchesDaemon` mirror.
     assert_eq!(
         PROTOCOL_VERSION, 2,
         "protocol version bumped without updating UDSClient.swift?"
@@ -21,7 +25,12 @@ fn hello_serializes_with_version_in_data() {
         version: PROTOCOL_VERSION,
     };
     let json = serde_json::to_string(&hello).unwrap();
-    assert_eq!(json, r#"{"type":"Hello","data":{"version":2}}"#);
+    // Format against the constant so future bumps don't desynchronize
+    // the assertion from the declared version.
+    assert_eq!(
+        json,
+        format!(r#"{{"type":"Hello","data":{{"version":{PROTOCOL_VERSION}}}}}"#)
+    );
 }
 
 #[test]

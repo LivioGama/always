@@ -116,18 +116,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            AlwaysApp/.build
+            Always/.build
             ~/Library/Caches/org.swift.swiftpm
-          key: ${{ runner.os }}-swiftpm-${{ hashFiles('AlwaysApp/Package.swift', 'AlwaysApp/Package.resolved') }}
+          key: ${{ runner.os }}-swiftpm-${{ hashFiles('Always/Package.swift', 'Always/Package.resolved') }}
           restore-keys: |
             ${{ runner.os }}-swiftpm-
 
       - name: Build Swift app
         run: |
-          cd AlwaysApp
+          cd Always
           swift build
 
       - name: Swift tests
         run: |
-          cd AlwaysApp
+          cd Always
           swift test

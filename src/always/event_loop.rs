@@ -117,6 +117,18 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
                 log.write(Event::MicrophoneAutoResumed);
 
                 pause::set_paused(false);
+                // Clear the idle-auto-paused flag so subsequent
+                // audio-output stop events resume the daemon. Previously
+                // we set `paused=false` but left `idle_auto_paused=true`,
+                // so `uds_server::NotifySystemAudioState{playing:false}`
+                // would refuse to auto-resume (it gates on
+                // `!is_idle_auto_paused()`) and the daemon stayed paused
+                // even though the user could see "Listening" in the UI.
+                pause::set_idle_auto_paused(false);
+                // Reset the voice-seen timestamp so the idle watchdog
+                // doesn't immediately re-pause us based on the gap that
+                // accumulated while we were mic-paused.
+                pause::mark_voice_seen();
                 event::global_broadcaster().resumed();
                 auto_paused_for_mic = false;
             }
@@ -617,7 +629,6 @@ mod tests {
             timeout_secs: 30,
             silence_secs: 2.0,
             auto_enter: false,
-            auto_enter_delay_secs: 2,
             filter_enabled: true,
             energy_threshold: 0.05,
             onset_ms: 50,
@@ -633,7 +644,7 @@ mod tests {
             postprocess_config: PostprocessConfig::default(),
             auto_enter_delay_ms: 0,
             idle_pause_secs: 0,
-            idle_pause_action: crate::always::config::IdlePauseAction::default(),
+            idle_pause_action: IdlePauseAction::default(),
         }
     }
 

@@ -140,6 +140,11 @@ pub async fn start_server() -> Result<()> {
     // Orphan watchdog: if no UDS client is connected for ORPHAN_TIMEOUT_SECS,
     // the Mac app is gone (quit/crashed/force-killed). Exit so we don't leave
     // a stale daemon that the next app launch can't communicate with.
+    //
+    // Before exiting we remove the pid + socket files explicitly because
+    // `std::process::exit` does NOT run Drop, so `PidGuard::Drop` would
+    // be skipped and the next launch would have to wait for
+    // `remove_stale_pid` / `remove_stale_socket` to detect a dead PID.
     tokio::spawn(async {
         let mut last_had_clients = Instant::now();
         loop {
@@ -152,6 +157,18 @@ pub async fn start_server() -> Result<()> {
                     timeout_secs = ORPHAN_TIMEOUT_SECS,
                     "orphan_daemon_exit: no UDS clients for too long"
                 );
+                // Mirror PidGuard::Drop's cleanup so the next daemon
+                // launch sees a clean slate without needing to detect
+                // a dead pid.
+                if let Ok(log_path) = crate::always::config::configured_log_path()
+                    && let Ok(mut log) = crate::always::log::Logger::open(&log_path)
+                {
+                    log.write(crate::always::log::Event::Stop);
+                }
+                let _ = std::fs::remove_file(crate::always::daemon::pid_path());
+                if let Some(sock) = crate::always::daemon::socket_path() {
+                    let _ = std::fs::remove_file(sock);
+                }
                 std::process::exit(0);
             }
         }
@@ -301,6 +318,14 @@ fn execute_command(cmd: DaemonCommand) {
             if new_state {
                 global_broadcaster().paused();
             } else {
+                // Clear the idle-auto-paused flag and reset the voice
+                // timestamp so the watchdog doesn't immediately re-pause us
+                // — same invariants the explicit `SetPaused{false}` path
+                // enforces. Without this, an idle-auto-paused daemon that
+                // the user unpaused via TogglePause would re-pause within
+                // CHECK_INTERVAL seconds.
+                pause::set_idle_auto_paused(false);
+                pause::mark_voice_seen();
                 global_broadcaster().resumed();
             }
             tracing::info!(new_state, "uds_toggle_pause");
@@ -529,6 +554,11 @@ fn handle_log_correction(intended: &str) {
 
 /// Return the token in `haystack` with the smallest case-insensitive
 /// Levenshtein distance to `needle`, paired with that distance.
+///
+/// Uses `strsim::levenshtein` (same dep `text_match.rs` already pulls in)
+/// — earlier this module had its own hand-rolled implementation, which
+/// was a maintenance hazard and drifted from the canonical one used in
+/// acoustic matching.
 fn best_token_match(haystack: &str, needle: &str) -> Option<(String, usize)> {
     let needle_lc = needle.to_lowercase();
     let mut best: Option<(String, usize)> = None;
@@ -536,39 +566,13 @@ fn best_token_match(haystack: &str, needle: &str) -> Option<(String, usize)> {
         if tok.is_empty() {
             continue;
         }
-        let d = levenshtein(&tok.to_lowercase(), &needle_lc);
+        let d = strsim::levenshtein(&tok.to_lowercase(), &needle_lc);
         match &best {
             Some((_, prev)) if *prev <= d => {}
             _ => best = Some((tok.to_string(), d)),
         }
     }
     best
-}
-
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let m = a.len();
-    let n = b.len();
-    if m == 0 {
-        return n;
-    }
-    if n == 0 {
-        return m;
-    }
-    let mut prev: Vec<usize> = (0..=n).collect();
-    let mut curr: Vec<usize> = vec![0; n + 1];
-    for i in 1..=m {
-        curr[0] = i;
-        for j in 1..=n {
-            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)
-                .min(curr[j - 1] + 1)
-                .min(prev[j - 1] + cost);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-    prev[n]
 }
 
 /// Send an event to all connected clients

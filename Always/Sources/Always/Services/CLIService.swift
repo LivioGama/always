@@ -1,32 +1,42 @@
 import Foundation
+import os.log
 
 class CLIService: ObservableObject {
     private let cliPath: String
+    private static let logger = Logger(subsystem: "com.always.app", category: "cli-service")
 
     init() {
-        // Path to the always binary - embedded in app bundle
+        // Path to the bundled daemon binary. Named `always-daemon` (not
+        // `always`) because macOS APFS is case-insensitive by default — a
+        // file named `MacOS/always` would collide with the GUI binary
+        // `MacOS/Always` and silently overwrite it. See `Always/build.sh`
+        // for the matching `cp` target.
         let bundle = Bundle.main
         let bundlePath = bundle.bundlePath
-        let daemonPath = bundlePath + "/Contents/MacOS/always"
+        let daemonPath = bundlePath + "/Contents/MacOS/always-daemon"
         if FileManager.default.fileExists(atPath: daemonPath) {
             cliPath = daemonPath
-            print("CLIService: Using bundled daemon at \(daemonPath)")
+            Self.logger.info("Using bundled daemon at \(daemonPath, privacy: .public)")
             return
         }
-        
-        // Fallback for development: look in target/release
+
+        // Fallback for development: look in target/release. Logged as a
+        // warning because in a shipped /Applications bundle this branch
+        // means `build.sh` did not bundle the daemon — almost certainly a
+        // packaging bug worth flagging.
         let currentPath = URL(fileURLWithPath: #file)
         let projectPath = currentPath.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         cliPath = projectPath.appendingPathComponent("target/release/always").path
-        print("CLIService: Using development daemon at \(cliPath)")
+        Self.logger.warning("Bundled daemon missing at \(daemonPath, privacy: .public) — falling back to dev path \(self.cliPath, privacy: .public)")
     }
 
     func startDaemon() async throws -> String {
-        // Read current config to pass to daemon
+        // Read current config to pass to daemon. Only pass flags the user
+        // has explicitly opted into; the daemon loads stt_silence,
+        // auto_enter_delay_ms, energy thresholds, etc. from its own prefs
+        // table so we don't have to mirror every knob through CLI args.
         let config = try await getConfig()
         var args = ["start"]
-        args.append("--silence")
-        args.append("1.5") // Default silence threshold
         if config.sttAutoEnter {
             args.append("--auto-enter")
         }
@@ -83,14 +93,22 @@ class CLIService: ObservableObject {
         process.executableURL = URL(fileURLWithPath: cliPath)
         process.arguments = arguments
 
-        // Set environment variables
+        // Set environment variables. The daemon needs `/opt/homebrew/bin`
+        // on PATH so the bundled audio pipeline can find SoX `rec`. Use
+        // `??` to handle the case where PATH is genuinely unset (no
+        // shell environment inheritance) — otherwise the
+        // `env["PATH"] = "\(homebrewBin):\(env["PATH"] ?? "")"` line
+        // would dereference a nil and the subprocess inherits an empty
+        // PATH, breaking SoX lookup silently.
         var env = ProcessInfo.processInfo.environment
-        // Add Homebrew to PATH for SoX
         let homebrewBin = "/opt/homebrew/bin"
-        if env["PATH"]?.contains(homebrewBin) == false {
-            env["PATH"] = "\(homebrewBin):\(env["PATH"] ?? "")"
+        let existingPath = env["PATH"] ?? ""
+        if !existingPath.split(separator: ":").contains(Substring(homebrewBin)) {
+            env["PATH"] = existingPath.isEmpty
+                ? homebrewBin
+                : "\(homebrewBin):\(existingPath)"
         }
-        // Pass through GROQ_API_KEY from parent environment if set
+        // Pass through GROQ_API_KEY from parent environment if set.
         if let groqKey = ProcessInfo.processInfo.environment["GROQ_API_KEY"] {
             env["GROQ_API_KEY"] = groqKey
         }

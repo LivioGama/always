@@ -24,7 +24,11 @@ linux = []
 windows = []
 # Opt-in offline transcription via `transcribe-rs` (whisper.cpp wrapper,
 # same crate used by Handy). Off by default because it pulls a heavy
-# native dep. Enable with `cargo build --features local-stt`.
+# native dep and currently fails to build on macOS 26 (whisper.cpp's
+# CMakeLists chain hits an error during the Xcode 16-bundled CMake
+# build). Treated as experimental scaffolding — do NOT enable this in
+# CI matrices that gate on success until the upstream build is fixed.
+# Enable locally with `cargo build --features local-stt`.
 local-stt = ["dep:transcribe-rs"]
 
 [dependencies]

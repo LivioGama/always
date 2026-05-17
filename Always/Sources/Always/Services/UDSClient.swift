@@ -275,6 +275,11 @@ class UDSClient: ObservableObject {
     /// After this many failed reconnects in a row, ask caller to respawn daemon.
     /// Lowered from 5 → 3 so stale daemons are killed faster.
     private let maxReconnectAttemptsBeforeRespawn: Int = 3
+    /// Reset on any successful decode; incremented on each decode failure.
+    /// When it hits `maxConsecutiveDecodeFailures` we force a reconnect so
+    /// the Hello handshake re-validates wire-format compatibility.
+    private var consecutiveDecodeFailures: Int = 0
+    private let maxConsecutiveDecodeFailures: Int = 5
     
     /// Get the default socket path based on the platform
     static func defaultSocketPath() -> String {
@@ -296,38 +301,20 @@ class UDSClient: ObservableObject {
         #endif
     }
     
+    /// Single funnel for client diagnostics. Goes only to `os.Logger`
+    /// — earlier builds dual-wrote to `/tmp/udsclient.log` which we
+    /// removed because (a) a writable world-readable temp file in a
+    /// signed app is a smell and (b) the file grew unboundedly across
+    /// sessions. View live logs with:
+    ///     log stream --predicate 'subsystem == "com.always.app"' --info
     private func log(_ message: String) {
-        logger.debug("\(message)")
-
-        // Also write to file for debugging
-        let logPath = "/tmp/udsclient.log"
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-        let line = "[\(timestamp)] \(message)\n"
-
-        if let data = line.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: logPath) {
-                if let handle = FileHandle(forWritingAtPath: logPath) {
-                    handle.seekToEndOfFile()
-                    handle.write(data)
-                    handle.closeFile()
-                }
-            } else {
-                try? data.write(to: URL(fileURLWithPath: logPath))
-            }
-        }
+        logger.debug("\(message, privacy: .public)")
     }
-    
+
     init(socketPath: String? = nil) {
         self.socketPath = socketPath ?? UDSClient.defaultSocketPath()
         self.queue = DispatchQueue(label: "com.always.udsclient")
         logger.info("Initializing with socket path: \(self.socketPath)")
-
-        // Clean up old log file on launch
-        try? FileManager.default.removeItem(atPath: "/tmp/udsclient.log")
-
-        // Log initialization
-        log("UDSClient initialized with socket: \(self.socketPath)")
-
         connect()
     }
     
@@ -516,16 +503,31 @@ class UDSClient: ObservableObject {
     }
     
     private func processMessage(_ jsonString: String) {
-        // Handle multiple JSON lines in one message
+        // Handle multiple JSON lines in one message.
         let lines = jsonString.components(separatedBy: "\n").filter { !$0.isEmpty }
-        
+
         for line in lines {
-            if let data = line.data(using: .utf8) {
-                do {
-                    let event = try JSONDecoder().decode(DaemonEvent.self, from: data)
-                    handleEvent(event)
-                } catch {
-                    self.logger.error("Failed to decode event: \(error.localizedDescription)")
+            guard let data = line.data(using: .utf8) else { continue }
+            do {
+                let event = try JSONDecoder().decode(DaemonEvent.self, from: data)
+                consecutiveDecodeFailures = 0
+                handleEvent(event)
+            } catch {
+                // Log the offending payload (truncated) so the daemon-side
+                // wire-format drift is diagnosable. Previously we
+                // swallowed decode errors entirely and the only symptom
+                // was "overlay stuck" / "menu silent" — exactly the
+                // class of bug that motivated bumping the UDS protocol
+                // version. After enough consecutive failures we force a
+                // reconnect so the Hello handshake re-validates.
+                let snippet = line.count > 256 ? String(line.prefix(256)) + "…" : line
+                logger.error("decode_event_failed: \(error.localizedDescription, privacy: .public) — payload: \(snippet, privacy: .public)")
+                consecutiveDecodeFailures += 1
+                if consecutiveDecodeFailures >= maxConsecutiveDecodeFailures {
+                    logger.error("decode_event_failed: \(self.consecutiveDecodeFailures) consecutive failures, forcing reconnect")
+                    disconnect()
+                    scheduleReconnect()
+                    return
                 }
             }
         }

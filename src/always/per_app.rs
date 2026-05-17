@@ -5,9 +5,19 @@
 //! runtime state for that app. Stored as a single JSON blob in the
 //! `per_app_settings_json` preference so we don't have to add a new
 //! table.
+//!
+//! Caching: the previous implementation re-opened the SQLite DB, ran a
+//! query, and re-parsed the JSON on every focus change, every paste,
+//! and every auto-enter resolution. With rapid app switching that
+//! produced visible DB thrashing. Now we cache the parsed overrides in
+//! memory and invalidate via `invalidate_cache()` — called from the
+//! `set_preference` write path for `per_app_settings_json` so the
+//! Settings UI's "edit overlay" remains a 1-frame change.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::db;
@@ -27,9 +37,30 @@ pub struct AppOverride {
 
 pub type AppOverrides = HashMap<String, AppOverride>;
 
+/// Cached parsed overrides. `None` = "not yet loaded"; populated on
+/// first call to `load()` after process start or after a write.
+static CACHE: LazyLock<RwLock<Option<AppOverrides>>> = LazyLock::new(|| RwLock::new(None));
+
+/// Force a re-read on the next `load()` call. Called from the
+/// `set_preference("per_app_settings_json", ...)` path so settings UI
+/// edits take effect on the very next focus change.
+pub fn invalidate_cache() {
+    *CACHE.write() = None;
+}
+
 /// Load the JSON overlay from preferences. Returns an empty map on any
-/// failure so callers don't have to special-case missing keys.
+/// failure so callers don't have to special-case missing keys. Cached
+/// after first call.
 pub fn load() -> AppOverrides {
+    if let Some(cached) = CACHE.read().as_ref() {
+        return cached.clone();
+    }
+    let parsed = load_from_db();
+    *CACHE.write() = Some(parsed.clone());
+    parsed
+}
+
+fn load_from_db() -> AppOverrides {
     let conn = match db::open() {
         Ok(c) => c,
         Err(_) => return HashMap::new(),

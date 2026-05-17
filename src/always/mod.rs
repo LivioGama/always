@@ -31,10 +31,5 @@ pub mod uds_server;
 pub mod vad;
 pub mod vocab;
 
-// DEPRECATED: File-based state persistence replaced by UDS event streaming
-// Kept for reference only - will be removed in future version
-#[deprecated(since = "0.14.0", note = "Use UDS event streaming instead")]
-pub mod state;
-
 pub use config::AlwaysConfig;
 pub use event_loop::run;

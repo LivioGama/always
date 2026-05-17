@@ -61,12 +61,16 @@ final class AlwaysTests: XCTestCase {
             "sttCooldownMs": 150,
             "sttSilence": 0.4,
             "sttAutoEnter": true,
+            "autoEnterDelayMs": 4000,
             "groqApiKey": null,
             "sileroThreshold": 0.5,
             "shortcutPause": "ctrl+alt+p",
             "shortcutAutoEnter": "ctrl+alt+a",
             "shortcutForcePaste": "ctrl+alt+v",
-            "postprocessEnabled": true
+            "shortcutCorrectionDialog": "ctrl+alt+w",
+            "postprocessEnabled": true,
+            "idlePauseSecs": 120,
+            "idlePauseAction": "pause"
         }
         """
         let data = json.data(using: .utf8)!
@@ -76,8 +80,36 @@ final class AlwaysTests: XCTestCase {
         XCTAssertEqual(config.sttCooldownMs, 150)
         XCTAssertEqual(config.sttSilence, 0.4)
         XCTAssertTrue(config.sttAutoEnter)
+        XCTAssertEqual(config.autoEnterDelayMs, 4000)
         XCTAssertEqual(config.sileroThreshold, 0.5)
         XCTAssertEqual(config.shortcutPause, "ctrl+alt+p")
+        XCTAssertEqual(config.idlePauseSecs, 120)
+    }
+
+    // Regression: the CLI's `config show` output uses `auto_enter_delay_ms`
+    // (in milliseconds). Earlier builds emitted `auto_enter_delay_secs` and
+    // Swift parsed it differently — silently breaking the round-trip.
+    func testConfigFromCLIParsesAutoEnterDelayMs() throws {
+        let cliOutput = """
+        stt_energy_threshold: 0.012
+        hear_energy_threshold: 0.001
+        stt_cooldown_ms: 150
+        stt_silence: 2.0
+        stt_auto_enter: true
+        auto_enter_delay_ms: 4000
+        silero_threshold: 0.5
+        idle_pause_secs: 120
+        idle_pause_action: pause
+        postprocess_enabled: true
+        """
+        guard let config = Config.fromCLI(output: cliOutput) else {
+            return XCTFail("fromCLI returned nil")
+        }
+        XCTAssertEqual(config.autoEnterDelayMs, 4000)
+        XCTAssertEqual(config.sttSilence, 2.0)
+        XCTAssertTrue(config.sttAutoEnter)
+        XCTAssertEqual(config.idlePauseSecs, 120)
+        XCTAssertEqual(config.idlePauseAction, "pause")
     }
 
     func testDaemonStatusModel() throws {
@@ -232,6 +264,12 @@ final class AlwaysTests: XCTestCase {
             from: #"{"type":"Paused","data":null}"#.data(using: .utf8)!
         )
         let pausedExp = expectation(description: "isPaused becomes true")
+        // assertForOverFulfill=false: StateMonitor is a singleton across the
+        // test suite. If another test toggled isPaused → true earlier and
+        // we're observing a transition with `.dropFirst()`, the sink may
+        // still receive multiple `true` values before XCTest tears the
+        // expectation down. We only care that it became true at least once.
+        pausedExp.assertForOverFulfill = false
         var bag = Set<AnyCancellable>()
         monitor.$isPaused
             .dropFirst()
@@ -273,10 +311,11 @@ final class AlwaysTests: XCTestCase {
     }
 
     func testProtocolVersionMatchesDaemon() throws {
-        // The Rust daemon's PROTOCOL_VERSION is pinned to 1 in
-        // tests/uds_protocol_test.rs. Bumping either side without the
-        // other will be caught by both tests.
-        XCTAssertEqual(UDS_PROTOCOL_VERSION, 1)
+        // Pinned in lockstep with `PROTOCOL_VERSION` in
+        // `src/always/event.rs` and `tests/uds_protocol_test.rs`. Bumping
+        // either side without updating the matching constant on the
+        // other side will fail both tests at once.
+        XCTAssertEqual(UDS_PROTOCOL_VERSION, 2)
     }
 
     func testHelloWithMismatchedVersionIsObservable() throws {

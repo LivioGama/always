@@ -202,15 +202,6 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN per_app_settings_json TEXT;")?;
     }
 
-    let has_stt_auto_enter_delay_secs = conn
-        .prepare("SELECT stt_auto_enter_delay_secs FROM preferences LIMIT 0")
-        .is_ok();
-    if !has_stt_auto_enter_delay_secs {
-        conn.execute_batch(
-            "ALTER TABLE preferences ADD COLUMN stt_auto_enter_delay_secs INTEGER;",
-        )?;
-    }
-
     Ok(())
 }
 
@@ -255,6 +246,10 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
     }
 }
 
+#[allow(clippy::collapsible_match)]
+// Each match arm validates a distinct key. Collapsing the inner `if` into
+// a guard would force the validation logic onto the arm pattern line and
+// make the rules harder to scan.
 pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
     let valid_keys = [
         "lang",
@@ -409,11 +404,21 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         _ => value,
     };
     conn.execute(&sql, [normalized])?;
+
+    // Invalidate the in-memory per-app overrides cache when the JSON
+    // blob changes — otherwise the daemon keeps applying the previous
+    // overrides until the next process restart.
+    if key == "per_app_settings_json" {
+        crate::always::per_app::invalidate_cache();
+    }
     Ok(())
 }
 
 pub fn reset_preferences(conn: &Connection) -> Result<()> {
     conn.execute("DELETE FROM preferences WHERE id = 1", [])?;
+    // A full reset wipes per_app_settings_json too, so the cache must
+    // re-read from a now-empty source.
+    crate::always::per_app::invalidate_cache();
     Ok(())
 }
 
