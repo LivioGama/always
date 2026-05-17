@@ -6,7 +6,7 @@ import os.log
 // Wire-format protocol version. MUST match `PROTOCOL_VERSION` in
 // `src/always/event.rs`. Bumping either side without the other will
 // cause the client to refuse the connection.
-let UDS_PROTOCOL_VERSION: UInt32 = 2
+let UDS_PROTOCOL_VERSION: UInt32 = 3
 
 // Event types matching Rust DaemonEvent enum
 enum DaemonEventType: String, Codable {
@@ -44,6 +44,13 @@ enum DaemonEventType: String, Codable {
     case idleAutoResumed = "IdleAutoResumed"
     // App focus broadcast from daemon back to us (idempotent echo).
     case focusedAppChanged = "FocusedAppChanged"
+    // Master force-pause flag changed. Distinct from Paused/Resumed
+    // (which track effective state). UI uses this to label the global
+    // toggle.
+    case masterPauseChanged = "MasterPauseChanged"
+    // Snapshot of bundle ids whose per-app `paused` override is
+    // `false` (the user's resumed-app allowlist).
+    case resumedAppsChanged = "ResumedAppsChanged"
     // Daemon asks app to show the correction dialog.
     case correctionDialogRequested = "CorrectionDialogRequested"
 }
@@ -98,6 +105,14 @@ struct FocusedAppChangedData: Codable {
     let bundle_id: String?
 }
 
+struct MasterPauseChangedData: Codable {
+    let master_paused: Bool
+}
+
+struct ResumedAppsChangedData: Codable {
+    let bundles: [String]
+}
+
 struct CorrectionDialogRequestedData: Codable {
     let last_transcript: String
 }
@@ -134,6 +149,10 @@ struct DaemonEvent: Codable {
     let idleAutoPaused: IdleAutoPausedData?
     /// Populated for `FocusedAppChanged`.
     let focusedApp: FocusedAppChangedData?
+    /// Populated for `MasterPauseChanged`.
+    let masterPause: MasterPauseChangedData?
+    /// Populated for `ResumedAppsChanged`.
+    let resumedApps: ResumedAppsChangedData?
     /// Populated for `CorrectionDialogRequested`.
     let correctionDialogRequest: CorrectionDialogRequestedData?
 
@@ -155,6 +174,8 @@ struct DaemonEvent: Codable {
         var countdownTick: AutoEnterCountdownTickData? = nil
         var idleAutoPaused: IdleAutoPausedData? = nil
         var focusedApp: FocusedAppChangedData? = nil
+        var masterPause: MasterPauseChangedData? = nil
+        var resumedApps: ResumedAppsChangedData? = nil
         var correctionDialogRequest: CorrectionDialogRequestedData? = nil
 
         switch type {
@@ -172,6 +193,10 @@ struct DaemonEvent: Codable {
             idleAutoPaused = try container.decodeIfPresent(IdleAutoPausedData.self, forKey: .data)
         case .focusedAppChanged:
             focusedApp = try container.decodeIfPresent(FocusedAppChangedData.self, forKey: .data)
+        case .masterPauseChanged:
+            masterPause = try container.decodeIfPresent(MasterPauseChangedData.self, forKey: .data)
+        case .resumedAppsChanged:
+            resumedApps = try container.decodeIfPresent(ResumedAppsChangedData.self, forKey: .data)
         case .correctionDialogRequested:
             correctionDialogRequest = try container.decodeIfPresent(CorrectionDialogRequestedData.self, forKey: .data)
         default:
@@ -189,6 +214,8 @@ struct DaemonEvent: Codable {
         self.countdownTick = countdownTick
         self.idleAutoPaused = idleAutoPaused
         self.focusedApp = focusedApp
+        self.masterPause = masterPause
+        self.resumedApps = resumedApps
         self.correctionDialogRequest = correctionDialogRequest
     }
 
@@ -212,6 +239,10 @@ struct DaemonEvent: Codable {
             try container.encodeIfPresent(idleAutoPaused, forKey: .data)
         case .focusedAppChanged:
             try container.encodeIfPresent(focusedApp, forKey: .data)
+        case .masterPauseChanged:
+            try container.encodeIfPresent(masterPause, forKey: .data)
+        case .resumedAppsChanged:
+            try container.encodeIfPresent(resumedApps, forKey: .data)
         case .correctionDialogRequested:
             try container.encodeIfPresent(correctionDialogRequest, forKey: .data)
         default:
@@ -229,6 +260,8 @@ struct DaemonEvent: Codable {
         countdownTick: AutoEnterCountdownTickData? = nil,
         idleAutoPaused: IdleAutoPausedData? = nil,
         focusedApp: FocusedAppChangedData? = nil,
+        masterPause: MasterPauseChangedData? = nil,
+        resumedApps: ResumedAppsChangedData? = nil,
         correctionDialogRequest: CorrectionDialogRequestedData? = nil
     ) {
         self.type = type
@@ -240,6 +273,8 @@ struct DaemonEvent: Codable {
         self.countdownTick = countdownTick
         self.idleAutoPaused = idleAutoPaused
         self.focusedApp = focusedApp
+        self.masterPause = masterPause
+        self.resumedApps = resumedApps
         self.correctionDialogRequest = correctionDialogRequest
     }
 }

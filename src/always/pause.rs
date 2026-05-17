@@ -1,4 +1,19 @@
 //! Pause state and auto-enter state management for the always-on mode.
+//!
+//! Two-tier pause model (changed 2026-05-17 — allowlist UX):
+//!
+//! - **MASTER_PAUSED** — the user's explicit global force-pause switch.
+//!   Set by `TogglePause`, idle auto-pause, mic-conflict, and audio-output
+//!   monitors. When true, EFFECTIVE is forced to true regardless of
+//!   per-app overrides.
+//! - **EFFECTIVE_PAUSED** — what the audio pipeline gates on. Derived
+//!   from `MASTER_PAUSED || per_app::effective_paused(current_app)`.
+//!   The per-app fallback now defaults to **paused for unlisted apps**,
+//!   so a fresh install treats every bundle as off-by-default and the
+//!   user explicitly resumes the apps they want voice typing in.
+//!
+//! Callers should still call `is_paused()` for the gating check — its
+//! semantics ("am I effectively paused right now?") didn't change.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -6,38 +21,30 @@ use std::time::Instant;
 
 use parking_lot::Mutex;
 
-/// Shared pause state that can be toggled from anywhere
-pub struct PauseState {
-    paused: AtomicBool,
+/// User's explicit global force-pause switch + auto-pause from
+/// idle/audio/mic. When `true`, EFFECTIVE is unconditionally `true`.
+static MASTER_PAUSED: AtomicBool = AtomicBool::new(false);
+
+/// Derived "what the audio pipeline gates on". Recomputed by
+/// `recompute_effective()` whenever MASTER, current_app, or the per-app
+/// overrides change. Starts `true` so a fresh launch is paused-by-default
+/// until the user resumes either globally or for a specific app.
+static EFFECTIVE_PAUSED: AtomicBool = AtomicBool::new(true);
+
+/// Recompute the effective pause state from MASTER + per-app rules.
+/// Returns `(new_effective, changed)`. Callers broadcast `Paused` /
+/// `Resumed` only when `changed` is true to keep the UDS log quiet.
+pub fn recompute_effective() -> (bool, bool) {
+    let new_effective = compute_effective();
+    let old = EFFECTIVE_PAUSED.swap(new_effective, Ordering::Relaxed);
+    (new_effective, new_effective != old)
 }
 
-impl PauseState {
-    pub fn new() -> Self {
-        Self {
-            paused: AtomicBool::new(false),
-        }
+fn compute_effective() -> bool {
+    if MASTER_PAUSED.load(Ordering::Relaxed) {
+        return true;
     }
-
-    pub fn is_paused(&self) -> bool {
-        self.paused.load(Ordering::Relaxed)
-    }
-
-    pub fn toggle(&self) -> bool {
-        let old_value = self.paused.load(Ordering::Relaxed);
-        let new_value = !old_value;
-        self.paused.store(new_value, Ordering::Relaxed);
-        new_value
-    }
-
-    pub fn set_paused(&self, paused: bool) {
-        self.paused.store(paused, Ordering::Relaxed);
-    }
-}
-
-impl Default for PauseState {
-    fn default() -> Self {
-        Self::new()
-    }
+    crate::always::per_app::effective_paused_for_current_app()
 }
 
 /// Shared mute state that can be toggled from anywhere
@@ -95,10 +102,6 @@ impl AutoEnterState {
     }
 }
 
-/// Global pause state instance
-static PAUSE_STATE: std::sync::LazyLock<Arc<PauseState>> =
-    std::sync::LazyLock::new(|| Arc::new(PauseState::new()));
-
 /// Global mute state instance
 static MUTE_STATE: std::sync::LazyLock<Arc<MuteState>> =
     std::sync::LazyLock::new(|| Arc::new(MuteState::new()));
@@ -112,11 +115,6 @@ pub fn init_auto_enter(initial_value: bool) {
     AUTO_ENTER_STATE.set_enabled(initial_value);
 }
 
-/// Get the global pause state
-pub fn global_pause_state() -> Arc<PauseState> {
-    Arc::clone(&PAUSE_STATE)
-}
-
 /// Get the global mute state
 pub fn global_mute_state() -> Arc<MuteState> {
     Arc::clone(&MUTE_STATE)
@@ -127,19 +125,38 @@ pub fn global_auto_enter_state() -> Arc<AutoEnterState> {
     Arc::clone(&AUTO_ENTER_STATE)
 }
 
-/// Check if the system is currently paused
+/// Is the daemon **effectively** paused right now? This is what the
+/// audio capture / VAD / transcribe pipeline gates on.
+///
+/// Returns the cached `EFFECTIVE_PAUSED` value — callers who just
+/// mutated MASTER or the current app must call `recompute_effective()`
+/// first.
 pub fn is_paused() -> bool {
-    PAUSE_STATE.is_paused()
+    EFFECTIVE_PAUSED.load(Ordering::Relaxed)
 }
 
-/// Toggle the pause state and return the new state
-pub fn toggle_pause() -> bool {
-    PAUSE_STATE.toggle()
+/// Is the global master force-pause flag set? Distinct from
+/// `is_paused()` — a fresh-install app with no overrides is paused
+/// (effective) but not master-paused. Master-paused is a stronger
+/// signal: every app is force-paused, including ones with an
+/// override that says "active".
+pub fn is_master_paused() -> bool {
+    MASTER_PAUSED.load(Ordering::Relaxed)
 }
 
-/// Set the pause state
-pub fn set_paused(paused: bool) {
-    PAUSE_STATE.set_paused(paused);
+/// Toggle MASTER and return `(new_effective, changed)`. Caller
+/// broadcasts `Paused` / `Resumed` only when `changed`.
+pub fn toggle_pause() -> (bool, bool) {
+    let old_master = MASTER_PAUSED.load(Ordering::Relaxed);
+    MASTER_PAUSED.store(!old_master, Ordering::Relaxed);
+    recompute_effective()
+}
+
+/// Set MASTER explicitly. Returns `(new_effective, changed)` so the
+/// caller can decide whether to broadcast a UDS event.
+pub fn set_paused(paused: bool) -> (bool, bool) {
+    MASTER_PAUSED.store(paused, Ordering::Relaxed);
+    recompute_effective()
 }
 
 /// Check if the system is currently muted
@@ -313,6 +330,14 @@ pub fn current_app() -> Option<String> {
 
 pub fn set_current_app(bundle_id: Option<String>) {
     *CURRENT_APP.lock() = bundle_id;
+}
+
+/// Update the focused app **and** recompute effective. Returns
+/// `(new_effective, changed)` like the other mutators so the caller
+/// can decide whether to broadcast `Paused`/`Resumed` on the UDS bus.
+pub fn set_current_app_and_recompute(bundle_id: Option<String>) -> (bool, bool) {
+    *CURRENT_APP.lock() = bundle_id;
+    recompute_effective()
 }
 
 /// Last final transcript text pasted (or filtered+force-pasted). Same

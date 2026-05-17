@@ -105,8 +105,12 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
                     // Log the auto-pause event
                     log.write(Event::MicrophoneAutoPaused { apps: &app_list });
                 }
-                pause::set_paused(true);
-                event::global_broadcaster().paused();
+                let (_effective, changed) = pause::set_paused(true);
+                event::global_broadcaster().master_pause_changed(true);
+                if changed {
+                    pause::dictation_buffer_clear();
+                    event::global_broadcaster().paused();
+                }
                 auto_paused_for_mic = true;
             }
             Ok(false) if auto_paused_for_mic => {
@@ -116,7 +120,6 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
                 // Log the auto-resume event
                 log.write(Event::MicrophoneAutoResumed);
 
-                pause::set_paused(false);
                 // Clear the idle-auto-paused flag so subsequent
                 // audio-output stop events resume the daemon. Previously
                 // we set `paused=false` but left `idle_auto_paused=true`,
@@ -125,11 +128,19 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
                 // `!is_idle_auto_paused()`) and the daemon stayed paused
                 // even though the user could see "Listening" in the UI.
                 pause::set_idle_auto_paused(false);
+                let (effective, changed) = pause::set_paused(false);
+                event::global_broadcaster().master_pause_changed(false);
                 // Reset the voice-seen timestamp so the idle watchdog
                 // doesn't immediately re-pause us based on the gap that
                 // accumulated while we were mic-paused.
                 pause::mark_voice_seen();
-                event::global_broadcaster().resumed();
+                if changed {
+                    if effective {
+                        event::global_broadcaster().paused();
+                    } else {
+                        event::global_broadcaster().resumed();
+                    }
+                }
                 auto_paused_for_mic = false;
             }
             Err(e) => {

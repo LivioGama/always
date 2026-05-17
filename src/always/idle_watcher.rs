@@ -34,11 +34,17 @@ pub fn spawn(rt: &Handle, idle_pause_secs: u32, idle_pause_action: IdlePauseActi
             tokio::time::sleep(CHECK_INTERVAL).await;
 
             let elapsed = pause::since_last_voice();
-            let already_paused = pause::is_paused();
+            // Gate on MASTER, not effective. If master is already set
+            // (user manually paused or a previous idle fire) there's
+            // nothing to do. Gating on effective would skip the idle
+            // fire whenever the focused app's per-app rule already
+            // paused it — but we still want to flip MASTER so a later
+            // app switch can't accidentally un-pause the daemon.
+            let already_master_paused = pause::is_master_paused();
 
-            if !already_paused && elapsed >= threshold {
-                pause::set_paused(true);
+            if !already_master_paused && elapsed >= threshold {
                 pause::set_idle_auto_paused(true);
+                let (effective, changed) = pause::set_paused(true);
 
                 // Apply idle_pause_action: if pause_and_mute, also set muted
                 if idle_pause_action == IdlePauseAction::PauseAndMute {
@@ -47,8 +53,12 @@ pub fn spawn(rt: &Handle, idle_pause_secs: u32, idle_pause_action: IdlePauseActi
 
                 let secs = elapsed.as_secs() as u32;
                 global_broadcaster().idle_auto_paused(secs);
-                global_broadcaster().paused();
-                tracing::info!(idle_secs = secs, "idle_auto_paused");
+                global_broadcaster().master_pause_changed(true);
+                if changed {
+                    pause::dictation_buffer_clear();
+                    global_broadcaster().paused();
+                }
+                tracing::info!(idle_secs = secs, effective, changed, "idle_auto_paused");
             }
         }
     });

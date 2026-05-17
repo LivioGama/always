@@ -6,12 +6,25 @@ class StateMonitor: ObservableObject {
     static let shared = StateMonitor()
 
     @Published var isPaused: Bool = false
+    /// User-explicit global pause (the master kill switch). True iff the
+    /// last Pause event arrived from a manual toggle, idle auto-pause,
+    /// audio output auto-pause, or mic conflict — distinguishable from
+    /// an `isPaused` that's just the per-app default for an unlisted
+    /// bundle. The UI uses this to label the global toggle ("Resume
+    /// globally" vs "Pause globally") and to choose whether the "for
+    /// this app" allowlist control makes sense.
+    @Published var isMasterPaused: Bool = false
     @Published var isAutoEnter: Bool = false
     @Published var isTranscribing: Bool = false
     @Published var isVoiceActivity: Bool = false
     /// Connection state to daemon. UI can show "Reconnecting…" if degraded.
     @Published var isDaemonConnected: Bool = false
     @Published var isDaemonDegraded: Bool = false
+    /// Bundle ids whose per-app override sets `paused: false` — i.e.
+    /// the user's resumed-app allowlist. Pulled from
+    /// `per_app_settings_json` and refreshed whenever the daemon
+    /// acknowledges a `SetAppPaused` write.
+    @Published var resumedBundleIds: Set<String> = []
 
     private var cancellables = Set<AnyCancellable>()
     private var udsClient: UDSClient
@@ -128,6 +141,25 @@ class StateMonitor: ObservableObject {
     /// approve/reject correction flows that carry a UUID.
     func sendCommandWithData<T: Encodable>(_ name: String, _ payload: T) {
         udsClient.sendCommandWithData(name, payload)
+    }
+
+    /// Write a `paused` override for the given bundle id. `nil` clears
+    /// the override (the app reverts to the default-paused fallback).
+    ///
+    /// This is how the per-app allowlist is edited from the UI:
+    /// "Resume for this app" sends `paused: false`, "Pause for this app"
+    /// sends `paused: true` (force-pause this specific app even if the
+    /// default were ever flipped), and "Remove from allowlist" sends
+    /// `paused: nil`.
+    func setAppPaused(bundleId: String, paused: Bool?) {
+        struct Payload: Encodable {
+            let bundle_id: String
+            let paused: Bool?
+        }
+        udsClient.sendCommandWithData(
+            "SetAppPaused",
+            Payload(bundle_id: bundleId, paused: paused)
+        )
     }
     
     /// Track whether the daemon's most recent ongoing state still
@@ -276,6 +308,14 @@ class StateMonitor: ObservableObject {
                 // bundle id push. No UI action needed; logged in
                 // statemonitor.log for debugging.
                 self.log("daemon acknowledged focused app: \(event.focusedApp?.bundle_id ?? "nil")")
+            case .masterPauseChanged:
+                if let v = event.masterPause?.master_paused {
+                    self.isMasterPaused = v
+                }
+            case .resumedAppsChanged:
+                if let bundles = event.resumedApps?.bundles {
+                    self.resumedBundleIds = Set(bundles)
+                }
             default:
                 break
             }

@@ -205,7 +205,9 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
 
     // Send current state on connection
     let is_paused = pause::is_paused();
+    let is_master_paused = pause::is_master_paused();
     let is_auto_enter = pause::is_auto_enter_enabled();
+    let resumed_bundles = crate::always::per_app::resumed_apps();
 
     // The Hello frame MUST be first so version-mismatched clients can
     // disconnect before reading state they may not understand.
@@ -217,6 +219,12 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
             DaemonEvent::Paused
         } else {
             DaemonEvent::Resumed
+        },
+        DaemonEvent::MasterPauseChanged {
+            master_paused: is_master_paused,
+        },
+        DaemonEvent::ResumedAppsChanged {
+            bundles: resumed_bundles,
         },
         if is_auto_enter {
             DaemonEvent::AutoEnterEnabled
@@ -314,21 +322,30 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
 fn execute_command(cmd: DaemonCommand) {
     match cmd {
         DaemonCommand::TogglePause => {
-            let new_state = pause::toggle_pause();
-            if new_state {
-                global_broadcaster().paused();
-            } else {
-                // Clear the idle-auto-paused flag and reset the voice
-                // timestamp so the watchdog doesn't immediately re-pause us
-                // — same invariants the explicit `SetPaused{false}` path
-                // enforces. Without this, an idle-auto-paused daemon that
-                // the user unpaused via TogglePause would re-pause within
-                // CHECK_INTERVAL seconds.
+            // toggle_pause flips MASTER and returns (effective, changed).
+            // We always reset idle/voice bookkeeping on a master flip,
+            // even when effective didn't change — the user clearly wants
+            // a "fresh start" timing-wise. Broadcasting is gated on
+            // `changed` so we don't spam UDS subscribers when the
+            // per-app rule kept effective the same as before the flip.
+            let (effective, changed) = pause::toggle_pause();
+            let master = pause::is_master_paused();
+            if !master {
                 pause::set_idle_auto_paused(false);
                 pause::mark_voice_seen();
-                global_broadcaster().resumed();
             }
-            tracing::info!(new_state, "uds_toggle_pause");
+            // Master always changed (we just toggled it) — broadcast so
+            // the UI can label the global toggle correctly.
+            global_broadcaster().master_pause_changed(master);
+            if changed {
+                if effective {
+                    pause::dictation_buffer_clear();
+                    global_broadcaster().paused();
+                } else {
+                    global_broadcaster().resumed();
+                }
+            }
+            tracing::info!(master, effective, changed, "uds_toggle_pause");
         }
         DaemonCommand::ToggleAutoEnter => {
             let new_state = pause::toggle_auto_enter();
@@ -343,24 +360,27 @@ fn execute_command(cmd: DaemonCommand) {
         DaemonCommand::RejectCorrection { id } => handle_reject_correction(&id),
         DaemonCommand::CaptureCorrection => handle_capture_correction(),
         DaemonCommand::SetPaused { paused, reason } => {
-            let was_paused = pause::is_paused();
-            if was_paused != paused {
-                pause::set_paused(paused);
-                if !paused {
-                    pause::set_idle_auto_paused(false);
-                    pause::mark_voice_seen();
-                }
-                if paused {
-                    // Pause invalidates the dictation merge buffer — when
-                    // the user resumes, they're starting a fresh utterance,
-                    // not continuing a sentence from before the pause.
+            let (effective, changed) = pause::set_paused(paused);
+            if !paused {
+                pause::set_idle_auto_paused(false);
+                pause::mark_voice_seen();
+            }
+            global_broadcaster().master_pause_changed(paused);
+            if changed {
+                if effective {
                     pause::dictation_buffer_clear();
                     global_broadcaster().paused();
                 } else {
                     global_broadcaster().resumed();
                 }
             }
-            tracing::info!(paused, reason = reason.as_deref().unwrap_or(""), "uds_set_paused");
+            tracing::info!(
+                master = paused,
+                effective,
+                changed,
+                reason = reason.as_deref().unwrap_or(""),
+                "uds_set_paused"
+            );
         }
         DaemonCommand::CancelAutoEnterCountdown => {
             if pause::countdown_active() {
@@ -370,19 +390,16 @@ fn execute_command(cmd: DaemonCommand) {
             }
         }
         DaemonCommand::NotifyFocusedAppChanged { bundle_id } => {
-            pause::set_current_app(bundle_id.clone());
+            // Update focused app + recompute effective in one step.
+            // Effective may flip because per-app rules differ between
+            // the previous and new bundle; broadcast on change so the
+            // status bar icon and overlay follow the user's focus.
+            let (effective, changed) =
+                pause::set_current_app_and_recompute(bundle_id.clone());
             global_broadcaster().focused_app_changed(bundle_id.clone());
-            // Apply per-app paused override on focus change. We compute
-            // the effective paused state from the override table (if
-            // any) and the *current* global flag, then sync the global
-            // flag to it. Without this push, an app that wants
-            // "always paused" would still record while focused unless
-            // the user manually toggles.
-            let global = pause::is_paused();
-            let effective = crate::always::per_app::effective_paused(global);
-            if effective != global {
-                pause::set_paused(effective);
+            if changed {
                 if effective {
+                    pause::dictation_buffer_clear();
                     global_broadcaster().paused();
                 } else {
                     pause::mark_voice_seen();
@@ -390,25 +407,73 @@ fn execute_command(cmd: DaemonCommand) {
                 }
                 tracing::info!(effective, "per_app_paused_applied");
             }
-            tracing::info!(bundle = ?bundle_id, "uds_focused_app_changed");
+            tracing::info!(bundle = ?bundle_id, effective, "uds_focused_app_changed");
         }
         DaemonCommand::NotifySystemAudioState { playing } => {
-            // Audio output started → pause. Audio output stopped → if
-            // we were paused for audio, resume. Distinguish from
-            // idle-auto-pause via the dedicated flag.
+            // Audio output started → master-pause everything (force
+            // overrides). Audio output stopped → clear master if we
+            // weren't in idle-pause, then let per-app rules decide.
             if playing {
-                if !pause::is_paused() {
-                    pause::set_paused(true);
-                    global_broadcaster().paused();
-                    tracing::info!("audio_output_auto_paused");
+                let was_master = pause::is_master_paused();
+                let (effective, changed) = pause::set_paused(true);
+                if !was_master {
+                    global_broadcaster().master_pause_changed(true);
                 }
-            } else {
-                // Only auto-resume if we weren't already in idle-pause.
-                if pause::is_paused() && !pause::is_idle_auto_paused() {
-                    pause::set_paused(false);
-                    pause::mark_voice_seen();
-                    global_broadcaster().resumed();
-                    tracing::info!("audio_output_auto_resumed");
+                if changed {
+                    pause::dictation_buffer_clear();
+                    global_broadcaster().paused();
+                    tracing::info!(effective, "audio_output_auto_paused");
+                }
+            } else if !pause::is_idle_auto_paused() {
+                let was_master = pause::is_master_paused();
+                let (effective, changed) = pause::set_paused(false);
+                pause::mark_voice_seen();
+                if was_master {
+                    global_broadcaster().master_pause_changed(false);
+                }
+                if changed {
+                    if effective {
+                        global_broadcaster().paused();
+                    } else {
+                        global_broadcaster().resumed();
+                    }
+                    tracing::info!(effective, "audio_output_auto_resumed");
+                }
+            }
+        }
+        DaemonCommand::SetAppPaused { bundle_id, paused } => {
+            // Write the override for `bundle_id` and recompute the
+            // effective state. Broadcasting is gated on `changed` so
+            // setting an override for a non-focused app doesn't spam
+            // the UDS bus.
+            match crate::always::per_app::set_app_paused_override(&bundle_id, paused) {
+                Ok(()) => {
+                    let (effective, changed) = pause::recompute_effective();
+                    if changed {
+                        if effective {
+                            pause::dictation_buffer_clear();
+                            global_broadcaster().paused();
+                        } else {
+                            pause::mark_voice_seen();
+                            global_broadcaster().resumed();
+                        }
+                    }
+                    // Always broadcast the updated allowlist so every
+                    // connected client (Settings UI, menu bar) sees
+                    // the same snapshot without round-tripping
+                    // through the CLI `config show` path.
+                    global_broadcaster()
+                        .resumed_apps_changed(crate::always::per_app::resumed_apps());
+                    tracing::info!(
+                        bundle = %bundle_id,
+                        paused = ?paused,
+                        effective,
+                        changed,
+                        "uds_set_app_paused"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, bundle = %bundle_id, "uds_set_app_paused_failed");
                 }
             }
         }

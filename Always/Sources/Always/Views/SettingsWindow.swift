@@ -14,6 +14,7 @@ private let settingsLogger = Logger(subsystem: "com.always.app", category: "sett
 struct SettingsWindow: View {
     @ObservedObject var cliService: CLIService
     @ObservedObject private var stateMonitor: StateMonitor = .shared
+    @ObservedObject private var focusedApp: FocusedAppMonitor = .shared
     @State private var config: Config = Config.defaultConfig
     @State private var isLoading = false
     @State private var apiKey: String = ""
@@ -82,11 +83,15 @@ struct SettingsWindow: View {
             // Banner only renders when one or more permissions are
             // missing — invisible afterwards.
             PermissionsBanner()
+            // Connection status stays on top — it's the at-a-glance
+            // health indicator. Allowlist sits directly below as the
+            // single section that mutates most often, before the
+            // static settings (behavior, API, vocabulary, …).
             statusAndPauseRow
             Divider()
-            behaviorRow
-            Divider()
             perAppSection
+            Divider()
+            behaviorRow
             Divider()
             apiSection
             Divider()
@@ -147,6 +152,11 @@ struct SettingsWindow: View {
             displayColor = .orange
             symbol = "exclamationmark.triangle.fill"
         }
+        // The master pause/resume toggle now lives at the top of the
+        // Voice Typing Allowlist section — the allowlist model makes
+        // it more an "emergency stop / lift the freeze" affordance
+        // than a primary control, so this row is just a connection
+        // status indicator now.
         return HStack(spacing: 12) {
             Image(systemName: symbol)
                 .foregroundColor(displayColor)
@@ -154,19 +164,6 @@ struct SettingsWindow: View {
                 .font(.headline)
                 .foregroundColor(displayColor)
             Spacer()
-            Button {
-                stateMonitor.togglePause()
-            } label: {
-                Label(
-                    stateMonitor.isPaused ? "Resume" : "Pause",
-                    systemImage: stateMonitor.isPaused
-                        ? "play.circle.fill"
-                        : "pause.circle.fill"
-                )
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(!isRunning)
         }
     }
 
@@ -235,75 +232,164 @@ struct SettingsWindow: View {
         }
     }
 
+    /// Pause is now off-by-default per app. The Settings section
+    /// surfaces:
+    ///   1. The currently-focused app + a one-click toggle to add or
+    ///      remove it from the resumed-apps allowlist.
+    ///   2. The full allowlist (every app the user has explicitly
+    ///      resumed) with a "Remove" button per row.
+    /// Everything else is implicit ("any app not on the list is paused").
     private var perAppSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Per-App Settings").font(.headline)
-            if let jsonStr = config.perAppSettingsJson, !jsonStr.isEmpty, jsonStr != "{}" {
-                if let data = jsonStr.data(using: .utf8),
-                   let overrides = try? JSONDecoder().decode([String: AppOverride].self, from: data) {
-                    if overrides.isEmpty {
-                        Text("No per-app overrides")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    } else {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(Array(overrides.sorted { $0.key < $1.key }), id: \.key) { bundleId, override in
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(appNameForBundle(bundleId))
-                                        .font(.caption)
-                                        .fontWeight(.semibold)
-                                        .foregroundColor(.secondary)
-
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        if let paused = override.paused {
-                                            HStack(spacing: 4) {
-                                                Image(systemName: paused ? "pause.circle.fill" : "play.circle.fill")
-                                                    .font(.caption2)
-                                                Text(paused ? "Paused" : "Active")
-                                                    .font(.caption2)
-                                            }
-                                            .foregroundColor(paused ? .orange : .green)
-                                        }
-
-                                        if let autoEnter = override.autoEnter {
-                                            HStack(spacing: 4) {
-                                                Image(systemName: autoEnter ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                                    .font(.caption2)
-                                                Text("Auto-Enter: \(autoEnter ? "On" : "Off")")
-                                                    .font(.caption2)
-                                            }
-                                            .foregroundColor(autoEnter ? .green : .gray)
-                                        }
-
-                                        if let delay = override.autoEnterDelayMs {
-                                            HStack(spacing: 4) {
-                                                Image(systemName: "timer")
-                                                    .font(.caption2)
-                                                Text("Delay: \(delay)ms")
-                                                    .font(.caption2)
-                                            }
-                                            .foregroundColor(.secondary)
-                                        }
-                                    }
-                                }
-                                .padding(.vertical, 6)
-                                .padding(.horizontal, 8)
-                                .background(Color.secondary.opacity(0.1))
-                                .cornerRadius(4)
-                            }
-                        }
-                    }
-                } else {
-                    Text("No per-app overrides")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            } else {
-                Text("No per-app overrides")
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Voice Typing Allowlist").font(.headline)
+                Spacer()
+                Text("\(stateMonitor.resumedBundleIds.count) app\(stateMonitor.resumedBundleIds.count == 1 ? "" : "s") resumed")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+            Text("Always is paused by default. Add an app here to resume voice typing while you're in it.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            masterPauseControl
+            focusedAppCard
+
+            if !stateMonitor.resumedBundleIds.isEmpty {
+                Divider().padding(.vertical, 2)
+                Text("Resumed apps")
+                    .font(.subheadline.bold())
+                    .foregroundColor(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(
+                        stateMonitor.resumedBundleIds.sorted(),
+                        id: \.self
+                    ) { bundleId in
+                        resumedAppRow(bundleId: bundleId)
+                    }
+                }
+            }
         }
+    }
+
+    /// Master pause kill switch — pauses every resumed app at once
+    /// (and unpauses back to per-app rules when toggled off). The
+    /// allowlist makes this an exceptional control rather than a
+    /// primary one, so it sits at the top of the section instead of
+    /// next to the connection-status row.
+    @ViewBuilder
+    private var masterPauseControl: some View {
+        let masterPaused = stateMonitor.isMasterPaused
+        HStack(spacing: 10) {
+            Image(systemName: masterPaused ? "exclamationmark.octagon.fill" : "checkmark.shield.fill")
+                .font(.title3)
+                .foregroundColor(masterPaused ? .orange : .accentColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(masterPaused ? "Paused everywhere" : "Allowlist active")
+                    .font(.subheadline.bold())
+                Text(
+                    masterPaused
+                        ? "Master kill switch is on — every resumed app is force-paused."
+                        : "Resumed apps below are listening; everything else is paused."
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button {
+                stateMonitor.togglePause()
+            } label: {
+                Text(masterPaused ? "Lift pause" : "Pause everything")
+            }
+            .controlSize(.small)
+            .disabled(!stateMonitor.isDaemonConnected)
+        }
+        .padding(10)
+        .background(
+            (masterPaused ? Color.orange : Color.accentColor).opacity(0.08)
+        )
+        .cornerRadius(6)
+    }
+
+    /// Header card that surfaces the currently-focused app and a
+    /// one-click toggle to add/remove it from the allowlist. This is
+    /// the answer to "what app am I paused for right now?".
+    @ViewBuilder
+    private var focusedAppCard: some View {
+        let bundleId = focusedApp.currentBundleId
+        let name = focusedApp.currentAppName ?? bundleId ?? "—"
+        let isResumed = bundleId.map { stateMonitor.resumedBundleIds.contains($0) } ?? false
+        let isPaused = stateMonitor.isPaused
+        HStack(spacing: 10) {
+            Image(systemName: isResumed ? "checkmark.circle.fill" : "pause.circle.fill")
+                .font(.title3)
+                .foregroundColor(isResumed && !isPaused ? .green : .orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(bundleId == nil ? "No focused app" : "Currently focused")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text(name)
+                    .font(.subheadline.bold())
+                Text(currentAppStateText(isResumed: isResumed, isPaused: isPaused))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            if let bundle = bundleId {
+                Button(action: {
+                    let newPaused: Bool? = isResumed ? nil : false
+                    stateMonitor.setAppPaused(bundleId: bundle, paused: newPaused)
+                }) {
+                    Text(isResumed ? "Remove from allowlist" : "Resume for this app")
+                }
+                .controlSize(.small)
+            }
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.08))
+        .cornerRadius(6)
+    }
+
+    private func currentAppStateText(isResumed: Bool, isPaused: Bool) -> String {
+        if stateMonitor.isMasterPaused {
+            return "Globally paused — toggle “Pause globally” to lift the master switch."
+        }
+        if isResumed && isPaused {
+            return "On the allowlist but paused for another reason."
+        }
+        if isResumed { return "Voice typing is active here." }
+        return "Paused (not on the allowlist)."
+    }
+
+    @ViewBuilder
+    private func resumedAppRow(bundleId: String) -> some View {
+        let isFocused = focusedApp.currentBundleId == bundleId
+        HStack(spacing: 8) {
+            Image(systemName: isFocused ? "arrowtriangle.right.fill" : "checkmark.circle")
+                .font(.caption)
+                .foregroundColor(isFocused ? .accentColor : .green)
+                .frame(width: 14)
+            Text(appNameForBundle(bundleId))
+                .font(.callout)
+            Spacer()
+            Button(role: .destructive) {
+                stateMonitor.setAppPaused(bundleId: bundleId, paused: nil)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.plain)
+            .help("Remove from allowlist (this app will be paused again)")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            isFocused
+                ? Color.accentColor.opacity(0.10)
+                : Color.clear
+        )
+        .cornerRadius(4)
     }
 
     private func appNameForBundle(_ bundleId: String) -> String {

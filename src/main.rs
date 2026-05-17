@@ -616,11 +616,13 @@ fn handle_toggle_pause() -> Result<()> {
         return Ok(());
     }
     // No daemon: keep the legacy local toggle so downstream scripts
-    // that grep for "Pause state:" don't break.
-    let new_state = always::always::pause::toggle_pause();
+    // that grep for "Pause state:" don't break. `toggle_pause` now
+    // returns `(effective, changed)` — we print the effective value
+    // since that's what the user cares about.
+    let (effective, _changed) = always::always::pause::toggle_pause();
     println!(
         "Pause state: {} (no daemon running; toggle was local-only)",
-        if new_state { "paused" } else { "resumed" }
+        if effective { "paused" } else { "resumed" }
     );
     Ok(())
 }

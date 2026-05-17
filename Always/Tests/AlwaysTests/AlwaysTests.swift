@@ -315,7 +315,7 @@ final class AlwaysTests: XCTestCase {
         // `src/always/event.rs` and `tests/uds_protocol_test.rs`. Bumping
         // either side without updating the matching constant on the
         // other side will fail both tests at once.
-        XCTAssertEqual(UDS_PROTOCOL_VERSION, 2)
+        XCTAssertEqual(UDS_PROTOCOL_VERSION, 3)
     }
 
     func testHelloWithMismatchedVersionIsObservable() throws {
