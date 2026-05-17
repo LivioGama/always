@@ -124,10 +124,7 @@ pub fn effective_paused_for_current_app() -> bool {
     if bundle == ALWAYS_OWN_BUNDLE_ID {
         return true;
     }
-    match load().get(&bundle).and_then(|o| o.paused) {
-        Some(v) => v,
-        None => true,
-    }
+    load().get(&bundle).and_then(|o| o.paused).unwrap_or(true)
 }
 
 /// True if the supplied bundle id is on the user's resumed-app

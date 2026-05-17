@@ -160,7 +160,7 @@ impl TestResults {
 }
 
 fn test_sentence(text: &str) -> TestResult {
-    let cfg = always::always::AlwaysConfig::from_cli("en".to_string(), 30, 0.5, false)
+    let cfg = always::always::AlwaysConfig::from_cli("en".to_string(), 30, 0.5, Some(false))
         .expect("Failed to create config");
 
     // Test individual filters
