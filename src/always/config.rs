@@ -337,7 +337,12 @@ impl AlwaysConfig {
         let config = Self {
             lang,
             timeout_secs,
-            silence_secs: prefs.stt_silence.unwrap_or(silence_secs),
+            // Floor at 2.5s: anything lower has been shown to cut
+            // mid-thought on natural dictation (trailing-off on
+            // connective phrases like "I want to ... questions"
+            // produced split pastes). Saved prefs / CLI flags below
+            // the floor are silently raised.
+            silence_secs: prefs.stt_silence.unwrap_or(silence_secs).max(2.5),
             // `auto_enter` was already resolved above: CLI flag → DB pref →
             // canonical default. The previous code re-read `prefs.stt_auto_enter`
             // here, which silently undid an explicit CLI override.
@@ -378,12 +383,13 @@ impl Default for AlwaysConfig {
             timeout_secs: 30,
             // Defaults aligned with `SensitivityPreset::Normal` and the
             // Mic Sensitivity / Speaking Style picker in the GUI.
-            // 2.0s — gives natural prose dictation room to breathe
-            // (1.5s cut off "modular" sentences with brief thinking
-            // pauses). Speculative transcription kicks off at 85% of
-            // this (≈1.7s) so end-to-end paste latency rarely exceeds
-            // ~2.0s after the user truly stops talking.
-            silence_secs: 2.0,
+            // 2.5s — 2.0s still cut mid-thought when the user trailed
+            // off softly on connective phrases ("I want to ...
+            // questions to be on the same page" was split into two
+            // pastes). 2.5s gives an extra 500ms of thinking-pause
+            // headroom; speculative transcription at 85% (~2.1s) keeps
+            // end-to-end paste latency close to the 2.0s feel.
+            silence_secs: 2.5,
             auto_enter: true,
             filter_enabled: true,
             energy_threshold: 0.012,

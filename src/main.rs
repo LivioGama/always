@@ -46,7 +46,7 @@ enum Commands {
         /// Seconds of silence before considering phrase complete.
         /// Default matches `AlwaysConfig::default().silence_secs` so the
         /// CLI doesn't silently override the prefs/canonical default.
-        #[arg(short = 's', long, default_value = "2.0")]
+        #[arg(short = 's', long, default_value = "2.5")]
         silence: f64,
         /// Press Enter automatically after pasting transcript. Omitting
         /// the flag (the default) reads `stt_auto_enter` from the prefs
@@ -72,7 +72,7 @@ enum Commands {
         timeout: u32,
         /// Seconds of silence before considering phrase complete.
         /// Default matches `AlwaysConfig::default().silence_secs`.
-        #[arg(short = 's', long, default_value = "2.0")]
+        #[arg(short = 's', long, default_value = "2.5")]
         silence: f64,
         /// Press Enter automatically after pasting transcript. See
         /// `Start::auto_enter` — same opt-in semantics; DB pref wins

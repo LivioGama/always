@@ -50,7 +50,16 @@ const SHORT_SILENCE_MS: u32 = 900;
 
 fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordResult> {
     let silence_frames = ((cfg.silence_secs * 1000.0) / FRAME_MS as f64).ceil() as usize;
-    let max_frames = (cfg.timeout_secs as usize * 1000) / FRAME_MS as usize;
+    // Two distinct timeouts:
+    // - `max_pre_voice_frames`: hard cap on the initial wait for voice
+    //   onset. Uses `cfg.timeout_secs` (default 30s) so a stale recorder
+    //   that never produces a voiced frame can't run forever.
+    // - `max_speech_frames`: cap on continuous speech once voice is
+    //   detected. 5 minutes is generous enough for long monologues
+    //   (the original 30s cap was mid-sentence-cutting users who gave
+    //   long prompts — observed split at the 28s mark).
+    let max_pre_voice_frames = (cfg.timeout_secs as usize * 1000) / FRAME_MS as usize;
+    let max_speech_frames = (300_usize * 1000) / FRAME_MS as usize;
     let min_speech_frames = (cfg.onset_ms / FRAME_MS).max(1) as usize;
     // Short-utterance cutoff. Computed once; activated per-iteration
     // when `speech_samples` duration is still under SHORT_SPEECH_MS.
@@ -68,11 +77,14 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     // - At final, if speculation is still valid (no resume), use its result —
     //   transcription has been running in parallel during the silence wait, so
     //   the user gets snappy paste with no extra latency cost.
-    // Tentative at 85% of final window. Earlier values (50%, 75%) caused mid-utterance
-    // speculation kickoff that returned partial transcripts when user resumed after a
-    // breath. With smoothing, the silence count itself is more accurate, so we can
-    // trust it closer to the final cutoff.
-    let tentative_silence_secs = (cfg.silence_secs * 0.85).clamp(0.7, 2.5);
+    // Tentative at 60% of final window. With the energy-anchored
+    // is_speech check, the silence count no longer triggers on soft
+    // trailing speech, so the 85% safety margin is overkill —
+    // speculation that turns out wrong is silently discarded and only
+    // costs one Groq call. Pushing tentative earlier shaves ~600ms off
+    // perceived end-of-utterance latency for the common case where the
+    // user actually did stop.
+    let tentative_silence_secs = (cfg.silence_secs * 0.60).clamp(0.5, 2.0);
     let tentative_silence_frames =
         ((tentative_silence_secs * 1000.0) / FRAME_MS as f64).ceil() as usize;
     // Pre-buffer: keep 200ms of audio before speech detection to catch first words.
@@ -98,12 +110,13 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     // Probability smoothing window. Silero outputs per-512-sample (32ms) chunks;
     // single-frame dips during voiceless consonants (s/f/th/h) or breaths can
     // briefly drop prob below threshold without genuine end-of-utterance.
-    // We track the last 16 readings (~512ms) and use the running max while in
+    // We track the last 24 readings (~768ms) and use the running max while in
     // speech — the prob must stay low for the FULL window to count as silence.
-    // 8 frames (~256ms) was too short — fricatives and brief inter-word stop
-    // closures could last 200-300ms in fluent speech and produce false
-    // end-of-utterance triggers mid-phrase.
-    let smoothing_window: usize = 16;
+    // History: 8 frames (~256ms) cut mid-phrase on fricatives; 16 frames
+    // (~512ms) still split connective-phrase dictation ("I want to ...
+    // questions ...") when the user trailed off softly. 24 frames covers
+    // typical thinking-pause dips while only adding ~240ms to cut latency.
+    let smoothing_window: usize = 24;
     let mut prob_history: VecDeque<f32> = VecDeque::with_capacity(smoothing_window);
 
     // Use persistent recorder to avoid process spawning overhead
@@ -117,6 +130,39 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     let mut voice_logged = false;
     let mut total_frames = 0usize;
     let mut pre_buffer: VecDeque<Vec<i16>> = VecDeque::with_capacity(pre_buffer_frames);
+
+    // Predictive end-of-speech: count consecutive frames whose RAW energy
+    // is below threshold. Runs independent of Silero/smoothing so the
+    // overlay can flip from "Listening" to "Transcribing" the moment the
+    // user actually goes quiet, not after the full silence wait.
+    // 500ms (17 frames) — long enough to ignore inter-word stop closures
+    // (~100-200ms) but short enough to feel instant on real pauses.
+    let early_overlay_frames = (500 / FRAME_MS as usize).max(1);
+    let mut consecutive_low_energy = 0usize;
+    // Single source of truth for the overlay state. Set true when ANY
+    // of {early-flip, speculation kickoff, final cut} fires, false when
+    // voice resumes mid-silence. Events are only sent on transitions —
+    // no spam, no flicker. (`allow(unused_assignments)` covers the
+    // terminal flips that happen right before function return.)
+    #[allow(unused_assignments)]
+    let mut transcribing_overlay = false;
+    // Helper: flip overlay to transcribing if not already.
+    macro_rules! flip_to_transcribing {
+        () => {{
+            if !transcribing_overlay {
+                transcribing_overlay = true;
+                event::global_broadcaster().transcribing_started();
+            }
+        }};
+    }
+    macro_rules! flip_to_listening {
+        () => {{
+            if transcribing_overlay {
+                transcribing_overlay = false;
+                event::global_broadcaster().transcribing_stopped();
+            }
+        }};
+    }
 
     // Optimization for very low energy thresholds (≤ 0.01): use fast energy check
     let use_fast_energy_check = cfg.energy_threshold <= 0.01;
@@ -175,14 +221,53 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
             .copied()
             .fold(0.0f32, f32::max)
             .max(last_prob);
-        // Hysteresis: while already in speech, only exit on the smoothed lower
-        // threshold; while not yet in speech, require the raw higher threshold
-        // to enter (faster onset detection).
+        // Hysteresis: while already in speech, exit only when BOTH Silero's
+        // smoothed max AND raw energy say silence; while not yet in speech,
+        // require the raw higher Silero threshold to enter (faster onset).
+        //
+        // The energy fallback is the load-bearing fix for mid-speech cuts:
+        // Silero misfires on soft trailing syllables, accent-edge phonemes,
+        // and quiet voiced segments — it drops its probability for hundreds
+        // of milliseconds while the user is genuinely still talking. Pure
+        // Silero+smoothing can't recover from this because the max stays low
+        // for the full window. Anchoring on raw energy means: as long as the
+        // microphone is picking up sound above the user's configured energy
+        // floor, the utterance stays open regardless of Silero's opinion.
+        let frame_energy = if use_fast_energy_check {
+            fast_normalized_energy(samples)
+        } else {
+            normalized_energy(samples)
+        };
+        // Use 1.5x energy_threshold for the in-speech keepalive: bare-threshold
+        // spikes from keyboard taps, distant traffic, or HVAC kick-on are NOT
+        // user voice and shouldn't latch the utterance open indefinitely.
+        // 1.5x is comfortably below normal speaking RMS (~0.04-0.10) but
+        // well above typical ambient (~0.003-0.010 with HVAC).
+        let energy_above_threshold = frame_energy >= cfg.energy_threshold * 1.5;
         let is_speech = if in_speech {
-            smoothed_max >= silence_threshold
+            smoothed_max >= silence_threshold || energy_above_threshold
         } else {
             last_prob >= speech_threshold
         };
+
+        // Predictive overlay management — independent of the cut decision.
+        // While in_speech: if raw energy drops below the keep-alive
+        // threshold for `early_overlay_frames`, presume the user paused
+        // and flip overlay to Transcribing immediately. If energy comes
+        // back, flip it back to Listening. The actual cut still waits
+        // for `silence_frames` so the user can resume without losing
+        // audio — only the visual feedback is predictive.
+        if in_speech {
+            if energy_above_threshold {
+                consecutive_low_energy = 0;
+                flip_to_listening!();
+            } else {
+                consecutive_low_energy += 1;
+                if consecutive_low_energy >= early_overlay_frames {
+                    flip_to_transcribing!();
+                }
+            }
+        }
 
         if is_speech {
             // Speech resumed: discard any pending speculation (its audio snapshot
@@ -190,6 +275,10 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
             if speculation_pending {
                 speculation_pending = false;
                 *speculation_slot.lock() = None;
+                // Overlay was likely flipped by speculation kickoff (or
+                // by early-flip already). Either way, user resumed —
+                // flip back. (No-op if it was already listening.)
+                flip_to_listening!();
             }
             consecutive_speech += 1;
             consecutive_silence = 0;
@@ -282,6 +371,9 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
             // hit final silence. If the user resumes, we discard it above.
             if !speculation_pending && consecutive_silence >= eff_tentative_frames {
                 speculation_pending = true;
+                // Make sure overlay is in Transcribing state (idempotent
+                // — early-flip may have already done this).
+                flip_to_transcribing!();
                 let audio_snapshot = speech_samples.clone();
                 let api_key = cfg.groq_stt_api_key.clone();
                 let slot = Arc::clone(&speculation_slot);
@@ -325,7 +417,15 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
         }
 
         total_frames += 1;
-        if total_frames >= max_frames {
+        // Two-tier timeout: pre-voice frames get the short cap so a
+        // dead recorder bails fast; in-speech frames get the long cap
+        // so a user mid-monologue doesn't get sliced in half.
+        let effective_max = if in_speech {
+            max_speech_frames
+        } else {
+            max_pre_voice_frames
+        };
+        if total_frames >= effective_max {
             break;
         }
     }
@@ -334,7 +434,10 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
         // Send voice activity ended event if no speech was detected
         event::global_broadcaster().voice_activity_ended();
         // Don't set listening to false here - let it time out naturally
-        return if total_frames >= max_frames {
+        // We bailed without ever entering speech, so only the pre-voice
+        // cap matters here (speech cap can't have fired — `in_speech`
+        // was never true).
+        return if total_frames >= max_pre_voice_frames {
             Ok(RecordResult::Timeout)
         } else {
             Ok(RecordResult::Silence)
@@ -351,6 +454,10 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     // Only log drops if we actually logged voice detection
     if speech_energy < cfg.energy_threshold {
         event::global_broadcaster().voice_activity_ended();
+        // Predictive overlay may have flipped to Transcribing during the
+        // silence wait — there's no transcription coming on the dropped
+        // path, so unflip so the badge doesn't lie.
+        flip_to_listening!();
         // Don't set listening to false here - let it time out naturally
         if voice_logged {
             // Only log dropped energy if we previously logged voice detected
@@ -363,8 +470,12 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
         }
     }
 
-    // Send transcribing started event
-    event::global_broadcaster().transcribing_started();
+    // Make sure the overlay is in Transcribing state. Idempotent —
+    // early-flip or speculation kickoff almost always already did this,
+    // but the final cut path also needs to guarantee the state for
+    // unusual paths (e.g. utterance ended without ever hitting the
+    // tentative silence window).
+    flip_to_transcribing!();
 
     // Try to use the speculative transcription if it was kicked off and
     // wasn't invalidated by a speech resume. Wait briefly if it's still in

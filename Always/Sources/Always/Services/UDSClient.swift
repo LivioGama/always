@@ -21,6 +21,12 @@ enum DaemonEventType: String, Codable {
     case transcriptFinal = "TranscriptFinal"
     case paused = "Paused"
     case resumed = "Resumed"
+    // Quiet pair: state-only updates from focus-driven per-app rules.
+    // GUI updates `isPaused` but MUST NOT flash the overlay — the user
+    // initiated the focus change with their mouse, they don't need a
+    // pause/play badge confirming it.
+    case pausedQuietly = "PausedQuietly"
+    case resumedQuietly = "ResumedQuietly"
     case autoEnterEnabled = "AutoEnterEnabled"
     case autoEnterDisabled = "AutoEnterDisabled"
     case voiceActivityDetected = "VoiceActivityDetected"

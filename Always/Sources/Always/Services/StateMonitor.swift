@@ -208,6 +208,13 @@ class StateMonitor: ObservableObject {
                 if changed {
                     StatusOverlayController.shared.flash(state: .resumed)
                 }
+            case .pausedQuietly:
+                // State-only update — no overlay flash. Origin: focus
+                // change (mouse window switch, Mission Control) where
+                // the user already knows what they did.
+                self.isPaused = true
+            case .resumedQuietly:
+                self.isPaused = false
             case .autoEnterEnabled:
                 let changed = !self.isAutoEnter
                 self.isAutoEnter = true

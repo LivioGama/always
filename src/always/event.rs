@@ -40,6 +40,14 @@ pub enum DaemonEvent {
     Paused,
     /// Daemon is resumed
     Resumed,
+    /// Daemon is paused as a side-effect of focus change (per-app rule).
+    /// Functionally identical to `Paused` for state tracking, but the GUI
+    /// MUST NOT flash the overlay — focus changes that the user initiated
+    /// with a mouse / window switcher should not advertise themselves.
+    PausedQuietly,
+    /// Daemon is resumed as a side-effect of focus change (per-app rule).
+    /// See `PausedQuietly` — no overlay flash.
+    ResumedQuietly,
     /// Auto-enter mode enabled
     AutoEnterEnabled,
     /// Auto-enter mode disabled
@@ -238,9 +246,21 @@ impl EventBroadcaster {
         self.send(DaemonEvent::Paused);
     }
 
+    /// Same as `paused` but tells the GUI to update state silently — no
+    /// overlay flash. Used by focus-change-driven per-app pause so a
+    /// manual mouse window switch doesn't pop pause/play badges.
+    pub fn paused_quietly(&self) {
+        self.send(DaemonEvent::PausedQuietly);
+    }
+
     /// Send resumed event
     pub fn resumed(&self) {
         self.send(DaemonEvent::Resumed);
+    }
+
+    /// Silent counterpart to `resumed` — see `paused_quietly`.
+    pub fn resumed_quietly(&self) {
+        self.send(DaemonEvent::ResumedQuietly);
     }
 
     /// Send auto-enter enabled event

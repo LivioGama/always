@@ -400,10 +400,14 @@ fn execute_command(cmd: DaemonCommand) {
             if changed {
                 if effective {
                     pause::dictation_buffer_clear();
-                    global_broadcaster().paused();
+                    // Quiet variant: focus changes come from manual
+                    // window switches (mouse, Mission Control). The
+                    // user already knows they switched app — flashing
+                    // pause/play overlays is visual noise.
+                    global_broadcaster().paused_quietly();
                 } else {
                     pause::mark_voice_seen();
-                    global_broadcaster().resumed();
+                    global_broadcaster().resumed_quietly();
                 }
                 tracing::info!(effective, "per_app_paused_applied");
             }
