@@ -98,7 +98,7 @@ fn transcriptions_url() -> String {
         .unwrap_or_else(|_| GROQ_TRANSCRIPTIONS_URL.to_string())
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct TranscriptionSegment {
     #[serde(default)]
     pub id: u32,
@@ -118,7 +118,7 @@ pub struct TranscriptionSegment {
     pub temperature: f32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct TranscriptionResult {
     #[serde(default)]
     pub text: String,

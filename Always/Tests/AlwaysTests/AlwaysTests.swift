@@ -69,7 +69,7 @@ final class AlwaysTests: XCTestCase {
             "shortcutForcePaste": "ctrl+alt+v",
             "shortcutCorrectionDialog": "ctrl+alt+w",
             "postprocessEnabled": true,
-            "idlePauseSecs": 120,
+            "idlePauseSecs": 600,
             "idlePauseAction": "pause"
         }
         """
@@ -83,7 +83,7 @@ final class AlwaysTests: XCTestCase {
         XCTAssertEqual(config.autoEnterDelayMs, 4000)
         XCTAssertEqual(config.sileroThreshold, 0.5)
         XCTAssertEqual(config.shortcutPause, "ctrl+alt+p")
-        XCTAssertEqual(config.idlePauseSecs, 120)
+        XCTAssertEqual(config.idlePauseSecs, 600)
     }
 
     // Regression: the CLI's `config show` output uses `auto_enter_delay_ms`
@@ -98,7 +98,7 @@ final class AlwaysTests: XCTestCase {
         stt_auto_enter: true
         auto_enter_delay_ms: 4000
         silero_threshold: 0.5
-        idle_pause_secs: 120
+        idle_pause_secs: 600
         idle_pause_action: pause
         postprocess_enabled: true
         """
@@ -108,7 +108,7 @@ final class AlwaysTests: XCTestCase {
         XCTAssertEqual(config.autoEnterDelayMs, 4000)
         XCTAssertEqual(config.sttSilence, 2.0)
         XCTAssertTrue(config.sttAutoEnter)
-        XCTAssertEqual(config.idlePauseSecs, 120)
+        XCTAssertEqual(config.idlePauseSecs, 600)
         XCTAssertEqual(config.idlePauseAction, "pause")
     }
 
@@ -315,7 +315,7 @@ final class AlwaysTests: XCTestCase {
         // `src/always/event.rs` and `tests/uds_protocol_test.rs`. Bumping
         // either side without updating the matching constant on the
         // other side will fail both tests at once.
-        XCTAssertEqual(UDS_PROTOCOL_VERSION, 3)
+        XCTAssertEqual(UDS_PROTOCOL_VERSION, 4)
     }
 
     func testHelloWithMismatchedVersionIsObservable() throws {

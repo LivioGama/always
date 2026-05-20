@@ -10,7 +10,14 @@ use tokio::sync::broadcast;
 /// OR per-app rule). Added [`DaemonEvent::MasterPauseChanged`] and
 /// [`DaemonEvent::ResumedAppsChanged`] so the UI can render the
 /// allowlist + master kill switch separately.
-pub const PROTOCOL_VERSION: u32 = 3;
+///
+/// **v4 (2026-05-19):** Local-model registry. New
+/// [`DaemonCommand`] variants for the Settings → Models tab
+/// (`ListModels`, `DownloadModel`, `CancelModelDownload`,
+/// `DeleteModel`, `SetActiveTranscriber`) and matching
+/// [`DaemonEvent`]s for catalog snapshot + download / verification /
+/// extraction progress + active-backend changes.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Event types for daemon-to-GUI communication
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +120,55 @@ pub enum DaemonEvent {
     /// best-guess match for the wrong word once the user types the
     /// intended one.
     CorrectionDialogRequested { last_transcript: String },
+    /// Snapshot of the local-model catalog (every entry with its
+    /// current `is_downloaded` / `is_downloading` / `partial_size`
+    /// fields). Broadcast in response to [`DaemonCommand::ListModels`]
+    /// and whenever the catalog mutates so all connected clients see
+    /// the same view.
+    ModelsList {
+        models: Vec<crate::managers::model_registry::ModelInfo>,
+    },
+    /// Streaming progress for an in-flight download. Throttled to
+    /// ~10 events/sec at the registry layer.
+    ModelDownloadProgress {
+        model_id: String,
+        downloaded: u64,
+        total: u64,
+        percentage: f64,
+    },
+    ModelDownloadComplete {
+        model_id: String,
+    },
+    ModelDownloadCancelled {
+        model_id: String,
+    },
+    ModelDownloadFailed {
+        model_id: String,
+        error: String,
+    },
+    ModelVerificationStarted {
+        model_id: String,
+    },
+    ModelVerificationCompleted {
+        model_id: String,
+    },
+    ModelExtractionStarted {
+        model_id: String,
+    },
+    ModelExtractionCompleted {
+        model_id: String,
+    },
+    ModelExtractionFailed {
+        model_id: String,
+        error: String,
+    },
+    /// Active STT backend changed (user picked a different model in
+    /// Settings → Models, or deleted the currently-active one). The
+    /// `backend` field is the canonical wire form — `groq` or
+    /// `local:<model_id>`.
+    ActiveTranscriberChanged {
+        backend: String,
+    },
 }
 
 impl DaemonEvent {
@@ -174,6 +230,32 @@ pub enum DaemonCommand {
     SetAppPaused {
         bundle_id: String,
         paused: Option<bool>,
+    },
+    /// Settings → Models requested a catalog snapshot. Daemon
+    /// responds with [`DaemonEvent::ModelsList`].
+    ListModels,
+    /// Begin downloading `model_id`. Idempotent — already-downloaded
+    /// or in-progress IDs are no-ops. Progress events stream on the
+    /// `ModelDownload*` channel until completion or cancel.
+    DownloadModel {
+        model_id: String,
+    },
+    /// Cancel an in-flight download. Partial file is kept so the next
+    /// `DownloadModel` for the same id resumes.
+    CancelModelDownload {
+        model_id: String,
+    },
+    /// Remove a downloaded model from disk.
+    DeleteModel {
+        model_id: String,
+    },
+    /// Switch the active STT backend. `backend` is the canonical wire
+    /// form parsed by
+    /// [`crate::stt_dispatch::TranscriberBackendChoice`] — `groq` or
+    /// `local:<model_id>`. Daemon emits
+    /// [`DaemonEvent::ActiveTranscriberChanged`] on success.
+    SetActiveTranscriber {
+        backend: String,
     },
 }
 

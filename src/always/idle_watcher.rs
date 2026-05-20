@@ -7,8 +7,9 @@
 //! 1. If the daemon is currently paused for an *idle* reason and voice
 //!    came back somehow (e.g. user toggled resume manually), clear the
 //!    idle-auto-paused flag without touching the pause state.
-//! 2. If the daemon is *not* paused and the gap since the last voice
-//!    event exceeds `idle_pause_secs`, set `paused = true`, broadcast
+//! 2. If the daemon is *not* already idle-paused or master-paused and
+//!    the gap since the last voice event exceeds `idle_pause_secs`, set
+//!    the idle flag (not MASTER), recompute effective pause, broadcast
 //!    `IdleAutoPaused`, and write a log line. If idle_pause_action is
 //!    `PauseAndMute`, also set `muted = true`.
 //!
@@ -34,26 +35,22 @@ pub fn spawn(rt: &Handle, idle_pause_secs: u32, idle_pause_action: IdlePauseActi
             tokio::time::sleep(CHECK_INTERVAL).await;
 
             let elapsed = pause::since_last_voice();
-            // Gate on MASTER, not effective. If master is already set
-            // (user manually paused or a previous idle fire) there's
-            // nothing to do. Gating on effective would skip the idle
-            // fire whenever the focused app's per-app rule already
-            // paused it — but we still want to flip MASTER so a later
-            // app switch can't accidentally un-pause the daemon.
-            let already_master_paused = pause::is_master_paused();
-
-            if !already_master_paused && elapsed >= threshold {
+            // Idle pause is separate from MASTER so switching to an
+            // allowlisted app or speaking again can resume without the
+            // user hunting for a global "lift pause" toggle.
+            if !pause::is_master_paused()
+                && !pause::is_idle_auto_paused()
+                && elapsed >= threshold
+            {
                 pause::set_idle_auto_paused(true);
-                let (effective, changed) = pause::set_paused(true);
+                let (effective, changed) = pause::recompute_effective();
 
-                // Apply idle_pause_action: if pause_and_mute, also set muted
                 if idle_pause_action == IdlePauseAction::PauseAndMute {
                     pause::set_muted(true);
                 }
 
                 let secs = elapsed.as_secs() as u32;
                 global_broadcaster().idle_auto_paused(secs);
-                global_broadcaster().master_pause_changed(true);
                 if changed {
                     pause::dictation_buffer_clear();
                     global_broadcaster().paused();

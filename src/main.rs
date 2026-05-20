@@ -103,6 +103,17 @@ enum Commands {
     TogglePause,
     /// Toggle auto-enter state
     ToggleAutoEnter,
+    /// Reset macOS menu bar / Control Center cache for Always
+    MenuBar {
+        #[command(subcommand)]
+        action: MenuBarAction,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum MenuBarAction {
+    /// Delete Control Center displayablemenuextras registry and stale NSStatusItem keys
+    Reset,
 }
 
 #[derive(Subcommand)]
@@ -208,6 +219,9 @@ fn main() -> Result<()> {
         Some(Commands::TogglePause) => handle_toggle_pause(),
         Some(Commands::ToggleAutoEnter) => handle_toggle_auto_enter(),
         Some(Commands::Logs { args }) => cli::handle_logs(args),
+        Some(Commands::MenuBar { action }) => match action {
+            MenuBarAction::Reset => cli::menu_bar::reset(),
+        },
         None => {
             eprintln!("always: always-on voice activation daemon");
             eprintln!("Usage: always <COMMAND>");
@@ -225,6 +239,7 @@ fn main() -> Result<()> {
             eprintln!("  toggle-pause      Toggle pause/resume state");
             eprintln!("  toggle-auto-enter Toggle auto-enter state");
             eprintln!("  logs              View and manage Always logs");
+            eprintln!("  menu-bar reset    Clear macOS menu bar cache for Always");
             eprintln!();
             eprintln!("Use 'always <COMMAND> --help' for more information on a command.");
             Ok(())

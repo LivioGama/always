@@ -2,9 +2,6 @@ import SwiftUI
 import AppKit
 import ApplicationServices
 import AVFoundation
-import Combine
-import os.log
-
 @main
 struct Always: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -20,32 +17,45 @@ struct Always: App {
         Window("Always Settings", id: "settings") {
             SettingsWindow(cliService: CLIService())
         }
-        // `.contentSize` makes the window grow to exactly fit its SwiftUI
-        // content and disables manual resize handles. The settings view
-        // is laid out to fit on a 14" laptop without any scrolling.
-        .windowResizability(.contentSize)
-        .commandsRemoved()
+        // Explicit size — `.contentSize` under-reports height on macOS 26
+        // (MenuBarExtra host), which left Settings clipped after Models.
+        .defaultSize(
+            width: SettingsWindowMetrics.width,
+            height: SettingsWindowMetrics.height
+        )
+        .windowResizability(.automatic)
+        .commands {
+            CommandGroup(replacing: .appTermination) {
+                Button("Quit Always") {
+                    AppDelegate.userInitiatedQuit = true
+                    NSApp.terminate(nil)
+                }
+                .keyboardShortcut("q")
+            }
+        }
 
         Window("Welcome to Always", id: "onboarding") {
             OnboardingView()
         }
         .defaultSize(width: 500, height: 400)
+
+        // Single menu bar entry — MenuBarExtra only (no NSStatusItem duplicate).
+        MenuBarExtra {
+            MenuBarView()
+        } label: {
+            MenuBarStatusLabel()
+        }
+        .menuBarExtraStyle(.menu)
     }
     
     init() {
-        // CRITICAL — start as `.accessory` so the status item registers
-        // correctly. Switching to `.regular` synchronously here is a
-        // confirmed macOS Tahoe 26 bug (Stats #3120, Maccy #1224, Ice
-        // #711, AeroSpace #1968, Apple Forums 650270): the status item
-        // gets created in com.apple.controlcenter.statusitems but never
-        // renders in the visible menu bar. The AppDelegate upgrades the
-        // policy to `.regular` asynchronously AFTER the status item is
-        // installed, so we still get the Dock running-dot.
-        NSApplication.shared.setActivationPolicy(.accessory)
-        // Refuse sudden/auto termination at the framework level too —
-        // belt-and-suspenders alongside the Info.plist keys.
-        ProcessInfo.processInfo.disableSuddenTermination()
-        ProcessInfo.processInfo.disableAutomaticTermination("Always must keep its status bar item alive")
+        // Dock icon + MenuBarExtra: reachable Settings when Control Center
+        // hides the status item. Keep-alive window prevents silent exit.
+        NSApplication.shared.setActivationPolicy(.regular)
+        // Do NOT call disableAutomaticTermination here — it blocks Dock Quit / Cmd+Q
+        // until enableAutomaticTermination is called, and the keep-alive window plus
+        // applicationShouldTerminateAfterLastWindowClosed(false) already prevent the
+        // macOS 26 silent-exit bug.
 
         // Inject onboarding state into AppDelegate. SwiftUI guarantees that
         // by the time `init()` runs, `@NSApplicationDelegateAdaptor` has
@@ -87,44 +97,31 @@ class OnboardingState: ObservableObject {
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var cliService: CLIService?
     private var onboardingState: OnboardingState?
-    /// Set true by the Quit menu item so we know a termination request is
-    /// user-initiated and should be honored. Anything else (system idle
-    /// reaper, SwiftUI scene lifecycle, etc.) is refused.
+    /// Set by Quit menu / Cmd+Q so termination is honored.
     static var userInitiatedQuit = false
 
-    /// Status bar item — pinned to a strong reference so AppKit doesn't
-    /// dealloc it. macOS 26 broke SwiftUI's MenuBarExtra in subtle ways
-    /// (icon hidden behind notch / Control Center overflow); managing
-    /// the NSStatusItem directly is reliable.
-    private var statusItem: NSStatusItem?
-    /// Popover that hosts the SwiftUI MenuBarView when the icon is clicked.
-    private var menuPopover: NSPopover?
-    /// Monitor that closes the popover when the user clicks outside it.
-    private var popoverDismissMonitor: Any?
-    /// State monitor for updating the status bar icon dynamically.
     private var stateMonitor: StateMonitor?
-    private var cancellables = Set<AnyCancellable>()
-    private let logger = OSLog(subsystem: "com.always.app", category: "status-bar-icon")
+    /// Invisible window that prevents SwiftUI from tearing down the process
+    /// when no Settings window is open (macOS 26 silent exit).
+    private var keepAliveWindow: NSWindow?
+    private var daemonBootstrapTask: Task<Void, Never>?
 
     func setOnboardingState(_ state: OnboardingState) {
         onboardingState = state
     }
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Another Always.app already owns the menu-bar slot — hand focus to it
+        // and exit before we install a second (invisible / orphaned) status item.
+        if !Self.enforceSingleInstance() {
+            exit(0)
+        }
+        installKeepAliveWindow()
+        NSLog("Always: MenuBarExtra installed")
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         cliService = CLIService()
-
-        // Install the status item under .accessory (set in App.init())
-        // and STAY .accessory permanently. Confirmed Tahoe 26 bug: any
-        // later upgrade to .regular leaves the status item un-slotted
-        // in the menu bar so it renders at screen origin (0,0 → bottom
-        // left) instead of the top right. User verified this by
-        // clicking the "invisible" icon and seeing the popover appear
-        // at the bottom-left corner of the screen.
-        //
-        // Trade-off: no Dock icon. Settings WindowGroup still
-        // auto-opens for both .accessory and .regular, so the user
-        // still gets an undeniable visible window on launch.
-        installStatusItem()
 
         // Onboarding gating: if no Groq API key is in the keychain,
         // surface the onboarding window. The scene id "onboarding"
@@ -146,40 +143,50 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         perms.requestMicrophoneIfNeeded()
         perms.requestAccessibilityIfNeeded()
 
-        // Kill any stale daemon from a previous session (crash, force-quit, etc.)
-        // before starting fresh. This prevents the broken-pipe bug where a new
-        // Mac app connects to an old daemon with stale UDS state.
         Self.killStaleDaemon()
 
-        // Bootstrap the singleton — touching .shared lazily creates it,
-        // which connects to the daemon over UDS and wires the overlay
-        // subscription. Without this access nothing else triggers it.
-        let monitor = StateMonitor.shared
-        stateMonitor = monitor
-
-        // System audio output watcher — auto-pauses the daemon when
-        // any app starts producing sound. Idempotent: start() is
-        // safe to call multiple times.
-        AudioOutputMonitor.shared.start(stateMonitor: monitor)
-        // Push the frontmost app's bundle id to the daemon so per-app
-        // settings overlay applies from the first paste.
-        FocusedAppMonitor.shared.start(stateMonitor: monitor)
-
-        // Subscribe to state changes to update the status bar icon
-        setupStatusBarIconUpdates()
-
-        Task {
-            _ = try? await cliService?.startDaemon()
+        let cli = cliService
+        daemonBootstrapTask = Task {
+            do {
+                _ = try await cli?.startDaemon()
+            } catch {
+                NSLog("Always: daemon start failed: \(error.localizedDescription)")
+            }
+            await MainActor.run { [weak self] in
+                let monitor = StateMonitor.shared
+                self?.stateMonitor = monitor
+                monitor.connectToDaemon()
+                AudioOutputMonitor.shared.start(stateMonitor: monitor)
+                FocusedAppMonitor.shared.start(stateMonitor: monitor)
+            }
         }
+    }
 
-        // Force-open Settings on launch so the user has an
-        // undeniable entry point even if the menu-bar item is
-        // hidden by a third-party menu-bar manager or macOS
-        // overflow logic. The Dock icon + Settings window are now
-        // the primary surface; the status item is a bonus.
-        DispatchQueue.main.async {
-            self.openSettingsWindow()
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where url.scheme == "always" {
+            if url.host == "settings" || url.path == "/settings" {
+                openSettingsWindow()
+            }
         }
+    }
+
+    /// 1×1 off-screen window so AppKit keeps the process alive when only
+    /// MenuBarExtra is visible (no Settings window open).
+    private func installKeepAliveWindow() {
+        let window = NSWindow(
+            contentRect: NSRect(x: -20000, y: -20000, width: 1, height: 1),
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
+        window.backgroundColor = .clear
+        window.level = .normal
+        window.collectionBehavior = [.transient, .ignoresCycle]
+        window.orderBack(nil)
+        keepAliveWindow = window
+        NSLog("Always: keep-alive window installed")
     }
 
     /// Open (or focus) the Settings window. Called on launch and
@@ -197,12 +204,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let existing = NSApp.windows.first(where: {
             $0.title == "Always Settings" || $0.identifier?.rawValue == "settings"
         }) {
+            SettingsWindowMetrics.apply(to: existing)
             existing.makeKeyAndOrderFront(nil)
             existing.orderFrontRegardless()
         }
     }
 
-    /// Dock-icon click handler. With `.regular` activation policy,
+    /// Dock-icon click handler (only when activation policy is `.regular`).
     /// clicking the Dock icon while the app has no visible window
     /// fires this — open Settings as the canonical entry point.
     func applicationShouldHandleReopen(
@@ -215,6 +223,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        stateMonitor?.prepareForQuit()
         Self.killStaleDaemon()
     }
 
@@ -229,23 +238,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
-    /// With `.regular` activation policy we don't suffer from the
-    /// SwiftUI MenuBarExtra phantom-terminate bug, so accept legitimate
-    /// quit requests: explicit Quit menu / Cmd+Q from the foreground
-    /// app, plus the userInitiatedQuit flag used by our own menu items.
-    /// Only refuse "ghost" termination requests that arrive with no
-    /// active user event AND no visible window — that pattern is the
-    /// macOS idle reaper trying to kill a backgrounded app.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if Self.userInitiatedQuit {
             return .terminateNow
         }
-        // User-driven quit (Cmd+Q, menu, Dock right-click → Quit) always
-        // arrives with a current event. Honor it.
         if NSApp.currentEvent != nil {
             return .terminateNow
         }
-        // System idle reaper: no event, no visible window — refuse.
         let visibleWindows = NSApp.windows.contains { $0.isVisible }
         if !visibleWindows {
             NSLog("Always: refusing background terminate (no event, no window)")
@@ -254,133 +253,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateNow
     }
 
-    /// Create the NSStatusItem and wire up the click handler that toggles
-    /// the MenuBarView popover.
-    ///
-    /// Kept deliberately minimal. Standard status-bar apps (Slack,
-    /// Discord, Zoom) use the bare-bones recipe below and stay visible
-    /// reliably when a third-party menu bar manager is not hiding them.
-    private func installStatusItem() {
-        // variableLength per the Tahoe 26 research: fixed lengths
-        // (60, squareLength) are more frequently dropped by ControlCenter
-        // on 26.x — Stats devs flagged the same issue.
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = item.button {
-            // Initial icon is the listening/armed default; the Combine
-            // subscription in setupStatusBarIconUpdates() will swap it
-            // to the correct state-aware symbol once StateMonitor emits.
-            let symbol = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Always")
-            symbol?.isTemplate = true
-            button.image = symbol
-            button.imagePosition = .imageOnly
-            button.title = ""
-            button.toolTip = "Always — voice activation"
-            button.target = self
-            button.action = #selector(statusItemClicked(_:))
-            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        }
-        item.isVisible = true
-        statusItem = item
-        os_log("status item installed (length=%{public}d visible=%{public}@)",
-               log: logger, type: .info, item.length, String(describing: item.isVisible))
+    /// If another Always.app is already running, activate it and return false
+    /// so the caller can exit before creating a duplicate menu-bar item.
+    @discardableResult
+    static func enforceSingleInstance() -> Bool {
+        guard let bundleId = Bundle.main.bundleIdentifier else { return true }
+        let myPid = ProcessInfo.processInfo.processIdentifier
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
+            .filter { $0.processIdentifier != myPid }
+        guard let existing = others.first else { return true }
 
-        // Pre-build the popover. NSHostingController hosts SwiftUI content.
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.contentSize = NSSize(width: 240, height: 320)
-        popover.contentViewController = NSHostingController(rootView: MenuBarView())
-        menuPopover = popover
+        NSLog("Always: another instance is running (pid %d) — activating it and exiting",
+              existing.processIdentifier)
+        existing.activate(options: [.activateAllWindows])
+        return false
     }
 
-    /// Subscribe to StateMonitor changes to update the status bar icon
-    /// dynamically. Match the canonical Tahoe-working pattern (MeetingBar,
-    /// TahoeMenuDemo, HelloStatus): subscribe ONCE via Combine, update
-    /// the image ONLY when state actually changes via `removeDuplicates`.
-    /// NO periodic timer, NO force-update DispatchQueue.asyncAfter, NO
-    /// `isVisible` toggling. Those were the bug — Tahoe 26 interprets
-    /// each as a state change and re-runs the menu-bar slot allocation,
-    /// which never converges. Proven by the minimal HELLO test app
-    /// rendering correctly while Always didn't.
-    private func setupStatusBarIconUpdates() {
-        guard let monitor = stateMonitor else { return }
-        // Fold all four state inputs into the SF Symbol name and dedupe on
-        // that. Critical for the Tahoe 26 slot-churn fix — we MUST NOT
-        // touch button.image unless the resolved icon actually changed.
-        // Mapping many bool transitions to a single string and applying
-        // `removeDuplicates` collapses redundant signals (e.g. transcribing
-        // ticks while paused still resolves to "pause.circle.fill") into a
-        // single assignment.
-        Publishers.CombineLatest4(
-            monitor.$isDaemonConnected,
-            monitor.$isPaused,
-            monitor.$isDaemonDegraded,
-            monitor.$isTranscribing
-        )
-        .map { isConnected, isPaused, isDegraded, isTranscribing in
-            StatusIconResolver.symbolName(
-                isConnected: isConnected,
-                isDegraded: isDegraded,
-                isPaused: isPaused,
-                isTranscribing: isTranscribing
-            )
-        }
-        .removeDuplicates()
-        .receive(on: DispatchQueue.main)
-        .sink { [weak self] iconName in
-            self?.applyStatusBarIcon(named: iconName)
-        }
-        .store(in: &cancellables)
-    }
-
-    /// Apply a resolved SF Symbol name to the status bar button. Strictly
-    /// minimal, matching the MeetingBar / TahoeMenuDemo / HelloStatus
-    /// pattern: just assign the image. Don't touch `isVisible`,
-    /// `needsDisplay`, `layout()`, `window.update()` — Tahoe 26 treats
-    /// each as a state change and re-runs slot allocation which never
-    /// settles. Dedup is enforced upstream in `setupStatusBarIconUpdates`
-    /// (Combine `removeDuplicates` on the resolved name), so by the time
-    /// we land here the icon really has changed.
-    private func applyStatusBarIcon(named iconName: String) {
-        guard let button = statusItem?.button else { return }
-        let image = NSImage(systemSymbolName: iconName, accessibilityDescription: "Always")
-        image?.isTemplate = true
-        button.image = image
-    }
-    @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
-        guard let popover = menuPopover else { return }
-        if popover.isShown {
-            popover.performClose(nil)
-            removeDismissMonitor()
-        } else {
-            popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
-            // Auto-close when the user clicks outside the popover.
-            popoverDismissMonitor = NSEvent.addGlobalMonitorForEvents(
-                matching: [.leftMouseDown, .rightMouseDown]
-            ) { [weak self] _ in
-                self?.menuPopover?.performClose(nil)
-                self?.removeDismissMonitor()
-            }
-        }
-    }
-
-    private func removeDismissMonitor() {
-        if let monitor = popoverDismissMonitor {
-            NSEvent.removeMonitor(monitor)
-            popoverDismissMonitor = nil
-        }
-    }
-
-    /// Read the daemon PID file and send SIGTERM. Synchronous so it works
-    /// in applicationWillTerminate (no time for async). Also removes the
-    /// PID file so the next launch sees a clean slate.
-    ///
-    /// Belt-and-suspenders: after the PID-file-based kill, also sweep
-    /// any process whose argv matches the daemon path in the app bundle
-    /// ("MacOS/always run"). This catches orphans whose pid file was
-    /// deleted (e.g. user manually rm'd it) but whose process is still
-    /// alive holding the mic + UDS socket. The path-anchored pattern
-    /// avoids matching unrelated commands that happen to contain
-    /// "always run" in their argv.
+    /// Read the daemon PID file and send SIGTERM. Also sweeps bundled
+    /// `always-daemon run` orphans and removes pid + socket files.
     static func killStaleDaemon() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let pidPath = home
@@ -388,16 +278,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .path
 
         if let pidString = try? String(contentsOfFile: pidPath, encoding: .utf8)
-                .trimmingCharacters(in: .whitespacesAndNewlines),
+            .trimmingCharacters(in: .whitespacesAndNewlines),
            let pid = pid_t(pidString),
            kill(pid, 0) == 0 {
             kill(pid, SIGTERM)
-            // Give it up to 2s to clean up, polling every 50ms. The
-            // daemon's signal handler removes pid + socket files
-            // before exiting, so we want to wait for that — yanking
-            // it with SIGKILL too fast leaves stale files.
             for _ in 0..<40 {
-                usleep(50_000) // 50ms
+                usleep(50_000)
                 if kill(pid, 0) != 0 { break }
             }
             if kill(pid, 0) == 0 {
@@ -406,21 +292,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Remove PID file regardless — it's stale either way
         try? FileManager.default.removeItem(atPath: pidPath)
 
-        // Belt-and-suspenders pkill in case pid file was missing or
-        // stale-but-the-process-is-actually-elsewhere.
         let pkill = Process()
         pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        pkill.arguments = ["-TERM", "-f", "MacOS/always run"]
+        pkill.arguments = ["-TERM", "-f", "always-daemon run"]
         pkill.standardOutput = FileHandle.nullDevice
         pkill.standardError = FileHandle.nullDevice
         try? pkill.run()
         pkill.waitUntilExit()
         usleep(200_000)
 
-        // Remove socket file so daemon starts with clean socket
         let sockPath = home
             .appendingPathComponent("Library/Caches/Always/always.sock")
             .path

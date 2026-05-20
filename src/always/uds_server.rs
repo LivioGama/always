@@ -1,13 +1,33 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
+use super::AlwaysConfig;
 use super::event::{DaemonCommand, DaemonEvent, global_broadcaster};
+use super::event_loop::ActiveTranscriber;
 use super::pause;
+use crate::managers::model_registry::{ModelEvent, ModelRegistry};
+use crate::stt_dispatch::{TranscriberBackendChoice, build_transcriber};
+
+/// Everything `execute_command` needs to handle the new
+/// `models.*` commands. Bundled into a single struct so we don't grow
+/// a 5-argument function signature every time we add a stateful
+/// command. Cloned per call — all fields are cheap to clone.
+#[derive(Clone)]
+struct ModelCommandCtx {
+    registry: ModelRegistry,
+    active: ActiveTranscriber,
+    /// Snapshot of the daemon's config taken at startup. Used to
+    /// rebuild the transcriber when the user swaps the active model —
+    /// only `transcriber_backend` is mutated per call, everything else
+    /// (lang, API key, etc.) carries over.
+    cfg: Arc<AlwaysConfig>,
+}
 
 // DoS protection constants
 const MAX_COMMAND_LINE_LENGTH: usize = 1024; // 1KB max command size
@@ -116,12 +136,38 @@ pub fn socket_path() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Start the Unix Domain Socket server
-pub async fn start_server() -> Result<()> {
+/// Start the Unix Domain Socket server.
+///
+/// Takes the model registry and the active-transcriber lock so the
+/// `models.*` commands can mutate them and the `ModelRegistry::subscribe`
+/// channel can be bridged into the global event broadcaster.
+pub async fn start_server(
+    registry: ModelRegistry,
+    active: ActiveTranscriber,
+    cfg: Arc<AlwaysConfig>,
+) -> Result<()> {
+    // Bridge registry events → global daemon broadcaster so every
+    // connected UDS client sees download/extract/verify progress on
+    // the same channel as the rest of the daemon's events.
+    spawn_registry_event_bridge(registry.clone());
+
+    let ctx = ModelCommandCtx {
+        registry,
+        active,
+        cfg,
+    };
+
     let socket_path = socket_path()?;
 
-    // Remove existing socket file if it exists
+    // Do not unlink a live socket — a second daemon would otherwise bind a
+    // new path while the first keeps the mic (duplicate transcripts).
     if socket_path.exists() {
+        if crate::always::daemon::socket_is_live(&socket_path) {
+            anyhow::bail!(
+                "UDS socket {} is already in use — another always daemon is running",
+                socket_path.display()
+            );
+        }
         std::fs::remove_file(&socket_path)?;
     }
 
@@ -178,8 +224,9 @@ pub async fn start_server() -> Result<()> {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    let _ = handle_client(stream).await;
+                    let _ = handle_client(stream, ctx).await;
                 });
             }
             Err(e) => {
@@ -189,8 +236,70 @@ pub async fn start_server() -> Result<()> {
     }
 }
 
+/// Subscribe to the registry's `ModelEvent` channel and re-emit each
+/// event on the global daemon broadcaster. Spawned once per server
+/// start; lives for the daemon's lifetime.
+fn spawn_registry_event_bridge(registry: ModelRegistry) {
+    tokio::spawn(async move {
+        let mut rx = registry.subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    let daemon_ev = match ev {
+                        ModelEvent::DownloadProgress(p) => DaemonEvent::ModelDownloadProgress {
+                            model_id: p.model_id,
+                            downloaded: p.downloaded,
+                            total: p.total,
+                            percentage: p.percentage,
+                        },
+                        ModelEvent::DownloadComplete { model_id } => {
+                            DaemonEvent::ModelDownloadComplete { model_id }
+                        }
+                        ModelEvent::DownloadCancelled { model_id } => {
+                            DaemonEvent::ModelDownloadCancelled { model_id }
+                        }
+                        ModelEvent::DownloadFailed { model_id, error } => {
+                            DaemonEvent::ModelDownloadFailed { model_id, error }
+                        }
+                        ModelEvent::VerificationStarted { model_id } => {
+                            DaemonEvent::ModelVerificationStarted { model_id }
+                        }
+                        ModelEvent::VerificationCompleted { model_id } => {
+                            DaemonEvent::ModelVerificationCompleted { model_id }
+                        }
+                        ModelEvent::ExtractionStarted { model_id } => {
+                            DaemonEvent::ModelExtractionStarted { model_id }
+                        }
+                        ModelEvent::ExtractionCompleted { model_id } => {
+                            DaemonEvent::ModelExtractionCompleted { model_id }
+                        }
+                        ModelEvent::ExtractionFailed { model_id, error } => {
+                            DaemonEvent::ModelExtractionFailed { model_id, error }
+                        }
+                        ModelEvent::ActiveChanged { model_id } => {
+                            let backend = match model_id {
+                                Some(id) => format!("local:{id}"),
+                                None => "groq".to_string(),
+                            };
+                            DaemonEvent::ActiveTranscriberChanged { backend }
+                        }
+                    };
+                    global_broadcaster().send(daemon_ev);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(skipped, "registry_event_bridge_lagged");
+                    // Re-sync clients by pushing a fresh catalog snapshot —
+                    // they may have missed a `ModelsList` mutation event.
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 /// Handle a single client connection
-async fn handle_client(stream: UnixStream) -> Result<()> {
+async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     CONNECTED_CLIENTS.fetch_add(1, Ordering::Relaxed);
     let _guard = ClientGuard;
     tracing::info!(
@@ -251,6 +360,7 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
     // Read commands from the client in a separate task. Each line is a JSON
     // DaemonCommand. Executing them here (inside the daemon process) is what
     // makes the resulting events reach all UDS subscribers.
+    let ctx_for_reader = ctx.clone();
     tokio::spawn(async move {
         let mut reader = reader;
         let mut line = String::new();
@@ -281,7 +391,7 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
                     }
 
                     match DaemonCommand::from_json_line(trimmed) {
-                        Ok(cmd) => execute_command(cmd),
+                        Ok(cmd) => execute_command(cmd, &ctx_for_reader),
                         Err(e) => {
                             tracing::error!(error = %e, "uds_parse_command_failed: {command}", command = trimmed)
                         }
@@ -319,7 +429,7 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
     Ok(())
 }
 
-fn execute_command(cmd: DaemonCommand) {
+fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
     match cmd {
         DaemonCommand::TogglePause => {
             // toggle_pause flips MASTER and returns (effective, changed).
@@ -390,6 +500,17 @@ fn execute_command(cmd: DaemonCommand) {
             }
         }
         DaemonCommand::NotifyFocusedAppChanged { bundle_id } => {
+            // Returning to an allowlisted app after idle auto-pause should
+            // resume listening without requiring a global master unpause.
+            if pause::is_idle_auto_paused()
+                && bundle_id
+                    .as_deref()
+                    .is_some_and(crate::always::per_app::is_app_resumed)
+            {
+                pause::set_idle_auto_paused(false);
+                pause::mark_voice_seen();
+                global_broadcaster().idle_auto_resumed();
+            }
             // Update focused app + recompute effective in one step.
             // Effective may flip because per-app rules differ between
             // the previous and new bundle; broadcast on change so the
@@ -483,6 +604,83 @@ fn execute_command(cmd: DaemonCommand) {
         }
         DaemonCommand::LogCorrection { intended } => {
             handle_log_correction(&intended);
+        }
+        DaemonCommand::ListModels => {
+            let models = ctx.registry.list();
+            global_broadcaster().send(DaemonEvent::ModelsList { models });
+        }
+        DaemonCommand::DownloadModel { model_id } => {
+            let registry = ctx.registry.clone();
+            let id_for_log = model_id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = registry.download(&model_id).await {
+                    tracing::error!(model = %model_id, error = %e, "model_download_failed");
+                }
+                // Push a fresh catalog snapshot so clients see the
+                // updated `is_downloaded` flag without polling.
+                let models = registry.list();
+                global_broadcaster().send(DaemonEvent::ModelsList { models });
+            });
+            tracing::info!(model = %id_for_log, "uds_download_model");
+        }
+        DaemonCommand::CancelModelDownload { model_id } => {
+            ctx.registry.cancel_download(&model_id);
+            tracing::info!(model = %model_id, "uds_cancel_model_download");
+        }
+        DaemonCommand::DeleteModel { model_id } => {
+            match ctx.registry.delete(&model_id) {
+                Ok(()) => {
+                    // If the deleted model was active, fall back to Groq.
+                    let was_active = matches!(
+                        &ctx.cfg.transcriber_backend,
+                        TranscriberBackendChoice::Local { model_id: active_id }
+                            if active_id == &model_id
+                    );
+                    if was_active {
+                        switch_active_backend(ctx, TranscriberBackendChoice::Groq);
+                    }
+                    let models = ctx.registry.list();
+                    global_broadcaster().send(DaemonEvent::ModelsList { models });
+                    tracing::info!(model = %model_id, was_active, "uds_delete_model");
+                }
+                Err(e) => tracing::error!(model = %model_id, error = %e, "uds_delete_model_failed"),
+            }
+        }
+        DaemonCommand::SetActiveTranscriber { backend } => match backend.parse() {
+            Ok(choice) => {
+                switch_active_backend(ctx, choice);
+            }
+            Err(e) => tracing::error!(error = %e, backend, "uds_set_active_invalid"),
+        },
+    }
+}
+
+/// Rebuild the [`crate::stt::Transcriber`] for `choice`, swap it into
+/// the [`ActiveTranscriber`] lock, persist the selection to the prefs
+/// DB, and emit [`DaemonEvent::ActiveTranscriberChanged`] so connected
+/// UDS clients refresh their active-model badge.
+fn switch_active_backend(ctx: &ModelCommandCtx, choice: TranscriberBackendChoice) {
+    let mut new_cfg = AlwaysConfig::clone(&ctx.cfg);
+    new_cfg.transcriber_backend = choice.clone();
+    match build_transcriber(&new_cfg, &ctx.registry) {
+        Ok(transcriber) => {
+            *ctx.active.write() = transcriber;
+            // Persist so the next daemon start uses the same choice.
+            if let Ok(conn) = crate::db::open() {
+                let value = choice.to_string();
+                if let Err(e) =
+                    crate::db::set_preference(&conn, "transcriber_backend", &value)
+                {
+                    tracing::warn!(error = %e, "persist_transcriber_backend_failed");
+                }
+            }
+            global_broadcaster().send(DaemonEvent::ActiveTranscriberChanged {
+                backend: choice.to_string(),
+            });
+            tracing::info!(backend = %choice, "uds_set_active_transcriber");
+        }
+        Err(e) => {
+            tracing::error!(backend = %choice, error = %e, "build_new_transcriber_failed");
         }
     }
 }

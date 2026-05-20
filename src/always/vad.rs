@@ -2,13 +2,14 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use voice_activity_detector::VoiceActivityDetector;
 
 use crate::always::audio::{self, FRAME_BYTES, FRAME_MS, FRAME_SAMPLES};
 use crate::always::config::AlwaysConfig;
 use crate::always::event;
 use crate::always::log::{Event, Logger};
 use crate::always::pause;
+use crate::always::vad_silero::SileroVad;
+use crate::stt::Transcriber;
 
 /// Speculative transcription result, populated by a background thread.
 type SpeculationSlot = Arc<Mutex<Option<Result<crate::stt::TranscriptionResult>>>>;
@@ -29,8 +30,35 @@ pub enum RecordResult {
     Timeout,
 }
 
-pub fn record_utterance(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordResult> {
-    record_with_local_vad(cfg, log)
+pub fn record_utterance(
+    cfg: &AlwaysConfig,
+    log: &mut Logger,
+    transcriber: &Arc<dyn Transcriber>,
+) -> Result<RecordResult> {
+    record_with_local_vad(cfg, log, transcriber)
+}
+
+/// Single-frame energy probe used while idle-paused so the user can wake
+/// listening by speaking without manually lifting pause.
+pub fn poll_speech_energy(cfg: &AlwaysConfig) -> Result<bool> {
+    let recorder_arc = audio::RecChild::get_or_spawn()?;
+    let mut frame_buf = [0u8; FRAME_BYTES];
+    let read = {
+        let mut recorder = recorder_arc.lock();
+        let rec = recorder
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Audio recorder not available"))?;
+        rec.read_frame(&mut frame_buf)?
+    };
+    if read < FRAME_BYTES {
+        return Ok(false);
+    }
+    let mut sample_buf = [0i16; FRAME_SAMPLES];
+    for (i, chunk) in frame_buf.chunks_exact(2).enumerate() {
+        sample_buf[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
+    }
+    let energy = normalized_energy(&sample_buf[..]);
+    Ok(energy >= cfg.energy_threshold * 0.5)
 }
 
 /// Speech shorter than this is treated as a "short utterance" and gets
@@ -41,14 +69,18 @@ pub fn record_utterance(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordRe
 /// mid-thought.
 const SHORT_SPEECH_MS: u32 = 400;
 /// Silence-after-speech window for short utterances. Standard window
-/// is `cfg.silence_secs` (1.5s default); for a short utterance we cut
+/// is `cfg.silence_secs` (2.0s default); for a short utterance we cut
 /// at 900ms so single words still paste in ~1.2s but the user gets
 /// real headroom for natural mid-thought micropauses before the cut
 /// fires. 700ms was still too aggressive — users reported mid-sentence
 /// pastes during normal dictation.
 const SHORT_SILENCE_MS: u32 = 900;
 
-fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordResult> {
+fn record_with_local_vad(
+    cfg: &AlwaysConfig,
+    log: &mut Logger,
+    transcriber: &Arc<dyn Transcriber>,
+) -> Result<RecordResult> {
     let silence_frames = ((cfg.silence_secs * 1000.0) / FRAME_MS as f64).ceil() as usize;
     // Two distinct timeouts:
     // - `max_pre_voice_frames`: hard cap on the initial wait for voice
@@ -77,25 +109,21 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     // - At final, if speculation is still valid (no resume), use its result —
     //   transcription has been running in parallel during the silence wait, so
     //   the user gets snappy paste with no extra latency cost.
-    // Tentative at 60% of final window. With the energy-anchored
-    // is_speech check, the silence count no longer triggers on soft
-    // trailing speech, so the 85% safety margin is overkill —
-    // speculation that turns out wrong is silently discarded and only
-    // costs one Groq call. Pushing tentative earlier shaves ~600ms off
-    // perceived end-of-utterance latency for the common case where the
-    // user actually did stop.
-    let tentative_silence_secs = (cfg.silence_secs * 0.60).clamp(0.5, 2.0);
+    // Tentative at 50% of final window — starts Whisper while the user
+    // is still in the trailing-silence wait, but we still require the
+    // full `silence_secs` of quiet before finalizing. Wrong guesses are
+    // discarded if speech resumes. 50% (vs 60%) saves ~200ms on a 2.0s
+    // silence budget without cutting the hard silence limit short.
+    let tentative_silence_secs = (cfg.silence_secs * 0.50).clamp(0.4, 1.8);
     let tentative_silence_frames =
         ((tentative_silence_secs * 1000.0) / FRAME_MS as f64).ceil() as usize;
     // Pre-buffer: keep 200ms of audio before speech detection to catch first words.
     // 50ms was too short — first syllable of "Run the program" was dropped. 200ms
     // gives enough headroom for VAD onset latency without bloating speech_samples.
     let pre_buffer_frames = (200 / FRAME_MS as usize).max(1);
-    let mut vad = VoiceActivityDetector::builder()
-        .sample_rate(16000_i64)
-        .chunk_size(512_usize)
-        .build()
-        .context("failed to build Silero VAD")?;
+    // Silero VAD via vad-rs. Frame size is locked to FRAME_SAMPLES (480 = 30ms @ 16kHz);
+    // the wrapper enforces this and converts i16 → f32 internally.
+    let vad = SileroVad::new().context("failed to load Silero VAD")?;
     let speech_threshold: f32 = cfg.silero_threshold;
     // Hysteresis: easier to STAY in speech than to ENTER it.
     // Silero's probability naturally dips below 0.5 during voiceless consonants
@@ -105,18 +133,16 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     // natural "thinking" speech with brief breath pauses: trailing soft speech
     // below 0.45 (when speech_threshold=0.5) still keeps the utterance alive.
     let silence_threshold: f32 = speech_threshold * 0.60;
-    let mut vad_accum: Vec<i16> = Vec::with_capacity(1024);
     let mut last_prob: f32 = 0.0;
     // Probability smoothing window. Silero outputs per-512-sample (32ms) chunks;
     // single-frame dips during voiceless consonants (s/f/th/h) or breaths can
     // briefly drop prob below threshold without genuine end-of-utterance.
-    // We track the last 24 readings (~768ms) and use the running max while in
+    // We track the last 20 readings (~640ms) and use the running max while in
     // speech — the prob must stay low for the FULL window to count as silence.
-    // History: 8 frames (~256ms) cut mid-phrase on fricatives; 16 frames
-    // (~512ms) still split connective-phrase dictation ("I want to ...
-    // questions ...") when the user trailed off softly. 24 frames covers
-    // typical thinking-pause dips while only adding ~240ms to cut latency.
-    let smoothing_window: usize = 24;
+    // History: 8 frames cut mid-phrase; 16 still split soft trails; 24 was
+    // safe but added ~240ms vs 16. 20 frames is the compromise: enough for
+    // fricatives/thinking dips without the full 2.5s-era penalty.
+    let smoothing_window: usize = 20;
     let mut prob_history: VecDeque<f32> = VecDeque::with_capacity(smoothing_window);
 
     // Use persistent recorder to avoid process spawning overhead
@@ -131,26 +157,27 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     let mut total_frames = 0usize;
     let mut pre_buffer: VecDeque<Vec<i16>> = VecDeque::with_capacity(pre_buffer_frames);
 
-    // Predictive end-of-speech: count consecutive frames whose RAW energy
-    // is below threshold. Runs independent of Silero/smoothing so the
-    // overlay can flip from "Listening" to "Transcribing" the moment the
-    // user actually goes quiet, not after the full silence wait.
-    // 500ms (17 frames) — long enough to ignore inter-word stop closures
-    // (~100-200ms) but short enough to feel instant on real pauses.
-    let early_overlay_frames = (500 / FRAME_MS as usize).max(1);
-    let mut consecutive_low_energy = 0usize;
-    // Single source of truth for the overlay state. Set true when ANY
-    // of {early-flip, speculation kickoff, final cut} fires, false when
-    // voice resumes mid-silence. Events are only sent on transitions —
-    // no spam, no flicker. (`allow(unused_assignments)` covers the
-    // terminal flips that happen right before function return.)
-    #[allow(unused_assignments)]
+    // Single source of truth for the overlay state. Flips to Transcribing
+    // at speculative STT kickoff (~60% of silence_secs), not on a early
+    // energy dip — that mismatch made paste feel ~2s slower than the UI.
+    // Final cut also guarantees the state. Resume mid-silence flips back.
+    // (`allow(unused_assignments)` covers terminal flips before return.)
     let mut transcribing_overlay = false;
     // Helper: flip overlay to transcribing if not already.
+    // The `#[allow(unused_assignments)]` covers terminal flips that
+    // happen on the final iteration of the loop: the assignment is
+    // observable by *subsequent* macro calls (which is exactly what
+    // makes it correct), but on the last invocation before `return`
+    // there's no subsequent reader, so the lint fires at the
+    // expansion site. Scoping the allow into the macro body keeps
+    // the surrounding code under the project-wide `-D warnings` gate.
     macro_rules! flip_to_transcribing {
         () => {{
             if !transcribing_overlay {
-                transcribing_overlay = true;
+                #[allow(unused_assignments)]
+                {
+                    transcribing_overlay = true;
+                }
                 event::global_broadcaster().transcribing_started();
             }
         }};
@@ -158,7 +185,10 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     macro_rules! flip_to_listening {
         () => {{
             if transcribing_overlay {
-                transcribing_overlay = false;
+                #[allow(unused_assignments)]
+                {
+                    transcribing_overlay = false;
+                }
                 event::global_broadcaster().transcribing_stopped();
             }
         }};
@@ -203,10 +233,12 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
         }
         let samples = &sample_buf[..];
 
-        vad_accum.extend_from_slice(samples);
-        if vad_accum.len() >= 512 {
-            let chunk: Vec<i16> = vad_accum.drain(..512).collect();
-            last_prob = vad.predict(chunk);
+        // One inference per 30ms frame. vad-rs requires exactly 480 samples
+        // (which is what `samples` always is here — see FRAME_SAMPLES). A
+        // transient inference error keeps the previous probability rather
+        // than mistakenly resetting to 0 and dropping a live utterance.
+        if let Ok(prob) = vad.predict(samples) {
+            last_prob = prob;
             if prob_history.len() >= smoothing_window {
                 prob_history.pop_front();
             }
@@ -238,36 +270,16 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
         } else {
             normalized_energy(samples)
         };
-        // Use 1.5x energy_threshold for the in-speech keepalive: bare-threshold
-        // spikes from keyboard taps, distant traffic, or HVAC kick-on are NOT
-        // user voice and shouldn't latch the utterance open indefinitely.
-        // 1.5x is comfortably below normal speaking RMS (~0.04-0.10) but
-        // well above typical ambient (~0.003-0.010 with HVAC).
-        let energy_above_threshold = frame_energy >= cfg.energy_threshold * 1.5;
+        // Use 2.0x energy_threshold for the in-speech keepalive: 1.5x let
+        // HVAC/keyboard spikes keep `consecutive_silence` from advancing,
+        // stretching the post-speech wait. 2.0x is still below normal speech
+        // RMS (~0.04-0.10) but above typical ambient (~0.003-0.010).
+        let energy_above_threshold = frame_energy >= cfg.energy_threshold * 2.0;
         let is_speech = if in_speech {
             smoothed_max >= silence_threshold || energy_above_threshold
         } else {
             last_prob >= speech_threshold
         };
-
-        // Predictive overlay management — independent of the cut decision.
-        // While in_speech: if raw energy drops below the keep-alive
-        // threshold for `early_overlay_frames`, presume the user paused
-        // and flip overlay to Transcribing immediately. If energy comes
-        // back, flip it back to Listening. The actual cut still waits
-        // for `silence_frames` so the user can resume without losing
-        // audio — only the visual feedback is predictive.
-        if in_speech {
-            if energy_above_threshold {
-                consecutive_low_energy = 0;
-                flip_to_listening!();
-            } else {
-                consecutive_low_energy += 1;
-                if consecutive_low_energy >= early_overlay_frames {
-                    flip_to_transcribing!();
-                }
-            }
-        }
 
         if is_speech {
             // Speech resumed: discard any pending speculation (its audio snapshot
@@ -275,9 +287,8 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
             if speculation_pending {
                 speculation_pending = false;
                 *speculation_slot.lock() = None;
-                // Overlay was likely flipped by speculation kickoff (or
-                // by early-flip already). Either way, user resumed —
-                // flip back. (No-op if it was already listening.)
+                // Overlay was likely flipped by speculation kickoff.
+                // User resumed — flip back. (No-op if already listening.)
                 flip_to_listening!();
             }
             consecutive_speech += 1;
@@ -306,7 +317,14 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
                         // here — that's the one piece upstream didn't
                         // wire and that was leaving us stuck in idle-pause
                         // after the audio-output auto-resume path.
-                        pause::set_idle_auto_paused(false);
+                        if pause::is_idle_auto_paused() {
+                            pause::set_idle_auto_paused(false);
+                            let (effective, changed) = pause::recompute_effective();
+                            if changed && !effective {
+                                event::global_broadcaster().idle_auto_resumed();
+                                event::global_broadcaster().resumed();
+                            }
+                        }
                         // Cancel any in-flight auto-enter countdown — the
                         // user is clearly still speaking. The dictation
                         // buffer is intentionally NOT cleared (cancel
@@ -371,11 +389,10 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
             // hit final silence. If the user resumes, we discard it above.
             if !speculation_pending && consecutive_silence >= eff_tentative_frames {
                 speculation_pending = true;
-                // Make sure overlay is in Transcribing state (idempotent
-                // — early-flip may have already done this).
+                // Overlay → Transcribing when speculative STT starts.
                 flip_to_transcribing!();
                 let audio_snapshot = speech_samples.clone();
-                let api_key = cfg.groq_stt_api_key.clone();
+                let transcriber_for_spec = Arc::clone(transcriber);
                 let slot = Arc::clone(&speculation_slot);
                 std::thread::spawn(move || {
                     // Wrap in catch_unwind: a panic in transcribe_from_bytes
@@ -387,7 +404,8 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
                     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                         || -> Result<crate::stt::TranscriptionResult> {
                             let wav = audio::create_wav_bytes_i16_mono_16k(&audio_snapshot)?;
-                            crate::stt::transcribe_from_bytes(wav, &api_key)
+                            transcriber_for_spec
+                                .transcribe_from_bytes(wav)
                                 .map_err(anyhow::Error::from)
                         },
                     ))
@@ -470,11 +488,7 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
         }
     }
 
-    // Make sure the overlay is in Transcribing state. Idempotent —
-    // early-flip or speculation kickoff almost always already did this,
-    // but the final cut path also needs to guarantee the state for
-    // unusual paths (e.g. utterance ended without ever hitting the
-    // tentative silence window).
+    // Guarantee Transcribing overlay (speculation usually already flipped).
     flip_to_transcribing!();
 
     // Try to use the speculative transcription if it was kicked off and
@@ -493,7 +507,7 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
             if started_wait.elapsed() >= max_wait {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         taken
     } else {
@@ -515,7 +529,7 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
                     return Err(err).context("failed to create WAV data in memory");
                 }
             };
-            match crate::stt::transcribe_from_bytes(wav_data, &cfg.groq_stt_api_key) {
+            match transcriber.transcribe_from_bytes(wav_data) {
                 Ok(result) => {
                     event::global_broadcaster().transcribing_stopped();
                     result

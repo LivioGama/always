@@ -220,9 +220,13 @@ class StatusOverlayView: NSView {
 
         // Frosted backdrop, same material the system volume HUD uses.
         blurView.autoresizingMask = [.width, .height]
-        blurView.material = .hudWindow
-        blurView.blendingMode = .behindWindow
+        // Solid panel — `.hudWindow` vibrancy triggers RenderBox shader failures on
+        // macOS 26 that can prevent the menu-bar status item from rendering at all.
+        blurView.material = .windowBackground
+        blurView.isEmphasized = false
+        blurView.blendingMode = .withinWindow
         blurView.state = .active
+        blurView.alphaValue = 0.92
         blurView.wantsLayer = true
         blurView.layer?.cornerRadius = StatusOverlayView.cornerRadius
         blurView.layer?.masksToBounds = true
@@ -459,9 +463,13 @@ class IdleResumeWidget: NSView {
 
         // Frosted backdrop
         blurView.autoresizingMask = [.width, .height]
-        blurView.material = .hudWindow
-        blurView.blendingMode = .behindWindow
+        // Solid panel — `.hudWindow` vibrancy triggers RenderBox shader failures on
+        // macOS 26 that can prevent the menu-bar status item from rendering at all.
+        blurView.material = .windowBackground
+        blurView.isEmphasized = false
+        blurView.blendingMode = .withinWindow
         blurView.state = .active
+        blurView.alphaValue = 0.92
         blurView.wantsLayer = true
         blurView.layer?.cornerRadius = Self.cornerRadius
         blurView.layer?.masksToBounds = true

@@ -64,6 +64,12 @@ pub fn invalidate_cache() {
     *CACHE.write() = None;
 }
 
+/// Test-only: inject parsed overrides without touching SQLite.
+#[cfg(test)]
+pub fn set_cache_for_test(overrides: AppOverrides) {
+    *CACHE.write() = Some(overrides);
+}
+
 /// Load the JSON overlay from preferences. Returns an empty map on any
 /// failure so callers don't have to special-case missing keys. Cached
 /// after first call.

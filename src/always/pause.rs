@@ -3,9 +3,11 @@
 //! Two-tier pause model (changed 2026-05-17 — allowlist UX):
 //!
 //! - **MASTER_PAUSED** — the user's explicit global force-pause switch.
-//!   Set by `TogglePause`, idle auto-pause, mic-conflict, and audio-output
-//!   monitors. When true, EFFECTIVE is forced to true regardless of
-//!   per-app overrides.
+//!   Set by `TogglePause`, mic-conflict, and audio-output monitors. When
+//!   true, EFFECTIVE is forced to true regardless of per-app overrides.
+//! - **IDLE_AUTO_PAUSED** — watchdog fired after `idle_pause_secs` with no
+//!   voice. Does *not* flip MASTER so focus changes and wake-on-voice can
+//!   resume allowlisted apps without a global "lift pause".
 //! - **EFFECTIVE_PAUSED** — what the audio pipeline gates on. Derived
 //!   from `MASTER_PAUSED || per_app::effective_paused(current_app)`.
 //!   The per-app fallback now defaults to **paused for unlisted apps**,
@@ -42,6 +44,9 @@ pub fn recompute_effective() -> (bool, bool) {
 
 fn compute_effective() -> bool {
     if MASTER_PAUSED.load(Ordering::Relaxed) {
+        return true;
+    }
+    if IDLE_AUTO_PAUSED.load(Ordering::Relaxed) {
         return true;
     }
     crate::always::per_app::effective_paused_for_current_app()
@@ -376,4 +381,72 @@ pub fn dictation_buffer_clear() {
 #[cfg(test)]
 pub fn clear_dictation_buffer_for_test() {
     dictation_buffer_clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::always::per_app::{self, AppOverride, AppOverrides};
+    use std::collections::HashMap;
+
+    fn reset_pause_state_for_test() {
+        MASTER_PAUSED.store(false, Ordering::Relaxed);
+        IDLE_AUTO_PAUSED.store(false, Ordering::Relaxed);
+        EFFECTIVE_PAUSED.store(true, Ordering::Relaxed);
+        *CURRENT_APP.lock() = None;
+        per_app::set_cache_for_test(HashMap::new());
+    }
+
+    #[test]
+    fn effective_paused_when_master_or_idle_or_per_app() {
+        reset_pause_state_for_test();
+        set_current_app(Some("com.example.editor".into()));
+        assert!(recompute_effective().0);
+
+        // Allowlisted app, no master/idle → listening.
+        per_app::set_cache_for_test(HashMap::from([(
+            "com.example.editor".to_string(),
+            AppOverride {
+                paused: Some(false),
+                ..Default::default()
+            },
+        )]));
+        let (eff, changed) = recompute_effective();
+        assert!(!eff);
+        assert!(changed);
+
+        // Idle auto-pause without master.
+        set_idle_auto_paused(true);
+        let (eff, _) = recompute_effective();
+        assert!(eff);
+        assert!(!is_master_paused());
+
+        set_idle_auto_paused(false);
+        recompute_effective();
+
+        // Master still wins over allowlist.
+        let (_, _) = set_paused(true);
+        assert!(is_master_paused());
+        assert!(is_paused());
+    }
+
+    #[test]
+    fn focus_change_recomputes_effective_for_allowlist() {
+        reset_pause_state_for_test();
+        per_app::set_cache_for_test(HashMap::from([(
+            "com.example.editor".to_string(),
+            AppOverride {
+                paused: Some(false),
+                ..Default::default()
+            },
+        )]));
+        set_current_app_and_recompute(Some("com.other.app".into()));
+        assert!(is_paused());
+
+        set_idle_auto_paused(false);
+        let (eff, changed) =
+            set_current_app_and_recompute(Some("com.example.editor".into()));
+        assert!(!eff);
+        assert!(changed);
+    }
 }

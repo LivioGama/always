@@ -219,7 +219,7 @@ struct LoadingIndicatorView: View {
         ZStack {
             // Semi-transparent background
             Circle()
-                .fill(.ultraThinMaterial)
+                .fill(Color.black.opacity(0.55))
                 .frame(width: 36, height: 36)
 
             // Spinning loader

@@ -4,7 +4,6 @@ import os.log
 class CLIService: ObservableObject {
     private let cliPath: String
     private static let logger = Logger(subsystem: "com.always.app", category: "cli-service")
-
     init() {
         // Path to the bundled daemon binary. Named `always-daemon` (not
         // `always`) because macOS APFS is case-insensitive by default — a
@@ -51,8 +50,7 @@ class CLIService: ObservableObject {
     /// that survived a crash or force-quit.
     func restartDaemon() async throws -> String {
         AppDelegate.killStaleDaemon()
-        // Brief pause so the OS reclaims the socket and PID file
-        try await Task.sleep(nanoseconds: 300_000_000) // 300ms
+        try await Task.sleep(nanoseconds: 300_000_000)
         return try await startDaemon()
     }
 

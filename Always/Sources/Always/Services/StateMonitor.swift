@@ -14,6 +14,8 @@ class StateMonitor: ObservableObject {
     /// globally" vs "Pause globally") and to choose whether the "for
     /// this app" allowlist control makes sense.
     @Published var isMasterPaused: Bool = false
+    /// True when the idle watchdog paused listening (distinct from master).
+    @Published var isIdleAutoPaused: Bool = false
     @Published var isAutoEnter: Bool = false
     @Published var isTranscribing: Bool = false
     @Published var isVoiceActivity: Bool = false
@@ -40,10 +42,11 @@ class StateMonitor: ObservableObject {
     }
 
     private init() {
-        self.udsClient = UDSClient()
+        self.udsClient = UDSClient(connectOnInit: false)
         setupUDSEventListener()
         setupOverlaySubscription()
         setupConnectionMonitoring()
+        setupFocusedAppPauseSync()
         logger.info("Initialized with UDSClient and overlay subscription")
 
         // Wire daemon respawn: if UDSClient gives up reconnecting, the daemon
@@ -88,6 +91,17 @@ class StateMonitor: ObservableObject {
         }
     }
     
+    /// Connect after `always-daemon start` has the UDS socket listening.
+    func connectToDaemon() {
+        udsClient.connect()
+    }
+
+    /// Stop UDS reconnect/respawn while the GUI is exiting.
+    func prepareForQuit() {
+        udsClient.shutdownForHostQuit()
+        cancellables.removeAll()
+    }
+
     deinit {
         // `removeAll` cancels and drops every subscription atomically.
         // Using `forEach { $0.cancel() }` left the array populated, so a
@@ -104,11 +118,43 @@ class StateMonitor: ObservableObject {
     /// Updates @Published state and flashes the overlay optimistically so
     /// the UI feels instant. The daemon's echo arrives milliseconds later
     /// and the changed-guard in handleDaemonEvent suppresses the duplicate.
+    /// Toggle the **master** pause flag (not per-app allowlist). The daemon
+    /// recomputes effective pause; we predict locally so the UI matches.
     func togglePause() {
-        let newValue = !isPaused
-        isPaused = newValue
-        StatusOverlayController.shared.flash(state: newValue ? .paused : .resumed)
+        let newMaster = !isMasterPaused
+        isMasterPaused = newMaster
+        if newMaster {
+            isPaused = true
+            isIdleAutoPaused = false
+        } else {
+            isIdleAutoPaused = false
+            applyLocalEffectivePauseState()
+        }
+        StatusOverlayController.shared.flash(state: isPaused ? .paused : .resumed)
         udsClient.sendCommand("TogglePause")
+    }
+
+    /// Predict `isPaused` from master + idle + focused-app allowlist.
+    /// Daemon events remain authoritative; this covers optimistic UI.
+    func applyLocalEffectivePauseState() {
+        if isMasterPaused || isIdleAutoPaused {
+            isPaused = true
+            return
+        }
+        guard let bundle = FocusedAppMonitor.shared.currentBundleId else {
+            isPaused = true
+            return
+        }
+        isPaused = !resumedBundleIds.contains(bundle)
+    }
+
+    private func setupFocusedAppPauseSync() {
+        FocusedAppMonitor.shared.$currentBundleId
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.applyLocalEffectivePauseState()
+            }
+            .store(in: &cancellables)
     }
 
     /// Same as togglePause, for auto-enter.
@@ -155,6 +201,14 @@ class StateMonitor: ObservableObject {
         struct Payload: Encodable {
             let bundle_id: String
             let paused: Bool?
+        }
+        if paused == false {
+            resumedBundleIds.insert(bundleId)
+        } else {
+            resumedBundleIds.remove(bundleId)
+        }
+        if bundleId == FocusedAppMonitor.shared.currentBundleId {
+            applyLocalEffectivePauseState()
         }
         udsClient.sendCommandWithData(
             "SetAppPaused",
@@ -240,8 +294,10 @@ class StateMonitor: ObservableObject {
                 self.isVoiceActivity = false
             case .voiceActivityDetected:
                 self.isVoiceActivity = true
+                NSLog("Always: VoiceActivityDetected → overlay")
             case .voiceActivityEnded:
                 self.isVoiceActivity = false
+                NSLog("Always: VoiceActivityEnded → hide overlay")
             case .transcriptionFiltered:
                 // Transcription was rejected — clear ongoing state and flash
                 // a brief "Filtered" overlay so the user knows the daemon
@@ -297,11 +353,15 @@ class StateMonitor: ObservableObject {
                 StatusOverlayController.shared.hide()
             case .idleAutoPaused:
                 let secs = Int(event.idleAutoPaused?.seconds ?? 0)
+                self.isIdleAutoPaused = true
                 self.isPaused = true
                 StatusOverlayController.shared.showIdleTimeoutAnimation(seconds: secs)
             case .idleAutoResumed:
-                self.isPaused = false
-                StatusOverlayController.shared.flash(state: .resumed)
+                self.isIdleAutoPaused = false
+                self.applyLocalEffectivePauseState()
+                if !self.isPaused {
+                    StatusOverlayController.shared.flash(state: .resumed)
+                }
             case .correctionDialogRequested:
                 let last = event.correctionDialogRequest?.last_transcript ?? ""
                 CorrectionDialog.shared.present(lastTranscript: last) { intended in
@@ -318,10 +378,17 @@ class StateMonitor: ObservableObject {
             case .masterPauseChanged:
                 if let v = event.masterPause?.master_paused {
                     self.isMasterPaused = v
+                    if v {
+                        self.isPaused = true
+                    } else {
+                        self.isIdleAutoPaused = false
+                        self.applyLocalEffectivePauseState()
+                    }
                 }
             case .resumedAppsChanged:
                 if let bundles = event.resumedApps?.bundles {
                     self.resumedBundleIds = Set(bundles)
+                    self.applyLocalEffectivePauseState()
                 }
             default:
                 break

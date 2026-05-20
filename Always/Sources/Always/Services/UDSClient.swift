@@ -6,7 +6,7 @@ import os.log
 // Wire-format protocol version. MUST match `PROTOCOL_VERSION` in
 // `src/always/event.rs`. Bumping either side without the other will
 // cause the client to refuse the connection.
-let UDS_PROTOCOL_VERSION: UInt32 = 3
+let UDS_PROTOCOL_VERSION: UInt32 = 4
 
 // Event types matching Rust DaemonEvent enum
 enum DaemonEventType: String, Codable {
@@ -59,6 +59,19 @@ enum DaemonEventType: String, Codable {
     case resumedAppsChanged = "ResumedAppsChanged"
     // Daemon asks app to show the correction dialog.
     case correctionDialogRequested = "CorrectionDialogRequested"
+    // Local-model registry (v4+). The Models tab subscribes; every
+    // other view ignores them.
+    case modelsList = "ModelsList"
+    case modelDownloadProgress = "ModelDownloadProgress"
+    case modelDownloadComplete = "ModelDownloadComplete"
+    case modelDownloadCancelled = "ModelDownloadCancelled"
+    case modelDownloadFailed = "ModelDownloadFailed"
+    case modelVerificationStarted = "ModelVerificationStarted"
+    case modelVerificationCompleted = "ModelVerificationCompleted"
+    case modelExtractionStarted = "ModelExtractionStarted"
+    case modelExtractionCompleted = "ModelExtractionCompleted"
+    case modelExtractionFailed = "ModelExtractionFailed"
+    case activeTranscriberChanged = "ActiveTranscriberChanged"
 }
 
 // Event data structures
@@ -123,6 +136,17 @@ struct CorrectionDialogRequestedData: Codable {
     let last_transcript: String
 }
 
+// Models-tab payloads. Defined in `Models/ModelInfo.swift`:
+//   - ModelsListData
+//   - ModelDownloadProgressData
+//   - ModelIdData            (used for complete/cancelled/verification*/extraction[Started|Completed])
+//   - ModelErrorData         (used for download_failed / extraction_failed)
+//   - ActiveTranscriberChangedData
+// These are decoded by the per-event switch below into typed fields on
+// `DaemonEvent`. Keeping the structs in `Models/` rather than here
+// avoids growing this 600-line file every time the catalog gains a
+// field.
+
 // Main event structure - matches Rust serde tagged enum format
 // Rust uses #[serde(tag = "type", content = "data")]
 // This produces JSON like: {"type":"ListeningStarted"} or {"type":"TranscriptFinal","data":{"text":"hello"}}
@@ -162,6 +186,20 @@ struct DaemonEvent: Codable {
     /// Populated for `CorrectionDialogRequested`.
     let correctionDialogRequest: CorrectionDialogRequestedData?
 
+    /// Populated only for `ModelsList`. Carries the full catalog
+    /// snapshot the daemon publishes after every mutation.
+    let modelsList: ModelsListData?
+    /// Populated only for `ModelDownloadProgress`.
+    let modelDownloadProgress: ModelDownloadProgressData?
+    /// Populated for the family of single-id model events: complete /
+    /// cancelled / verification / extraction (start+done).
+    let modelId: ModelIdData?
+    /// Populated for `ModelDownloadFailed` / `ModelExtractionFailed`.
+    let modelError: ModelErrorData?
+    /// Populated for `ActiveTranscriberChanged`. `backend` is the
+    /// canonical wire form — `groq` or `local:<model_id>`.
+    let activeTranscriber: ActiveTranscriberChangedData?
+
     enum CodingKeys: String, CodingKey {
         case type
         case data
@@ -183,6 +221,11 @@ struct DaemonEvent: Codable {
         var masterPause: MasterPauseChangedData? = nil
         var resumedApps: ResumedAppsChangedData? = nil
         var correctionDialogRequest: CorrectionDialogRequestedData? = nil
+        var modelsList: ModelsListData? = nil
+        var modelDownloadProgress: ModelDownloadProgressData? = nil
+        var modelId: ModelIdData? = nil
+        var modelError: ModelErrorData? = nil
+        var activeTranscriber: ActiveTranscriberChangedData? = nil
 
         switch type {
         case .hello:
@@ -205,6 +248,18 @@ struct DaemonEvent: Codable {
             resumedApps = try container.decodeIfPresent(ResumedAppsChangedData.self, forKey: .data)
         case .correctionDialogRequested:
             correctionDialogRequest = try container.decodeIfPresent(CorrectionDialogRequestedData.self, forKey: .data)
+        case .modelsList:
+            modelsList = try container.decodeIfPresent(ModelsListData.self, forKey: .data)
+        case .modelDownloadProgress:
+            modelDownloadProgress = try container.decodeIfPresent(ModelDownloadProgressData.self, forKey: .data)
+        case .modelDownloadComplete, .modelDownloadCancelled,
+             .modelVerificationStarted, .modelVerificationCompleted,
+             .modelExtractionStarted, .modelExtractionCompleted:
+            modelId = try container.decodeIfPresent(ModelIdData.self, forKey: .data)
+        case .modelDownloadFailed, .modelExtractionFailed:
+            modelError = try container.decodeIfPresent(ModelErrorData.self, forKey: .data)
+        case .activeTranscriberChanged:
+            activeTranscriber = try container.decodeIfPresent(ActiveTranscriberChangedData.self, forKey: .data)
         default:
             // Fall-through path: text-bearing or empty events. Keep using
             // the loose dict so existing call sites (e.g. transcript chunk
@@ -223,6 +278,11 @@ struct DaemonEvent: Codable {
         self.masterPause = masterPause
         self.resumedApps = resumedApps
         self.correctionDialogRequest = correctionDialogRequest
+        self.modelsList = modelsList
+        self.modelDownloadProgress = modelDownloadProgress
+        self.modelId = modelId
+        self.modelError = modelError
+        self.activeTranscriber = activeTranscriber
     }
 
     func encode(to encoder: Encoder) throws {
@@ -251,6 +311,18 @@ struct DaemonEvent: Codable {
             try container.encodeIfPresent(resumedApps, forKey: .data)
         case .correctionDialogRequested:
             try container.encodeIfPresent(correctionDialogRequest, forKey: .data)
+        case .modelsList:
+            try container.encodeIfPresent(modelsList, forKey: .data)
+        case .modelDownloadProgress:
+            try container.encodeIfPresent(modelDownloadProgress, forKey: .data)
+        case .modelDownloadComplete, .modelDownloadCancelled,
+             .modelVerificationStarted, .modelVerificationCompleted,
+             .modelExtractionStarted, .modelExtractionCompleted:
+            try container.encodeIfPresent(modelId, forKey: .data)
+        case .modelDownloadFailed, .modelExtractionFailed:
+            try container.encodeIfPresent(modelError, forKey: .data)
+        case .activeTranscriberChanged:
+            try container.encodeIfPresent(activeTranscriber, forKey: .data)
         default:
             try container.encodeIfPresent(data, forKey: .data)
         }
@@ -268,7 +340,12 @@ struct DaemonEvent: Codable {
         focusedApp: FocusedAppChangedData? = nil,
         masterPause: MasterPauseChangedData? = nil,
         resumedApps: ResumedAppsChangedData? = nil,
-        correctionDialogRequest: CorrectionDialogRequestedData? = nil
+        correctionDialogRequest: CorrectionDialogRequestedData? = nil,
+        modelsList: ModelsListData? = nil,
+        modelDownloadProgress: ModelDownloadProgressData? = nil,
+        modelId: ModelIdData? = nil,
+        modelError: ModelErrorData? = nil,
+        activeTranscriber: ActiveTranscriberChangedData? = nil
     ) {
         self.type = type
         self.data = data
@@ -282,6 +359,11 @@ struct DaemonEvent: Codable {
         self.masterPause = masterPause
         self.resumedApps = resumedApps
         self.correctionDialogRequest = correctionDialogRequest
+        self.modelsList = modelsList
+        self.modelDownloadProgress = modelDownloadProgress
+        self.modelId = modelId
+        self.modelError = modelError
+        self.activeTranscriber = activeTranscriber
     }
 }
 
@@ -307,6 +389,7 @@ class UDSClient: ObservableObject {
     /// has failed repeatedly. The callback should respawn the daemon
     /// (e.g. via CLIService.startDaemon()).
     var onDaemonNeedsRespawn: (() -> Void)?
+    private var isHostQuitting = false
 
     // Watchdog tuning
     private let watchdogCheckInterval: TimeInterval = 5.0
@@ -352,11 +435,13 @@ class UDSClient: ObservableObject {
         logger.debug("\(message, privacy: .public)")
     }
 
-    init(socketPath: String? = nil) {
+    init(socketPath: String? = nil, connectOnInit: Bool = false) {
         self.socketPath = socketPath ?? UDSClient.defaultSocketPath()
         self.queue = DispatchQueue(label: "com.always.udsclient")
         logger.info("Initializing with socket path: \(self.socketPath)")
-        connect()
+        if connectOnInit {
+            connect()
+        }
     }
     
     deinit {
@@ -439,9 +524,18 @@ class UDSClient: ObservableObject {
         }
     }
 
+    /// GUI is exiting — do not reconnect or request daemon respawn.
+    func shutdownForHostQuit() {
+        isHostQuitting = true
+        onDaemonNeedsRespawn = nil
+        reconnectScheduled = false
+        disconnect()
+    }
+
     private func scheduleReconnect() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            if self.isHostQuitting { return }
             if self.reconnectScheduled { return }
             self.reconnectScheduled = true
             self.reconnectAttempts += 1

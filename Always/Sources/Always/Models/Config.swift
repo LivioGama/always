@@ -66,7 +66,7 @@ struct Config: Codable {
         shortcutCorrectionDialog: "ctrl+alt+w",
         postprocessEnabled: true,
         perAppSettingsJson: nil,
-        idlePauseSecs: 120,
+        idlePauseSecs: 600,
         idlePauseAction: "pause"
     )
 

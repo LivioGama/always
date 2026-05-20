@@ -18,6 +18,12 @@ struct MenuBarView: View {
             return stateMonitor.isDaemonDegraded ? "Reconnecting…" : "Connecting…"
         }
         if stateMonitor.isPaused {
+            if stateMonitor.isMasterPaused {
+                return "Paused everywhere"
+            }
+            if stateMonitor.isIdleAutoPaused {
+                return "Idle pause (speak or switch app)"
+            }
             if let name = focusedApp.currentAppName, !name.isEmpty {
                 return "Paused for \(name)"
             }
@@ -129,9 +135,8 @@ struct MenuBarView: View {
                 systemImage: "power",
                 isDisabled: false,
                 action: {
-                    AppDelegate.killStaleDaemon()
                     AppDelegate.userInitiatedQuit = true
-                    NSApplication.shared.terminate(nil)
+                    NSApp.terminate(nil)
                 }
             )
         }
@@ -265,9 +270,8 @@ private struct MenuRow: View {
 }
 
 /// Shared resolver for the SF Symbol that represents the current daemon
-/// state. Used by both `MenuBarView` (the in-menu status row) and the
-/// `AppDelegate` status-item icon so they stay visually consistent and
-/// any future state additions only need one update site.
+/// state. Used by `MenuBarView`, `MenuBarStatusLabel`, and any other
+/// status surfaces so they stay visually consistent.
 enum StatusIconResolver {
     static func symbolName(
         isConnected: Bool,
