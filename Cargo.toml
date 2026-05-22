@@ -48,7 +48,7 @@ chrono = { version = "0.4", features = ["clock"] }
 # model file is bundled at `resources/models/silero_vad_v4.onnx` and
 # loaded via `include_bytes!` at runtime — see `always::vad_silero`.
 vad-rs = { git = "https://github.com/cjpais/vad-rs", default-features = false }
-toml = "0.8"
+toml = "1.1"
 regex = "1"
 base64 = "0.22"
 strsim = "0.11"
