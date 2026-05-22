@@ -17,7 +17,11 @@ use tokio::sync::broadcast;
 /// `DeleteModel`, `SetActiveTranscriber`) and matching
 /// [`DaemonEvent`]s for catalog snapshot + download / verification /
 /// extraction progress + active-backend changes.
-pub const PROTOCOL_VERSION: u32 = 4;
+///
+/// **v5 (2026-05-20):** Live preference sync from Settings.
+/// `SetAutoEnter` + `ApplyRuntimePreferences` so sensitivity and
+/// auto-enter delay apply without a daemon restart.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Event types for daemon-to-GUI communication
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,7 +30,9 @@ pub enum DaemonEvent {
     /// Sent as the very first frame after a client connects. Carries the
     /// daemon's protocol version. The Mac app rejects the connection if
     /// the version is not the one it was built with.
-    Hello { version: u32 },
+    Hello {
+        version: u32,
+    },
     /// Daemon has started listening for voice input
     ListeningStarted,
     /// Daemon has stopped listening
@@ -40,9 +46,13 @@ pub enum DaemonEvent {
     /// Transcription has stopped
     TranscribingStopped,
     /// Partial transcript (streaming update)
-    TranscriptChunk { text: String },
+    TranscriptChunk {
+        text: String,
+    },
     /// Final transcript result
-    TranscriptFinal { text: String },
+    TranscriptFinal {
+        text: String,
+    },
     /// Daemon is paused
     Paused,
     /// Daemon is resumed
@@ -65,12 +75,17 @@ pub enum DaemonEvent {
     VoiceActivityEnded,
     /// Transcription was rejected by the filter or hallucination detector.
     /// Carries a short, human-readable reason so the GUI can display it.
-    TranscriptionFiltered { reason: String },
+    TranscriptionFiltered {
+        reason: String,
+    },
     /// A `(wrong → right)` correction pair was just applied to
     /// `~/.always/glossary.json` (typically by the user pressing the
     /// correction-capture hotkey or approving a queued candidate).
     /// The GUI uses this to flash a brief toast.
-    CorrectionLogged { wrong: String, right: String },
+    CorrectionLogged {
+        wrong: String,
+        right: String,
+    },
     /// A passive clipboard re-copy looked like a correction but was
     /// not auto-applied — it sits in the pending-corrections queue
     /// awaiting user approval. Carries the queue entry's UUID as a
@@ -92,34 +107,49 @@ pub enum DaemonEvent {
     Heartbeat,
     /// Auto-enter delay started — countdown overlay is now active.
     /// `total_ms` is the full delay; `remaining_ms == total_ms` on start.
-    AutoEnterCountdownStarted { remaining_ms: u32, total_ms: u32 },
+    AutoEnterCountdownStarted {
+        remaining_ms: u32,
+        total_ms: u32,
+    },
     /// Tick of the auto-enter countdown.
-    AutoEnterCountdownTick { remaining_ms: u32 },
+    AutoEnterCountdownTick {
+        remaining_ms: u32,
+    },
     /// Auto-enter countdown cancelled by user (key press) or override.
     AutoEnterCountdownCancelled,
     /// Auto-enter countdown reached zero — Return was just synthesized.
     AutoEnterCountdownFinished,
     /// Daemon auto-paused after going `seconds` with no voice activity.
-    IdleAutoPaused { seconds: u32 },
+    IdleAutoPaused {
+        seconds: u32,
+    },
     /// Daemon auto-resumed after the idle-pause condition cleared.
     IdleAutoResumed,
     /// Focused application changed (macOS only).
-    FocusedAppChanged { bundle_id: Option<String> },
+    FocusedAppChanged {
+        bundle_id: Option<String>,
+    },
     /// Master pause flag flipped — the user (or the audio/idle/mic
     /// watchdogs) explicitly toggled the global force-pause switch.
     /// `Paused`/`Resumed` continue to track *effective* state; this
     /// event is what the UI uses to label the global pause toggle
     /// ("Pause globally" vs "Resume globally").
-    MasterPauseChanged { master_paused: bool },
+    MasterPauseChanged {
+        master_paused: bool,
+    },
     /// Snapshot of the resumed-app allowlist (bundle ids whose
     /// `paused` override is set to `false`). Sent on connect and
     /// whenever a `SetAppPaused` command mutates the list.
-    ResumedAppsChanged { bundles: Vec<String> },
+    ResumedAppsChanged {
+        bundles: Vec<String>,
+    },
     /// Daemon wants the GUI to open the correction dialog. Carries the
     /// most recently-pasted transcript so the dialog can offer a
     /// best-guess match for the wrong word once the user types the
     /// intended one.
-    CorrectionDialogRequested { last_transcript: String },
+    CorrectionDialogRequested {
+        last_transcript: String,
+    },
     /// Snapshot of the local-model catalog (every entry with its
     /// current `is_downloaded` / `is_downloading` / `partial_size`
     /// fields). Broadcast in response to [`DaemonCommand::ListModels`]
@@ -192,6 +222,18 @@ impl DaemonEvent {
 pub enum DaemonCommand {
     TogglePause,
     ToggleAutoEnter,
+    /// Set auto-enter on/off to an explicit value (Settings toggle).
+    SetAutoEnter {
+        enabled: bool,
+    },
+    /// Hot-reload sensitivity + auto-enter delay without restart.
+    ApplyRuntimePreferences {
+        auto_enter_delay_ms: u32,
+        energy_threshold: f64,
+        silence_secs: f64,
+        cooldown_ms: u32,
+        silero_threshold: f32,
+    },
     /// Approve a pending correction in the queue and apply it to the
     /// glossary. The daemon emits `CorrectionLogged` on success.
     ApproveCorrection {
@@ -207,20 +249,29 @@ pub enum DaemonCommand {
     CaptureCorrection,
     /// Explicit pause set/clear with optional reason string (for logs).
     /// Used by the Swift audio-output monitor and per-app overrides.
-    SetPaused { paused: bool, reason: Option<String> },
+    SetPaused {
+        paused: bool,
+        reason: Option<String>,
+    },
     /// Cancel the active auto-enter countdown (e.g. Mac app saw a
     /// keystroke land in the focused app).
     CancelAutoEnterCountdown,
     /// macOS Swift app reports the user switched focused application.
-    NotifyFocusedAppChanged { bundle_id: Option<String> },
+    NotifyFocusedAppChanged {
+        bundle_id: Option<String>,
+    },
     /// macOS Swift app reports the system audio-output device started
     /// or stopped producing sound. Daemon may auto-pause/resume.
-    NotifySystemAudioState { playing: bool },
+    NotifySystemAudioState {
+        playing: bool,
+    },
     /// User submitted the correction dialog with the intended spelling.
     /// Daemon diffs against `last_pasted`/`last_transcript`, finds the
     /// closest wrong-word match, and updates the glossary (add entry,
     /// remove over-fired entry, or bump weight).
-    LogCorrection { intended: String },
+    LogCorrection {
+        intended: String,
+    },
     /// Set (or clear) the per-app `paused` override for `bundle_id`.
     /// `paused = Some(false)` → app is on the resumed-allowlist.
     /// `paused = Some(true)` → app is force-paused even though it

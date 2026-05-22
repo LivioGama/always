@@ -16,7 +16,9 @@ use std::sync::LazyLock;
 
 use tokio::sync::Mutex;
 
-use always::stt::{SttError, reset_circuit_breaker_for_test, transcribe_from_bytes};
+use always::stt::{
+    SttError, TranscriptionResult, reset_circuit_breaker_for_test, transcribe_from_bytes,
+};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -52,6 +54,25 @@ fn ok_body() -> serde_json::Value {
     })
 }
 
+async fn transcribe_with_mock_base_url(
+    server: &MockServer,
+    api_key: &str,
+) -> Result<TranscriptionResult, SttError> {
+    let base_url = server.uri();
+    let api_key = api_key.to_string();
+    tokio::task::spawn_blocking(move || {
+        let _env_guard = always::stt::GROQ_BASE_URL_ENV_LOCK
+            .lock()
+            .expect("GROQ_BASE_URL_ENV_LOCK poisoned");
+        unsafe { std::env::set_var("ALWAYS_GROQ_BASE_URL", base_url) };
+        let result = transcribe_from_bytes(dummy_wav_bytes(), &api_key);
+        unsafe { std::env::remove_var("ALWAYS_GROQ_BASE_URL") };
+        result
+    })
+    .await
+    .expect("blocking task panicked")
+}
+
 #[tokio::test]
 async fn retries_on_429_then_succeeds() {
     let _guard = SERIAL.lock().await;
@@ -70,19 +91,11 @@ async fn retries_on_429_then_succeeds() {
         .mount(&server)
         .await;
 
-    // SAFETY: reqwest reads ALWAYS_GROQ_BASE_URL at call time, no other
-    // test thread is concurrently reading the env var while this guard
-    // is held. unsafe is required by std for `set_var`.
-    unsafe { std::env::set_var("ALWAYS_GROQ_BASE_URL", server.uri()) };
-
-    let result =
-        tokio::task::spawn_blocking(|| transcribe_from_bytes(dummy_wav_bytes(), "test_key"))
-            .await
-            .expect("blocking task panicked")
-            .expect("third attempt should succeed");
+    let result = transcribe_with_mock_base_url(&server, "test_key")
+        .await
+        .expect("third attempt should succeed");
 
     assert_eq!(result.text, "hello");
-    unsafe { std::env::remove_var("ALWAYS_GROQ_BASE_URL") };
 }
 
 #[tokio::test]
@@ -97,18 +110,12 @@ async fn rate_limit_exhaustion_returns_rate_limited() {
         .mount(&server)
         .await;
 
-    unsafe { std::env::set_var("ALWAYS_GROQ_BASE_URL", server.uri()) };
-
-    let result =
-        tokio::task::spawn_blocking(|| transcribe_from_bytes(dummy_wav_bytes(), "test_key"))
-            .await
-            .unwrap();
+    let result = transcribe_with_mock_base_url(&server, "test_key").await;
 
     match result {
         Err(SttError::RateLimited { attempts }) => assert_eq!(attempts, 3),
         other => panic!("expected RateLimited, got {:?}", other.map(|_| "Ok")),
     }
-    unsafe { std::env::remove_var("ALWAYS_GROQ_BASE_URL") };
 }
 
 #[tokio::test]
@@ -123,12 +130,7 @@ async fn server_error_500_returns_server_error_after_retries() {
         .mount(&server)
         .await;
 
-    unsafe { std::env::set_var("ALWAYS_GROQ_BASE_URL", server.uri()) };
-
-    let result =
-        tokio::task::spawn_blocking(|| transcribe_from_bytes(dummy_wav_bytes(), "test_key"))
-            .await
-            .unwrap();
+    let result = transcribe_with_mock_base_url(&server, "test_key").await;
 
     match result {
         Err(SttError::ServerError { status, attempts }) => {
@@ -137,7 +139,6 @@ async fn server_error_500_returns_server_error_after_retries() {
         }
         other => panic!("expected ServerError, got {:?}", other.map(|_| "Ok")),
     }
-    unsafe { std::env::remove_var("ALWAYS_GROQ_BASE_URL") };
 }
 
 #[tokio::test]
@@ -153,18 +154,12 @@ async fn unrecoverable_4xx_does_not_retry() {
         .mount(&server)
         .await;
 
-    unsafe { std::env::set_var("ALWAYS_GROQ_BASE_URL", server.uri()) };
-
-    let result =
-        tokio::task::spawn_blocking(|| transcribe_from_bytes(dummy_wav_bytes(), "bad_key"))
-            .await
-            .unwrap();
+    let result = transcribe_with_mock_base_url(&server, "bad_key").await;
 
     match result {
         Err(SttError::ClientError { status, .. }) => assert_eq!(status, 401),
         other => panic!("expected ClientError(401), got {:?}", other.map(|_| "Ok")),
     }
-    unsafe { std::env::remove_var("ALWAYS_GROQ_BASE_URL") };
 }
 
 #[tokio::test]
@@ -179,22 +174,14 @@ async fn circuit_breaker_opens_after_three_consecutive_failures() {
         .mount(&server)
         .await;
 
-    unsafe { std::env::set_var("ALWAYS_GROQ_BASE_URL", server.uri()) };
-
     // Three failed transcriptions = three consecutive failures.
     for _ in 0..3 {
-        let _ =
-            tokio::task::spawn_blocking(|| transcribe_from_bytes(dummy_wav_bytes(), "test_key"))
-                .await
-                .unwrap();
+        let _ = transcribe_with_mock_base_url(&server, "test_key").await;
     }
 
     // The next call MUST be short-circuited rather than waiting for retries.
     let started = std::time::Instant::now();
-    let outcome =
-        tokio::task::spawn_blocking(|| transcribe_from_bytes(dummy_wav_bytes(), "test_key"))
-            .await
-            .unwrap();
+    let outcome = transcribe_with_mock_base_url(&server, "test_key").await;
     let elapsed = started.elapsed();
 
     match outcome {
@@ -212,7 +199,6 @@ async fn circuit_breaker_opens_after_three_consecutive_failures() {
     );
 
     reset_circuit_breaker_for_test();
-    unsafe { std::env::remove_var("ALWAYS_GROQ_BASE_URL") };
 }
 
 #[tokio::test]

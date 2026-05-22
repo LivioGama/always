@@ -230,6 +230,17 @@ pub fn set_last_pasted(text: impl Into<String>) {
     *LAST_PASTED.lock() = Some((text.into(), std::time::Instant::now()));
 }
 
+/// Read the most recent paste text if still within `window`.
+pub fn last_pasted_text_within(window: std::time::Duration) -> Option<String> {
+    let guard = LAST_PASTED.lock();
+    let (text, ts) = guard.as_ref()?;
+    if ts.elapsed() <= window {
+        Some(text.clone())
+    } else {
+        None
+    }
+}
+
 /// Read the most recent paste if it's still within `window` seconds.
 /// Does NOT clear the slot — multiple consumers (hotkey + watcher) may
 /// inspect it. Returns `(text, paste_instant)`.
@@ -386,8 +397,10 @@ pub fn clear_dictation_buffer_for_test() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::always::per_app::{self, AppOverride, AppOverrides};
+    use crate::always::per_app::{self, AppOverride};
     use std::collections::HashMap;
+
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn reset_pause_state_for_test() {
         MASTER_PAUSED.store(false, Ordering::Relaxed);
@@ -399,6 +412,7 @@ mod tests {
 
     #[test]
     fn effective_paused_when_master_or_idle_or_per_app() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
         reset_pause_state_for_test();
         set_current_app(Some("com.example.editor".into()));
         assert!(recompute_effective().0);
@@ -432,6 +446,7 @@ mod tests {
 
     #[test]
     fn focus_change_recomputes_effective_for_allowlist() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
         reset_pause_state_for_test();
         per_app::set_cache_for_test(HashMap::from([(
             "com.example.editor".to_string(),
@@ -444,8 +459,7 @@ mod tests {
         assert!(is_paused());
 
         set_idle_auto_paused(false);
-        let (eff, changed) =
-            set_current_app_and_recompute(Some("com.example.editor".into()));
+        let (eff, changed) = set_current_app_and_recompute(Some("com.example.editor".into()));
         assert!(!eff);
         assert!(changed);
     }

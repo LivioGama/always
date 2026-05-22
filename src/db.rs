@@ -193,9 +193,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         .prepare("SELECT shortcut_correction_dialog FROM preferences LIMIT 0")
         .is_ok();
     if !has_shortcut_correction_dialog {
-        conn.execute_batch(
-            "ALTER TABLE preferences ADD COLUMN shortcut_correction_dialog TEXT;",
-        )?;
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN shortcut_correction_dialog TEXT;")?;
     }
 
     let has_per_app_settings_json = conn
@@ -359,7 +357,10 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
                 anyhow::bail!("silero_threshold must be between 0.1 and 0.9");
             }
         }
-        "stt_trim_silence" | "stt_auto_enter" | "postprocess_enabled" | "passive_correction_capture" => {
+        "stt_trim_silence"
+        | "stt_auto_enter"
+        | "postprocess_enabled"
+        | "passive_correction_capture" => {
             if !matches!(value, "true" | "false" | "1" | "0") {
                 anyhow::bail!("{key} must be one of: true, false, 1, 0");
             }

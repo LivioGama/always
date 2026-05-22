@@ -22,6 +22,10 @@ use crate::stt_dispatch::{TranscriberBackendChoice, build_transcriber};
 /// trivial swap on user model change — no need to restart the daemon.
 pub type ActiveTranscriber = Arc<RwLock<Arc<dyn Transcriber>>>;
 
+/// Active [`AlwaysConfig`] shared between the main loop and the UDS
+/// server so Settings changes apply without a daemon restart.
+pub type ActiveConfig = Arc<RwLock<AlwaysConfig>>;
+
 pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     let _pid = daemon::PidGuard::install()?;
     let mut log = Logger::open(&cfg.log_path)?;
@@ -43,22 +47,24 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     // Build the initial transcriber based on the resolved backend.
     // Wrapped in RwLock so the UDS server can swap it when the user
     // selects a different model in Settings without a daemon restart.
-    let initial_transcriber = build_transcriber(cfg, &registry)
-        .context("construct initial transcriber")?;
+    let initial_transcriber =
+        build_transcriber(cfg, &registry).context("construct initial transcriber")?;
     let active: ActiveTranscriber = Arc::new(RwLock::new(initial_transcriber));
 
+    let active_cfg: ActiveConfig = Arc::new(RwLock::new(cfg.clone()));
+
     // Pre-warm Groq TLS only when the active backend actually uses it.
-    if matches!(cfg.transcriber_backend, TranscriberBackendChoice::Groq) {
-        if let Some(api_key) = cfg.groq_stt_api_key.clone() {
-            rt.spawn(async move {
-                let client = crate::http_client::async_client();
-                let _ = client
-                    .get("https://api.groq.com/openai/v1/models")
-                    .header("Authorization", format!("Bearer {}", api_key))
-                    .send()
-                    .await;
-            });
-        }
+    if matches!(cfg.transcriber_backend, TranscriberBackendChoice::Groq)
+        && let Some(api_key) = cfg.groq_stt_api_key.clone()
+    {
+        rt.spawn(async move {
+            let client = crate::http_client::async_client();
+            let _ = client
+                .get("https://api.groq.com/openai/v1/models")
+                .header("Authorization", format!("Bearer {}", api_key))
+                .send()
+                .await;
+        });
     }
 
     // Initialize the auto-enter state from config
@@ -70,7 +76,7 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     // Start UDS server in background and track the task. Hands it a
     // clone of the registry + active-transcriber lock so the
     // `models.*` commands can mutate them.
-    let cfg_for_uds = Arc::new(cfg.clone());
+    let cfg_for_uds = Arc::clone(&active_cfg);
     let registry_for_uds = registry.clone();
     let active_for_uds = Arc::clone(&active);
     let _uds_handle = rt.spawn(async move {
@@ -117,12 +123,18 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     }
 
     let mut last_process = Instant::now() - Duration::from_secs(10);
+    let mut last_dup_check = Instant::now();
 
     // Initialize microphone monitor for auto-pause functionality
     let mut mic_monitor = mic_monitor::MicrophoneMonitor::new();
     let mut auto_paused_for_mic = false;
 
     loop {
+        if last_dup_check.elapsed() >= Duration::from_secs(30) {
+            last_dup_check = Instant::now();
+            daemon::reconcile_duplicate_processes();
+        }
+
         // Check if other apps are using the microphone
         match mic_monitor.is_microphone_in_use() {
             Ok(true) if !auto_paused_for_mic => {
@@ -188,7 +200,7 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
             if pause::is_idle_auto_paused()
                 && !pause::is_master_paused()
                 && !auto_paused_for_mic
-                && vad::poll_speech_energy(cfg).unwrap_or(false)
+                && vad::poll_speech_energy(&active_cfg.read()).unwrap_or(false)
             {
                 pause::set_idle_auto_paused(false);
                 pause::mark_voice_seen();
@@ -212,7 +224,7 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         // picks up the new backend automatically.
         let transcriber_snapshot = active.read().clone();
         if let Err(e) = process_one(
-            cfg,
+            &active_cfg,
             &mut log,
             &mut last_process,
             rt.handle(),
@@ -229,13 +241,14 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
 }
 
 fn process_one(
-    cfg: &AlwaysConfig,
+    active_cfg: &ActiveConfig,
     log: &mut Logger,
     last_process: &mut Instant,
     rt: &Handle,
     transcriber: &Arc<dyn Transcriber>,
 ) -> Result<()> {
-    match vad::record_utterance(cfg, log, transcriber)
+    let cfg = active_cfg.read();
+    match vad::record_utterance(&cfg, log, transcriber)
         .context("failed to record/transcribe utterance")?
     {
         vad::RecordResult::Speech {
@@ -243,7 +256,7 @@ fn process_one(
             energy,
             transcription,
         } => {
-            handle_speech(cfg, log, &text, energy, &transcription, last_process, rt)?;
+            handle_speech(&cfg, log, &text, energy, &transcription, last_process, rt)?;
         }
         vad::RecordResult::Silence => {
             // Don't log silence events - they're too frequent and not useful
@@ -308,6 +321,22 @@ fn handle_speech(
             Ok(())
         }
         SpeechAction::Paste { text: transformed } => {
+            // Suppress identical back-to-back pastes from VAD edge noise or
+            // duplicate daemon processes. Window is at least 2s even when
+            // cooldown_ms is configured lower.
+            let dup_window = Duration::from_millis(cfg.cooldown_ms.max(2000) as u64);
+            if let Some(recent) = pause::last_pasted_text_within(dup_window)
+                && recent.trim() == transformed.trim()
+            {
+                tracing::info!(
+                    text = %transformed,
+                    dup_window_ms = dup_window.as_millis() as u64,
+                    "duplicate_paste_suppressed"
+                );
+                event::global_broadcaster().voice_activity_ended();
+                return Ok(());
+            }
+
             // Log the raw Whisper transcript for debugging STT quality issues
             tracing::info!(
                 stage = "whisper_raw",
@@ -414,8 +443,7 @@ fn handle_speech(
                 log.write(Event::Error {
                     message: "Skipped paste: Command key held",
                 });
-                event::global_broadcaster()
-                    .transcription_filtered("Held Command key — not pasted");
+                event::global_broadcaster().transcription_filtered("Held Command key — not pasted");
                 // Drop the merge buffer too: the user is in the middle of
                 // a shortcut, the next utterance shouldn't try to append
                 // to text that never reached the field.
@@ -435,7 +463,8 @@ fn handle_speech(
                 spawn_grammar_patch(rt, cfg, final_text.clone(), pasted_at);
             }
 
-            let auto_enter_effective = per_app::effective_auto_enter(pause::is_auto_enter_enabled());
+            let auto_enter_effective =
+                per_app::effective_auto_enter(pause::is_auto_enter_enabled());
             if auto_enter_effective {
                 // Hold the merged buffer so the NEXT utterance can
                 // append again if it arrives before the countdown
@@ -569,7 +598,12 @@ fn apply_grammar_blocking(text: &str, cfg: &AlwaysConfig, rt: &Handle) -> String
 }
 
 /// After paste-first, patch grammar via Cmd+Z + repaste when the LLM returns.
-fn spawn_grammar_patch(rt: &Handle, cfg: &AlwaysConfig, acoustic_pasted: String, pasted_at: Instant) {
+fn spawn_grammar_patch(
+    rt: &Handle,
+    cfg: &AlwaysConfig,
+    acoustic_pasted: String,
+    pasted_at: Instant,
+) {
     let Some(pp) = cfg.post_processor.clone() else {
         return;
     };

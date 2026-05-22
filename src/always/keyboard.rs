@@ -209,6 +209,7 @@ fn key_to_shortcut_name(key: &rdev::Key) -> Option<&'static str> {
 /// removes the override otherwise. Recomputes the effective state and
 /// broadcasts the appropriate UDS events so every connected GUI
 /// surface updates immediately.
+#[cfg(feature = "macos")]
 fn handle_per_app_pause_hotkey(bundle: &str) {
     use crate::always::per_app;
     let was_resumed = per_app::is_app_resumed(bundle);
@@ -249,6 +250,7 @@ fn handle_per_app_pause_hotkey(bundle: &str) {
 /// Used as a fallback when no focused app is reported (or it's
 /// Always itself), so a globally-paused user can still un-master-pause
 /// with the same chord they're used to.
+#[cfg(feature = "macos")]
 fn handle_master_pause_hotkey() {
     let (effective, changed) = pause::toggle_pause();
     let master = pause::is_master_paused();
@@ -353,8 +355,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                         let current = pause::current_app();
                         match current.as_deref() {
                             Some(bundle)
-                                if bundle
-                                    != crate::always::per_app::ALWAYS_OWN_BUNDLE_ID =>
+                                if bundle != crate::always::per_app::ALWAYS_OWN_BUNDLE_ID =>
                             {
                                 handle_per_app_pause_hotkey(bundle);
                             }
@@ -424,8 +425,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                                 event::global_broadcaster()
                                     .correction_logged(p.wrong.clone(), p.right.clone());
                             }
-                            event::global_broadcaster()
-                                .correction_capture_result("applied");
+                            event::global_broadcaster().correction_capture_result("applied");
                             let _ = applied; // count surfaced via per-pair CorrectionLogged events
                         }
                         Ok(correction::CaptureOutcome::NoRecentPaste) => {
@@ -435,8 +435,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                         }
                         Ok(correction::CaptureOutcome::NoChange) => {
                             tracing::debug!("log_correction_no_change");
-                            event::global_broadcaster()
-                                .correction_capture_result("no_change");
+                            event::global_broadcaster().correction_capture_result("no_change");
                         }
                         Ok(correction::CaptureOutcome::NoCorrectionPairs) => {
                             tracing::debug!("log_correction_no_correction_pairs");
@@ -445,8 +444,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                         }
                         Err(error) => {
                             tracing::error!(?error, "log_correction_failed");
-                            event::global_broadcaster()
-                                .correction_capture_result("error");
+                            event::global_broadcaster().correction_capture_result("error");
                         }
                     }
                 } else if correction_dialog_combo.matches_name(
@@ -463,8 +461,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                     // the daemon when `LogCorrection { intended }`
                     // comes back.
                     let last = pause::last_transcript_for_correction().unwrap_or_default();
-                    event::global_broadcaster()
-                        .correction_dialog_requested(last);
+                    event::global_broadcaster().correction_dialog_requested(last);
                 }
             }
             _ => {
@@ -472,7 +469,9 @@ pub fn start_keyboard_listener() -> Result<()> {
                 // cancel an in-flight countdown — they reflect
                 // intentional user input directed at the focused app,
                 // not a quiescent "let auto-enter run" state.
-                if pause::countdown_active() && matches!(event.event_type, EventType::ButtonPress(_)) {
+                if pause::countdown_active()
+                    && matches!(event.event_type, EventType::ButtonPress(_))
+                {
                     pause::countdown_request_cancel();
                     pause::dictation_buffer_clear();
                 }

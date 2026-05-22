@@ -141,8 +141,8 @@ Other CLI commands worth knowing:
 |---------|---------|
 | `always logs --pretty` | Live-tail the daemon log with emoji decoration |
 | `always status` | Is the daemon running? PID, log path |
-| `always toggle pause` | Mute / unmute mic without killing the daemon |
-| `always toggle auto-enter` | Toggle the "press Return after paste" feature |
+| `always toggle-pause` | Mute / unmute mic without killing the daemon |
+| `always toggle-auto-enter` | Toggle the "press Return after paste" feature |
 
 ---
 
@@ -386,7 +386,6 @@ Finder" buttons resolve to the same canonical location, and
 API keys are stored in the OS Keychain (`security find-generic-password
 -s com.always.daemon`), never in SQLite or env vars in plain text.
 
-The daemon hot-reloads `stt_silence`, `stt_cooldown_ms`, and the energy
-thresholds at the start of each utterance. `silero_threshold` is read at
-daemon startup; restart the daemon (`always stop && always start`) for
-that one to take effect.
+The daemon hot-reloads `stt_silence`, `stt_cooldown_ms`,
+`stt_energy_threshold`, `hear_energy_threshold`, and `silero_threshold`
+through the Settings app without a daemon restart.

@@ -105,15 +105,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// when no Settings window is open (macOS 26 silent exit).
     private var keepAliveWindow: NSWindow?
     private var daemonBootstrapTask: Task<Void, Never>?
+    private let singleInstanceGuard = SingleInstanceGuard.shared
 
     func setOnboardingState(_ state: OnboardingState) {
         onboardingState = state
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        // Another Always.app already owns the menu-bar slot — hand focus to it
-        // and exit before we install a second (invisible / orphaned) status item.
-        if !Self.enforceSingleInstance() {
+        // Flock + process sweep — covers com.always / com.always.v2 / stale
+        // Desktop copies that bypass bundle-ID checks.
+        if !singleInstanceGuard.acquireOrHandOff() {
             exit(0)
         }
         installKeepAliveWindow()
@@ -149,6 +150,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         daemonBootstrapTask = Task {
             do {
                 _ = try await cli?.startDaemon()
+                await Self.reconcileDuplicateDaemons(cli: cli)
             } catch {
                 NSLog("Always: daemon start failed: \(error.localizedDescription)")
             }
@@ -225,6 +227,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         stateMonitor?.prepareForQuit()
         Self.killStaleDaemon()
+        singleInstanceGuard.release()
     }
 
     /// Menu-bar (LSUIElement) apps must NOT quit when the last window
@@ -253,24 +256,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateNow
     }
 
-    /// If another Always.app is already running, activate it and return false
-    /// so the caller can exit before creating a duplicate menu-bar item.
-    @discardableResult
-    static func enforceSingleInstance() -> Bool {
-        guard let bundleId = Bundle.main.bundleIdentifier else { return true }
-        let myPid = ProcessInfo.processInfo.processIdentifier
-        let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
-            .filter { $0.processIdentifier != myPid }
-        guard let existing = others.first else { return true }
-
-        NSLog("Always: another instance is running (pid %d) — activating it and exiting",
-              existing.processIdentifier)
-        existing.activate(options: [.activateAllWindows])
-        return false
+    /// If multiple voice daemons are running they both paste the same
+    /// utterance — reconcile by killing all and starting one fresh copy.
+    static func reconcileDuplicateDaemons(cli: CLIService?) async {
+        let pids = listDaemonProcessIDs()
+        guard pids.count > 1 else { return }
+        NSLog("Always: WARNING — \(pids.count) daemon processes (\(pids)) — reconciling")
+        killStaleDaemon()
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        do {
+            _ = try await cli?.startDaemon()
+        } catch {
+            NSLog("Always: daemon reconcile restart failed: \(error.localizedDescription)")
+        }
     }
 
-    /// Read the daemon PID file and send SIGTERM. Also sweeps bundled
-    /// `always-daemon run` orphans and removes pid + socket files.
+    /// Kill voice daemons via pid file + ps sweep (never `pkill -f`, which
+    /// can match its own argv and hang).
     static func killStaleDaemon() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let pidPath = home
@@ -294,18 +296,52 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         try? FileManager.default.removeItem(atPath: pidPath)
 
-        let pkill = Process()
-        pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        pkill.arguments = ["-TERM", "-f", "always-daemon run"]
-        pkill.standardOutput = FileHandle.nullDevice
-        pkill.standardError = FileHandle.nullDevice
-        try? pkill.run()
-        pkill.waitUntilExit()
+        for pid in listDaemonProcessIDs() {
+            kill(pid, SIGTERM)
+        }
         usleep(200_000)
+        for pid in listDaemonProcessIDs() {
+            kill(pid, SIGKILL)
+        }
+        usleep(100_000)
 
         let sockPath = home
             .appendingPathComponent("Library/Caches/Always/always.sock")
             .path
         try? FileManager.default.removeItem(atPath: sockPath)
+    }
+
+    /// PIDs whose argv is `always-daemon run` (bundled or dev).
+    static func listDaemonProcessIDs() -> [pid_t] {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
+        proc.arguments = ["-ax", "-o", "pid=,command="]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        let text = String(data: data, encoding: .utf8) ?? ""
+        var pids: [pid_t] = []
+        for line in text.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard let space = trimmed.firstIndex(where: { $0.isWhitespace }) else { continue }
+            let pidStr = trimmed[..<space]
+            let command = trimmed[space...].trimmingCharacters(in: .whitespaces)
+            guard let pid = pid_t(pidStr) else { continue }
+            if isDaemonRunCommand(command) {
+                pids.append(pid)
+            }
+        }
+        return pids
+    }
+
+    private static func isDaemonRunCommand(_ command: String) -> Bool {
+        let parts = command.split(whereSeparator: { $0.isWhitespace })
+        guard parts.count >= 2 else { return false }
+        let executable = String(parts[0] as Substring)
+        let name = URL(fileURLWithPath: executable).lastPathComponent
+        return (name == "always" || name == "always-daemon") && parts[1] == "run"
     }
 }

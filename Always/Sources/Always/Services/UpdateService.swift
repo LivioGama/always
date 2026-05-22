@@ -20,22 +20,30 @@ final class UpdateService: ObservableObject {
     static let shared = UpdateService()
 
     private let logger = Logger(subsystem: "com.always.app", category: "updates")
-    private let userDriver: SilentErrorUserDriver
-    private let updater: SPUUpdater
+    private let userDriver: SilentErrorUserDriver?
+    private let updater: SPUUpdater?
 
     /// Convenience: forwards Sparkle's `canCheckForUpdates` flag.
     @Published var canCheckForUpdates: Bool = false
 
     private init() {
         let host = Bundle.main
+        guard Self.hasUsablePublicKey(in: host) else {
+            self.userDriver = nil
+            self.updater = nil
+            logger.warning("Sparkle disabled because SUPublicEDKey is missing or still uses the placeholder")
+            return
+        }
+
         let driver = SilentErrorUserDriver(hostBundle: host, delegate: nil)
         self.userDriver = driver
-        self.updater = SPUUpdater(
+        let updater = SPUUpdater(
             hostBundle: host,
             applicationBundle: host,
             userDriver: driver,
             delegate: nil
         )
+        self.updater = updater
 
         do {
             try updater.start()
@@ -52,7 +60,19 @@ final class UpdateService: ObservableObject {
 
     /// User-initiated check ("Check for Updates…" menu item).
     func checkForUpdates() {
+        guard let updater else {
+            logger.warning("Sparkle update check skipped because updater is not configured")
+            return
+        }
         updater.checkForUpdates()
+    }
+
+    private static func hasUsablePublicKey(in bundle: Bundle) -> Bool {
+        guard let key = bundle.object(forInfoDictionaryKey: "SUPublicEDKey") as? String else {
+            return false
+        }
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed != "REPLACE_WITH_BASE64_EDDSA_PUBLIC_KEY"
     }
 
     private var feedDescription: String {

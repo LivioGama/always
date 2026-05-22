@@ -21,21 +21,16 @@ use crate::stt::{GroqTranscriber, Transcriber};
 /// column in the prefs DB (`groq` or `local:<model_id>`). The
 /// FromStr/Display impls own that wire format so the DB layer and the
 /// UDS server stay in sync.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum TranscriberBackendChoice {
     /// Remote Groq Whisper API. Requires `GROQ_API_KEY`.
+    #[default]
     Groq,
     /// Local model identified by the registry id (e.g.
     /// `parakeet-tdt-0.6b-v3`). Must be downloaded before it can be
     /// activated — [`build_transcriber`] falls back to Groq when the
     /// model file is missing on disk.
     Local { model_id: String },
-}
-
-impl Default for TranscriberBackendChoice {
-    fn default() -> Self {
-        Self::Groq
-    }
 }
 
 impl std::fmt::Display for TranscriberBackendChoice {
@@ -170,8 +165,7 @@ mod tests {
 
     #[test]
     fn parse_local() {
-        let parsed: TranscriberBackendChoice =
-            "local:parakeet-tdt-0.6b-v3".parse().unwrap();
+        let parsed: TranscriberBackendChoice = "local:parakeet-tdt-0.6b-v3".parse().unwrap();
         assert!(matches!(
             parsed,
             TranscriberBackendChoice::Local { ref model_id } if model_id == "parakeet-tdt-0.6b-v3"

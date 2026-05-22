@@ -69,11 +69,7 @@ impl LocalTranscriber {
     /// Load a downloaded model from disk. `path` is the registry's
     /// `models_dir.join(model.filename)` — file for Whisper engines,
     /// directory for ONNX engines.
-    pub fn load(
-        engine_type: EngineType,
-        path: &Path,
-        language: Option<String>,
-    ) -> Result<Self> {
+    pub fn load(engine_type: EngineType, path: &Path, language: Option<String>) -> Result<Self> {
         let engine = build_engine(engine_type, path)
             .with_context(|| format!("loading {engine_type:?} model from {}", path.display()))?;
         Ok(Self {
@@ -146,7 +142,11 @@ impl Transcriber for LocalTranscriber {
     }
 }
 
-fn run_engine(engine: &mut LoadedEngine, samples: &[f32], language: Option<String>) -> Result<String> {
+fn run_engine(
+    engine: &mut LoadedEngine,
+    samples: &[f32],
+    language: Option<String>,
+) -> Result<String> {
     let result = match engine {
         LoadedEngine::Whisper(w) => {
             let params = WhisperInferenceParams {

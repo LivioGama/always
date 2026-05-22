@@ -18,19 +18,14 @@
 /// "I" and its contractions are intentionally absent: they MUST stay
 /// capitalized even mid-sentence.
 pub const ENGLISH_SAFE_LOWERCASE_STARTERS: &[&str] = &[
-    "The", "A", "An", "And", "But", "Or", "So", "Yet", "Nor",
-    "If", "When", "While", "Because", "Since", "Although", "Though",
-    "Then", "Now", "Just", "Also", "Only", "Even", "Still",
-    "We", "You", "They", "He", "She", "It",
-    "This", "That", "These", "Those", "There", "Here",
-    "In", "On", "At", "To", "For", "Of", "With", "Without", "From",
-    "By", "About", "Into", "Onto", "Over", "Under", "Through",
-    "As", "Is", "Are", "Was", "Were", "Will", "Would", "Should",
-    "Could", "Can", "May", "Might", "Must", "Has", "Have", "Had", "Do",
-    "Does", "Did", "Be", "Been", "Being",
-    "Some", "Any", "All", "Most", "Many", "Few", "Each", "Every",
-    "My", "Your", "Our", "Their", "His", "Her", "Its",
-    "So", "Such", "What", "Which", "How", "Why", "Where",
+    "The", "A", "An", "And", "But", "Or", "So", "Yet", "Nor", "If", "When", "While", "Because",
+    "Since", "Although", "Though", "Then", "Now", "Just", "Also", "Only", "Even", "Still", "We",
+    "You", "They", "He", "She", "It", "This", "That", "These", "Those", "There", "Here", "In",
+    "On", "At", "To", "For", "Of", "With", "Without", "From", "By", "About", "Into", "Onto",
+    "Over", "Under", "Through", "As", "Is", "Are", "Was", "Were", "Will", "Would", "Should",
+    "Could", "Can", "May", "Might", "Must", "Has", "Have", "Had", "Do", "Does", "Did", "Be",
+    "Been", "Being", "Some", "Any", "All", "Most", "Many", "Few", "Each", "Every", "My", "Your",
+    "Our", "Their", "His", "Her", "Its", "So", "Such", "What", "Which", "How", "Why", "Where",
 ];
 
 /// English sentence terminators. Kept as a `&[char]` so non-English

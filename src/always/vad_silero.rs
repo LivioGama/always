@@ -45,8 +45,7 @@ fn silero_model_path() -> Result<PathBuf> {
         Ok(path)
     });
     entry
-        .as_ref()
-        .map(|p| p.clone())
+        .clone()
         .map_err(|e| anyhow::anyhow!("silero model setup failed: {e}"))
 }
 

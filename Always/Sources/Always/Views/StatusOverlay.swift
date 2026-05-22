@@ -342,7 +342,9 @@ class StatusOverlayWindow: NSWindow {
         self.backgroundColor = NSColor.clear
         self.isOpaque = false
         self.level = .popUpMenu
-        self.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        // `.fullScreenAuxiliary` is required for the HUD to appear over native
+        // fullscreen apps (same Space). ListeningIndicator already uses this.
+        self.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         self.ignoresMouseEvents = true
         self.hasShadow = true
         self.isReleasedWhenClosed = false
@@ -536,7 +538,9 @@ class IdleResumeWindow: NSWindow {
         self.backgroundColor = NSColor.clear
         self.isOpaque = false
         self.level = .popUpMenu
-        self.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        // `.fullScreenAuxiliary` is required for the HUD to appear over native
+        // fullscreen apps (same Space). ListeningIndicator already uses this.
+        self.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         self.ignoresMouseEvents = false
         self.hasShadow = true
         self.isReleasedWhenClosed = false

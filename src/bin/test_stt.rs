@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use always::glossary;
-use always::stt::{Transcriber, GroqTranscriber};
+use always::stt::{GroqTranscriber, Transcriber};
 
 /// Test script to debug STT pipeline:
 /// Records audio, transcribes it, and shows each correction stage.
@@ -76,7 +76,7 @@ fn main() -> Result<()> {
         Ok(r) => {
             println!("│ ✓ Received response");
             r
-        },
+        }
         Err(e) => {
             println!("❌ Transcription failed: {}", e);
             return Err(e.into());
@@ -90,11 +90,7 @@ fn main() -> Result<()> {
     println!("│ Language: {}", result.language);
     println!("│ Duration: {:.2}s", result.duration);
     if !result.segments.is_empty() {
-        let avg_logprob: f32 = result
-            .segments
-            .iter()
-            .map(|s| s.avg_logprob)
-            .sum::<f32>()
+        let avg_logprob: f32 = result.segments.iter().map(|s| s.avg_logprob).sum::<f32>()
             / result.segments.len() as f32;
         println!("│ Confidence (avg_logprob): {:.4}", avg_logprob);
     }

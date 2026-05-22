@@ -49,19 +49,22 @@ async fn transcribe_from_bytes_hits_mock_groq_endpoint() {
         .mount(&server)
         .await;
 
-    // Run the blocking transcribe call in a dedicated thread so we don't block
-    // the tokio reactor (and so we can scope the env var override safely).
+    // Scope the env var override under the shared STT env lock. The Groq
+    // base URL is process-global, so this must not overlap with other STT
+    // tests that point the client at their own mock server.
     let base_url = server.uri();
     let result = tokio::task::spawn_blocking(move || {
-        // SAFETY: setting an env var; tests in this file don't race on it.
+        let _env_guard = always::stt::GROQ_BASE_URL_ENV_LOCK
+            .lock()
+            .expect("GROQ_BASE_URL_ENV_LOCK poisoned");
         unsafe {
             std::env::set_var("ALWAYS_GROQ_BASE_URL", &base_url);
         }
-        let r = transcribe_from_bytes(dummy_wav_bytes(), "test_key");
+        let result = transcribe_from_bytes(dummy_wav_bytes(), "test_key");
         unsafe {
             std::env::remove_var("ALWAYS_GROQ_BASE_URL");
         }
-        r
+        result
     })
     .await
     .expect("spawn_blocking failed")

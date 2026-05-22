@@ -1,6 +1,6 @@
 # Code Quality Assessment: Always
 
-Date: 2026-05-03
+Date: 2026-05-22
 Mode: Full Assessment
 Primary focus: Stabilization and safe high-impact improvements
 
@@ -8,21 +8,23 @@ Primary focus: Stabilization and safe high-impact improvements
 
 | Metric | Current |
 | --- | ---: |
-| Rust production LOC (`src/`) | 8,176 |
-| Rust integration test LOC (`tests/`) | 317 |
-| Swift production LOC (`Always/Sources`) | 2,557 |
-| Swift test LOC (`Always/Tests`) | 248 |
-| Test assertions/cases detected | 109 |
+| Rust production LOC (`src/`) | 15,895 |
+| Rust + Swift test LOC (`tests/`, `Always/Tests`) | 1,282 |
+| Swift production LOC (`Always/Sources`) | 6,123 |
+| Test assertions/cases detected | 170+ |
 | Direct Cargo dependencies | 27 |
-| Largest Rust file | `src/always/vocab/plugins.rs` — 705 LOC |
-| Largest Swift file | `Always/Sources/Always/Views/SettingsWindow.swift` — 493 LOC |
+| Largest Rust file | `src/managers/model_registry.rs` — 1,208 LOC |
+| Largest Swift file | `Always/Sources/Always/Views/SettingsWindow.swift` — 795 LOC |
 
 Verification snapshot after stabilization:
 
 - `cargo fmt --check`: passing
-- `cargo clippy --release -- -D warnings`: passing
-- `cargo test keyboard`: passing
-- `swift test`: passing after adding pure helper coverage
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`: passing
+- `cargo test --locked --all-targets`: passing
+- `cargo test --locked --all-targets --all-features`: passing
+- `cargo test --locked --no-default-features --features linux --lib --bins`: passing
+- `swift test --package-path Always`: passing
+- `./run.sh`: builds, deploys, launches `/Applications/Always.app`, and starts one bundled daemon
 
 ## Subsystem Ratings
 
@@ -34,8 +36,8 @@ Strengths:
 - UDS socket permissions are restricted to owner access, reducing local command-injection risk.
 
 Concerns:
-- Several mature modules exceed the healthy Rust file-size range: `vocab/plugins.rs` at 705 LOC, `vocab.rs` at 596 LOC, `ai_filter.rs` at 552 LOC, and `hallucination.rs` at 531 LOC.
-- `vad.rs` mixes recording, VAD state transitions, speculative transcription, energy checks, and event emission in one 402 LOC file. It is below the god-module threshold but is high-risk because it is latency-sensitive.
+- Several mature modules now exceed the healthy Rust file-size range: `model_registry.rs` at 1,208 LOC, `uds_server.rs` at 893 LOC, `correction.rs` at 800 LOC, `vocab/plugins.rs` at 746 LOC, `event_loop.rs` at 737 LOC, and `vad.rs` at 687 LOC.
+- `vad.rs` and `event_loop.rs` remain high-risk because they mix latency-sensitive capture, runtime configuration, speculative transcription, duplicate suppression, and event emission.
 
 ### CLI and Configuration (`src/main.rs`, `src/cli/`, `src/db.rs`) ★★★☆☆
 
@@ -44,8 +46,8 @@ Strengths:
 - Sensitive API-key storage has moved toward keychain-backed paths.
 
 Concerns:
-- CLI code still has mixed command dispatch and operational behavior in `src/main.rs` at 371 LOC.
-- The logs command had a stale namespace path that only surfaced when compiling the binary test target, showing that CLI module coverage needs to stay part of routine verification.
+- CLI code still has mixed command dispatch and operational behavior in `src/main.rs` at 692 LOC.
+- CLI/docs drift remains a realistic risk; this pass fixed stale `toggle pause` / `toggle auto-enter` references and restored help text for `toggle-pause`.
 
 ### Swift App (`Always/Sources/Always/`) ★★★☆☆
 
@@ -54,18 +56,18 @@ Strengths:
 - The UI now has pure helper seams for network-free validation and masked API-key persistence checks.
 
 Concerns:
-- `SettingsWindow.swift` at 493 LOC and `StatusOverlay.swift` at 477 LOC are near the 500 LOC threshold and mix presentation, state orchestration, and side effects.
-- GitNexus could not index Swift symbols because the Swift tree-sitter parser is unavailable, so Rust graph tooling does not currently protect Swift refactors.
+- `SettingsWindow.swift` at 795 LOC, `StatusOverlay.swift` at 781 LOC, and `UDSClient.swift` at 780 LOC now exceed the 500 LOC threshold and mix presentation, state orchestration, protocol decoding, and side effects.
+- Sparkle startup is now defensive in local/dev builds: the app skips Sparkle when `SUPublicEDKey` is still the placeholder instead of logging an invalid EdDSA key failure. Public release still requires replacing the placeholder key.
 
 ### CI and Tooling (`.github/workflows/ci.yml`) ★★★★☆
 
 Strengths:
-- CI runs Rust format, clippy, tests, Swift build, and Swift tests on macOS.
-- `cargo-audit` installation now fails loudly if the tool cannot install.
+- CI runs Rust format, all-target/all-feature clippy, Rust tests, Swift build/test, audit/deny/machete, Linux no-defaults build, dependency review, and CodeQL.
+- The release workflow builds/signs/notarizes the macOS app, generates a DMG/appcast/SBOM/checksums, publishes crates/Homebrew artifacts, and expects Sparkle signing secrets.
 
 Concerns:
-- `cargo audit` remains advisory-only while transitive advisories are reviewed.
-- There is no coverage threshold or release-mode Swift verification gate yet.
+- Release remains blocked until `SUPublicEDKey` is replaced with the public half matching `SPARKLE_ED_PRIVATE_KEY`.
+- The manual microphone/permissions/dictation matrix still requires human-visible macOS interaction before tagging.
 
 ### Documentation (`README.md`, `docs/`) ★★★☆☆
 
@@ -78,35 +80,35 @@ Concerns:
 
 ## Key Findings
 
-1. **Quality gates were not green before stabilization.** `cargo fmt --check` and clippy both failed at the start of the pass. These now pass.
-2. **Shortcut configuration needed focused safety tests.** Parsing/matching now has tests for valid combos, invalid shortcuts, unsupported keys, and fallback defaults.
-3. **Swift UI work needed testable seams.** Groq validation status mapping and masked API-key persistence are now pure helpers with tests, reducing reliance on live network/UI behavior.
-4. **Audit tooling policy needed clarity.** CI no longer hides `cargo-audit` installation failure; advisory results remain non-blocking by documented choice.
-5. **Large files are the next maintainability bottleneck.** The safest next step is targeted decomposition after all gates stay green.
+1. **Quality gates were not green before this pass.** Format, clippy, all-target Rust tests, Swift tests, all-feature local-STT tests, and Linux smoke now pass.
+2. **All-feature testing exposed shared global-state races.** Pause/per-app tests now serialize their global mutations.
+3. **Linux release smoke caught macOS-only import drift.** Hotkey handlers are now gated to the macOS feature path.
+4. **Sparkle local startup was noisy with the checked-in placeholder.** UpdateService now disables Sparkle until a real public key is configured; release builds still fail fast if notarization is attempted with the placeholder.
+5. **Large files are now the main maintainability risk.** The safest next step is targeted decomposition after v1.0 rather than broad pre-release refactors.
 
 ## Recommendations
 
 ### P1: Keep Stabilization Gates Mandatory
 
-- **What**: Keep `cargo fmt --check`, `cargo clippy --release -- -D warnings`, `cargo test`, `swift build`, and `swift test` as required pre-merge checks.
+- **What**: Keep `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked --all-targets`, `cargo test --locked --all-targets --all-features`, Linux no-defaults smoke, and `swift test --package-path Always` as required pre-merge checks.
 - **Risk**: Low — already passing locally after this pass.
 - **Impact**: Prevents recurrence of formatting, namespace, and warning regressions.
 
-### P1: Add Release-Mode Swift Verification
+### P1: Finish Sparkle Release Key Setup
 
-- **What**: Add a documented local release build check for `Always`, then promote it to CI once the overlay release-mode regression is resolved.
-- **Risk**: Medium — may expose the known overlay issue.
-- **Impact**: Closes the most visible confidence gap for shipping the macOS app.
+- **What**: Generate the Sparkle EdDSA keypair, set `SPARKLE_ED_PRIVATE_KEY` in GitHub secrets, replace `SUPublicEDKey` in `Always/Info.plist`, and run the release workflow dry-run/tag flow.
+- **Risk**: Medium — key mismatch breaks auto-update.
+- **Impact**: Removes the last known release-packaging blocker.
 
-### P2: Split Large Vocabulary Plugin Module
+### P2: Split Large Model/Protocol Modules
 
-- **What**: Split `src/always/vocab/plugins.rs` by plugin and shared extraction helpers.
-- **Risk**: Medium — import behavior touches user vocabulary quality.
-- **Impact**: Reduces the largest Rust maintenance hotspot without changing external behavior.
+- **What**: Split `model_registry.rs`, `uds_server.rs`, and `correction.rs` along catalog/download/protocol/queue boundaries after v1.0.
+- **Risk**: Medium — model and UDS behavior touch release-critical flows.
+- **Impact**: Reduces the largest Rust maintenance hotspots without changing external behavior.
 
 ### P2: Decompose Swift Settings and Overlay
 
-- **What**: Move settings persistence helpers and overlay state calculation into smaller testable units.
+- **What**: Move settings persistence, UDS event decoding helpers, and overlay state calculation into smaller testable units.
 - **Risk**: Medium — UI behavior must be visually verified.
 - **Impact**: Reduces near-threshold Swift files and improves testability.
 

@@ -46,13 +46,26 @@ pub fn is_running() -> bool {
     read_pid().is_some_and(process_is_running)
 }
 
-/// argv patterns for `pkill -f`. The bundled Mac app runs
-/// `Contents/MacOS/always-daemon run`; dev builds use `always run`.
-const DAEMON_PGREP_PATTERNS: &[&str] = &["always-daemon run", "always run"];
+fn is_daemon_run_command(command: &str) -> bool {
+    let mut args = command.split_whitespace();
+    let Some(exe) = args.next() else {
+        return false;
+    };
+    let Some(subcommand) = args.next() else {
+        return false;
+    };
+    let Some(name) = std::path::Path::new(exe)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    matches!(name, "always" | "always-daemon") && subcommand == "run"
+}
 
-fn pids_matching_argv(pattern: &str) -> Vec<u32> {
-    let output = match std::process::Command::new("pgrep")
-        .args(["-f", pattern])
+fn process_table() -> Vec<(u32, String)> {
+    let output = match std::process::Command::new("ps")
+        .args(["-eo", "pid=,args="])
         .output()
     {
         Ok(o) if o.status.success() => o,
@@ -60,15 +73,21 @@ fn pids_matching_argv(pattern: &str) -> Vec<u32> {
     };
     String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(|line| line.trim().parse().ok())
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let split = trimmed.find(char::is_whitespace)?;
+            let pid = trimmed[..split].parse().ok()?;
+            let command = trimmed[split..].trim().to_string();
+            Some((pid, command))
+        })
         .collect()
 }
 
 /// All PIDs whose argv matches a voice daemon (may include the current process).
 pub fn list_daemon_pids() -> Vec<u32> {
-    let mut pids: Vec<u32> = DAEMON_PGREP_PATTERNS
-        .iter()
-        .flat_map(|pattern| pids_matching_argv(pattern))
+    let mut pids: Vec<u32> = process_table()
+        .into_iter()
+        .filter_map(|(pid, command)| is_daemon_run_command(&command).then_some(pid))
         .collect();
     pids.sort_unstable();
     pids.dedup();
@@ -77,7 +96,7 @@ pub fn list_daemon_pids() -> Vec<u32> {
 
 /// Terminate stray daemon processes. Never signals `except_pid` (the caller).
 pub fn kill_orphan_daemon_processes_except(except_pid: u32) {
-    let mut victims: Vec<u32> = list_daemon_pids()
+    let victims: Vec<u32> = list_daemon_pids()
         .into_iter()
         .filter(|pid| *pid != except_pid)
         .collect();
@@ -102,6 +121,26 @@ pub fn kill_orphan_daemon_processes() {
     kill_orphan_daemon_processes_except(std::process::id());
 }
 
+/// If another always daemon is still running, terminate it. Both
+/// processes capture the same mic and paste independently — the most
+/// common cause of "double transcript" reports.
+pub fn reconcile_duplicate_processes() {
+    let self_pid = std::process::id();
+    let others: Vec<u32> = list_daemon_pids()
+        .into_iter()
+        .filter(|pid| *pid != self_pid)
+        .collect();
+    if others.is_empty() {
+        return;
+    }
+    tracing::error!(
+        self_pid,
+        others = ?others,
+        "duplicate_daemon_processes_detected"
+    );
+    kill_orphan_daemon_processes_except(self_pid);
+}
+
 /// Block until no `always-daemon run` / `always run` processes remain.
 /// Returns `true` when the process list is empty.
 pub fn wait_until_no_daemon_processes(max_wait: Duration) -> bool {
@@ -123,6 +162,18 @@ pub fn socket_is_live(sock: &std::path::Path) -> bool {
 pub fn start(cfg: &AlwaysConfig) -> Result<()> {
     if is_running() {
         println!("Always-on daemon already running.");
+        return Ok(());
+    }
+    if let Some(sock) = socket_path()
+        && sock.exists()
+        && socket_is_live(&sock)
+    {
+        println!("Always-on daemon already running.");
+        return Ok(());
+    }
+    let existing = list_daemon_pids();
+    if !existing.is_empty() {
+        println!("Always-on daemon already running (pids: {:?}).", existing);
         return Ok(());
     }
     kill_orphan_daemon_processes();
@@ -242,7 +293,8 @@ impl PidGuard {
             .truncate(true)
             .open(&path)
             .context("failed to open always PID file")?;
-        acquire_exclusive_lock(&file).context("Always-on daemon already running (pid lock held)")?;
+        acquire_exclusive_lock(&file)
+            .context("Always-on daemon already running (pid lock held)")?;
         write!(file, "{}", std::process::id())?;
         let count = list_daemon_pids();
         if count.len() > 1 {
@@ -361,5 +413,24 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(pids.len(), sorted.len());
+    }
+
+    #[test]
+    fn daemon_run_matcher_rejects_diagnostic_commands() {
+        assert!(is_daemon_run_command(
+            "/Applications/Always.app/Contents/MacOS/always-daemon run --lang en"
+        ));
+        assert!(is_daemon_run_command(
+            "/Users/livio/Documents/always/target/release/always run --timeout 30"
+        ));
+        assert!(!is_daemon_run_command(
+            "/bin/zsh -lc ps aux | rg \"(/Applications/Always.app|always run|always-daemon)\""
+        ));
+        assert!(!is_daemon_run_command(
+            "rg (/Applications/Always.app|always run|always-daemon)"
+        ));
+        assert!(!is_daemon_run_command(
+            "/Applications/Always.app/Contents/MacOS/always-daemon status"
+        ));
     }
 }

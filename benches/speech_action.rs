@@ -11,12 +11,15 @@ use std::time::{Duration, Instant};
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
-use always::always::config::{AlwaysConfig, IdlePauseAction, PostprocessConfig, VadMode, VocabConfig};
+use always::always::config::{
+    AlwaysConfig, IdlePauseAction, PostprocessConfig, VadMode, VocabConfig,
+};
 use always::always::localization::Localization;
 use always::always::speech_action::{
     classify_transcription, in_cooldown, merge_dictation, merge_dictation_with,
 };
 use always::stt::TranscriptionResult;
+use always::stt_dispatch::TranscriberBackendChoice;
 
 fn bench_config() -> AlwaysConfig {
     AlwaysConfig {
@@ -32,7 +35,8 @@ fn bench_config() -> AlwaysConfig {
         post_processor: None,
         project_root: None,
         learning_enabled: false,
-        groq_stt_api_key: "test-key".to_string(),
+        groq_stt_api_key: Some("test-key".to_string()),
+        transcriber_backend: TranscriberBackendChoice::Groq,
         vad_mode: VadMode::Local,
         silero_threshold: 0.5,
         vocab_config: VocabConfig::default(),

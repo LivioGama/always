@@ -97,17 +97,37 @@ pub struct DownloadProgress {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ModelEvent {
     DownloadProgress(DownloadProgress),
-    DownloadComplete { model_id: String },
-    DownloadCancelled { model_id: String },
-    DownloadFailed { model_id: String, error: String },
-    VerificationStarted { model_id: String },
-    VerificationCompleted { model_id: String },
-    ExtractionStarted { model_id: String },
-    ExtractionCompleted { model_id: String },
-    ExtractionFailed { model_id: String, error: String },
+    DownloadComplete {
+        model_id: String,
+    },
+    DownloadCancelled {
+        model_id: String,
+    },
+    DownloadFailed {
+        model_id: String,
+        error: String,
+    },
+    VerificationStarted {
+        model_id: String,
+    },
+    VerificationCompleted {
+        model_id: String,
+    },
+    ExtractionStarted {
+        model_id: String,
+    },
+    ExtractionCompleted {
+        model_id: String,
+    },
+    ExtractionFailed {
+        model_id: String,
+        error: String,
+    },
     /// The active model id changed — UI should refresh badges. Carries
     /// `None` when the user switched back to the remote Groq backend.
-    ActiveChanged { model_id: Option<String> },
+    ActiveChanged {
+        model_id: Option<String>,
+    },
 }
 
 /// RAII cleanup for the `is_downloading` flag + cancel slot. Borrowed
@@ -211,9 +231,7 @@ impl ModelRegistry {
         let mut models = self.available_models.lock();
         for model in models.values_mut() {
             let model_path = self.models_dir.join(&model.filename);
-            let partial_path = self
-                .models_dir
-                .join(format!("{}.partial", &model.filename));
+            let partial_path = self.models_dir.join(format!("{}.partial", &model.filename));
             let extracting_path = self
                 .models_dir
                 .join(format!("{}.extracting", &model.filename));
@@ -221,10 +239,7 @@ impl ModelRegistry {
             // Sweep stale extraction temp dirs left over from a crash
             // mid-extract — but only if we're not actively extracting
             // this model right now.
-            let is_currently_extracting = self
-                .extracting_models
-                .lock()
-                .contains(&model.id);
+            let is_currently_extracting = self.extracting_models.lock().contains(&model.id);
             if extracting_path.exists() && !is_currently_extracting {
                 tracing::warn!(model = %model.id, "cleaning_up_interrupted_extraction");
                 let _ = fs::remove_dir_all(&extracting_path);
@@ -236,10 +251,7 @@ impl ModelRegistry {
                 model.is_downloaded = model_path.exists() && model_path.is_file();
             }
             model.is_downloading = false;
-            model.partial_size = partial_path
-                .metadata()
-                .map(|m| m.len())
-                .unwrap_or(0);
+            model.partial_size = partial_path.metadata().map(|m| m.len()).unwrap_or(0);
         }
         Ok(())
     }
@@ -260,9 +272,7 @@ impl ModelRegistry {
             .get(model_id)
             .ok_or_else(|| anyhow::anyhow!("unknown model id: {model_id}"))?;
         let path = self.models_dir.join(&info.filename);
-        let partial = self
-            .models_dir
-            .join(format!("{}.partial", &info.filename));
+        let partial = self.models_dir.join(format!("{}.partial", &info.filename));
 
         if path.is_dir() {
             fs::remove_dir_all(&path).ok();
@@ -273,7 +283,9 @@ impl ModelRegistry {
             fs::remove_file(&partial).ok();
         }
         self.refresh_disk_status()?;
-        let _ = self.events_tx.send(ModelEvent::ActiveChanged { model_id: None });
+        let _ = self
+            .events_tx
+            .send(ModelEvent::ActiveChanged { model_id: None });
         Ok(())
     }
 
@@ -456,9 +468,7 @@ impl ModelRegistry {
 
         // tar.gz extract (directory-based) vs single-file rename.
         if model_info.is_directory {
-            self.extracting_models
-                .lock()
-                .insert(model_id.to_string());
+            self.extracting_models.lock().insert(model_id.to_string());
             let _ = self.events_tx.send(ModelEvent::ExtractionStarted {
                 model_id: model_id.to_string(),
             });
@@ -540,12 +550,14 @@ impl ModelRegistry {
         } else {
             0.0
         };
-        let _ = self.events_tx.send(ModelEvent::DownloadProgress(DownloadProgress {
-            model_id: model_id.to_string(),
-            downloaded,
-            total,
-            percentage,
-        }));
+        let _ = self
+            .events_tx
+            .send(ModelEvent::DownloadProgress(DownloadProgress {
+                model_id: model_id.to_string(),
+                downloaded,
+                total,
+                percentage,
+            }));
     }
 
     fn emit_failed(&self, model_id: &str, error: &str) {
@@ -666,7 +678,10 @@ fn discover_custom_whisper_models(
             .collect::<Vec<_>>()
             .join(" ");
 
-        let size_mb = path.metadata().map(|m| m.len() / (1024 * 1024)).unwrap_or(0);
+        let size_mb = path
+            .metadata()
+            .map(|m| m.len() / (1024 * 1024))
+            .unwrap_or(0);
         tracing::info!(model = %model_id, %filename, size_mb, "discovered_custom_whisper_model");
 
         available_models.insert(
@@ -1048,14 +1063,17 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
         },
     );
 
-    let canary_flash_languages: Vec<String> =
-        ["en", "de", "es", "fr"].into_iter().map(String::from).collect();
+    let canary_flash_languages: Vec<String> = ["en", "de", "es", "fr"]
+        .into_iter()
+        .map(String::from)
+        .collect();
     map.insert(
         "canary-180m-flash".into(),
         ModelInfo {
             id: "canary-180m-flash".into(),
             name: "Canary 180M Flash".into(),
-            description: "Very fast. English, German, Spanish, French. Supports translation.".into(),
+            description: "Very fast. English, German, Spanish, French. Supports translation."
+                .into(),
             filename: "canary-180m-flash".into(),
             url: Some("https://blob.handy.computer/canary-180m-flash.tar.gz".into()),
             sha256: Some("6d9cfca6118b296e196eaedc1c8fa9788305a7b0f1feafdb6dc91932ab6e53f7".into()),
@@ -1087,7 +1105,8 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
         ModelInfo {
             id: "canary-1b-v2".into(),
             name: "Canary 1B v2".into(),
-            description: "Accurate multilingual. 25 European languages. Supports translation.".into(),
+            description: "Accurate multilingual. 25 European languages. Supports translation."
+                .into(),
             filename: "canary-1b-v2".into(),
             url: Some("https://blob.handy.computer/canary-1b-v2.tar.gz".into()),
             sha256: Some("02305b2a25f9cf3e7deaffa7f94df00efa44f442cd55c101c2cb9c000f904666".into()),

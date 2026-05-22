@@ -100,6 +100,7 @@ enum Commands {
         #[command(flatten)]
         args: LogsCommand,
     },
+    /// Toggle pause/resume state
     TogglePause,
     /// Toggle auto-enter state
     ToggleAutoEnter,
@@ -390,10 +391,7 @@ fn handle_config(action: ConfigAction) -> Result<()> {
             );
             println!(
                 "per_app_settings_json: {}",
-                prefs
-                    .per_app_settings_json
-                    .as_deref()
-                    .unwrap_or("{}")
+                prefs.per_app_settings_json.as_deref().unwrap_or("{}")
             );
             println!(
                 "idle_pause_secs: {}",
@@ -404,10 +402,7 @@ fn handle_config(action: ConfigAction) -> Result<()> {
             );
             println!(
                 "idle_pause_action: {}",
-                prefs
-                    .idle_pause_action
-                    .as_deref()
-                    .unwrap_or("pause")
+                prefs.idle_pause_action.as_deref().unwrap_or("pause")
             );
         }
         ConfigAction::Set { key, value } => {
@@ -663,18 +658,16 @@ fn handle_toggle_auto_enter() -> Result<()> {
 /// responsible for terminating with `\n`-or-not; we append one.
 /// Times out after 2 s so a stuck daemon doesn't hang the CLI.
 fn send_uds_command(json: &str) -> Result<()> {
+    use anyhow::Context as _;
     use std::io::Write as _;
     use std::os::unix::net::UnixStream;
-    use anyhow::Context as _;
 
     let Some(sock_path) = always::always::daemon::socket_path() else {
         anyhow::bail!("no UDS socket path available on this platform");
     };
     let mut stream = UnixStream::connect(&sock_path)
         .with_context(|| format!("failed to connect to daemon at {}", sock_path.display()))?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .ok();
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
     writeln!(stream, "{json}").context("failed to send UDS command")?;
     Ok(())
 }

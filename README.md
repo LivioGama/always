@@ -186,8 +186,8 @@ always start                # Start daemon in background
 always stop                 # Stop daemon
 always status               # Show pid + log path
 always run                  # Run in foreground (debugging)
-always toggle pause         # Mute mic without killing the daemon
-always toggle auto-enter    # Toggle "press Return after paste"
+always toggle-pause         # Mute mic without killing the daemon
+always toggle-auto-enter    # Toggle "press Return after paste"
 ```
 
 ### Configuration

@@ -38,10 +38,7 @@ pub fn spawn(rt: &Handle, idle_pause_secs: u32, idle_pause_action: IdlePauseActi
             // Idle pause is separate from MASTER so switching to an
             // allowlisted app or speaking again can resume without the
             // user hunting for a global "lift pause" toggle.
-            if !pause::is_master_paused()
-                && !pause::is_idle_auto_paused()
-                && elapsed >= threshold
-            {
+            if !pause::is_master_paused() && !pause::is_idle_auto_paused() && elapsed >= threshold {
                 pause::set_idle_auto_paused(true);
                 let (effective, changed) = pause::recompute_effective();
 

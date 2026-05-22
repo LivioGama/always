@@ -21,7 +21,10 @@
 //! Both paths share [`diff_words`] and [`apply_pairs_to_glossary`] so
 //! the on-disk effect is identical regardless of source.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+#[cfg(feature = "macos")]
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -217,7 +220,10 @@ pub fn diff_words(old: &str, new: &str) -> Vec<CorrectionPair> {
 fn strip_edge_punct(s: &str) -> &str {
     s.trim_matches(|c: char| {
         c.is_whitespace()
-            || matches!(c, '.' | ',' | '!' | '?' | ';' | ':' | '"' | '\'' | '(' | ')')
+            || matches!(
+                c,
+                '.' | ',' | '!' | '?' | ';' | ':' | '"' | '\'' | '(' | ')'
+            )
     })
 }
 
@@ -380,10 +386,7 @@ pub fn add_or_bump_term(term: &str) -> Result<()> {
     match idx {
         Some(i) => {
             let entry = &mut entries[i];
-            let current = entry
-                .get("weight")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(1);
+            let current = entry.get("weight").and_then(|v| v.as_i64()).unwrap_or(1);
             entry["weight"] = serde_json::json!(current + 1);
         }
         None => {

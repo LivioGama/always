@@ -30,6 +30,15 @@ class CLIService: ObservableObject {
     }
 
     func startDaemon() async throws -> String {
+        let status = try await getStatus()
+        if status.isRunning {
+            Self.logger.info("Daemon already running — skipping start")
+            return "Always-on daemon already running."
+        }
+        if !AppDelegate.listDaemonProcessIDs().isEmpty {
+            Self.logger.warning("Daemon process without pid file — skipping start")
+            return "Always-on daemon already running."
+        }
         // Read current config to pass to daemon. Only pass flags the user
         // has explicitly opted into; the daemon loads stt_silence,
         // auto_enter_delay_ms, energy thresholds, etc. from its own prefs

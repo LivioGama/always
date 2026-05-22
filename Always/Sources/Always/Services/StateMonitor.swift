@@ -157,23 +157,45 @@ class StateMonitor: ObservableObject {
             .store(in: &cancellables)
     }
 
-    /// Same as togglePause, for auto-enter.
-    ///
-    /// Also persists the new value to the daemon's DB so it survives a
-    /// daemon restart. The UDS `ToggleAutoEnter` command only mutates
-    /// in-memory state — without the `setConfig` round-trip the
-    /// preference would reset to the CLI default on every launch.
-    func toggleAutoEnter() {
-        let newValue = !isAutoEnter
-        isAutoEnter = newValue
-        StatusOverlayController.shared.flash(state: newValue ? .autoEnterOn : .autoEnterOff)
-        udsClient.sendCommand("ToggleAutoEnter")
+    /// Set auto-enter to an explicit value and persist to DB.
+    func setAutoEnter(_ enabled: Bool) {
+        guard enabled != isAutoEnter else { return }
+        isAutoEnter = enabled
+        StatusOverlayController.shared.flash(state: enabled ? .autoEnterOn : .autoEnterOff)
+        struct Payload: Encodable { let enabled: Bool }
+        udsClient.sendCommandWithData("SetAutoEnter", Payload(enabled: enabled))
         Task { [cliService] in
             _ = try? await cliService.setConfig(
                 key: "stt_auto_enter",
-                value: newValue ? "true" : "false"
+                value: enabled ? "true" : "false"
             )
         }
+    }
+
+    /// Same as setAutoEnter, toggling from current state (menu shortcuts).
+    func toggleAutoEnter() {
+        setAutoEnter(!isAutoEnter)
+    }
+
+    /// Push sensitivity + auto-enter delay to the running daemon after
+    /// Settings writes them to the DB.
+    func applyRuntimePreferences(from config: Config) {
+        guard isDaemonConnected else { return }
+        struct Payload: Encodable {
+            let auto_enter_delay_ms: UInt32
+            let energy_threshold: Double
+            let silence_secs: Double
+            let cooldown_ms: UInt32
+            let silero_threshold: Float
+        }
+        let payload = Payload(
+            auto_enter_delay_ms: UInt32(max(0, config.autoEnterDelayMs)),
+            energy_threshold: config.sttEnergyThreshold,
+            silence_secs: config.sttSilence,
+            cooldown_ms: UInt32(max(0, config.sttCooldownMs)),
+            silero_threshold: config.sileroThreshold
+        )
+        udsClient.sendCommandWithData("ApplyRuntimePreferences", payload)
     }
 
     /// Send a parameterless command to the daemon.

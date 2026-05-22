@@ -252,8 +252,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        Localization, SpeechAction, classify_transcription, in_cooldown,
-        lowercase_if_safe_starter, merge_dictation, merge_dictation_with,
+        Localization, SpeechAction, classify_transcription, in_cooldown, lowercase_if_safe_starter,
+        merge_dictation, merge_dictation_with,
     };
     use crate::always::AlwaysConfig;
     use crate::stt::TranscriptionResult;
@@ -527,13 +527,7 @@ mod tests {
     /// passes through.
     #[test]
     fn merge_empty_addition_is_identity_invariant() {
-        for prev in [
-            "",
-            "hello",
-            "Hello.",
-            "  trailing whitespace  ",
-            "नमस्ते",
-        ] {
+        for prev in ["", "hello", "Hello.", "  trailing whitespace  ", "नमस्ते"] {
             let (joined, delta) = merge_dictation(prev, "");
             assert_eq!(joined, prev, "identity broken for previous={prev:?}");
             assert!(

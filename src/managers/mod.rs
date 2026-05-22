@@ -6,6 +6,4 @@
 
 pub mod model_registry;
 
-pub use model_registry::{
-    DownloadProgress, EngineType, ModelEvent, ModelInfo, ModelRegistry,
-};
+pub use model_registry::{DownloadProgress, EngineType, ModelEvent, ModelInfo, ModelRegistry};

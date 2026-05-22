@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::always::audio::{self, FRAME_BYTES, FRAME_MS, FRAME_SAMPLES};
 use crate::always::config::AlwaysConfig;
@@ -11,8 +12,40 @@ use crate::always::pause;
 use crate::always::vad_silero::SileroVad;
 use crate::stt::Transcriber;
 
-/// Speculative transcription result, populated by a background thread.
-type SpeculationSlot = Arc<Mutex<Option<Result<crate::stt::TranscriptionResult>>>>;
+/// Speculative transcription slot with a generation counter so late
+/// writes from discarded speculation threads cannot poison the slot.
+struct SpeculationSlot {
+    generation: AtomicU32,
+    result: Mutex<Option<Result<crate::stt::TranscriptionResult>>>,
+}
+
+impl SpeculationSlot {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            generation: AtomicU32::new(0),
+            result: Mutex::new(None),
+        })
+    }
+
+    fn invalidate(&self) {
+        self.generation.fetch_add(1, Ordering::Release);
+        *self.result.lock() = None;
+    }
+
+    fn current_generation(&self) -> u32 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn store_if_current(&self, captured_gen: u32, value: Result<crate::stt::TranscriptionResult>) {
+        if captured_gen == self.generation.load(Ordering::Acquire) {
+            *self.result.lock() = Some(value);
+        }
+    }
+
+    fn take(&self) -> Option<Result<crate::stt::TranscriptionResult>> {
+        self.result.lock().take()
+    }
+}
 
 pub enum RecordResult {
     Speech {
@@ -95,8 +128,7 @@ fn record_with_local_vad(
     let min_speech_frames = (cfg.onset_ms / FRAME_MS).max(1) as usize;
     // Short-utterance cutoff. Computed once; activated per-iteration
     // when `speech_samples` duration is still under SHORT_SPEECH_MS.
-    let short_silence_frames =
-        ((SHORT_SILENCE_MS as f64) / FRAME_MS as f64).ceil() as usize;
+    let short_silence_frames = ((SHORT_SILENCE_MS as f64) / FRAME_MS as f64).ceil() as usize;
     // Tentative kickoff at 50% of the short window — earlier than the
     // 85% used for normal utterances because the speech itself is so
     // brief that even a misfired speculation is cheap to retry.
@@ -211,7 +243,7 @@ fn record_with_local_vad(
 
     // Speculation state (Option B): kicked off at tentative silence, may be
     // discarded if speech resumes before final silence.
-    let speculation_slot: SpeculationSlot = Arc::new(Mutex::new(None));
+    let speculation_slot = SpeculationSlot::new();
     let mut speculation_pending = false;
 
     loop {
@@ -286,7 +318,7 @@ fn record_with_local_vad(
             // is now stale because more speech will be appended).
             if speculation_pending {
                 speculation_pending = false;
-                *speculation_slot.lock() = None;
+                speculation_slot.invalidate();
                 // Overlay was likely flipped by speculation kickoff.
                 // User resumed — flip back. (No-op if already listening.)
                 flip_to_listening!();
@@ -389,6 +421,8 @@ fn record_with_local_vad(
             // hit final silence. If the user resumes, we discard it above.
             if !speculation_pending && consecutive_silence >= eff_tentative_frames {
                 speculation_pending = true;
+                speculation_slot.invalidate();
+                let captured_gen = speculation_slot.current_generation();
                 // Overlay → Transcribing when speculative STT starts.
                 flip_to_transcribing!();
                 let audio_snapshot = speech_samples.clone();
@@ -418,7 +452,7 @@ fn record_with_local_vad(
                         tracing::error!(panic = %msg, "speculation transcription panicked");
                         Err(anyhow::anyhow!("speculation transcription panicked: {msg}"))
                     });
-                    *slot.lock() = Some(outcome);
+                    slot.store_if_current(captured_gen, outcome);
                 });
             }
 
@@ -500,7 +534,7 @@ fn record_with_local_vad(
         let max_wait = std::time::Duration::from_secs(10);
         let mut taken: Option<Result<crate::stt::TranscriptionResult>> = None;
         loop {
-            if let Some(r) = speculation_slot.lock().take() {
+            if let Some(r) = speculation_slot.take() {
                 taken = Some(r);
                 break;
             }

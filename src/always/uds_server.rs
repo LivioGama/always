@@ -1,15 +1,13 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
-use super::AlwaysConfig;
 use super::event::{DaemonCommand, DaemonEvent, global_broadcaster};
-use super::event_loop::ActiveTranscriber;
+use super::event_loop::{ActiveConfig, ActiveTranscriber};
 use super::pause;
 use crate::managers::model_registry::{ModelEvent, ModelRegistry};
 use crate::stt_dispatch::{TranscriberBackendChoice, build_transcriber};
@@ -22,11 +20,9 @@ use crate::stt_dispatch::{TranscriberBackendChoice, build_transcriber};
 struct ModelCommandCtx {
     registry: ModelRegistry,
     active: ActiveTranscriber,
-    /// Snapshot of the daemon's config taken at startup. Used to
-    /// rebuild the transcriber when the user swaps the active model —
-    /// only `transcriber_backend` is mutated per call, everything else
-    /// (lang, API key, etc.) carries over.
-    cfg: Arc<AlwaysConfig>,
+    /// Live config shared with the main loop. Mutated by
+    /// `ApplyRuntimePreferences` and when swapping transcriber backend.
+    cfg: ActiveConfig,
 }
 
 // DoS protection constants
@@ -144,7 +140,7 @@ pub fn socket_path() -> Result<PathBuf> {
 pub async fn start_server(
     registry: ModelRegistry,
     active: ActiveTranscriber,
-    cfg: Arc<AlwaysConfig>,
+    cfg: ActiveConfig,
 ) -> Result<()> {
     // Bridge registry events → global daemon broadcaster so every
     // connected UDS client sees download/extract/verify progress on
@@ -466,6 +462,31 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
             }
             tracing::info!(new_state, "uds_toggle_auto_enter");
         }
+        DaemonCommand::SetAutoEnter { enabled } => {
+            pause::set_auto_enter_enabled(enabled);
+            if enabled {
+                global_broadcaster().auto_enter_enabled();
+            } else {
+                global_broadcaster().auto_enter_disabled();
+            }
+            tracing::info!(enabled, "uds_set_auto_enter");
+        }
+        DaemonCommand::ApplyRuntimePreferences {
+            auto_enter_delay_ms,
+            energy_threshold,
+            silence_secs,
+            cooldown_ms,
+            silero_threshold,
+        } => {
+            apply_runtime_preferences(
+                ctx,
+                auto_enter_delay_ms,
+                energy_threshold,
+                silence_secs,
+                cooldown_ms,
+                silero_threshold,
+            );
+        }
         DaemonCommand::ApproveCorrection { id } => handle_approve_correction(&id),
         DaemonCommand::RejectCorrection { id } => handle_reject_correction(&id),
         DaemonCommand::CaptureCorrection => handle_capture_correction(),
@@ -515,8 +536,7 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
             // Effective may flip because per-app rules differ between
             // the previous and new bundle; broadcast on change so the
             // status bar icon and overlay follow the user's focus.
-            let (effective, changed) =
-                pause::set_current_app_and_recompute(bundle_id.clone());
+            let (effective, changed) = pause::set_current_app_and_recompute(bundle_id.clone());
             global_broadcaster().focused_app_changed(bundle_id.clone());
             if changed {
                 if effective {
@@ -632,7 +652,7 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
                 Ok(()) => {
                     // If the deleted model was active, fall back to Groq.
                     let was_active = matches!(
-                        &ctx.cfg.transcriber_backend,
+                        &ctx.cfg.read().transcriber_backend,
                         TranscriberBackendChoice::Local { model_id: active_id }
                             if active_id == &model_id
                     );
@@ -660,7 +680,7 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
 /// DB, and emit [`DaemonEvent::ActiveTranscriberChanged`] so connected
 /// UDS clients refresh their active-model badge.
 fn switch_active_backend(ctx: &ModelCommandCtx, choice: TranscriberBackendChoice) {
-    let mut new_cfg = AlwaysConfig::clone(&ctx.cfg);
+    let mut new_cfg = ctx.cfg.write();
     new_cfg.transcriber_backend = choice.clone();
     match build_transcriber(&new_cfg, &ctx.registry) {
         Ok(transcriber) => {
@@ -668,9 +688,7 @@ fn switch_active_backend(ctx: &ModelCommandCtx, choice: TranscriberBackendChoice
             // Persist so the next daemon start uses the same choice.
             if let Ok(conn) = crate::db::open() {
                 let value = choice.to_string();
-                if let Err(e) =
-                    crate::db::set_preference(&conn, "transcriber_backend", &value)
-                {
+                if let Err(e) = crate::db::set_preference(&conn, "transcriber_backend", &value) {
                     tracing::warn!(error = %e, "persist_transcriber_backend_failed");
                 }
             }
@@ -683,6 +701,33 @@ fn switch_active_backend(ctx: &ModelCommandCtx, choice: TranscriberBackendChoice
             tracing::error!(backend = %choice, error = %e, "build_new_transcriber_failed");
         }
     }
+}
+
+/// Hot-reload fields the main loop reads from [`AlwaysConfig`] each
+/// utterance. DB persistence is handled by the Mac app before this
+/// command is sent.
+fn apply_runtime_preferences(
+    ctx: &ModelCommandCtx,
+    auto_enter_delay_ms: u32,
+    energy_threshold: f64,
+    silence_secs: f64,
+    cooldown_ms: u32,
+    silero_threshold: f32,
+) {
+    let mut cfg = ctx.cfg.write();
+    cfg.auto_enter_delay_ms = auto_enter_delay_ms.min(60_000);
+    cfg.energy_threshold = energy_threshold.clamp(0.0001, 0.5);
+    cfg.silence_secs = silence_secs.clamp(1.5, 15.0);
+    cfg.cooldown_ms = cooldown_ms;
+    cfg.silero_threshold = silero_threshold.clamp(0.0, 1.0);
+    tracing::info!(
+        auto_enter_delay_ms = cfg.auto_enter_delay_ms,
+        energy_threshold = cfg.energy_threshold,
+        silence_secs = cfg.silence_secs,
+        cooldown_ms = cfg.cooldown_ms,
+        silero_threshold = cfg.silero_threshold,
+        "uds_apply_runtime_preferences"
+    );
 }
 
 /// Handler for `ApproveCorrection`. Looks the entry up by UUID, applies

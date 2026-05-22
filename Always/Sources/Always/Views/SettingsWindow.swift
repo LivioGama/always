@@ -187,14 +187,18 @@ struct SettingsWindow: View {
                     "Auto-Enter After Paste",
                     isOn: Binding(
                         get: { stateMonitor.isAutoEnter },
-                        set: { _ in stateMonitor.toggleAutoEnter() }
+                        set: { newValue in
+                            config.sttAutoEnter = newValue
+                            stateMonitor.setAutoEnter(newValue)
+                        }
                     )
                 )
+                .disabled(!stateMonitor.isDaemonConnected)
                 Spacer()
             }
             NumericSettingRow(
                 title: "Auto-Enter Delay",
-                help: "Seconds before auto-enter. Set to 0 to disable.",
+                help: "Seconds before Return is pressed. Set to 0 for immediate Return. Use the toggle above to disable auto-enter.",
                 unit: "s",
                 formatter: Self.intFormatter,
                 value: Binding(
@@ -221,7 +225,7 @@ struct SettingsWindow: View {
                 .foregroundColor(.secondary)
 
             Text(
-                "Pauses listening after a stretch with no speech. Does not flip the global master switch — switch to a resumed app or speak to wake."
+                "Pauses listening after a stretch with no speech. Does not flip the global master switch — switch to a resumed app or speak to wake. Changes apply on next daemon restart."
             )
             .font(.caption)
             .foregroundColor(.secondary)
@@ -704,7 +708,6 @@ struct SettingsWindow: View {
                 _ = try await cliService.setConfig(key: "hear_energy_threshold", value: String(config.hearEnergyThreshold))
                 _ = try await cliService.setConfig(key: "stt_silence", value: String(config.sttSilence))
                 _ = try await cliService.setConfig(key: "stt_cooldown_ms", value: String(config.sttCooldownMs))
-                _ = try await cliService.setConfig(key: "stt_auto_enter", value: String(config.sttAutoEnter))
                 _ = try await cliService.setConfig(key: "auto_enter_delay_ms", value: String(config.autoEnterDelayMs))
                 _ = try await cliService.setConfig(key: "silero_threshold", value: String(config.sileroThreshold))
                 _ = try await cliService.setConfig(key: "postprocess_enabled", value: String(config.postprocessEnabled))
@@ -713,6 +716,9 @@ struct SettingsWindow: View {
                 // Only save API key if it's not masked (doesn't contain only dots)
                 if shouldPersistApiKey(apiKey) {
                     _ = try await cliService.setConfig(key: "groq_api_key", value: apiKey.isEmpty ? "" : apiKey)
+                }
+                await MainActor.run {
+                    stateMonitor.applyRuntimePreferences(from: config)
                 }
             } catch {
                 settingsLogger.error("saveConfig failed: \(error.localizedDescription, privacy: .public)")

@@ -33,7 +33,9 @@ impl FromStr for IdlePauseAction {
         match s.to_lowercase().as_str() {
             "pause" => Ok(Self::Pause),
             "pause_and_mute" => Ok(Self::PauseAndMute),
-            _ => anyhow::bail!("invalid idle pause action: {s}, must be 'pause' or 'pause_and_mute'"),
+            _ => {
+                anyhow::bail!("invalid idle pause action: {s}, must be 'pause' or 'pause_and_mute'")
+            }
         }
     }
 }
@@ -315,9 +317,7 @@ impl AlwaysConfig {
         // the previous code always took the CLI value, so a user-saved
         // `stt_auto_enter = false` was silently ignored when the daemon
         // was relaunched without an explicit override.
-        let auto_enter = auto_enter
-            .or(prefs.stt_auto_enter)
-            .unwrap_or(true);
+        let auto_enter = auto_enter.or(prefs.stt_auto_enter).unwrap_or(true);
 
         let vocab_config = load_vocab_config();
         let postprocess_config = load_postprocess_config();
@@ -362,10 +362,7 @@ impl AlwaysConfig {
             // Respect saved prefs / CLI; clamp to the same bounds as the
             // Settings UI (1.5s minimum keeps brief thinking-pause room
             // without the old hard 2.5s floor that added ~500ms latency).
-            silence_secs: prefs
-                .stt_silence
-                .unwrap_or(silence_secs)
-                .clamp(1.5, 15.0),
+            silence_secs: prefs.stt_silence.unwrap_or(silence_secs).clamp(1.5, 15.0),
             // `auto_enter` was already resolved above: CLI flag → DB pref →
             // canonical default. The previous code re-read `prefs.stt_auto_enter`
             // here, which silently undid an explicit CLI override.
@@ -384,7 +381,9 @@ impl AlwaysConfig {
             silero_threshold: prefs.silero_threshold.unwrap_or(0.5) as f32,
             vocab_config,
             postprocess_config: effective_postprocess,
-            auto_enter_delay_ms: prefs.auto_enter_delay_ms.unwrap_or(DEFAULT_AUTO_ENTER_DELAY_MS),
+            auto_enter_delay_ms: prefs
+                .auto_enter_delay_ms
+                .unwrap_or(DEFAULT_AUTO_ENTER_DELAY_MS),
             idle_pause_secs: prefs.idle_pause_secs.unwrap_or(DEFAULT_IDLE_PAUSE_SECS),
             idle_pause_action: prefs
                 .idle_pause_action
