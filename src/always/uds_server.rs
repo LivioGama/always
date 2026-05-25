@@ -320,6 +320,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         DaemonEvent::Hello {
             version: crate::always::event::PROTOCOL_VERSION,
         },
+        DaemonEvent::ListeningStarted, // Send immediately after Hello
         if is_paused {
             DaemonEvent::Paused
         } else {
@@ -336,7 +337,6 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         } else {
             DaemonEvent::AutoEnterDisabled
         },
-        DaemonEvent::ListeningStarted,
     ];
 
     for event in initial_events {
