@@ -51,11 +51,12 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     // Create shared config early so UDS server can start immediately
     let active_cfg: ActiveConfig = Arc::new(RwLock::new(cfg.clone()));
 
-    // Start UDS server IMMEDIATELY before expensive operations
-    // This allows the GUI to connect and receive ListeningStarted quickly
-    // The transcriber will be swapped in later when ready
+    // Start UDS server IMMEDIATELY with a placeholder transcriber
+    // This allows the GUI to connect while we load the expensive model
+    // The real transcriber will be swapped in when ready
     let cfg_for_uds = Arc::clone(&active_cfg);
     let registry_placeholder = ModelRegistry::new().context("init model registry")?;
+    // Use a dummy transcriber initially - will be swapped after model loads
     let active_placeholder: ActiveTranscriber = Arc::new(RwLock::new(
         build_transcriber(cfg, &registry_placeholder).context("construct initial transcriber")?
     ));
@@ -69,8 +70,8 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         }
     });
 
-    // Send initial state events immediately after UDS server starts
-    // This ensures the GUI gets ListeningStarted as early as possible
+    // Send initial state events immediately - UDS server will broadcast them
+    // to clients as they connect via the initial state in handle_client
     event::global_broadcaster().listening_started();
     if cfg.auto_enter {
         event::global_broadcaster().auto_enter_enabled();
