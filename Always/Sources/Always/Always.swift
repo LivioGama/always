@@ -147,19 +147,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Self.killStaleDaemon()
 
         let cli = cliService
+        // Start connecting immediately - don't wait for daemon start to complete
+        // The UDS client has retry logic and will connect as soon as the socket is ready
+        Task { @MainActor [weak self] in
+            let monitor = StateMonitor.shared
+            self?.stateMonitor = monitor
+            monitor.connectToDaemon()
+            AudioOutputMonitor.shared.start(stateMonitor: monitor)
+            FocusedAppMonitor.shared.start(stateMonitor: monitor)
+        }
+
         daemonBootstrapTask = Task {
             do {
                 _ = try await cli?.startDaemon()
                 await Self.reconcileDuplicateDaemons(cli: cli)
             } catch {
                 NSLog("Always: daemon start failed: \(error.localizedDescription)")
-            }
-            await MainActor.run { [weak self] in
-                let monitor = StateMonitor.shared
-                self?.stateMonitor = monitor
-                monitor.connectToDaemon()
-                AudioOutputMonitor.shared.start(stateMonitor: monitor)
-                FocusedAppMonitor.shared.start(stateMonitor: monitor)
             }
         }
     }
