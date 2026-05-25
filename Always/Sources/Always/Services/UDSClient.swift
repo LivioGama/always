@@ -557,8 +557,14 @@ class UDSClient: ObservableObject {
             self.reconnectAttempts += 1
             self.isDegraded = true
 
-            // Exponential backoff: 1, 2, 4, 8, 16, max 30 seconds.
-            let delay = min(30.0, pow(2.0, Double(self.reconnectAttempts - 1)))
+            // Fast reconnect for first few attempts (likely just daemon startup delay)
+            // Then exponential backoff: 0.1, 0.2, 0.4, 1, 2, 4, 8, 16, max 30 seconds.
+            let delay: Double
+            if self.reconnectAttempts <= 3 {
+                delay = 0.1 * pow(2.0, Double(self.reconnectAttempts - 1))
+            } else {
+                delay = min(30.0, pow(2.0, Double(self.reconnectAttempts - 3)))
+            }
             self.log("Scheduling reconnect attempt #\(self.reconnectAttempts) in \(delay)s")
 
             // After repeated failures, the daemon process is probably gone.
