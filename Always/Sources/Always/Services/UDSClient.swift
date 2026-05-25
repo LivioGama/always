@@ -557,15 +557,18 @@ class UDSClient: ObservableObject {
             self.reconnectAttempts += 1
             self.isDegraded = true
 
-            // Immediate retry for first attempt (likely just daemon startup delay)
-            // Then exponential backoff: 0, 0.1, 0.2, 0.4, 1, 2, 4, 8, 16, max 30 seconds.
+            // Aggressive retry for first few attempts (socket likely just needs a moment)
+            // Then exponential backoff: 0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 1, 2, 4, 8, 16, max 30 seconds.
             let delay: Double
-            if self.reconnectAttempts == 1 {
-                delay = 0.0
-            } else if self.reconnectAttempts <= 4 {
-                delay = 0.1 * pow(2.0, Double(self.reconnectAttempts - 2))
-            } else {
-                delay = min(30.0, pow(2.0, Double(self.reconnectAttempts - 4)))
+            switch self.reconnectAttempts {
+            case 1: delay = 0.0
+            case 2: delay = 0.01
+            case 3: delay = 0.02
+            case 4: delay = 0.05
+            case 5: delay = 0.1
+            case 6: delay = 0.2
+            case 7: delay = 0.4
+            default: delay = min(30.0, pow(2.0, Double(self.reconnectAttempts - 5)))
             }
             self.log("Scheduling reconnect attempt #\(self.reconnectAttempts) in \(delay)s")
 
