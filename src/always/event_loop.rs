@@ -90,6 +90,13 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         }
     });
 
+    // Send initial state events immediately after UDS server starts
+    // This ensures the GUI gets ListeningStarted as early as possible
+    event::global_broadcaster().listening_started();
+    if cfg.auto_enter {
+        event::global_broadcaster().auto_enter_enabled();
+    }
+
     // Heartbeat task: emit Heartbeat every 5s so connected GUI clients can
     // detect a dead/stalled daemon via watchdog timeout.
     let _heartbeat_handle = rt.spawn(async {
@@ -118,12 +125,6 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     // Idle-pause watchdog. Spawns at most one task; no-op when
     // `idle_pause_secs == 0`. Lives for the daemon lifetime.
     idle_watcher::spawn(rt.handle(), cfg.idle_pause_secs, cfg.idle_pause_action);
-
-    // Send initial state events
-    event::global_broadcaster().listening_started();
-    if cfg.auto_enter {
-        event::global_broadcaster().auto_enter_enabled();
-    }
 
     let mut last_process = Instant::now() - Duration::from_secs(10);
     let mut last_dup_check = Instant::now();
