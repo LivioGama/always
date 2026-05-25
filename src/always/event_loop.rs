@@ -16,7 +16,7 @@ use crate::always::{
 };
 use crate::managers::model_registry::ModelRegistry;
 use crate::stt::Transcriber;
-use crate::stt_dispatch::{TranscriberBackendChoice, build_transcriber};
+use crate::stt_dispatch::build_transcriber;
 
 /// Active [`Transcriber`] shared between the main loop, the UDS server
 /// (which swaps it when the user picks a different model in Settings),
@@ -42,46 +42,25 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     // the pid + socket files and calls `std::process::exit(0)`.
     daemon::install_signal_handlers(rt.handle());
 
-    // Model registry (catalog + downloader). Loaded once at startup;
-    // shared by reference with the UDS server. Cloning is cheap — the
-    // struct holds Arcs for the inner state.
-    let registry = ModelRegistry::new().context("init model registry")?;
-
-    // Build the initial transcriber based on the resolved backend.
-    // Wrapped in RwLock so the UDS server can swap it when the user
-    // selects a different model in Settings without a daemon restart.
-    let initial_transcriber =
-        build_transcriber(cfg, &registry).context("construct initial transcriber")?;
-    let active: ActiveTranscriber = Arc::new(RwLock::new(initial_transcriber));
-
-    let active_cfg: ActiveConfig = Arc::new(RwLock::new(cfg.clone()));
-
-    // Pre-warm Groq TLS only when the active backend actually uses it.
-    if matches!(cfg.transcriber_backend, TranscriberBackendChoice::Groq)
-        && let Some(api_key) = cfg.groq_stt_api_key.clone()
-    {
-        rt.spawn(async move {
-            let client = crate::http_client::async_client();
-            let _ = client
-                .get("https://api.groq.com/openai/v1/models")
-                .header("Authorization", format!("Bearer {}", api_key))
-                .send()
-                .await;
-        });
-    }
-
     // Initialize the auto-enter state from config
     pause::init_auto_enter(cfg.auto_enter);
 
     // Start keyboard listener for shortcuts
     keyboard::start_keyboard_listener()?;
 
-    // Start UDS server in background and track the task. Hands it a
-    // clone of the registry + active-transcriber lock so the
-    // `models.*` commands can mutate them.
+    // Create shared config early so UDS server can start immediately
+    let active_cfg: ActiveConfig = Arc::new(RwLock::new(cfg.clone()));
+
+    // Start UDS server IMMEDIATELY before expensive operations
+    // This allows the GUI to connect and receive ListeningStarted quickly
+    // The transcriber will be swapped in later when ready
     let cfg_for_uds = Arc::clone(&active_cfg);
-    let registry_for_uds = registry.clone();
-    let active_for_uds = Arc::clone(&active);
+    let registry_placeholder = ModelRegistry::new().context("init model registry")?;
+    let active_placeholder: ActiveTranscriber = Arc::new(RwLock::new(
+        build_transcriber(cfg, &registry_placeholder).context("construct initial transcriber")?
+    ));
+    let registry_for_uds = registry_placeholder.clone();
+    let active_for_uds = Arc::clone(&active_placeholder);
     let _uds_handle = rt.spawn(async move {
         if let Err(e) =
             uds_server::start_server(registry_for_uds, active_for_uds, cfg_for_uds).await
@@ -96,6 +75,10 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     if cfg.auto_enter {
         event::global_broadcaster().auto_enter_enabled();
     }
+
+    // Now do the expensive operations after UDS is accepting connections
+    let registry = registry_placeholder;
+    let active = active_placeholder;
 
     // Heartbeat task: emit Heartbeat every 5s so connected GUI clients can
     // detect a dead/stalled daemon via watchdog timeout.
