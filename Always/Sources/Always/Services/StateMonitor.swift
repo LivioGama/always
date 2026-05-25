@@ -63,6 +63,14 @@ class StateMonitor: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] connected in
                 self?.isDaemonConnected = connected
+                if connected {
+                    // Daemon restart clears in-memory focus + pause state.
+                    // Re-push what the GUI already knows so listening resumes
+                    // without requiring an app switch.
+                    FocusedAppMonitor.shared.resyncCurrentAppToDaemon()
+                    // Audio state is pushed on property changes; re-pushing on
+                    // connect races focus resync and can spuriously master-pause.
+                }
             }
             .store(in: &cancellables)
         udsClient.$isDegraded
@@ -328,6 +336,11 @@ class StateMonitor: ObservableObject {
                 self.isVoiceActivity = false
                 let reason = event.data?["reason"] ?? ""
                 StatusOverlayController.shared.flash(state: .filtered(reason: reason), duration: 1.8)
+            case .lowMicrophoneVolume:
+                // Microphone volume is too low - flash a warning overlay
+                if let energy = event.data?["energy"] as? Double {
+                    StatusOverlayController.shared.flash(state: .lowMicrophoneVolume(energy: energy), duration: 3.0)
+                }
             case .correctionLogged:
                 // Per-pair confirmation (⌃⌥X applied a wrong→right
                 // substitution to glossary.json). Flash the actual

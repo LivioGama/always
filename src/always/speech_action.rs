@@ -19,7 +19,7 @@
 //!   - [`merge_dictation`] — append-with-case-fixup for resume merges
 //!   - [`Localization`] — i18n seam for the heuristics above
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::always::config::AlwaysConfig;
 use crate::always::filter;
@@ -48,6 +48,70 @@ pub enum SpeechAction {
     Hallucinated { reason: String },
     /// Accepted — daemon should copy + paste this final text.
     Paste { text: String },
+}
+
+/// Minimum duplicate-paste suppression window — independent of `cooldown_ms`
+/// so a low cooldown setting cannot weaken back-to-back dedupe.
+pub const PASTE_DEDUPE_MIN_WINDOW_MS: u64 = 3000;
+
+/// Levenshtein similarity threshold for near-duplicate suppression (0–1).
+pub const PASTE_NEAR_DUPLICATE_SIMILARITY: f64 = 0.92;
+
+/// Effective dedupe window: at least [`PASTE_DEDUPE_MIN_WINDOW_MS`].
+#[must_use]
+pub fn paste_dedupe_window(cooldown_ms: u32) -> Duration {
+    Duration::from_millis(cooldown_ms.max(PASTE_DEDUPE_MIN_WINDOW_MS as u32) as u64)
+}
+
+/// Normalize paste text for duplicate comparison only (not for display).
+#[must_use]
+pub fn normalize_for_paste_dedupe(text: &str) -> String {
+    let trimmed = text.trim();
+    let mut out = String::with_capacity(trimmed.len());
+    let mut prev_space = false;
+    for ch in trimmed.chars() {
+        if ch.is_whitespace() {
+            if !prev_space && !out.is_empty() {
+                out.push(' ');
+            }
+            prev_space = true;
+        } else {
+            prev_space = false;
+            out.push(ch.to_ascii_lowercase());
+        }
+    }
+    while out.ends_with(|c: char| c.is_ascii_punctuation() || c.is_whitespace()) {
+        out.pop();
+    }
+    out
+}
+
+/// Similarity ratio in `[0.0, 1.0]` after normalization.
+#[must_use]
+pub fn paste_similarity(a: &str, b: &str) -> f64 {
+    let na = normalize_for_paste_dedupe(a);
+    let nb = normalize_for_paste_dedupe(b);
+    if na.is_empty() && nb.is_empty() {
+        return 1.0;
+    }
+    if na == nb {
+        return 1.0;
+    }
+    let max_len = na.len().max(nb.len());
+    if max_len == 0 {
+        return 1.0;
+    }
+    let dist = strsim::levenshtein(&na, &nb) as f64;
+    1.0 - dist / max_len as f64
+}
+
+/// True when `candidate` is identical or near-identical to `recent`.
+#[must_use]
+pub fn is_near_duplicate_paste(candidate: &str, recent: &str) -> bool {
+    if candidate.trim() == recent.trim() {
+        return true;
+    }
+    paste_similarity(candidate, recent) >= PASTE_NEAR_DUPLICATE_SIMILARITY
 }
 
 /// True when `now` is still inside the post-paste cooldown window
@@ -252,8 +316,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        Localization, SpeechAction, classify_transcription, in_cooldown, lowercase_if_safe_starter,
-        merge_dictation, merge_dictation_with,
+        Localization, SpeechAction, PASTE_DEDUPE_MIN_WINDOW_MS, classify_transcription,
+        in_cooldown, is_near_duplicate_paste, lowercase_if_safe_starter, merge_dictation,
+        merge_dictation_with, normalize_for_paste_dedupe, paste_dedupe_window,
     };
     use crate::always::AlwaysConfig;
     use crate::stt::TranscriptionResult;
@@ -595,5 +660,41 @@ mod tests {
             Localization::default().sentence_terminators,
             Localization::ENGLISH.sentence_terminators,
         );
+    }
+
+    // ----------------------------------------------------------------------
+    // Paste dedupe helpers
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn paste_dedupe_window_is_at_least_three_seconds() {
+        assert!(paste_dedupe_window(0).as_millis() >= u128::from(PASTE_DEDUPE_MIN_WINDOW_MS));
+        assert!(paste_dedupe_window(150).as_millis() >= u128::from(PASTE_DEDUPE_MIN_WINDOW_MS));
+        assert_eq!(
+            paste_dedupe_window(5000).as_millis(),
+            5000_u128,
+            "values above the floor pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn normalize_for_paste_dedupe_collapses_case_and_punctuation() {
+        assert_eq!(
+            normalize_for_paste_dedupe("Hello world."),
+            normalize_for_paste_dedupe("hello world")
+        );
+    }
+
+    #[test]
+    fn is_near_duplicate_paste_catches_punctuation_variants() {
+        assert!(is_near_duplicate_paste("Hello world.", "hello world"));
+    }
+
+    #[test]
+    fn is_near_duplicate_paste_allows_different_sentences() {
+        assert!(!is_near_duplicate_paste(
+            "open the settings panel",
+            "close the settings panel"
+        ));
     }
 }

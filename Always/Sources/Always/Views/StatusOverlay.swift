@@ -1,7 +1,96 @@
 import AppKit
+import CoreGraphics
 import os.log
 
 private let overlayLogger = Logger(subsystem: "com.always.app", category: "status-overlay")
+
+/// Resolves the display containing the frontmost app's main window — more
+/// reliable than mouse position when a native fullscreen app owns a Space.
+private enum OverlayScreenPlacement {
+    /// CGWindow bounds use a top-left origin; AppKit screens use bottom-left.
+    private static func appKitFrame(fromCGWindowBounds cgBounds: CGRect) -> CGRect {
+        let globalMaxY = NSScreen.screens.map(\.frame.maxY).max() ?? 0
+        return CGRect(
+            x: cgBounds.origin.x,
+            y: globalMaxY - cgBounds.origin.y - cgBounds.height,
+            width: cgBounds.width,
+            height: cgBounds.height
+        )
+    }
+
+    private static func screenContaining(point: NSPoint) -> NSScreen? {
+        NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) } ?? NSScreen.main
+    }
+
+    static func screenForFrontmostApp() -> NSScreen? {
+        guard let frontApp = NSWorkspace.shared.frontmostApplication else {
+            return screenContaining(point: NSEvent.mouseLocation)
+        }
+        let pid = frontApp.processIdentifier
+        guard let windowList = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
+            return screenContaining(point: NSEvent.mouseLocation)
+        }
+
+        var bestFrame = CGRect.zero
+        var bestArea: CGFloat = 0
+
+        for entry in windowList {
+            guard let ownerPID = entry[kCGWindowOwnerPID as String] as? Int32,
+                  ownerPID == pid,
+                  let layer = entry[kCGWindowLayer as String] as? Int,
+                  layer == 0,
+                  let boundsDict = entry[kCGWindowBounds as String] as? [String: CGFloat],
+                  let x = boundsDict["X"],
+                  let y = boundsDict["Y"],
+                  let w = boundsDict["Width"],
+                  let h = boundsDict["Height"] else {
+                continue
+            }
+            let frame = appKitFrame(fromCGWindowBounds: CGRect(x: x, y: y, width: w, height: h))
+            let area = frame.width * frame.height
+            if area > bestArea {
+                bestArea = area
+                bestFrame = frame
+            }
+        }
+
+        if bestArea > 0 {
+            var targetScreen: NSScreen?
+            var maxIntersection: CGFloat = 0
+            for screen in NSScreen.screens {
+                let intersection = bestFrame.intersection(screen.frame)
+                let area = intersection.width * intersection.height
+                if area > maxIntersection {
+                    maxIntersection = area
+                    targetScreen = screen
+                }
+            }
+            if let targetScreen {
+                return targetScreen
+            }
+            return screenContaining(point: NSPoint(x: bestFrame.midX, y: bestFrame.midY))
+        }
+
+        return screenContaining(point: NSEvent.mouseLocation)
+    }
+
+    static func volumeHudOrigin(on screen: NSScreen, width: CGFloat, height: CGFloat) -> NSPoint {
+        let screenFrame = screen.visibleFrame
+        let targetX = (screenFrame.width - width) / 2 + screenFrame.minX
+        let targetY = screenFrame.minY + 140
+        return NSPoint(x: targetX, y: targetY)
+    }
+
+    static func bottomRightOrigin(on screen: NSScreen, width: CGFloat, height: CGFloat, margin: CGFloat = 20) -> NSPoint {
+        let screenFrame = screen.visibleFrame
+        let targetX = screenFrame.maxX - width - margin
+        let targetY = screenFrame.minY + margin
+        return NSPoint(x: targetX, y: targetY)
+    }
+}
 
 enum OverlayState: Equatable, Hashable {
     case paused
@@ -12,12 +101,16 @@ enum OverlayState: Equatable, Hashable {
     case processing
     case voiceActivity
     case filtered(reason: String)
+    /// Mic input level is probably too low for reliable transcription.
+    case lowMicrophoneVolume
     case correctionSaved(wrong: String, right: String)
     case correctionEmpty(reason: String)
     /// Auto-enter countdown overlay. Whole seconds remaining.
     case autoEnterCountdown(secondsRemaining: Int)
     /// Idle auto-pause notice (briefly shown when daemon goes idle).
     case idleAutoPaused(seconds: Int)
+    /// Microphone volume warning - energy level is too low for reliable detection.
+    case lowMicrophoneVolume(energy: Double)
 
     var rawValue: String {
         switch self {
@@ -29,10 +122,12 @@ enum OverlayState: Equatable, Hashable {
         case .processing: return "Processing"
         case .voiceActivity: return "Listening"
         case .filtered(let reason): return reason.isEmpty ? "Filtered" : "Filtered · \(reason)"
+        case .lowMicrophoneVolume: return "Mic too quiet · raise input volume"
         case .correctionSaved(let wrong, let right): return "Saved: \(wrong) → \(right)"
         case .correctionEmpty(let reason): return reason.isEmpty ? "Nothing to fix" : reason
         case .autoEnterCountdown(let s): return "Auto-Enter in \(s)s · any key cancels"
         case .idleAutoPaused(let s): return "Idle for \(s)s · paused"
+        case .lowMicrophoneVolume(let energy): return String(format: "Low mic volume · energy %.3f", energy)
         }
     }
 
@@ -46,10 +141,12 @@ enum OverlayState: Equatable, Hashable {
         case .processing: return "waveform.circle"
         case .voiceActivity: return "waveform"
         case .filtered: return "xmark.octagon.fill"
+        case .lowMicrophoneVolume: return "mic.slash.fill"
         case .correctionSaved: return "checkmark.seal.fill"
         case .correctionEmpty: return "questionmark.circle"
         case .autoEnterCountdown: return "return"
         case .idleAutoPaused: return "moon.zzz.fill"
+        case .lowMicrophoneVolume: return "speaker.slash.fill"
         }
     }
 
@@ -63,10 +160,12 @@ enum OverlayState: Equatable, Hashable {
         case .processing: return .systemBlue
         case .voiceActivity: return .systemRed
         case .filtered: return .systemPink
+        case .lowMicrophoneVolume: return .systemYellow
         case .correctionSaved: return .systemGreen
         case .correctionEmpty: return .systemGray
         case .autoEnterCountdown: return .systemYellow
         case .idleAutoPaused: return .systemOrange
+        case .lowMicrophoneVolume: return .systemRed
         }
     }
 }
@@ -325,7 +424,7 @@ class StatusOverlayView: NSView {
     }
 }
 
-class StatusOverlayWindow: NSWindow {
+class StatusOverlayWindow: NSPanel {
     private var overlayView: StatusOverlayView?
 
     static let overlayWidth: CGFloat = 230
@@ -334,26 +433,35 @@ class StatusOverlayWindow: NSWindow {
     init() {
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: StatusOverlayWindow.overlayWidth, height: StatusOverlayWindow.overlayHeight),
-            styleMask: [.borderless],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
 
         self.backgroundColor = NSColor.clear
         self.isOpaque = false
-        self.level = .popUpMenu
+        self.level = .floating
         // `.fullScreenAuxiliary` is required for the HUD to appear over native
-        // fullscreen apps (same Space). ListeningIndicator already uses this.
+        // fullscreen apps (same Space). NSPanel + nonactivatingPanel matches
+        // ListeningIndicator, which renders correctly in fullscreen Spaces.
         self.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         self.ignoresMouseEvents = true
         self.hasShadow = true
         self.isReleasedWhenClosed = false
+        self.isFloatingPanel = true
+        self.becomesKeyOnlyIfNeeded = true
 
-        positionOnMouseScreen()
+        positionOnFrontmostScreen()
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) not implemented")
+    }
+
+    /// Reposition on the frontmost app's screen and re-front (fullscreen Spaces).
+    func repositionAndFront() {
+        positionOnFrontmostScreen()
+        orderFrontRegardless()
     }
 
     func show(state: OverlayState) {
@@ -368,7 +476,7 @@ class StatusOverlayWindow: NSWindow {
                 self.overlayView = StatusOverlayView(frame: frame)
                 self.contentView = self.overlayView
             }
-            self.positionOnMouseScreen()
+            self.positionOnFrontmostScreen()
 
             // Update state on the existing view so consecutive flashes
             // (e.g. pause then auto-enter) reuse the same window instead
@@ -380,8 +488,8 @@ class StatusOverlayWindow: NSWindow {
             let wasVisible = self.isVisible
             if !wasVisible {
                 self.alphaValue = 0.0
-                self.orderFrontRegardless()
             }
+            self.orderFrontRegardless()
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = wasVisible ? 0.0 : 0.15
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
@@ -418,22 +526,22 @@ class StatusOverlayWindow: NSWindow {
         }
     }
 
-    private func positionOnMouseScreen() {
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) })
-            ?? NSScreen.main
-        guard let screen = screen else { return }
-
-        // Place where the system volume HUD appears: horizontally centered,
-        // ~140pt above the bottom of the visible frame.
-        let screenFrame = screen.visibleFrame
-        let windowWidth = StatusOverlayWindow.overlayWidth
-        let windowHeight = StatusOverlayWindow.overlayHeight
-
-        let targetX = (screenFrame.width - windowWidth) / 2 + screenFrame.minX
-        let targetY = screenFrame.minY + 140
-
-        self.setFrame(NSRect(x: targetX, y: targetY, width: windowWidth, height: windowHeight), display: true)
+    private func positionOnFrontmostScreen() {
+        guard let screen = OverlayScreenPlacement.screenForFrontmostApp() else { return }
+        let origin = OverlayScreenPlacement.volumeHudOrigin(
+            on: screen,
+            width: StatusOverlayWindow.overlayWidth,
+            height: StatusOverlayWindow.overlayHeight
+        )
+        self.setFrame(
+            NSRect(
+                x: origin.x,
+                y: origin.y,
+                width: StatusOverlayWindow.overlayWidth,
+                height: StatusOverlayWindow.overlayHeight
+            ),
+            display: true
+        )
     }
 }
 
@@ -521,7 +629,7 @@ class IdleResumeWidget: NSView {
     }
 }
 
-class IdleResumeWindow: NSWindow {
+class IdleResumeWindow: NSPanel {
     private var widgetView: IdleResumeWidget?
 
     static let widgetWidth: CGFloat = 60
@@ -530,26 +638,31 @@ class IdleResumeWindow: NSWindow {
     init() {
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: Self.widgetWidth, height: Self.widgetHeight),
-            styleMask: [.borderless],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
 
         self.backgroundColor = NSColor.clear
         self.isOpaque = false
-        self.level = .popUpMenu
-        // `.fullScreenAuxiliary` is required for the HUD to appear over native
-        // fullscreen apps (same Space). ListeningIndicator already uses this.
+        self.level = .floating
         self.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         self.ignoresMouseEvents = false
         self.hasShadow = true
         self.isReleasedWhenClosed = false
+        self.isFloatingPanel = true
+        self.becomesKeyOnlyIfNeeded = true
 
-        positionInBottomRight()
+        positionOnFrontmostScreen()
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) not implemented")
+    }
+
+    func repositionAndFront() {
+        positionOnFrontmostScreen()
+        orderFrontRegardless()
     }
 
     func show(onPlayClicked: @escaping () -> Void) {
@@ -566,7 +679,7 @@ class IdleResumeWindow: NSWindow {
                 self.contentView = widget
             }
 
-            self.positionInBottomRight()
+            self.positionOnFrontmostScreen()
 
             if !self.isVisible {
                 self.alphaValue = 0.0
@@ -602,18 +715,17 @@ class IdleResumeWindow: NSWindow {
         }
     }
 
-    private func positionInBottomRight() {
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) })
-            ?? NSScreen.main
-        guard let screen = screen else { return }
-
-        let screenFrame = screen.visibleFrame
-        let margin: CGFloat = 20
-        let targetX = screenFrame.maxX - Self.widgetWidth - margin
-        let targetY = screenFrame.minY + margin
-
-        self.setFrame(NSRect(x: targetX, y: targetY, width: Self.widgetWidth, height: Self.widgetHeight), display: true)
+    private func positionOnFrontmostScreen() {
+        guard let screen = OverlayScreenPlacement.screenForFrontmostApp() else { return }
+        let origin = OverlayScreenPlacement.bottomRightOrigin(
+            on: screen,
+            width: Self.widgetWidth,
+            height: Self.widgetHeight
+        )
+        self.setFrame(
+            NSRect(x: origin.x, y: origin.y, width: Self.widgetWidth, height: Self.widgetHeight),
+            display: true
+        )
     }
 }
 
@@ -626,8 +738,38 @@ class StatusOverlayController {
     private var idleAnimationWorkItem: DispatchWorkItem?
     private var flashEndsAt: Date?
     private var pendingShowState: OverlayState?
+    private var spaceObservers: [NSObjectProtocol] = []
 
-    private init() {}
+    private init() {
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        spaceObservers.append(
+            workspaceCenter.addObserver(
+                forName: NSWorkspace.activeSpaceDidChangeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.refreshVisibleOverlayPlacement()
+            }
+        )
+        spaceObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.refreshVisibleOverlayPlacement()
+            }
+        )
+    }
+
+    private func refreshVisibleOverlayPlacement() {
+        if window?.isVisible == true {
+            window?.repositionAndFront()
+        }
+        if idleResumeWindow?.isVisible == true {
+            idleResumeWindow?.repositionAndFront()
+        }
+    }
 
     private func ensureWindow() {
         if window == nil {

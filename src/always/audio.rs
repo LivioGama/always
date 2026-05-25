@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdout};
 use std::sync::Arc;
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -15,6 +15,12 @@ pub const RATE: u32 = 16_000;
 pub const FRAME_MS: u32 = 30;
 pub const FRAME_SAMPLES: usize = 480;
 pub const FRAME_BYTES: usize = 960;
+
+/// CoreAudio overrun count that triggers a `rec` respawn. Bursts of
+/// "unhandled buffer overrun" mean SoX is discarding input samples —
+/// usually a native-rate capture / resample mismatch on USB mics (e.g.
+/// Elgato Wave:3 @ 48 kHz stereo).
+const REC_OVERRUN_RESPAWN_THRESHOLD: u32 = 64;
 
 static TEMP_WAV_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -68,18 +74,25 @@ pub struct RecChild {
     child: Child,
     stdout: ChildStdout,
     reuse_count: u32,
+    /// Incremented by the stderr drainer on CoreAudio buffer overruns.
+    overrun_count: Arc<AtomicU32>,
 }
 
 impl RecChild {
     pub fn spawn() -> Result<Self> {
         tracing::info!("rec_spawn_starting");
+        let overrun_count = Arc::new(AtomicU32::new(0));
         let mut child = std::process::Command::new("/opt/homebrew/bin/rec")
+            // Capture at the device's native rate/channels (typically 48 kHz
+            // stereo on USB mics), then resample to 16 kHz mono on the
+            // output side. Requesting `-c 1 -r 16000` on input makes
+            // CoreAudio warn and misbehave ("can't set sample rate 16000;
+            // using 48000") which leads to buffer overruns and dropped
+            // speech energy in the VAD pipeline.
             .args([
                 "--no-show-progress",
-                "-c",
-                "1",
-                "-r",
-                "16000",
+                "--buffer",
+                "131072",
                 "-t",
                 "raw",
                 "-e",
@@ -91,6 +104,8 @@ impl RecChild {
                 "-",
                 "rate",
                 "16000",
+                "channels",
+                "1",
             ])
             .stdout(std::process::Stdio::piped())
             // Capture stderr instead of dropping it on the floor. SoX
@@ -102,6 +117,7 @@ impl RecChild {
             .context("Failed to run 'rec' command. Install SoX: brew install sox")?;
         let stdout = child.stdout.take().context("sox stdout missing")?;
         if let Some(stderr) = child.stderr.take() {
+            let overruns = Arc::clone(&overrun_count);
             // Drain stderr on a background thread; log every non-empty
             // line as a daemon warning so SoX/CoreAudio errors surface
             // in the structured log instead of disappearing.
@@ -109,9 +125,19 @@ impl RecChild {
                 use std::io::{BufRead, BufReader};
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().map_while(Result::ok) {
-                    if !line.trim().is_empty() {
-                        tracing::warn!(line = %line, "rec_stderr");
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
                     }
+                    if trimmed.contains("buffer overrun") {
+                        let count = overruns.fetch_add(1, Ordering::Relaxed) + 1;
+                        // Avoid flooding the log — first + every 32nd.
+                        if count == 1 || count.is_multiple_of(32) {
+                            tracing::warn!(count, line = %trimmed, "rec_coreaudio_overrun");
+                        }
+                        continue;
+                    }
+                    tracing::warn!(line = %trimmed, "rec_stderr");
                 }
             });
         }
@@ -120,6 +146,7 @@ impl RecChild {
             child,
             stdout,
             reuse_count: 0,
+            overrun_count,
         })
     }
 
@@ -153,6 +180,15 @@ impl RecChild {
     }
 
     fn is_healthy(&mut self) -> bool {
+        let overruns = self.overrun_count.load(Ordering::Relaxed);
+        if overruns >= REC_OVERRUN_RESPAWN_THRESHOLD {
+            tracing::warn!(
+                overruns,
+                threshold = REC_OVERRUN_RESPAWN_THRESHOLD,
+                "rec_respawn_due_to_coreaudio_overruns"
+            );
+            return false;
+        }
         match self.child.try_wait() {
             Ok(Some(_)) => false, // Process has exited
             Ok(None) => true,     // Process still running

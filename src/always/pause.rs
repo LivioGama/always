@@ -262,6 +262,43 @@ pub fn clear_last_pasted_for_test() {
     *LAST_PASTED.lock() = None;
 }
 
+/// True while a paste pipeline (copy → Cmd+V → optional grammar patch) is
+/// in flight. Prevents overlapping pastes from VAD double-fire.
+static PASTE_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Acquire the paste-in-flight lock. Returns `false` if another paste is
+/// already running (e.g. async grammar patch still holding the lock).
+pub fn try_begin_paste() -> bool {
+    PASTE_IN_FLIGHT
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_ok()
+}
+
+/// Release the paste-in-flight lock.
+pub fn end_paste() {
+    PASTE_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub fn clear_paste_in_flight_for_test() {
+    end_paste();
+}
+
+/// True when `candidate` matches a recent paste within `window` (exact or
+/// near-duplicate after normalization).
+pub fn should_suppress_duplicate_paste(candidate: &str, window: std::time::Duration) -> bool {
+    let Some(recent) = last_pasted_text_within(window) else {
+        return false;
+    };
+    crate::always::speech_action::is_near_duplicate_paste(candidate, &recent)
+}
+
 /// Last moment voice activity was detected. Used by the idle-pause
 /// watchdog: if more than `idle_pause_secs` elapses without voice, the
 /// daemon auto-pauses. Initialized to `Instant::now()` at startup so we

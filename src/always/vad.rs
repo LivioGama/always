@@ -340,6 +340,18 @@ fn record_with_local_vad(
                         log.write(Event::VoiceDetected);
                         voice_logged = true;
 
+                        // Check if energy is suspiciously low - might indicate mic volume issue
+                        let current_energy = if use_fast_energy_check {
+                            fast_normalized_energy(samples)
+                        } else {
+                            normalized_energy(samples)
+                        };
+                        // Warn if energy is barely above threshold (within 20% margin)
+                        if current_energy < cfg.energy_threshold * 1.2 {
+                            event::global_broadcaster()
+                                .low_microphone_volume_maybe(current_energy);
+                        }
+
                         // Send voice activity detected event
                         event::global_broadcaster().voice_activity_detected();
                         // Clear the idle-auto-paused flag the moment we

@@ -48,10 +48,7 @@ final class FocusedAppMonitor: ObservableObject {
         // itself — at launch the front app is usually Always (we just
         // opened Settings), so the daemon keeps an empty current_app
         // until the user clicks into another window.
-        let front = NSWorkspace.shared.frontmostApplication
-        if let bundle = front?.bundleIdentifier {
-            self.notify(bundleID: bundle, name: front?.localizedName)
-        }
+        resyncCurrentAppToDaemon()
         observer = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
@@ -61,6 +58,33 @@ final class FocusedAppMonitor: ObservableObject {
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             self.notify(bundleID: app?.bundleIdentifier, name: app?.localizedName)
         }
+    }
+
+    /// Re-push the focused app after a daemon restart or UDS reconnect.
+    /// The daemon resets `current_app` on startup and stays paused until
+    /// it receives `NotifyFocusedAppChanged` — but focus only changes on
+    /// app switches, so a reconnect without a switch would leave listening
+    /// dead until the user Cmd+Tab'd away and back.
+    func resyncCurrentAppToDaemon() {
+        let front = NSWorkspace.shared.frontmostApplication
+        let bundle: String?
+        let name: String?
+        if front?.bundleIdentifier == Self.ownBundleId {
+            // Settings is frontmost — keep reporting the last real app
+            // so the allowlist still applies to the workspace the user
+            // came from.
+            bundle = currentBundleId
+            name = currentAppName
+        } else {
+            bundle = front?.bundleIdentifier
+            name = front?.localizedName
+        }
+        guard let bundle else {
+            logger.debug("resync skipped — no real app to report")
+            return
+        }
+        lastBundleID = nil
+        notify(bundleID: bundle, name: name)
     }
 
     private func notify(bundleID: String?, name: String?) {
