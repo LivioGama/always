@@ -311,6 +311,12 @@ class StateMonitor: ObservableObject {
                 if changed {
                     StatusOverlayController.shared.flash(state: .autoEnterOff)
                 }
+            case .listeningStarted:
+                // Daemon is now listening - show overlay immediately
+                self.isVoiceActivity = true
+            case .listeningStopped:
+                // Daemon stopped listening - hide overlay
+                self.isVoiceActivity = false
             case .transcribingStarted:
                 self.isTranscribing = true
             case .transcribingStopped:
