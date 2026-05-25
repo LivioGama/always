@@ -101,8 +101,6 @@ enum OverlayState: Equatable, Hashable {
     case processing
     case voiceActivity
     case filtered(reason: String)
-    /// Mic input level is probably too low for reliable transcription.
-    case lowMicrophoneVolume
     case correctionSaved(wrong: String, right: String)
     case correctionEmpty(reason: String)
     /// Auto-enter countdown overlay. Whole seconds remaining.
@@ -122,7 +120,6 @@ enum OverlayState: Equatable, Hashable {
         case .processing: return "Processing"
         case .voiceActivity: return "Listening"
         case .filtered(let reason): return reason.isEmpty ? "Filtered" : "Filtered · \(reason)"
-        case .lowMicrophoneVolume: return "Mic too quiet · raise input volume"
         case .correctionSaved(let wrong, let right): return "Saved: \(wrong) → \(right)"
         case .correctionEmpty(let reason): return reason.isEmpty ? "Nothing to fix" : reason
         case .autoEnterCountdown(let s): return "Auto-Enter in \(s)s · any key cancels"
@@ -141,7 +138,6 @@ enum OverlayState: Equatable, Hashable {
         case .processing: return "waveform.circle"
         case .voiceActivity: return "waveform"
         case .filtered: return "xmark.octagon.fill"
-        case .lowMicrophoneVolume: return "mic.slash.fill"
         case .correctionSaved: return "checkmark.seal.fill"
         case .correctionEmpty: return "questionmark.circle"
         case .autoEnterCountdown: return "return"
@@ -160,7 +156,6 @@ enum OverlayState: Equatable, Hashable {
         case .processing: return .systemBlue
         case .voiceActivity: return .systemRed
         case .filtered: return .systemPink
-        case .lowMicrophoneVolume: return .systemYellow
         case .correctionSaved: return .systemGreen
         case .correctionEmpty: return .systemGray
         case .autoEnterCountdown: return .systemYellow
