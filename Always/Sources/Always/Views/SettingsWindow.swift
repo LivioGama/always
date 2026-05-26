@@ -90,7 +90,7 @@ struct SettingsWindow: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            SettingsSidebar(selectedPanel: $selectedPanel)
+            SettingsSidebar(selectedPanel: $selectedPanel, stateMonitor: stateMonitor)
             Divider()
             panelContent
         }
@@ -120,22 +120,30 @@ struct SettingsWindow: View {
         switch selectedPanel {
         case .general:
             GeneralPanel(
+                stateMonitor: stateMonitor,
+                focusedApp: focusedApp
+            )
+        case .behavior:
+            BehaviorPanel(
                 cliService: cliService,
                 stateMonitor: stateMonitor,
-                focusedApp: focusedApp,
+                config: $config
+            )
+        case .shortcuts:
+            ShortcutsPanel(cliService: cliService, config: $config)
+        case .vocabulary:
+            VocabularyPanel()
+        case .models:
+            ModelsPanel()
+        case .advanced:
+            AdvancedPanel(
+                cliService: cliService,
                 config: $config,
                 apiKey: $apiKey,
                 showApiKey: $showApiKey,
                 isSavingApiKey: $isSavingApiKey,
                 focusedField: $focusedField,
                 saveApiKey: saveApiKey
-            )
-        case .models:
-            ModelsPanel()
-        case .advanced:
-            AdvancedPanel(
-                cliService: cliService,
-                config: $config
             )
         case .about:
             AboutPanel()

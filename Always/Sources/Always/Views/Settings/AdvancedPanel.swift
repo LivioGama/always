@@ -3,15 +3,69 @@ import SwiftUI
 struct AdvancedPanel: View {
     @ObservedObject var cliService: CLIService
     @Binding var config: Config
+    @Binding var apiKey: String
+    @Binding var showApiKey: Bool
+    @Binding var isSavingApiKey: Bool
+    @FocusState.Binding var focusedField: SettingsWindow.Field?
+    var saveApiKey: () -> Void
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                sensitivitySection
+                apiSection
                 Divider()
-                shortcutsSection
+                sensitivitySection
             }
             .padding(20)
+        }
+    }
+
+    private var apiSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Groq API Key").font(.headline)
+            HStack {
+                ZStack(alignment: .trailing) {
+                    Group {
+                        if showApiKey {
+                            TextField("Groq API Key", text: $apiKey)
+                                .textFieldStyle(.roundedBorder)
+                        } else {
+                            SecureField("Groq API Key", text: $apiKey)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+                    .focused($focusedField, equals: .apiKey)
+                    .onChange(of: apiKey) { _, newValue in
+                        config.groqApiKey = newValue.isEmpty ? nil : newValue
+                    }
+                    if isSavingApiKey {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .frame(width: 14, height: 14)
+                            .padding(.trailing, 8)
+                    }
+                }
+
+                Button {
+                    showApiKey.toggle()
+                    focusedField = nil
+                } label: {
+                    Image(systemName: showApiKey ? "eye.slash" : "eye")
+                }
+                .buttonStyle(.borderless)
+
+                Button {
+                    saveApiKey()
+                } label: {
+                    Image(systemName: "arrow.down.doc")
+                }
+                .buttonStyle(.borderless)
+                .help("Save API Key")
+                .disabled(isSavingApiKey)
+            }
+            Text("Required for transcription and smart postprocessing.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
         }
     }
 
@@ -36,7 +90,7 @@ struct AdvancedPanel: View {
                 .frame(width: 280)
             }
 
-            DisclosureGroup("Advanced") {
+            DisclosureGroup("Advanced thresholds") {
                 VStack(alignment: .leading, spacing: 8) {
                     NumericSettingRow(
                         title: "STT Energy Threshold",
@@ -110,42 +164,5 @@ struct AdvancedPanel: View {
             stt: config.sttEnergyThreshold,
             hear: config.hearEnergyThreshold
         )
-    }
-
-    private var shortcutsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Keyboard Shortcuts").font(.headline)
-            KeyCaptureButton(
-                label: "Pause / Resume",
-                shortcut: $config.shortcutPause,
-                onSave: { value in
-                    _ = try? await cliService.setConfig(key: "shortcut_pause", value: value)
-                }
-            )
-            KeyCaptureButton(
-                label: "Toggle Auto-Enter",
-                shortcut: $config.shortcutAutoEnter,
-                onSave: { value in
-                    _ = try? await cliService.setConfig(key: "shortcut_auto_enter", value: value)
-                }
-            )
-            KeyCaptureButton(
-                label: "Paste Last Filtered",
-                shortcut: $config.shortcutForcePaste,
-                onSave: { value in
-                    _ = try? await cliService.setConfig(key: "shortcut_force_paste", value: value)
-                }
-            )
-            KeyCaptureButton(
-                label: "Correction Dialog",
-                shortcut: $config.shortcutCorrectionDialog,
-                onSave: { value in
-                    _ = try? await cliService.setConfig(key: "shortcut_correction_dialog", value: value)
-                }
-            )
-            Text("Shortcut changes take effect on next launch.")
-                .font(.caption2)
-                .foregroundColor(.secondary)
-        }
     }
 }
