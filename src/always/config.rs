@@ -360,9 +360,11 @@ impl AlwaysConfig {
             lang,
             timeout_secs,
             // Respect saved prefs / CLI; clamp to the same bounds as the
-            // Settings UI (1.5s minimum keeps brief thinking-pause room
-            // without the old hard 2.5s floor that added ~500ms latency).
-            silence_secs: prefs.stt_silence.unwrap_or(silence_secs).clamp(1.5, 15.0),
+            // Settings UI. 1.0s minimum — was 1.5s but that floor added
+            // 500ms to perceived transcribe latency for anyone who tuned
+            // sub-second cutoffs in the UI. Users still constrained from
+            // setting absurd <1s windows that would split phrases.
+            silence_secs: prefs.stt_silence.unwrap_or(silence_secs).clamp(1.0, 15.0),
             // `auto_enter` was already resolved above: CLI flag → DB pref →
             // canonical default. The previous code re-read `prefs.stt_auto_enter`
             // here, which silently undid an explicit CLI override.
@@ -410,11 +412,11 @@ impl Default for AlwaysConfig {
             timeout_secs: 30,
             // Defaults aligned with `SensitivityPreset::Normal` and the
             // Mic Sensitivity / Speaking Style picker in the GUI.
-            // 2.0s balances snappy paste with natural mid-thought pauses.
-            // Speculative STT kicks off at 60% (~1.2s); overlay flips
-            // then too (not before). Users can raise to 2.5s in Settings
-            // if they get mid-sentence splits.
-            silence_secs: 2.0,
+            // 1.5s reverts the 2.0s "snappier overlay" pad — that 500ms
+            // dominated perceived transcribe latency. Speculative STT
+            // still kicks off at 60% (~900ms). Users who get mid-sentence
+            // splits can raise this in Settings.
+            silence_secs: 1.5,
             auto_enter: true,
             filter_enabled: true,
             energy_threshold: 0.012,

@@ -102,12 +102,11 @@ pub fn poll_speech_energy(cfg: &AlwaysConfig) -> Result<bool> {
 /// mid-thought.
 const SHORT_SPEECH_MS: u32 = 400;
 /// Silence-after-speech window for short utterances. Standard window
-/// is `cfg.silence_secs` (2.0s default); for a short utterance we cut
-/// at 900ms so single words still paste in ~1.2s but the user gets
-/// real headroom for natural mid-thought micropauses before the cut
-/// fires. 700ms was still too aggressive — users reported mid-sentence
-/// pastes during normal dictation.
-const SHORT_SILENCE_MS: u32 = 900;
+/// is `cfg.silence_secs` (1.5s default); for a short utterance we cut
+/// at 400ms so single words ("yes", "ok") paste in ~700ms total.
+/// Reverted from 900ms — felt laggy. Mid-sentence safety is covered
+/// by the higher-level `silence_secs` which catches longer phrases.
+const SHORT_SILENCE_MS: u32 = 400;
 
 fn record_with_local_vad(
     cfg: &AlwaysConfig,
@@ -161,10 +160,12 @@ fn record_with_local_vad(
     // Silero's probability naturally dips below 0.5 during voiceless consonants
     // (h, s, f), inter-syllable pauses, and quiet syllables — without hysteresis,
     // these brief dips accumulate consecutive_silence and prematurely cut the
-    // utterance mid-sentence. 0.60 (vs prior 0.75) gives more headroom for
-    // natural "thinking" speech with brief breath pauses: trailing soft speech
-    // below 0.45 (when speech_threshold=0.5) still keeps the utterance alive.
-    let silence_threshold: f32 = speech_threshold * 0.60;
+    // utterance mid-sentence. Reverted from 0.60 → 0.75 for snappier
+    // end-of-speech: the previous 0.60 kept utterances alive through long
+    // ambient/breath windows, making the daemon feel slow to start
+    // transcribing. Mid-sentence "soft trailing" cases ('s', 'f', 'h')
+    // are still covered by the smoothing window below.
+    let silence_threshold: f32 = speech_threshold * 0.75;
     let mut last_prob: f32 = 0.0;
     // Probability smoothing window. Silero outputs per-512-sample (32ms) chunks;
     // single-frame dips during voiceless consonants (s/f/th/h) or breaths can

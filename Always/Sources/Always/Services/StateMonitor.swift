@@ -292,21 +292,20 @@ class StateMonitor: ObservableObject {
     }
 
     private func updateOverlay() {
-        // Connection lost or any pause-class state active → hide.
+        // Always-on listening model: the overlay is visible whenever the
+        // daemon is connected and not paused (by master switch, per-app
+        // allowlist for the focused app, or idle-timeout). Switching focus
+        // to a non-allowlisted app or pausing globally hides it instantly.
         if !isDaemonConnected || isMasterPaused || isPaused || isIdleAutoPaused {
             StatusOverlayController.shared.hide()
             return
         }
-        // Only show while actively speaking or transcribing. The previous
-        // sticky `isListeningActive` kept the HUD up forever between
-        // phrases because the daemon never emits `ListeningStopped` until
-        // shutdown — leaving an always-on indicator instead of feedback.
         if isTranscribing {
             StatusOverlayController.shared.show(state: .transcribing)
-        } else if isVoiceActivity {
-            StatusOverlayController.shared.show(state: .voiceActivity)
         } else {
-            StatusOverlayController.shared.hide()
+            // Includes the idle "ready to listen" state — feels real-time
+            // because the indicator is there before you start speaking.
+            StatusOverlayController.shared.show(state: .voiceActivity)
         }
     }
 
