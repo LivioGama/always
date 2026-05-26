@@ -250,7 +250,10 @@ private struct ModelRow: View {
             ProgressView(value: Double(value))
                 .progressViewStyle(.linear)
                 .frame(width: 70)
-                .tint(.accentColor.opacity(0.8))
+                // On macOS 26 `.tint(.accentColor.opacity(...))` triggers
+                // infinite recursion inside Color.AccentColorProvider.resolve
+                // when the row is laid out. Plain `.accentColor` is safe.
+                .tint(.accentColor)
         }
     }
 

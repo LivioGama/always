@@ -271,35 +271,45 @@ class StateMonitor: ObservableObject {
         )
     }
     
-    /// Drives the persistent overlay from three pieces of daemon state:
-    /// transcribing (highest priority) → voice activity → idle listening.
-    /// Show is instant; hide is debounced 50 ms to absorb the tiny gap
-    /// between `transcriptFinal` and the next `listeningStarted`.
+    /// Recompute the overlay whenever any state that contributes to it
+    /// changes. Pause states (per-app, master, idle) suppress everything
+    /// so switching focus to a paused app immediately hides the listening
+    /// / transcribing HUD — the user's signal that we stopped listening.
     private func setupOverlaySubscription() {
-        Publishers.CombineLatest3($isTranscribing, $isVoiceActivity, $isListeningActive)
-            .removeDuplicates(by: { $0 == $1 })
-            .sink { [weak self] isTranscribing, isVoiceActivity, isListening in
-                guard let self = self else { return }
-                if isTranscribing {
-                    StatusOverlayController.shared.show(state: .transcribing)
-                } else if isVoiceActivity {
-                    StatusOverlayController.shared.show(state: .voiceActivity)
-                } else if isListening {
-                    StatusOverlayController.shared.show(state: .voiceActivity)
-                } else {
-                    self.log("ongoing state cleared — hiding overlay")
-                    StatusOverlayController.shared.hide()
-                }
-            }
+        let inputs: [AnyPublisher<Void, Never>] = [
+            $isTranscribing.map { _ in () }.eraseToAnyPublisher(),
+            $isVoiceActivity.map { _ in () }.eraseToAnyPublisher(),
+            $isListeningActive.map { _ in () }.eraseToAnyPublisher(),
+            $isPaused.map { _ in () }.eraseToAnyPublisher(),
+            $isMasterPaused.map { _ in () }.eraseToAnyPublisher(),
+            $isIdleAutoPaused.map { _ in () }.eraseToAnyPublisher(),
+            $isDaemonConnected.map { _ in () }.eraseToAnyPublisher(),
+        ]
+        Publishers.MergeMany(inputs)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateOverlay() }
             .store(in: &cancellables)
     }
 
-    private func showOngoingOverlayIfNeeded() {
+    private func updateOverlay() {
+        // Connection lost or any pause-class state active → hide.
+        // Pauses include the master kill switch, per-app override for the
+        // currently focused app, and the idle auto-pause watchdog.
+        if !isDaemonConnected || isMasterPaused || isPaused || isIdleAutoPaused {
+            StatusOverlayController.shared.hide()
+            return
+        }
         if isTranscribing {
             StatusOverlayController.shared.show(state: .transcribing)
         } else if isVoiceActivity || isListeningActive {
             StatusOverlayController.shared.show(state: .voiceActivity)
+        } else {
+            StatusOverlayController.shared.hide()
         }
+    }
+
+    private func showOngoingOverlayIfNeeded() {
+        updateOverlay()
     }
 
     private func setupUDSEventListener() {
