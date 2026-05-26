@@ -134,10 +134,7 @@ struct SettingsWindow: View {
         case .vocabulary:
             VocabularyPanel()
         case .models:
-            ModelsPanel()
-        case .advanced:
-            AdvancedPanel(
-                cliService: cliService,
+            ModelsPanel(
                 config: $config,
                 apiKey: $apiKey,
                 showApiKey: $showApiKey,

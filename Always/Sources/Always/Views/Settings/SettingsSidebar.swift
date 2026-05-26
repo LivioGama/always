@@ -6,7 +6,6 @@ enum SettingsPanel: String, CaseIterable {
     case shortcuts = "Shortcuts"
     case vocabulary = "Vocabulary"
     case models = "Models"
-    case advanced = "Advanced"
     case about = "About"
 
     var symbol: String {
@@ -16,7 +15,6 @@ enum SettingsPanel: String, CaseIterable {
         case .shortcuts:  return "command"
         case .vocabulary: return "character.book.closed"
         case .models:     return "cpu"
-        case .advanced:   return "wrench.and.screwdriver"
         case .about:      return "info.circle"
         }
     }
@@ -42,29 +40,31 @@ struct SettingsSidebar: View {
 
     @ViewBuilder
     private func sidebarItem(for panel: SettingsPanel) -> some View {
-        Button {
-            selectedPanel = panel
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: panel.symbol)
-                    .frame(width: 18)
-                    .foregroundColor(selectedPanel == panel ? .white : .secondary)
-                Text(panel.rawValue)
-                    .font(.body)
-                    .foregroundColor(selectedPanel == panel ? .white : .primary)
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(
-                selectedPanel == panel
-                    ? Color.accentColor
-                    : Color.clear
-            )
-            .cornerRadius(6)
+        HStack(spacing: 10) {
+            Image(systemName: panel.symbol)
+                .frame(width: 18)
+                .foregroundColor(selectedPanel == panel ? .white : .secondary)
+            Text(panel.rawValue)
+                .font(.body)
+                .foregroundColor(selectedPanel == panel ? .white : .primary)
+            Spacer()
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(
+            selectedPanel == panel
+                ? Color.accentColor
+                : Color.clear
+        )
+        .cornerRadius(6)
         .padding(.horizontal, 8)
+        // `contentShape` makes the entire row hit-testable — without it
+        // SwiftUI only catches taps on the Image/Text glyphs, not the
+        // Spacer or padding area, which the user perceives as dead zones.
+        .contentShape(Rectangle())
+        .onTapGesture {
+            selectedPanel = panel
+        }
     }
 
     private var statusFooter: some View {

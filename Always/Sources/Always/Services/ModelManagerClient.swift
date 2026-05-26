@@ -39,6 +39,7 @@ final class ModelManagerClient: ObservableObject {
     /// over `Notification.Name.daemonEvent`, broadcast by the same
     /// client.
     private var observer: NSObjectProtocol?
+    private var cancellables = Set<AnyCancellable>()
 
     private init() {
         observer = NotificationCenter.default.addObserver(
@@ -51,6 +52,18 @@ final class ModelManagerClient: ObservableObject {
                 self?.handle(event)
             }
         }
+
+        // Auto-request the catalog whenever the GUI (re)connects to the
+        // daemon. Without this, a Settings → Models open that races the
+        // bootstrap reconnect drops its one-shot request and the panel
+        // stays stuck on "Waiting for model catalog from daemon…".
+        StateMonitor.shared.$isDaemonConnected
+            .removeDuplicates()
+            .filter { $0 }
+            .sink { [weak self] _ in
+                self?.requestModelsList()
+            }
+            .store(in: &cancellables)
     }
 
     deinit {
