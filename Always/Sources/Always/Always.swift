@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import ApplicationServices
 import AVFoundation
+import Darwin
 @main
 struct Always: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -118,6 +119,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             exit(0)
         }
         installKeepAliveWindow()
+        StateMonitor.shared.beginBootstrap()
+        StateMonitor.shared.connectToDaemon()
         NSLog("Always: MenuBarExtra installed")
     }
 
@@ -144,24 +147,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         perms.requestMicrophoneIfNeeded()
         perms.requestAccessibilityIfNeeded()
 
-        Self.killStaleDaemon()
-
         let cli = cliService
-        // Start connecting immediately - don't wait for daemon start to complete
-        // The UDS client has retry logic and will connect as soon as the socket is ready
+        // Connect immediately — UDS retries until the socket is live. Daemon
+        // cleanup/spawn runs concurrently so a healthy daemon is never killed
+        // just because the GUI relaunched.
         Task { @MainActor [weak self] in
             let monitor = StateMonitor.shared
             self?.stateMonitor = monitor
-            monitor.connectToDaemon()
+            StatusOverlayController.shared.prewarm()
             AudioOutputMonitor.shared.start(stateMonitor: monitor)
             FocusedAppMonitor.shared.start(stateMonitor: monitor)
         }
 
         daemonBootstrapTask = Task {
+            if Self.isHealthyDaemon() {
+                NSLog("Always: healthy daemon detected — attaching without restart")
+                await Self.reconcileDuplicateDaemons(cli: cli)
+                return
+            }
+
+            await Task.detached(priority: .userInitiated) {
+                Self.killStaleDaemon()
+            }.value
+
             do {
                 _ = try await cli?.startDaemon()
                 await Self.reconcileDuplicateDaemons(cli: cli)
             } catch {
+                await MainActor.run { StateMonitor.shared.endBootstrap() }
                 NSLog("Always: daemon start failed: \(error.localizedDescription)")
             }
         }
@@ -229,7 +242,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         stateMonitor?.prepareForQuit()
-        Self.killStaleDaemon()
+        // Leave the voice daemon running so the next GUI launch can attach
+        // instantly over the existing UDS socket. Stale daemons are reaped
+        // by the orphan watchdog in uds_server.rs or by explicit restart.
         singleInstanceGuard.release()
     }
 
@@ -272,6 +287,42 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             NSLog("Always: daemon reconcile restart failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Default UDS socket path — shared with `UDSClient`.
+    static func daemonSocketPath() -> String {
+        UDSClient.defaultSocketPath()
+    }
+
+    /// True when `always.sock` accepts a connection (mirrors Rust `socket_is_live`).
+    static func isDaemonSocketLive() -> Bool {
+        let path = daemonSocketPath()
+        guard FileManager.default.fileExists(atPath: path) else { return false }
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = path.utf8
+        guard pathBytes.count < MemoryLayout.size(ofValue: addr.sun_path) else { return false }
+        _ = withUnsafeMutablePointer(to: &addr.sun_path) { pathPtr in
+            memcpy(pathPtr, path, pathBytes.count)
+        }
+        let result = withUnsafeBytes(of: &addr) { addrBytes in
+            Darwin.connect(
+                fd,
+                addrBytes.baseAddress!.assumingMemoryBound(to: sockaddr.self),
+                socklen_t(MemoryLayout<sockaddr_un>.size)
+            )
+        }
+        return result == 0
+    }
+
+    /// Live UDS socket and no duplicate `always run` processes.
+    static func isHealthyDaemon() -> Bool {
+        guard isDaemonSocketLive() else { return false }
+        return listDaemonProcessIDs().count <= 1
     }
 
     /// Kill voice daemons via pid file + ps sweep (never `pkill -f`, which

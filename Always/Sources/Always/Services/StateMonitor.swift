@@ -33,6 +33,7 @@ class StateMonitor: ObservableObject {
     private let cliService = CLIService()
     private let logger = Logger(subsystem: "com.always.app", category: "state-monitor")
     private var respawnInFlight = false
+    private var isBootstrapping = false
 
     /// Diagnostic logger — goes only to `os.Logger`. The previous
     /// implementation also wrote `/tmp/statemonitor.log`; that file
@@ -64,6 +65,7 @@ class StateMonitor: ObservableObject {
             .sink { [weak self] connected in
                 self?.isDaemonConnected = connected
                 if connected {
+                    self?.endBootstrap()
                     // Daemon restart clears in-memory focus + pause state.
                     // Re-push what the GUI already knows so listening resumes
                     // without requiring an app switch.
@@ -85,7 +87,7 @@ class StateMonitor: ObservableObject {
     /// fresh. This is the nuclear option — used when the watchdog has
     /// given up on reconnecting, meaning the old daemon is truly broken.
     private func respawnDaemonIfNeeded() {
-        guard !respawnInFlight else { return }
+        guard !respawnInFlight, !isBootstrapping else { return }
         respawnInFlight = true
         logger.warning("Force-restarting daemon (stale process suspected)")
         Task { [weak self] in
@@ -99,9 +101,20 @@ class StateMonitor: ObservableObject {
         }
     }
     
-    /// Connect after `always-daemon start` has the UDS socket listening.
+    /// Connect as soon as the UDS socket is listening (retries until live).
     func connectToDaemon() {
         udsClient.connect()
+    }
+
+    func beginBootstrap() {
+        isBootstrapping = true
+        udsClient.setBootstrapping(true)
+    }
+
+    func endBootstrap() {
+        guard isBootstrapping else { return }
+        isBootstrapping = false
+        udsClient.setBootstrapping(false)
     }
 
     /// Stop UDS reconnect/respawn while the GUI is exiting.
@@ -246,25 +259,26 @@ class StateMonitor: ObservableObject {
         )
     }
     
-    /// Track whether the daemon's most recent ongoing state still
-    /// warrants a persistent overlay. Used so a flash doesn't clobber
-    /// an in-progress transcription, and so the overlay restores
-    /// itself when a flash auto-hides during ongoing activity.
+    /// Persistent overlay: show immediately; debounce only hides to avoid flicker.
     private func setupOverlaySubscription() {
         Publishers.CombineLatest($isTranscribing, $isVoiceActivity)
             .debounce(for: .milliseconds(50), scheduler: DispatchQueue.main)
             .sink { [weak self] isTranscribing, isVoiceActivity in
                 guard let self = self else { return }
-                self.log("ongoing state - trans:\(isTranscribing) voice:\(isVoiceActivity)")
-                if isTranscribing {
-                    StatusOverlayController.shared.show(state: .transcribing)
-                } else if isVoiceActivity {
-                    StatusOverlayController.shared.show(state: .voiceActivity)
-                } else {
+                if !isTranscribing && !isVoiceActivity {
+                    self.log("ongoing state cleared — hiding overlay")
                     StatusOverlayController.shared.hide()
                 }
             }
             .store(in: &cancellables)
+    }
+
+    private func showOngoingOverlayIfNeeded() {
+        if isTranscribing {
+            StatusOverlayController.shared.show(state: .transcribing)
+        } else if isVoiceActivity {
+            StatusOverlayController.shared.show(state: .voiceActivity)
+        }
     }
 
     private func setupUDSEventListener() {
@@ -278,162 +292,161 @@ class StateMonitor: ObservableObject {
     }
 
     private func handleDaemonEvent(_ event: DaemonEvent) {
-        DispatchQueue.main.async {
-            switch event.type {
-            case .paused:
-                let changed = !self.isPaused
-                self.isPaused = true
-                if changed {
-                    StatusOverlayController.shared.flash(state: .paused)
-                }
-            case .resumed:
-                let changed = self.isPaused
-                self.isPaused = false
-                if changed {
-                    StatusOverlayController.shared.flash(state: .resumed)
-                }
-            case .pausedQuietly:
-                // State-only update — no overlay flash. Origin: focus
-                // change (mouse window switch, Mission Control) where
-                // the user already knows what they did.
-                self.isPaused = true
-            case .resumedQuietly:
-                self.isPaused = false
-            case .autoEnterEnabled:
-                let changed = !self.isAutoEnter
-                self.isAutoEnter = true
-                if changed {
-                    StatusOverlayController.shared.flash(state: .autoEnterOn)
-                }
-            case .autoEnterDisabled:
-                let changed = self.isAutoEnter
-                self.isAutoEnter = false
-                if changed {
-                    StatusOverlayController.shared.flash(state: .autoEnterOff)
-                }
-            case .listeningStarted:
-                // Daemon is now listening - show overlay immediately
-                self.isVoiceActivity = true
-            case .listeningStopped:
-                // Daemon stopped listening - hide overlay
-                self.isVoiceActivity = false
-            case .transcribingStarted:
-                self.isTranscribing = true
-            case .transcribingStopped:
-                self.isTranscribing = false
-            case .transcriptFinal:
-                // The phrase is fully done. Force-clear the ongoing state
-                // so the "Listening" overlay disappears immediately —
-                // VoiceActivityEnded sometimes lags or is suppressed by
-                // residual room noise.
-                self.isTranscribing = false
-                self.isVoiceActivity = false
-            case .voiceActivityDetected:
-                self.isVoiceActivity = true
-                NSLog("Always: VoiceActivityDetected → overlay")
-            case .voiceActivityEnded:
-                self.isVoiceActivity = false
-                NSLog("Always: VoiceActivityEnded → hide overlay")
-            case .transcriptionFiltered:
-                // Transcription was rejected — clear ongoing state and flash
-                // a brief "Filtered" overlay so the user knows the daemon
-                // heard them but suppressed the paste.
-                self.isTranscribing = false
-                self.isVoiceActivity = false
-                let reason = event.data?["reason"] ?? ""
-                StatusOverlayController.shared.flash(state: .filtered(reason: reason), duration: 1.8)
-            case .lowMicrophoneVolume:
-                // Microphone volume is too low - flash a warning overlay
-                if let energy = event.data?["energy"] as? Double {
-                    StatusOverlayController.shared.flash(state: .lowMicrophoneVolume(energy: energy), duration: 3.0)
-                }
-            case .correctionLogged:
-                // Per-pair confirmation (⌃⌥X applied a wrong→right
-                // substitution to glossary.json). Flash the actual
-                // pair text so the user sees what was learned, not
-                // just that something happened.
-                if let payload = event.correctionLogged {
-                    StatusOverlayController.shared.flash(
-                        state: .correctionSaved(wrong: payload.wrong, right: payload.right),
-                        duration: 2.5
-                    )
-                }
-            case .correctionCaptureResult:
-                // Summary outcome of a ⌃⌥X press. The "applied" case
-                // is already covered by per-pair `.correctionLogged`
-                // overlays above; here we only surface the
-                // negative outcomes so the user knows their press
-                // registered but produced no change.
-                let outcome = event.data?["outcome"] ?? ""
-                let label: String
-                switch outcome {
-                case "applied":
-                    return  // already handled per-pair
-                case "no_recent_paste":
-                    label = "No recent paste to compare"
-                case "no_change":
-                    label = "Selection matches paste"
-                case "no_correction_pairs":
-                    label = "No clear corrections found"
-                case "error":
-                    label = "Capture failed"
-                default:
-                    label = "Capture: \(outcome)"
-                }
-                StatusOverlayController.shared.flash(
-                    state: .correctionEmpty(reason: label),
-                    duration: 1.8
-                )
-            case .autoEnterCountdownStarted, .autoEnterCountdownTick:
-                let ms = event.countdownStart?.remaining_ms ?? event.countdownTick?.remaining_ms ?? 0
-                let seconds = max(0, Int((ms + 999) / 1000))
-                // Persistent overlay: replaces flash. Stays visible
-                // until Finished/Cancelled clears it.
-                StatusOverlayController.shared.show(state: .autoEnterCountdown(secondsRemaining: seconds))
-            case .autoEnterCountdownCancelled, .autoEnterCountdownFinished:
-                StatusOverlayController.shared.hide()
-            case .idleAutoPaused:
-                let secs = Int(event.idleAutoPaused?.seconds ?? 0)
-                self.isIdleAutoPaused = true
-                self.isPaused = true
-                StatusOverlayController.shared.showIdleTimeoutAnimation(seconds: secs)
-            case .idleAutoResumed:
-                self.isIdleAutoPaused = false
-                self.applyLocalEffectivePauseState()
-                if !self.isPaused {
-                    StatusOverlayController.shared.flash(state: .resumed)
-                }
-            case .correctionDialogRequested:
-                let last = event.correctionDialogRequest?.last_transcript ?? ""
-                CorrectionDialog.shared.present(lastTranscript: last) { intended in
-                    self.udsClient.sendCommandWithData(
-                        "LogCorrection",
-                        ["intended": intended]
-                    )
-                }
-            case .focusedAppChanged:
-                // Idempotent echo — daemon confirms it accepted our app
-                // bundle id push. No UI action needed; logged in
-                // statemonitor.log for debugging.
-                self.log("daemon acknowledged focused app: \(event.focusedApp?.bundle_id ?? "nil")")
-            case .masterPauseChanged:
-                if let v = event.masterPause?.master_paused {
-                    self.isMasterPaused = v
-                    if v {
-                        self.isPaused = true
-                    } else {
-                        self.isIdleAutoPaused = false
-                        self.applyLocalEffectivePauseState()
-                    }
-                }
-            case .resumedAppsChanged:
-                if let bundles = event.resumedApps?.bundles {
-                    self.resumedBundleIds = Set(bundles)
-                    self.applyLocalEffectivePauseState()
-                }
-            default:
-                break
+        switch event.type {
+        case .paused:
+            let changed = !isPaused
+            isPaused = true
+            if changed {
+                StatusOverlayController.shared.flash(state: .paused)
             }
+        case .resumed:
+            let changed = isPaused
+            isPaused = false
+            if changed {
+                StatusOverlayController.shared.flash(state: .resumed)
+            }
+        case .pausedQuietly:
+            // State-only update — no overlay flash. Origin: focus
+            // change (mouse window switch, Mission Control) where
+            // the user already knows what they did.
+            isPaused = true
+        case .resumedQuietly:
+            isPaused = false
+        case .autoEnterEnabled:
+            let changed = !isAutoEnter
+            isAutoEnter = true
+            if changed {
+                StatusOverlayController.shared.flash(state: .autoEnterOn)
+            }
+        case .autoEnterDisabled:
+            let changed = isAutoEnter
+            isAutoEnter = false
+            if changed {
+                StatusOverlayController.shared.flash(state: .autoEnterOff)
+            }
+        case .listeningStarted:
+            isVoiceActivity = true
+            showOngoingOverlayIfNeeded()
+        case .listeningStopped:
+            isVoiceActivity = false
+        case .transcribingStarted:
+            isTranscribing = true
+            StatusOverlayController.shared.show(state: .transcribing)
+        case .transcribingStopped:
+            isTranscribing = false
+        case .transcriptFinal:
+            // The phrase is fully done. Force-clear the ongoing state
+            // so the "Listening" overlay disappears immediately —
+            // VoiceActivityEnded sometimes lags or is suppressed by
+            // residual room noise.
+            isTranscribing = false
+            isVoiceActivity = false
+        case .voiceActivityDetected:
+            isVoiceActivity = true
+            showOngoingOverlayIfNeeded()
+            NSLog("Always: VoiceActivityDetected → overlay")
+        case .voiceActivityEnded:
+            isVoiceActivity = false
+            NSLog("Always: VoiceActivityEnded → hide overlay")
+        case .transcriptionFiltered:
+            // Transcription was rejected — clear ongoing state and flash
+            // a brief "Filtered" overlay so the user knows the daemon
+            // heard them but suppressed the paste.
+            isTranscribing = false
+            isVoiceActivity = false
+            let reason = event.data?["reason"] ?? ""
+            StatusOverlayController.shared.flash(state: .filtered(reason: reason), duration: 1.8)
+        case .lowMicrophoneVolume:
+            // Microphone volume is too low - flash a warning overlay
+            if let energy = event.data?["energy"] as? Double {
+                StatusOverlayController.shared.flash(state: .lowMicrophoneVolume(energy: energy), duration: 3.0)
+            }
+        case .correctionLogged:
+            // Per-pair confirmation (⌃⌥X applied a wrong→right
+            // substitution to glossary.json). Flash the actual
+            // pair text so the user sees what was learned, not
+            // just that something happened.
+            if let payload = event.correctionLogged {
+                StatusOverlayController.shared.flash(
+                    state: .correctionSaved(wrong: payload.wrong, right: payload.right),
+                    duration: 2.5
+                )
+            }
+        case .correctionCaptureResult:
+            // Summary outcome of a ⌃⌥X press. The "applied" case
+            // is already covered by per-pair `.correctionLogged`
+            // overlays above; here we only surface the
+            // negative outcomes so the user knows their press
+            // registered but produced no change.
+            let outcome = event.data?["outcome"] ?? ""
+            let label: String
+            switch outcome {
+            case "applied":
+                return  // already handled per-pair
+            case "no_recent_paste":
+                label = "No recent paste to compare"
+            case "no_change":
+                label = "Selection matches paste"
+            case "no_correction_pairs":
+                label = "No clear corrections found"
+            case "error":
+                label = "Capture failed"
+            default:
+                label = "Capture: \(outcome)"
+            }
+            StatusOverlayController.shared.flash(
+                state: .correctionEmpty(reason: label),
+                duration: 1.8
+            )
+        case .autoEnterCountdownStarted, .autoEnterCountdownTick:
+            let ms = event.countdownStart?.remaining_ms ?? event.countdownTick?.remaining_ms ?? 0
+            let seconds = max(0, Int((ms + 999) / 1000))
+            // Persistent overlay: replaces flash. Stays visible
+            // until Finished/Cancelled clears it.
+            StatusOverlayController.shared.show(state: .autoEnterCountdown(secondsRemaining: seconds))
+        case .autoEnterCountdownCancelled, .autoEnterCountdownFinished:
+            StatusOverlayController.shared.hide()
+        case .idleAutoPaused:
+            let secs = Int(event.idleAutoPaused?.seconds ?? 0)
+            isIdleAutoPaused = true
+            isPaused = true
+            StatusOverlayController.shared.showIdleTimeoutAnimation(seconds: secs)
+        case .idleAutoResumed:
+            isIdleAutoPaused = false
+            applyLocalEffectivePauseState()
+            if !isPaused {
+                StatusOverlayController.shared.flash(state: .resumed)
+            }
+        case .correctionDialogRequested:
+            let last = event.correctionDialogRequest?.last_transcript ?? ""
+            CorrectionDialog.shared.present(lastTranscript: last) { intended in
+                self.udsClient.sendCommandWithData(
+                    "LogCorrection",
+                    ["intended": intended]
+                )
+            }
+        case .focusedAppChanged:
+            // Idempotent echo — daemon confirms it accepted our app
+            // bundle id push. No UI action needed; logged in
+            // statemonitor.log for debugging.
+            log("daemon acknowledged focused app: \(event.focusedApp?.bundle_id ?? "nil")")
+        case .masterPauseChanged:
+            if let v = event.masterPause?.master_paused {
+                isMasterPaused = v
+                if v {
+                    isPaused = true
+                } else {
+                    isIdleAutoPaused = false
+                    applyLocalEffectivePauseState()
+                }
+            }
+        case .resumedAppsChanged:
+            if let bundles = event.resumedApps?.bundles {
+                resumedBundleIds = Set(bundles)
+                applyLocalEffectivePauseState()
+            }
+        default:
+            break
         }
     }
 }

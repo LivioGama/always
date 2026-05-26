@@ -16,7 +16,7 @@ use crate::always::{
 };
 use crate::managers::model_registry::ModelRegistry;
 use crate::stt::Transcriber;
-use crate::stt_dispatch::build_transcriber;
+use crate::stt_dispatch::{build_transcriber, not_ready_transcriber};
 
 /// Active [`Transcriber`] shared between the main loop, the UDS server
 /// (which swaps it when the user picks a different model in Settings),
@@ -45,21 +45,14 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     // Initialize the auto-enter state from config
     pause::init_auto_enter(cfg.auto_enter);
 
-    // Start keyboard listener for shortcuts
-    keyboard::start_keyboard_listener()?;
-
     // Create shared config early so UDS server can start immediately
     let active_cfg: ActiveConfig = Arc::new(RwLock::new(cfg.clone()));
 
-    // Start UDS server IMMEDIATELY with a placeholder transcriber
-    // This allows the GUI to connect while we load the expensive model
-    // The real transcriber will be swapped in when ready
+    // Start UDS server IMMEDIATELY with a placeholder transcriber so the GUI
+    // can connect while the real backend loads in the background.
     let cfg_for_uds = Arc::clone(&active_cfg);
     let registry_placeholder = ModelRegistry::new().context("init model registry")?;
-    // Use a dummy transcriber initially - will be swapped after model loads
-    let active_placeholder: ActiveTranscriber = Arc::new(RwLock::new(
-        build_transcriber(cfg, &registry_placeholder).context("construct initial transcriber")?
-    ));
+    let active_placeholder: ActiveTranscriber = Arc::new(RwLock::new(not_ready_transcriber()));
     let registry_for_uds = registry_placeholder.clone();
     let active_for_uds = Arc::clone(&active_placeholder);
     let _uds_handle = rt.spawn(async move {
@@ -77,8 +70,24 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         event::global_broadcaster().auto_enter_enabled();
     }
 
+    // Keyboard hooks are not needed for UDS bind — start after the socket is live.
+    keyboard::start_keyboard_listener()?;
+
+    // Load the real transcriber off the hot path (local models can take seconds).
+    let cfg_for_build = cfg.clone();
+    let registry_for_build = registry_placeholder.clone();
+    let active_for_build = Arc::clone(&active_placeholder);
+    std::thread::spawn(move || {
+        match build_transcriber(&cfg_for_build, &registry_for_build) {
+            Ok(transcriber) => {
+                *active_for_build.write() = transcriber;
+                tracing::info!("transcriber_ready");
+            }
+            Err(e) => tracing::error!(error = %e, "transcriber_init_failed"),
+        }
+    });
+
     // Now do the expensive operations after UDS is accepting connections
-    let registry = registry_placeholder;
     let active = active_placeholder;
 
     // Heartbeat task: emit Heartbeat every 5s so connected GUI clients can

@@ -406,6 +406,8 @@ class UDSClient: ObservableObject {
     /// (e.g. via CLIService.startDaemon()).
     var onDaemonNeedsRespawn: (() -> Void)?
     private var isHostQuitting = false
+    /// During app launch bootstrap, failed connects are expected — don't flip degraded.
+    private var isBootstrapping = false
 
     // Watchdog tuning
     private let watchdogCheckInterval: TimeInterval = 5.0
@@ -548,6 +550,17 @@ class UDSClient: ObservableObject {
         disconnect()
     }
 
+    func setBootstrapping(_ bootstrapping: Bool) {
+        DispatchQueue.main.async {
+            self.isBootstrapping = bootstrapping
+            if bootstrapping {
+                self.isDegraded = false
+            } else if !self.isConnected {
+                self.isDegraded = true
+            }
+        }
+    }
+
     private func scheduleReconnect() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
@@ -555,26 +568,32 @@ class UDSClient: ObservableObject {
             if self.reconnectScheduled { return }
             self.reconnectScheduled = true
             self.reconnectAttempts += 1
-            self.isDegraded = true
+            if !self.isBootstrapping {
+                self.isDegraded = true
+            }
 
-            // Aggressive retry for first few attempts (socket likely just needs a moment)
-            // Then exponential backoff: 0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 1, 2, 4, 8, 16, max 30 seconds.
+            // During bootstrap, retry aggressively — the daemon child is still binding UDS.
             let delay: Double
-            switch self.reconnectAttempts {
-            case 1: delay = 0.0
-            case 2: delay = 0.01
-            case 3: delay = 0.02
-            case 4: delay = 0.05
-            case 5: delay = 0.1
-            case 6: delay = 0.2
-            case 7: delay = 0.4
-            default: delay = min(30.0, pow(2.0, Double(self.reconnectAttempts - 5)))
+            if self.isBootstrapping {
+                delay = self.reconnectAttempts <= 20 ? 0.005 : 0.02
+            } else {
+                switch self.reconnectAttempts {
+                case 1: delay = 0.0
+                case 2: delay = 0.01
+                case 3: delay = 0.02
+                case 4: delay = 0.05
+                case 5: delay = 0.1
+                case 6: delay = 0.2
+                case 7: delay = 0.4
+                default: delay = min(30.0, pow(2.0, Double(self.reconnectAttempts - 5)))
+                }
             }
             self.log("Scheduling reconnect attempt #\(self.reconnectAttempts) in \(delay)s")
 
-            // After repeated failures, the daemon process is probably gone.
-            // Ask the host (CLIService) to respawn it before retrying again.
-            if self.reconnectAttempts >= self.maxReconnectAttemptsBeforeRespawn {
+            // During bootstrap the AppDelegate task owns daemon spawn — do
+            // not kill/restart a daemon that is still coming up.
+            if self.reconnectAttempts >= self.maxReconnectAttemptsBeforeRespawn,
+               !self.isBootstrapping {
                 self.log("Reconnect attempts exhausted — requesting daemon respawn")
                 self.onDaemonNeedsRespawn?()
             }

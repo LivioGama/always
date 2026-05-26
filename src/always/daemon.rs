@@ -160,16 +160,44 @@ pub fn socket_is_live(sock: &std::path::Path) -> bool {
 }
 
 pub fn start(cfg: &AlwaysConfig) -> Result<()> {
-    // Kill any existing daemons immediately before starting a new one
-    // This prevents duplicate daemons from running in parallel
-    kill_orphan_daemon_processes();
-    if !wait_until_no_daemon_processes(Duration::from_secs(5)) {
-        tracing::warn!(
-            pids = ?list_daemon_pids(),
-            "daemon processes still alive after kill — forcing second SIGKILL pass"
-        );
+    if is_running() {
+        println!("Always-on daemon already running.");
+        return Ok(());
+    }
+    if let Some(sock) = socket_path()
+        && sock.exists()
+        && socket_is_live(&sock)
+    {
+        println!("Always-on daemon already running.");
+        return Ok(());
+    }
+    let existing = list_daemon_pids();
+    if !existing.is_empty() {
+        println!("Always-on daemon already running (pids: {:?}).", existing);
+        return Ok(());
+    }
+
+    let skip_orphan_kill = std::env::var("ALWAYS_SKIP_ORPHAN_KILL")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if skip_orphan_kill {
+        remove_stale_pid();
+        remove_stale_socket();
+    } else {
+        // Kill any existing daemons immediately before starting a new one
+        // This prevents duplicate daemons from running in parallel
         kill_orphan_daemon_processes();
-        let _ = wait_until_no_daemon_processes(Duration::from_secs(2));
+        if !wait_until_no_daemon_processes(Duration::from_secs(5)) {
+            tracing::warn!(
+                pids = ?list_daemon_pids(),
+                "daemon processes still alive after kill — forcing second SIGKILL pass"
+            );
+            kill_orphan_daemon_processes();
+            let _ = wait_until_no_daemon_processes(Duration::from_secs(2));
+        }
+        remove_stale_pid();
+        remove_stale_socket();
     }
 
     if is_running() {
@@ -188,8 +216,6 @@ pub fn start(cfg: &AlwaysConfig) -> Result<()> {
         println!("Always-on daemon already running (pids: {:?}).", existing);
         return Ok(());
     }
-    remove_stale_pid();
-    remove_stale_socket();
 
     let exe = std::env::current_exe().context("cannot find always binary")?;
     let child = std::process::Command::new(&exe)
