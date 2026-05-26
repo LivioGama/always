@@ -303,10 +303,30 @@ pub struct PidGuard {
 
 impl PidGuard {
     pub fn install() -> Result<Self> {
-        kill_orphan_daemon_processes();
-        if !wait_until_no_daemon_processes(Duration::from_secs(5)) {
+        // Refuse-to-start guard: if another daemon already owns a live UDS
+        // socket, bail BEFORE killing anything. Murdering a healthy daemon
+        // and replacing it briefly puts two processes on the mic and the
+        // user gets a double transcript. The flock alone is not enough —
+        // we used to kill orphans first, then take the lock, which is
+        // exactly the race we're closing.
+        if let Some(sock) = socket_path()
+            && socket_is_live(&sock)
+        {
+            anyhow::bail!(
+                "Always-on daemon already running (UDS socket live) — refusing to start a second instance"
+            );
+        }
+
+        let skip_orphan_kill = std::env::var("ALWAYS_SKIP_ORPHAN_KILL")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        if !skip_orphan_kill {
             kill_orphan_daemon_processes();
-            let _ = wait_until_no_daemon_processes(Duration::from_secs(2));
+            if !wait_until_no_daemon_processes(Duration::from_secs(5)) {
+                kill_orphan_daemon_processes();
+                let _ = wait_until_no_daemon_processes(Duration::from_secs(2));
+            }
         }
         remove_stale_pid();
         remove_stale_socket();
@@ -324,6 +344,18 @@ impl PidGuard {
             .context("failed to open always PID file")?;
         acquire_exclusive_lock(&file)
             .context("Always-on daemon already running (pid lock held)")?;
+
+        // Post-lock recheck: between the early socket probe and the flock
+        // acquire, another daemon may have raced ahead and bound the
+        // socket. If so, abort without touching anything.
+        if let Some(sock) = socket_path()
+            && socket_is_live(&sock)
+        {
+            anyhow::bail!(
+                "Another always daemon bound the UDS socket during startup — refusing to double-bind"
+            );
+        }
+
         write!(file, "{}", std::process::id())?;
         let count = list_daemon_pids();
         if count.len() > 1 {
