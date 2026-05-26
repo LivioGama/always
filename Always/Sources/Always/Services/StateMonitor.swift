@@ -19,6 +19,11 @@ class StateMonitor: ObservableObject {
     @Published var isAutoEnter: Bool = false
     @Published var isTranscribing: Bool = false
     @Published var isVoiceActivity: Bool = false
+    /// Sticky between the daemon's `listeningStarted` and `listeningStopped`
+    /// (or disconnect). Drives the idle "Listening" overlay that should
+    /// stay visible between phrases — without this, every `transcriptFinal`
+    /// would hide the overlay until the user spoke again.
+    @Published var isListeningActive: Bool = false
     /// Connection state to daemon. UI can show "Reconnecting…" if degraded.
     @Published var isDaemonConnected: Bool = false
     @Published var isDaemonDegraded: Bool = false
@@ -64,6 +69,13 @@ class StateMonitor: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] connected in
                 self?.isDaemonConnected = connected
+                if !connected {
+                    // Daemon went away — drop sticky listening state so the
+                    // overlay actually disappears instead of lingering.
+                    self?.isListeningActive = false
+                    self?.isVoiceActivity = false
+                    self?.isTranscribing = false
+                }
                 if connected {
                     self?.endBootstrap()
                     // Daemon restart clears in-memory focus + pause state.
@@ -259,13 +271,22 @@ class StateMonitor: ObservableObject {
         )
     }
     
-    /// Persistent overlay: show immediately; debounce only hides to avoid flicker.
+    /// Drives the persistent overlay from three pieces of daemon state:
+    /// transcribing (highest priority) → voice activity → idle listening.
+    /// Show is instant; hide is debounced 50 ms to absorb the tiny gap
+    /// between `transcriptFinal` and the next `listeningStarted`.
     private func setupOverlaySubscription() {
-        Publishers.CombineLatest($isTranscribing, $isVoiceActivity)
-            .debounce(for: .milliseconds(50), scheduler: DispatchQueue.main)
-            .sink { [weak self] isTranscribing, isVoiceActivity in
+        Publishers.CombineLatest3($isTranscribing, $isVoiceActivity, $isListeningActive)
+            .removeDuplicates(by: { $0 == $1 })
+            .sink { [weak self] isTranscribing, isVoiceActivity, isListening in
                 guard let self = self else { return }
-                if !isTranscribing && !isVoiceActivity {
+                if isTranscribing {
+                    StatusOverlayController.shared.show(state: .transcribing)
+                } else if isVoiceActivity {
+                    StatusOverlayController.shared.show(state: .voiceActivity)
+                } else if isListening {
+                    StatusOverlayController.shared.show(state: .voiceActivity)
+                } else {
                     self.log("ongoing state cleared — hiding overlay")
                     StatusOverlayController.shared.hide()
                 }
@@ -276,7 +297,7 @@ class StateMonitor: ObservableObject {
     private func showOngoingOverlayIfNeeded() {
         if isTranscribing {
             StatusOverlayController.shared.show(state: .transcribing)
-        } else if isVoiceActivity {
+        } else if isVoiceActivity || isListeningActive {
             StatusOverlayController.shared.show(state: .voiceActivity)
         }
     }
@@ -325,9 +346,10 @@ class StateMonitor: ObservableObject {
                 StatusOverlayController.shared.flash(state: .autoEnterOff)
             }
         case .listeningStarted:
-            isVoiceActivity = true
+            isListeningActive = true
             showOngoingOverlayIfNeeded()
         case .listeningStopped:
+            isListeningActive = false
             isVoiceActivity = false
         case .transcribingStarted:
             isTranscribing = true
