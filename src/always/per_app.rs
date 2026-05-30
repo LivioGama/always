@@ -22,9 +22,20 @@
 //! memory and invalidate via `invalidate_cache()` — called from the
 //! `set_preference` write path for `per_app_settings_json` so the
 //! Settings UI's "edit overlay" remains a 1-frame change.
+//!
+//! Cross-process freshness: `invalidate_cache()` only clears the
+//! *calling* process's static `CACHE`. The CLI and the daemon are
+//! separate processes, so a CLI `config set`/`config reset` would
+//! otherwise leave the running daemon serving a stale allowlist until
+//! restart. To pick up cross-process edits, the cache is keyed on the
+//! DB file's mtime: each `load()` cheaply `stat`s the DB and re-reads
+//! the (tiny) blob when the mtime changed. That's one `stat()` per
+//! call instead of a full open+query+parse, so the hot path stays
+//! cheap while a CLI edit is reflected on the very next focus change.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
+use std::time::SystemTime;
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -53,32 +64,76 @@ pub struct AppOverride {
 
 pub type AppOverrides = HashMap<String, AppOverride>;
 
-/// Cached parsed overrides. `None` = "not yet loaded"; populated on
-/// first call to `load()` after process start or after a write.
-static CACHE: LazyLock<RwLock<Option<AppOverrides>>> = LazyLock::new(|| RwLock::new(None));
+/// Cached parsed overrides plus the freshness signal they were read
+/// at. `overrides == None` means "not yet loaded". `db_mtime` is the
+/// DB file's modification time captured when the blob was parsed; a
+/// differing mtime on the next `load()` (e.g. after a write from
+/// *another* process) forces a re-read.
+#[derive(Default)]
+struct CacheState {
+    overrides: Option<AppOverrides>,
+    db_mtime: Option<SystemTime>,
+}
+
+/// Cached parsed overrides. Populated on first call to `load()` after
+/// process start, and re-read whenever the DB file's mtime changes.
+static CACHE: LazyLock<RwLock<CacheState>> = LazyLock::new(|| RwLock::new(CacheState::default()));
+
+/// Freshness signal for the preferences DB: the latest modification
+/// time across the main DB file and its WAL sidecar. Used so that when
+/// the CLI writes per-app settings, the daemon sees a newer mtime and
+/// re-reads. In WAL mode an `UPDATE` lands in `always.db-wal` first and
+/// only touches `always.db` on checkpoint, so we take the max of both
+/// — that catches the change immediately regardless of checkpoint
+/// timing. Returns `None` if neither file can be stat'd (in which case
+/// `load()` conservatively re-reads).
+fn db_mtime() -> Option<SystemTime> {
+    let db = crate::config::db_path();
+    let wal = {
+        let mut p = db.clone().into_os_string();
+        p.push("-wal");
+        std::path::PathBuf::from(p)
+    };
+    let stat = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    [stat(&db), stat(&wal)].into_iter().flatten().max()
+}
 
 /// Force a re-read on the next `load()` call. Called from the
 /// `set_preference("per_app_settings_json", ...)` path so settings UI
-/// edits take effect on the very next focus change.
+/// edits in *this* process take effect on the very next focus change.
+/// Cross-process edits are handled by the mtime check in `load()`.
 pub fn invalidate_cache() {
-    *CACHE.write() = None;
+    *CACHE.write() = CacheState::default();
 }
 
 /// Test-only: inject parsed overrides without touching SQLite.
 #[cfg(test)]
 pub fn set_cache_for_test(overrides: AppOverrides) {
-    *CACHE.write() = Some(overrides);
+    *CACHE.write() = CacheState {
+        overrides: Some(overrides),
+        db_mtime: db_mtime(),
+    };
 }
 
 /// Load the JSON overlay from preferences. Returns an empty map on any
 /// failure so callers don't have to special-case missing keys. Cached
-/// after first call.
+/// after first call, but re-read when the DB file's mtime changes so a
+/// cross-process edit (CLI `config set`/`reset`) is picked up.
 pub fn load() -> AppOverrides {
-    if let Some(cached) = CACHE.read().as_ref() {
-        return cached.clone();
+    let mtime = db_mtime();
+    {
+        let cache = CACHE.read();
+        if let Some(cached) = cache.overrides.as_ref()
+            && cache.db_mtime == mtime
+        {
+            return cached.clone();
+        }
     }
     let parsed = load_from_db();
-    *CACHE.write() = Some(parsed.clone());
+    *CACHE.write() = CacheState {
+        overrides: Some(parsed.clone()),
+        db_mtime: mtime,
+    };
     parsed
 }
 

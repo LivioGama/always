@@ -316,7 +316,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        Localization, SpeechAction, PASTE_DEDUPE_MIN_WINDOW_MS, classify_transcription,
+        Localization, PASTE_DEDUPE_MIN_WINDOW_MS, SpeechAction, classify_transcription,
         in_cooldown, is_near_duplicate_paste, lowercase_if_safe_starter, merge_dictation,
         merge_dictation_with, normalize_for_paste_dedupe, paste_dedupe_window,
     };

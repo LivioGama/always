@@ -264,8 +264,7 @@ pub fn clear_last_pasted_for_test() {
 
 /// True while a paste pipeline (copy → Cmd+V → optional grammar patch) is
 /// in flight. Prevents overlapping pastes from VAD double-fire.
-static PASTE_IN_FLIGHT: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static PASTE_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Acquire the paste-in-flight lock. Returns `false` if another paste is
 /// already running (e.g. async grammar patch still holding the lock).

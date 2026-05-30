@@ -115,12 +115,35 @@ fn build_engine(engine_type: EngineType, path: &Path) -> Result<LoadedEngine> {
     })
 }
 
+/// Hard ceiling on a single offline utterance. The daemon is always-on
+/// and a stuck-open VAD (continuous noise/feedback) could otherwise drive
+/// an unbounded WAV → multi-GB f32/tensor allocation and OOM-kill the
+/// process. 10 minutes is far longer than any real dictation; beyond it we
+/// reject the input rather than try to transcribe it.
+const MAX_LOCAL_STT_SECS: usize = 600;
+/// 16 kHz mono i16 = 32 000 bytes/sec. The `+ 4096` absorbs RIFF header and
+/// any extra LIST/JUNK/INFO chunks so a legitimately-capped clip isn't
+/// rejected for header overhead.
+const MAX_WAV_BYTES: usize = 16_000 * 2 * MAX_LOCAL_STT_SECS;
+
 impl Transcriber for LocalTranscriber {
     fn transcribe_from_bytes(&self, audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
-        let samples = decode_wav_to_f32(&audio).map_err(SttError::Other)?;
+        if audio.len() > MAX_WAV_BYTES + 4096 {
+            return Err(SttError::Other(anyhow::anyhow!(
+                "utterance too long for local STT ({} bytes > {} cap)",
+                audio.len(),
+                MAX_WAV_BYTES
+            )));
+        }
+
+        let mut samples = decode_wav_to_f32(&audio).map_err(SttError::Other)?;
         if samples.is_empty() {
             return Ok(TranscriptionResult::default());
         }
+        // Belt-and-suspenders: cap decoded length too, so even a WAV whose
+        // header understates its data chunk can't push the engine past the
+        // duration ceiling.
+        samples.truncate(MAX_LOCAL_STT_SECS * 16_000);
 
         let mut engine = self
             .engine

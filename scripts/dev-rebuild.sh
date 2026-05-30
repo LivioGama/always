@@ -71,9 +71,14 @@ echo "▶ cargo build ($PROFILE)..."
 if [ "$SKIP_DAEMON" = true ]; then
     echo "  (skipped - --no-daemon flag set)"
 else
+    # local-stt enables the Parakeet/Whisper/Canary/etc local backends
+    # via transcribe-rs. Without it the daemon silently falls back to
+    # Groq when the user picks a local model — including ones already
+    # cached by Handy. Always-on for the deploy script; CI can still
+    # build without the feature for Linux/Windows.
     case "$PROFILE" in
-        debug)   cargo build --lib --bin always ;;
-        release) cargo build --release --lib --bin always ;;
+        debug)   cargo build --lib --bin always --features local-stt ;;
+        release) cargo build --release --lib --bin always --features local-stt ;;
         *) echo "unknown profile: $PROFILE (use 'debug' or 'release')"; exit 2 ;;
     esac
 fi

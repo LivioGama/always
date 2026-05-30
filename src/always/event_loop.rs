@@ -74,6 +74,12 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         event::global_broadcaster().auto_enter_enabled();
     }
 
+    // Restore persisted focus/pause state now that the broadcaster and UDS
+    // server are up (so any events it emits reach connected clients) but
+    // before audio gating begins. The function is a no-op when there is
+    // nothing to restore; owned by `focus_state`, just invoked here.
+    crate::always::focus_state::restore_on_startup();
+
     // Keyboard hooks are not needed for UDS bind — start after the socket is live.
     keyboard::start_keyboard_listener()?;
 
@@ -303,7 +309,21 @@ fn handle_speech(
     match action {
         SpeechAction::InCooldown => Ok(()),
         SpeechAction::Rejected { reason } => {
-            tracing::info!(text, filter_reason = %reason, "filtered");
+            // Privacy: gate raw transcript text behind `should_log_transcripts`
+            // — without the gate, every release-build daemon writes user
+            // speech to its info-level logs, which then propagate to any
+            // central log collector. The structured `Event::Filtered`
+            // record below is still written via the audited log path,
+            // which honors the same gate.
+            if crate::always::telemetry::should_log_transcripts() {
+                tracing::info!(text, filter_reason = %reason, "filtered");
+            } else {
+                tracing::info!(
+                    chars = text.chars().count(),
+                    filter_reason = %reason,
+                    "filtered"
+                );
+            }
             // Re-derive the structured filter result for logging fidelity.
             let filter_result = filter::should_accept_with_reason(text, cfg);
             log.write(Event::Filtered {
@@ -317,7 +337,15 @@ fn handle_speech(
             Ok(())
         }
         SpeechAction::Hallucinated { reason } => {
-            tracing::info!(text, reason = %reason, "hallucination filtered");
+            if crate::always::telemetry::should_log_transcripts() {
+                tracing::info!(text, reason = %reason, "hallucination filtered");
+            } else {
+                tracing::info!(
+                    chars = text.chars().count(),
+                    reason = %reason,
+                    "hallucination filtered"
+                );
+            }
             log.write(Event::Filtered {
                 text,
                 energy,
@@ -470,7 +498,33 @@ fn handle_speech(
                 daemon::reconcile_duplicate_processes();
             }
 
-            paste::copy_to_clipboard(paste_clipboard)?;
+            // Snapshot the user's clipboard BEFORE we overwrite it with the
+            // transcript, so the synchronous / no-grammar paste paths can
+            // restore it after the Cmd+V is consumed (guarded — see the
+            // restore call below). Best-effort: if pbpaste fails we simply
+            // skip the restore rather than abort the paste. Plain-text only;
+            // non-text flavors aren't preserved (documented in paste.rs).
+            // The clipboard payload we are about to write — kept so the
+            // guarded restore can confirm nothing else clobbered it since.
+            let prev_clipboard = paste::read_clipboard_text().ok();
+            let written_clipboard = paste_clipboard.clone();
+
+            // NOTE: the paste-in-flight lock is held from `try_begin_paste()`
+            // above. Every early-return below MUST release it via
+            // `end_paste()` or the daemon goes permanently mute (future
+            // utterances drop as "in_flight"). A bare `?` here previously
+            // leaked the lock when pbcopy failed.
+            if let Err(err) = paste::copy_to_clipboard(paste_clipboard) {
+                tracing::warn!(error = %err, "clipboard_copy_failed");
+                log.write(Event::Error {
+                    message: "Skipped paste: clipboard copy failed",
+                });
+                event::global_broadcaster().transcription_filtered("Clipboard error — not pasted");
+                event::global_broadcaster().voice_activity_ended();
+                pause::dictation_buffer_clear();
+                pause::end_paste();
+                return Ok(());
+            }
 
             // Skip paste if Command is held — likely a shortcut in flight.
             // Surface the drop on the status overlay (same channel as
@@ -499,9 +553,33 @@ fn handle_speech(
             let pasted_at = Instant::now();
 
             if grammar_patch_async {
+                // TODO(clipboard-restore): the async-grammar path ends with
+                // `replace_via_undo` INSIDE `spawn_grammar_patch` (undo +
+                // copy(corrected) + Cmd+V), which is the LAST clipboard op
+                // for this utterance. The guarded restore must run after
+                // that final repaste and re-check against the *corrected*
+                // clipboard payload, not `written_clipboard`. Threading the
+                // snapshot through and re-guarding correctly there is more
+                // intricate than the synchronous case, so the clipboard
+                // restore for the async-grammar path is deliberately
+                // deferred. The synchronous + no-grammar path below restores.
                 spawn_grammar_patch(rt, cfg, final_text.clone(), pasted_at);
             } else {
                 pause::end_paste();
+                // Synchronous / no-grammar path: this was the last clipboard
+                // op for the utterance. Give the target app time to consume
+                // the Cmd+V, then restore the user's prior clipboard — but
+                // only if our transcript is still on the pasteboard (i.e.
+                // the user/another app didn't copy something fresh in the
+                // meantime). See `restore_clipboard_if_unchanged`.
+                if let Some(prev) = prev_clipboard {
+                    std::thread::sleep(Duration::from_millis(150));
+                    if let Err(err) =
+                        paste::restore_clipboard_if_unchanged(&prev, &written_clipboard)
+                    {
+                        tracing::warn!(error = %err, "clipboard_restore_failed");
+                    }
+                }
             }
 
             let auto_enter_effective =
@@ -598,7 +676,32 @@ fn apply_grammar_blocking(text: &str, cfg: &AlwaysConfig, rt: &Handle) -> String
         && let Some(ref pp) = cfg.post_processor
     {
         let started = Instant::now();
-        match rt.block_on(pp.process(text, None)) {
+        // Bound the blocking grammar call: this runs on the main loop
+        // thread (merge path / async-grammar disabled), so a hung cloud
+        // endpoint would otherwise freeze the whole daemon — no new
+        // utterance could be recorded until it returned. On timeout we
+        // fall back to the acoustic `text` exactly like the error arm
+        // below, so behavior on a stalled endpoint matches a failed one.
+        // Returning the fallback string directly (rather than synthesizing
+        // an Err) keeps the result type identical to `pp.process(..)` and
+        // avoids reaching into its concrete error type. `Duration` is
+        // imported at the top of this file.
+        const GRAMMAR_BLOCKING_TIMEOUT: Duration = Duration::from_secs(8);
+        let timed = rt.block_on(async {
+            tokio::time::timeout(GRAMMAR_BLOCKING_TIMEOUT, pp.process(text, None)).await
+        });
+        let process_result = match timed {
+            Ok(inner) => inner,
+            Err(_elapsed) => {
+                tracing::warn!(
+                    timeout_secs = GRAMMAR_BLOCKING_TIMEOUT.as_secs(),
+                    fallback_text = %text,
+                    "grammar correction timed out, using acoustic match result"
+                );
+                return text.to_string();
+            }
+        };
+        match process_result {
             Ok(cleaned) => {
                 let elapsed_ms = started.elapsed().as_millis() as u64;
                 if text != cleaned {
@@ -676,8 +779,7 @@ fn spawn_grammar_patch(
         };
 
         if cleaned == acoustic_pasted
-            || normalize_for_paste_dedupe(&cleaned)
-                == normalize_for_paste_dedupe(&acoustic_pasted)
+            || normalize_for_paste_dedupe(&cleaned) == normalize_for_paste_dedupe(&acoustic_pasted)
         {
             tracing::debug!(
                 stage = "grammar_patch",

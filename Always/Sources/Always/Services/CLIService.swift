@@ -150,13 +150,23 @@ class CLIService: ObservableObject {
         process.standardOutput = pipe
         process.standardError = pipe
 
-        try process.run()
-        process.waitUntilExit()
+        // Run the blocking process work off the Swift concurrency cooperative
+        // pool (Task.detached) so a slow/hung daemon subcommand cannot starve
+        // other async work. Inside, drain the pipe to EOF *before* waiting:
+        // both stdout and stderr feed the same Pipe, so if the child emits
+        // more than the OS pipe buffer (~16-64 KB) it blocks on write and
+        // never exits. `readDataToEndOfFile()` returns when the child closes
+        // the write end (EOF on exit), avoiding the wait-then-drain deadlock.
+        let (data, status) = try await Task.detached(priority: .utility) {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return (data, process.terminationStatus)
+        }.value
 
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let output = String(data: data, encoding: .utf8) ?? ""
 
-        if process.terminationStatus != 0 {
+        if status != 0 {
             throw CLIError.commandFailed(output)
         }
 

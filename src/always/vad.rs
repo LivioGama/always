@@ -76,6 +76,11 @@ pub fn record_utterance(
 pub fn poll_speech_energy(cfg: &AlwaysConfig) -> Result<bool> {
     let recorder_arc = audio::RecChild::get_or_spawn()?;
     let mut frame_buf = [0u8; FRAME_BYTES];
+    // INVARIANT (concurrency): `read_frame` blocks under GLOBAL_RECORDER (see
+    // the matching note in `record_with_local_vad`). This idle wake-on-voice
+    // poll must run on the same single thread as `record_utterance`; running
+    // them concurrently risks serializing on — or, if `rec` wedges, deadlocking
+    // behind — the global recorder lock.
     let read = {
         let mut recorder = recorder_arc.lock();
         let rec = recorder
@@ -248,6 +253,15 @@ fn record_with_local_vad(
     let mut speculation_pending = false;
 
     loop {
+        // INVARIANT (concurrency): `read_frame` blocks on rec's stdout for up
+        // to one full frame while holding GLOBAL_RECORDER. `record_utterance`
+        // and `poll_speech_energy` therefore MUST NOT run concurrently on
+        // different threads — they would serialize on this lock a full frame
+        // each, and a wedged `rec` (neither bytes nor EOF) would hold the lock
+        // indefinitely and deadlock every other audio caller. The live
+        // pipeline upholds this by driving both from the single event-loop
+        // thread; a future multi-reader design needs a single owning reader or
+        // a read timeout before this invariant can be relaxed.
         let read = {
             let mut recorder = recorder_arc.lock();
             if let Some(ref mut rec) = recorder.as_mut() {
@@ -257,7 +271,35 @@ fn record_with_local_vad(
             }
         };
 
+        if read == 0 {
+            // True EOF on rec's stdout: the recorder died (USB
+            // re-enumeration, mic unplug, TCC revoke, or `rec` exit).
+            // `read_frame` already logged `rec_eof_on_read_frame`. The
+            // danger is the *dead* RecChild lingering in the global slot:
+            // until the next `get_or_spawn` notices it via `try_wait`, every
+            // caller keeps reading immediate EOF from the corpse, so a
+            // transient re-enumeration looks like permanent death. Evict it
+            // now — `take()` drops the RecChild, whose Drop impl `kill()`s and
+            // `wait()`s the child — so the NEXT capture cycle's `get_or_spawn`
+            // respawns a fresh recorder and capture recovers. We deliberately
+            // do NOT attempt an in-loop respawn/retry of the current utterance:
+            // the safe, well-contained fix is to guarantee the dead child can't
+            // wedge subsequent cycles. Any partial audio captured so far flows
+            // through the post-loop path below exactly as on any other break.
+            {
+                let mut recorder = recorder_arc.lock();
+                if recorder.take().is_some() {
+                    tracing::warn!("rec_eof_recorder_reset");
+                }
+            }
+            break;
+        }
+
         if read < FRAME_BYTES {
+            // Partial frame (0 < read < FRAME_BYTES) at shutdown/disconnect:
+            // preserve the existing behavior of ending the utterance. The
+            // recorder is not necessarily dead here (a short read can precede
+            // a clean EOF on the next iteration), so we do not evict it.
             break;
         }
 
@@ -344,8 +386,7 @@ fn record_with_local_vad(
                         // Warn if energy is barely above threshold (within 20% margin)
                         // Use the already-calculated frame_energy to avoid redundant computation
                         if frame_energy < cfg.energy_threshold * 1.2 {
-                            event::global_broadcaster()
-                                .low_microphone_volume_maybe(frame_energy);
+                            event::global_broadcaster().low_microphone_volume_maybe(frame_energy);
                         }
 
                         // Send voice activity detected event
