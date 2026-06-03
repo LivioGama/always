@@ -6,7 +6,7 @@ import os.log
 // Wire-format protocol version. MUST match `PROTOCOL_VERSION` in
 // `src/always/event.rs`. Bumping either side without the other will
 // cause the client to refuse the connection.
-let UDS_PROTOCOL_VERSION: UInt32 = 5
+let UDS_PROTOCOL_VERSION: UInt32 = 6
 
 // Event types matching Rust DaemonEvent enum
 enum DaemonEventType: String, Codable {
@@ -557,8 +557,16 @@ class UDSClient: ObservableObject {
             self.reconnectAttempts += 1
             self.isDegraded = true
 
-            // Exponential backoff: 1, 2, 4, 8, 16, max 30 seconds.
-            let delay = min(30.0, pow(2.0, Double(self.reconnectAttempts - 1)))
+            // Immediate retry for first attempt (likely just daemon startup delay)
+            // Then exponential backoff: 0, 0.1, 0.2, 0.4, 1, 2, 4, 8, 16, max 30 seconds.
+            let delay: Double
+            if self.reconnectAttempts == 1 {
+                delay = 0.0
+            } else if self.reconnectAttempts <= 4 {
+                delay = 0.1 * pow(2.0, Double(self.reconnectAttempts - 2))
+            } else {
+                delay = min(30.0, pow(2.0, Double(self.reconnectAttempts - 4)))
+            }
             self.log("Scheduling reconnect attempt #\(self.reconnectAttempts) in \(delay)s")
 
             // After repeated failures, the daemon process is probably gone.

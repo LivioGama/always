@@ -6,11 +6,27 @@
 # Usage:
 #   scripts/dev-rebuild.sh                # debug build (default — transcripts visible)
 #   scripts/dev-rebuild.sh release        # release build (transcripts hidden)
+#   scripts/dev-rebuild.sh --no-daemon    # skip daemon restart (for Swift-only changes)
 #   ALWAYS_REBUILD_SILENT=1 scripts/dev-rebuild.sh   # mute sounds
 
 set -euo pipefail
 
-PROFILE="${1:-debug}"
+# Parse arguments
+SKIP_DAEMON=false
+PROFILE="debug"
+for arg in "$@"; do
+    case "$arg" in
+        --no-daemon)
+            SKIP_DAEMON=true
+            ;;
+        release)
+            PROFILE="release"
+            ;;
+        debug)
+            PROFILE="debug"
+            ;;
+    esac
+done
 SOUND_DIR="/System/Library/Sounds"
 SOUND_KILL="$SOUND_DIR/Pop.aiff"
 SOUND_COMPILED="$SOUND_DIR/Frog.aiff"
@@ -34,26 +50,33 @@ pkill -9 -f "Always.app" 2>/dev/null || true
 pkill -9 -f "/Applications/Always.app" 2>/dev/null || true
 # Stale project-dir bundle can steal LaunchServices resolution.
 pkill -9 -f "Documents/always/Always/Always.app" 2>/dev/null || true
-# Kill the Rust daemon too. The GUI's applicationWillTerminate handler
-# usually does this, but a hard pkill on Always.app skips it, so the
-# daemon outlives the rebuild and the next launch hits a stale UDS
-# socket / pid file. Send SIGTERM first (lets PidGuard::Drop fire),
-# then SIGKILL if still alive.
-for _pat in "always-daemon run" "always run"; do
-  pkill -TERM -f "$_pat" 2>/dev/null || true
-done
-sleep 0.5   # PidGuard::Drop + socket cleanup
-for _pat in "always-daemon run" "always run"; do
-  pkill -KILL -f "$_pat" 2>/dev/null || true
-done
-sleep 0.2   # let processes actually die before rebuild
+
+# Kill the Rust daemon too (unless --no-daemon flag is set)
+# The GUI's applicationWillTerminate handler usually does this, but a hard
+# pkill on Always.app skips it, so the daemon outlives the rebuild and the
+# next launch hits a stale UDS socket / pid file. Send SIGTERM first
+# (lets PidGuard::Drop fire), then SIGKILL if still alive.
+if [ "$SKIP_DAEMON" = false ]; then
+    for _pat in "always-daemon run" "always run"; do
+      pkill -TERM -f "$_pat" 2>/dev/null || true
+    done
+    sleep 0.5   # PidGuard::Drop + socket cleanup
+    for _pat in "always-daemon run" "always run"; do
+      pkill -KILL -f "$_pat" 2>/dev/null || true
+    done
+    sleep 0.2   # let processes actually die before rebuild
+fi
 
 echo "▶ cargo build ($PROFILE)..."
-case "$PROFILE" in
-    debug)   cargo build --lib --bin always ;;
-    release) cargo build --release --lib --bin always ;;
-    *) echo "unknown profile: $PROFILE (use 'debug' or 'release')"; exit 2 ;;
-esac
+if [ "$SKIP_DAEMON" = true ]; then
+    echo "  (skipped - --no-daemon flag set)"
+else
+    case "$PROFILE" in
+        debug)   cargo build --lib --bin always ;;
+        release) cargo build --release --lib --bin always ;;
+        *) echo "unknown profile: $PROFILE (use 'debug' or 'release')"; exit 2 ;;
+    esac
+fi
 play "$SOUND_COMPILED"
 
 echo "▶ Swift bundle + deploy..."
