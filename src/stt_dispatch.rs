@@ -15,7 +15,21 @@ use anyhow::{Context, Result};
 
 use crate::always::AlwaysConfig;
 use crate::managers::model_registry::ModelRegistry;
-use crate::stt::{GroqTranscriber, Transcriber};
+use crate::stt::{GroqTranscriber, SttError, Transcriber, TranscriptionResult};
+
+/// Placeholder transcriber so the UDS server can bind before heavy model load.
+pub struct NotReadyTranscriber;
+
+impl Transcriber for NotReadyTranscriber {
+    fn transcribe_from_bytes(&self, _audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
+        Err(SttError::Other(anyhow::anyhow!("transcriber still initializing")))
+    }
+}
+
+/// Shared placeholder installed at daemon boot; swapped when [`build_transcriber`] completes.
+pub fn not_ready_transcriber() -> Arc<dyn Transcriber> {
+    Arc::new(NotReadyTranscriber)
+}
 
 /// User's transcription backend pick. Serialises to a single TEXT
 /// column in the prefs DB (`groq` or `local:<model_id>`). The

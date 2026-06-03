@@ -31,7 +31,7 @@ const COMMANDS_PER_SECOND_LIMIT: u32 = 10; // Max 10 commands per second per cli
 
 /// How long the daemon stays alive after the last UDS client disconnects.
 /// Prevents stale daemons surviving indefinitely when the Mac app quits.
-const ORPHAN_TIMEOUT_SECS: u64 = 30;
+const ORPHAN_TIMEOUT_SECS: u64 = 120;
 
 static CONNECTED_CLIENTS: AtomicUsize = AtomicUsize::new(0);
 
@@ -320,6 +320,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         DaemonEvent::Hello {
             version: crate::always::event::PROTOCOL_VERSION,
         },
+        DaemonEvent::ListeningStarted, // Send immediately after Hello
         if is_paused {
             DaemonEvent::Paused
         } else {
@@ -336,21 +337,25 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         } else {
             DaemonEvent::AutoEnterDisabled
         },
-        DaemonEvent::ListeningStarted,
     ];
 
+    let mut initial_payload = String::new();
     for event in initial_events {
-        if let Ok(json_line) = event.to_json_line()
-            && let Err(e) = writer.write_all(json_line.as_bytes()).await
-        {
-            tracing::error!(error = %e, "uds_send_initial_state_failed");
-            return Ok(());
+        if let Ok(json_line) = event.to_json_line() {
+            initial_payload.push_str(&json_line);
         }
     }
 
-    if let Err(e) = writer.flush().await {
-        tracing::error!(error = %e, "uds_flush_initial_state_failed");
-        return Ok(());
+    if !initial_payload.is_empty() {
+        if let Err(e) = writer.write_all(initial_payload.as_bytes()).await {
+            tracing::error!(error = %e, "uds_send_initial_state_failed");
+            return Ok(());
+        }
+
+        if let Err(e) = writer.flush().await {
+            tracing::error!(error = %e, "uds_flush_initial_state_failed");
+            return Ok(());
+        }
     }
 
     // Read commands from the client in a separate task. Each line is a JSON

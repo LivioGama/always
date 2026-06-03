@@ -110,6 +110,16 @@ enum OverlayState: Equatable, Hashable {
     /// Microphone volume warning - energy level is too low for reliable detection.
     case lowMicrophoneVolume(energy: Double)
 
+    /// Persistent HUD states that should appear instantly (no fade-in).
+    var isInstantShow: Bool {
+        switch self {
+        case .voiceActivity, .transcribing, .autoEnterCountdown:
+            return true
+        default:
+            return false
+        }
+    }
+
     var rawValue: String {
         switch self {
         case .paused: return "Paused"
@@ -459,7 +469,7 @@ class StatusOverlayWindow: NSPanel {
         orderFrontRegardless()
     }
 
-    func show(state: OverlayState) {
+    func show(state: OverlayState, instant: Bool = false) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
 
@@ -478,18 +488,21 @@ class StatusOverlayWindow: NSPanel {
             // of stacking.
             self.overlayView?.state = state
 
-            // Cancel any in-flight fade-out so we don't disappear mid-show,
-            // then fade in from current alpha to fully opaque.
+            let snapIn = instant || state.isInstantShow
             let wasVisible = self.isVisible
-            if !wasVisible {
+            if !wasVisible && !snapIn {
                 self.alphaValue = 0.0
             }
             self.orderFrontRegardless()
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = wasVisible ? 0.0 : 0.15
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                self.animator().alphaValue = 1.0
-            })
+            if snapIn {
+                self.alphaValue = 1.0
+            } else {
+                NSAnimationContext.runAnimationGroup({ ctx in
+                    ctx.duration = wasVisible ? 0.0 : 0.15
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    self.animator().alphaValue = 1.0
+                })
+            }
         }
     }
 
@@ -773,6 +786,16 @@ class StatusOverlayController {
         }
     }
 
+    /// Create the HUD window off-screen so the first show is instant.
+    func prewarm() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.ensureWindow()
+            self.window?.alphaValue = 0
+            self.window?.orderOut(nil)
+        }
+    }
+
     /// Show the overlay and keep it visible until explicitly hidden. Used
     /// for ongoing states like transcribing or voice activity.
     /// If a flash is currently active, defer until the flash completes
@@ -784,7 +807,7 @@ class StatusOverlayController {
             return
         }
         cancelPendingHide()
-        window?.show(state: state)
+        window?.show(state: state, instant: state.isInstantShow)
     }
 
     /// Show the overlay briefly then auto-hide. Used for transient
@@ -805,7 +828,7 @@ class StatusOverlayController {
             // instead of hiding (avoids a flicker between flash hide and show).
             if let deferred = self.pendingShowState {
                 self.pendingShowState = nil
-                self.window?.show(state: deferred)
+                self.window?.show(state: deferred, instant: deferred.isInstantShow)
             } else {
                 self.window?.hide()
             }

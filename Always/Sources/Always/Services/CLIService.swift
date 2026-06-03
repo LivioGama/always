@@ -30,25 +30,60 @@ class CLIService: ObservableObject {
     }
 
     func startDaemon() async throws -> String {
-        let status = try await getStatus()
-        if status.isRunning {
-            Self.logger.info("Daemon already running — skipping start")
+        if AppDelegate.isHealthyDaemon() || AppDelegate.isDaemonSocketLive() {
+            Self.logger.info("Live UDS socket — skipping start")
             return "Always-on daemon already running."
         }
-        if !AppDelegate.listDaemonProcessIDs().isEmpty {
-            Self.logger.warning("Daemon process without pid file — skipping start")
-            return "Always-on daemon already running."
+
+        if AppDelegate.listDaemonProcessIDs().isEmpty {
+            try spawnDetachedRunProcess()
+        } else {
+            Self.logger.warning("Daemon process without live socket — waiting for UDS bind")
         }
-        // Read current config to pass to daemon. Only pass flags the user
-        // has explicitly opted into; the daemon loads stt_silence,
-        // auto_enter_delay_ms, energy thresholds, etc. from its own prefs
-        // table so we don't have to mirror every knob through CLI args.
-        let config = try await getConfig()
-        var args = ["start"]
-        if config.sttAutoEnter {
-            args.append("--auto-enter")
+
+        let deadline = Date().addingTimeInterval(15)
+        while Date() < deadline {
+            if AppDelegate.isDaemonSocketLive() {
+                return "Always-on daemon ready."
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
         }
-        return try await runCLI(arguments: args)
+        throw CLIError.commandFailed("Always-on daemon failed to start")
+    }
+
+    /// Spawn `always run` directly — skips the parent `start` subprocess that
+    /// reloads config and can add seconds before the child even launches.
+    private func spawnDetachedRunProcess() throws {
+        if !FileManager.default.fileExists(atPath: cliPath) {
+            throw CLIError.binaryNotFound
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: cliPath)
+        // CLI flags are defaults; `AlwaysConfig::from_cli` reads prefs from DB.
+        process.arguments = ["run", "--lang", "en", "--timeout", "30", "--silence", "2.5"]
+        var env = ProcessInfo.processInfo.environment
+        applyCLIEnvironment(&env)
+        process.environment = env
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        Self.logger.info("Spawned detached always run (pid \(process.processIdentifier))")
+    }
+
+    private func applyCLIEnvironment(_ env: inout [String: String]) {
+        let homebrewBin = "/opt/homebrew/bin"
+        let existingPath = env["PATH"] ?? ""
+        if !existingPath.split(separator: ":").contains(Substring(homebrewBin)) {
+            env["PATH"] = existingPath.isEmpty
+                ? homebrewBin
+                : "\(homebrewBin):\(existingPath)"
+        }
+        if let groqKey = ProcessInfo.processInfo.environment["GROQ_API_KEY"] {
+            env["GROQ_API_KEY"] = groqKey
+        }
+        env["ALWAYS_SKIP_ORPHAN_KILL"] = "1"
     }
 
     func stopDaemon() async throws -> String {
@@ -108,17 +143,7 @@ class CLIService: ObservableObject {
         // would dereference a nil and the subprocess inherits an empty
         // PATH, breaking SoX lookup silently.
         var env = ProcessInfo.processInfo.environment
-        let homebrewBin = "/opt/homebrew/bin"
-        let existingPath = env["PATH"] ?? ""
-        if !existingPath.split(separator: ":").contains(Substring(homebrewBin)) {
-            env["PATH"] = existingPath.isEmpty
-                ? homebrewBin
-                : "\(homebrewBin):\(existingPath)"
-        }
-        // Pass through GROQ_API_KEY from parent environment if set.
-        if let groqKey = ProcessInfo.processInfo.environment["GROQ_API_KEY"] {
-            env["GROQ_API_KEY"] = groqKey
-        }
+        applyCLIEnvironment(&env)
         process.environment = env
 
         let pipe = Pipe()
