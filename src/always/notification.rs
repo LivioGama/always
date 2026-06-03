@@ -2,20 +2,36 @@
 
 use anyhow::Result;
 
-/// Show a system notification
-pub fn notify(title: &str, message: &str, _sound: bool) -> Result<()> {
-    // Try to use notify-send if available (Linux)
-    if let Ok(_) = std::process::Command::new("notify-send")
-        .arg(title)
-        .arg(message)
-        .output()
-    {
-        return Ok(());
-    }
+/// Show a system notification using macOS osascript
+pub fn notify(title: &str, message: &str, sound: bool) -> Result<()> {
+    // Use osascript for macOS notifications
+    let mut command = std::process::Command::new("osascript");
+    command.arg("-e");
 
-    // Fallback to console output
-    eprintln!("🔔 {} - {}", title, message);
-    Ok(())
+    let script = if sound {
+        format!(
+            r#"display notification "{}" with title "{}" sound name "Ping""#,
+            message.replace("\"", "\\\""),
+            title.replace("\"", "\\\"")
+        )
+    } else {
+        format!(
+            r#"display notification "{}" with title "{}""#,
+            message.replace("\"", "\\\""),
+            title.replace("\"", "\\\"")
+        )
+    };
+
+    command.arg(script);
+
+    match command.output() {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            // Fallback to console output
+            eprintln!("🔔 {} - {}", title, message);
+            Ok(())
+        }
+    }
 }
 
 /// Show pause status change with notification
@@ -26,11 +42,8 @@ pub fn show_pause_status_change(paused: bool) -> Result<()> {
         ("ACTIVE", "🎤")
     };
 
-    // Show notification with sound
-    notify("ALWAYS", &format!("{} ALWAYS {}", icon, status), true)?;
-
-    // Also print to console for daemon logs
-    eprintln!("{} ALWAYS {} (Ctrl+Shift+P to toggle)", icon, status.to_lowercase());
+    // Show macOS notification with sound
+    notify("Always Listening", &format!("{} {}", icon, status), true)?;
 
     Ok(())
 }
@@ -43,11 +56,8 @@ pub fn show_auto_enter_status_change(enabled: bool) -> Result<()> {
         ("DISABLED", "⏸")
     };
 
-    // Show notification with sound
-    notify("ALWAYS Auto-Enter", &format!("{} Auto-Enter {}", icon, status), true)?;
-
-    // Also print to console for daemon logs
-    eprintln!("{} Auto-Enter {} (Ctrl+Shift+A to toggle)", icon, status.to_lowercase());
+    // Show macOS notification with sound
+    notify("Auto-Enter", &format!("{} {}", icon, status), true)?;
 
     Ok(())
 }

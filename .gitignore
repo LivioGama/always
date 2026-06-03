@@ -14,3 +14,7 @@ build/
 *.log
 *.jsonl
 glossary.json
+.gitnexus
+AlwaysApp/.build/
+.filtering_evolution_history.md
+AlwaysApp.app/

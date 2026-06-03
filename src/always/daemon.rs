@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::always::{AlwaysConfig, config as always_config};
+use crate::always::{config as always_config, AlwaysConfig};
 use crate::config;
 
 pub fn pid_path() -> PathBuf {
@@ -30,7 +30,6 @@ pub fn start(cfg: &AlwaysConfig) -> Result<()> {
     let exe = std::env::current_exe().context("cannot find always binary")?;
     let child = std::process::Command::new(&exe)
         .args([
-            "always",
             "run",
             "--lang",
             &cfg.lang,
@@ -115,6 +114,12 @@ impl PidGuard {
 
 impl Drop for PidGuard {
     fn drop(&mut self) {
+        // Log daemon stop
+        if let Ok(log_path) = always_config::configured_log_path() {
+            if let Ok(mut log) = crate::always::log::Logger::open(&log_path) {
+                log.write(crate::always::log::Event::Stop);
+            }
+        }
         let _ = std::fs::remove_file(pid_path());
     }
 }

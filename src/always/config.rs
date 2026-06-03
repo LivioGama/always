@@ -146,8 +146,8 @@ impl AlwaysConfig {
             silence_secs,
             auto_enter,
             filter_enabled: true, // Always enabled - filter is always on
-            energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.05),
-            onset_ms: 100,
+            energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.15),
+            onset_ms: 30,
             cooldown_ms: prefs.stt_cooldown_ms.unwrap_or(150),
             log_path: log_path_from_preferences(&prefs),
             vocab,
@@ -270,6 +270,7 @@ fn default_log_path() -> PathBuf {
 fn get_groq_stt_api_key() -> Result<String> {
     // Try environment variable first
     if let Ok(key) = std::env::var("GROQ_API_KEY") {
+        eprintln!("🔑 Using GROQ_API_KEY from environment variable (first 12 chars): {}...", &key[..key.len().min(12)]);
         return Ok(key);
     }
 
@@ -277,6 +278,7 @@ fn get_groq_stt_api_key() -> Result<String> {
     if let Ok(conn) = db::open() {
         if let Ok(prefs) = db::get_preferences(&conn) {
             if let Some(key) = prefs.groq_api_key {
+                eprintln!("🔑 Using GROQ_API_KEY from database (first 12 chars): {}...", &key[..key.len().min(12)]);
                 return Ok(key);
             }
         }

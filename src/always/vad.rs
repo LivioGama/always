@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use std::collections::VecDeque;
 use webrtc_vad::{Vad, VadMode};
 
-use crate::always::AlwaysConfig;
 use crate::always::audio::{self, FRAME_BYTES, FRAME_MS};
-use crate::always::loading;
+use crate::always::config::AlwaysConfig;
+use crate::always::event;
 use crate::always::log::{Event, Logger};
 
 pub enum RecordResult {
@@ -23,8 +23,8 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     let silence_frames = ((cfg.silence_secs * 1000.0) / FRAME_MS as f64).ceil() as usize;
     let max_frames = (cfg.timeout_secs as usize * 1000) / FRAME_MS as usize;
     let min_speech_frames = (cfg.onset_ms / FRAME_MS).max(1) as usize;
-    // Pre-buffer: keep 200ms of audio before speech detection to catch first words
-    let pre_buffer_frames = (200 / FRAME_MS as usize).max(1);
+    // Pre-buffer: keep 50ms of audio before speech detection to catch first words
+    let pre_buffer_frames = (50 / FRAME_MS as usize).max(1);
     let mut vad =
         Vad::new_with_rate_and_mode(webrtc_vad::SampleRate::Rate16kHz, VadMode::LowBitrate);
 
@@ -89,9 +89,9 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
                     if passes_energy_check {
                         log.write(Event::VoiceDetected);
                         voice_logged = true;
-                        if let Err(e) = loading::show_loading_overlay() {
-                            eprintln!("Failed to show voice detection overlay: {}", e);
-                        }
+
+                        // Send voice activity detected event
+                        event::global_broadcaster().voice_activity_detected();
                     }
                 }
                 // Prepend pre-buffer to capture audio before VAD triggered
@@ -125,8 +125,9 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     }
 
     if speech_samples.is_empty() {
-        // Hide any loading overlay if no speech was detected
-        loading::stop_loading();
+        // Send voice activity ended event if no speech was detected
+        event::global_broadcaster().voice_activity_ended();
+        // Don't set listening to false here - let it time out naturally
         return if total_frames >= max_frames {
             Ok(RecordResult::Timeout)
         } else {
@@ -143,7 +144,8 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
 
     // Only log drops if we actually logged voice detection
     if speech_energy < cfg.energy_threshold {
-        loading::stop_loading();
+        event::global_broadcaster().voice_activity_ended();
+        // Don't set listening to false here - let it time out naturally
         if voice_logged {
             // Only log dropped energy if we previously logged voice detected
             return Ok(RecordResult::DroppedLowEnergy {
@@ -155,29 +157,32 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
         }
     }
 
-    // Show loading overlay while transcribing
-    if let Err(e) = loading::show_persistent_overlay() {
-        eprintln!("Failed to show loading overlay: {}", e);
-    }
+    // Send transcribing started event
+    event::global_broadcaster().transcribing_started();
 
     // Create WAV data in memory instead of writing to disk
     let wav_data = match audio::create_wav_bytes_i16_mono_16k(&speech_samples) {
         Ok(data) => data,
         Err(err) => {
-            loading::stop_loading();
+            event::global_broadcaster().transcribing_stopped();
             return Err(err).context("failed to create WAV data in memory");
         }
     };
 
-    let raw = match crate::stt::transcribe_from_bytes(wav_data, Some(&cfg.lang), &cfg.groq_stt_api_key, "whisper-large-v3") {
+    let raw = match crate::stt::transcribe_from_bytes(
+        wav_data,
+        Some(&cfg.lang),
+        &cfg.groq_stt_api_key,
+        "whisper-large-v3",
+    ) {
         Ok(raw) => {
-            // Hide loading overlay on success
-            loading::stop_loading();
+            // Send transcribing stopped event on success
+            event::global_broadcaster().transcribing_stopped();
             raw
-        },
+        }
         Err(err) => {
-            // Hide loading overlay on error
-            loading::stop_loading();
+            // Send transcribing stopped event on error
+            event::global_broadcaster().transcribing_stopped();
             return Err(err).context("failed to transcribe utterance");
         }
     };
@@ -244,7 +249,7 @@ fn normalized_energy(samples: &[i16]) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalized_energy, fast_normalized_energy, fast_energy_check};
+    use super::{fast_energy_check, fast_normalized_energy, normalized_energy};
 
     #[test]
     fn normalized_energy_handles_empty_input() {
@@ -277,8 +282,8 @@ mod tests {
     #[test]
     fn fast_methods_are_consistent_with_standard() {
         let test_samples = [
-            1000, -800, 1200, -900, 600, -700, 1500, -1100,
-            400, -300, 800, -600, 200, -100, 900, -750,
+            1000, -800, 1200, -900, 600, -700, 1500, -1100, 400, -300, 800, -600, 200, -100, 900,
+            -750,
         ];
 
         let standard_energy = normalized_energy(&test_samples);

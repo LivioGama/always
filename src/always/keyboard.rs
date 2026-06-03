@@ -1,5 +1,6 @@
 //! Keyboard shortcut handler for global pause toggle and auto-enter toggle.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -7,7 +8,18 @@ use std::time::Duration;
 use anyhow::Result;
 use rdev::{listen, EventType, Key};
 
-use super::{notification, pause};
+use super::{config as always_config, event, log, notification, pause};
+
+/// Tracks whether the Command (⌘) key is currently held.
+/// Used by the paste path to suppress keystrokes when the user is mid-shortcut
+/// (e.g. ⌘+Tab) so an interjecting paste doesn't corrupt their action.
+static CMD_HELD: once_cell::sync::Lazy<AtomicBool> =
+    once_cell::sync::Lazy::new(|| AtomicBool::new(false));
+
+/// Returns true if either Command key is currently held.
+pub fn is_cmd_held() -> bool {
+    CMD_HELD.load(Ordering::Relaxed)
+}
 
 /// Start listening for keyboard shortcuts:
 /// - Ctrl+Shift+P: Toggle pause/resume
@@ -25,7 +37,8 @@ pub fn start_keyboard_listener() -> Result<()> {
                 EventType::KeyPress(Key::ControlLeft) | EventType::KeyPress(Key::ControlRight) => {
                     ctrl_pressed = true;
                 }
-                EventType::KeyRelease(Key::ControlLeft) | EventType::KeyRelease(Key::ControlRight) => {
+                EventType::KeyRelease(Key::ControlLeft)
+                | EventType::KeyRelease(Key::ControlRight) => {
                     ctrl_pressed = false;
                 }
                 EventType::KeyPress(Key::ShiftLeft) | EventType::KeyPress(Key::ShiftRight) => {
@@ -34,9 +47,29 @@ pub fn start_keyboard_listener() -> Result<()> {
                 EventType::KeyRelease(Key::ShiftLeft) | EventType::KeyRelease(Key::ShiftRight) => {
                     shift_pressed = false;
                 }
+                EventType::KeyPress(Key::MetaLeft) | EventType::KeyPress(Key::MetaRight) => {
+                    CMD_HELD.store(true, Ordering::Relaxed);
+                }
+                EventType::KeyRelease(Key::MetaLeft) | EventType::KeyRelease(Key::MetaRight) => {
+                    CMD_HELD.store(false, Ordering::Relaxed);
+                }
                 EventType::KeyPress(Key::KeyP) => {
                     if ctrl_pressed && shift_pressed {
                         let new_state = pause::toggle_pause();
+
+                        // Send event instead of writing to file
+                        if new_state {
+                            event::global_broadcaster().paused();
+                        } else {
+                            event::global_broadcaster().resumed();
+                        }
+
+                        // Log the pause toggle
+                        if let Ok(log_path) = always_config::configured_log_path() {
+                            if let Ok(mut logger) = log::Logger::open(&log_path) {
+                                logger.write(log::Event::PauseToggled { paused: new_state });
+                            }
+                        }
 
                         // Show visual notification
                         if let Err(e) = notification::show_pause_status_change(new_state) {
@@ -47,6 +80,20 @@ pub fn start_keyboard_listener() -> Result<()> {
                 EventType::KeyPress(Key::KeyA) => {
                     if ctrl_pressed && shift_pressed {
                         let new_state = pause::toggle_auto_enter();
+
+                        // Send event instead of writing to file
+                        if new_state {
+                            event::global_broadcaster().auto_enter_enabled();
+                        } else {
+                            event::global_broadcaster().auto_enter_disabled();
+                        }
+
+                        // Log the auto-enter toggle
+                        if let Ok(log_path) = always_config::configured_log_path() {
+                            if let Ok(mut logger) = log::Logger::open(&log_path) {
+                                logger.write(log::Event::AutoEnterToggled { enabled: new_state });
+                            }
+                        }
 
                         // Show visual notification
                         if let Err(e) = notification::show_auto_enter_status_change(new_state) {

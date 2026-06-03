@@ -1,22 +1,31 @@
 //! Always-on voice activation.
 
+pub mod ai_filter;
 pub mod audio;
 pub mod config;
 pub mod daemon;
+pub mod event;
 pub mod event_loop;
 pub mod filter;
+pub mod filter_config;
 pub mod hud;
 pub mod keyboard;
-pub mod loading;
 pub mod log;
+pub mod mic_monitor;
 pub mod notification;
 pub mod paste;
 pub mod pause;
 pub mod text;
+pub mod uds_server;
 pub mod vad;
 pub mod context_vocab;
 pub mod postprocess;
 pub mod vocab;
+
+// DEPRECATED: File-based state persistence replaced by UDS event streaming
+// Kept for reference only - will be removed in future version
+#[deprecated(since = "0.14.0", note = "Use UDS event streaming instead")]
+pub mod state;
 
 pub use config::AlwaysConfig;
 pub use event_loop::run;

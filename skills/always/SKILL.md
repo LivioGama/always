@@ -1,6 +1,7 @@
 ---
 name: always
-description: Manipulate the configuration and custom vocabulary of the Always voice activation daemon. Use when the user wants to view or change Always preferences (API keys, energy thresholds, silence timeouts, auto-enter behavior), add domain-specific terms to the glossary so Whisper transcribes them correctly, or import vocabulary from existing STT software.
+description: Manipulate the configuration and custom vocabulary of the Always voice activation daemon. Use when the user wants to view or change Always preferences (API keys, energy thresholds, silence timeouts, auto-enter behavior), add domain-specific terms to the glossary so Whisper transcribes them correctly, import vocabulary from existing STT software, or analyze conversation patterns to extract meaningful vocabulary corrections from context.
+slash_command: always-config
 ---
 
 # Always — Configuration & Vocabulary Skill
@@ -21,6 +22,7 @@ This skill covers both.
 - The user wants Whisper to recognize a specific term ("add `Kubernetes` to the
   vocabulary", "Whisper keeps hearing 'cuber netties' instead of `Kubernetes`").
 - The user wants to import vocabulary from another STT tool already on the system.
+- The user wants to extract vocabulary corrections from conversation context - analyze patterns where something was transcribed incorrectly and then corrected, adding only meaningful terms (not nonsense).
 
 ## Configuration — `always config`
 
@@ -112,6 +114,38 @@ always vocab import
 
 This scans for Dragon NaturallySpeaking, macOS Dictation, Windows Speech Recognition,
 Google Speech Recognition, and OpenAI Whisper, then imports their vocabularies.
+
+### Fuzzy pattern analysis from conversation
+
+When analyzing conversation context to extract vocabulary corrections:
+
+1. **Identify correction patterns** - Look for instances where:
+   - A transcription was followed by an immediate manual correction
+   - The user explicitly stated "I meant X" or "that should be X"
+   - The same term was consistently mistranscribed multiple times
+
+2. **Filter for meaningful terms** - Only add terms that:
+   - Are domain-specific or technical (e.g., Kubernetes, TensorFlow, specific product names)
+   - Have consistent phonetic patterns that explain the mistranscription
+   - Are not common words or phrases that would naturally vary
+   - Appear in multiple correction instances (not one-off typos)
+
+3. **Extract the correction pair**:
+   - `term`: the corrected, canonical spelling
+   - `mistranscriptions`: the common phonetic misreads observed
+   - `frequency`: based on how often the correction pattern appeared
+
+4. **Add to glossary using jq**:
+```bash
+jq '. += [{"term":"<corrected_term>","mistranscriptions":["<mistranscription1>","<mistranscription2>"],"frequency":<count>}]' \
+  glossary.json > glossary.json.tmp && mv glossary.json.tmp glossary.json
+```
+
+Example: If the conversation shows "cuber netties" → "Kubernetes" appearing 3 times:
+```bash
+jq '. += [{"term":"Kubernetes","mistranscriptions":["cuber netties"],"frequency":3}]' \
+  glossary.json > glossary.json.tmp && mv glossary.json.tmp glossary.json
+```
 
 ## Token budget
 

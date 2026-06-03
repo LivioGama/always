@@ -1,7 +1,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use serde_json::json;
 
 use always::db;
+use always::always::pause;
 
 #[derive(Parser)]
 #[command(name = "always", version, about = "Always-on voice activation daemon — Groq STT with intelligent transcription")]
@@ -31,6 +33,8 @@ enum Commands {
     Stop,
     /// Show always-on daemon status
     Status,
+    /// Get current daemon state (pause, auto-enter, etc.)
+    GetState,
     /// Run always-on in foreground (for debugging)
     #[command(name = "run")]
     RunForeground {
@@ -57,6 +61,10 @@ enum Commands {
         #[command(subcommand)]
         action: VocabAction,
     },
+    /// Toggle pause/resume state
+    TogglePause,
+    /// Toggle auto-enter state
+    ToggleAutoEnter,
 }
 
 #[derive(Subcommand)]
@@ -98,6 +106,7 @@ fn main() -> Result<()> {
         }) => always::always::daemon::start(&always_config(lang, timeout, silence, auto_enter)?),
         Some(Commands::Stop) => always::always::daemon::stop(),
         Some(Commands::Status) => always::always::daemon::status(),
+        Some(Commands::GetState) => Ok(handle_get_state()),
         Some(Commands::RunForeground {
             lang,
             timeout,
@@ -106,17 +115,21 @@ fn main() -> Result<()> {
         }) => always::always::run(&always_config(lang, timeout, silence, auto_enter)?),
         Some(Commands::Config { action }) => handle_config(action),
         Some(Commands::Vocab { action }) => handle_vocab(action),
+        Some(Commands::TogglePause) => handle_toggle_pause(),
+        Some(Commands::ToggleAutoEnter) => handle_toggle_auto_enter(),
         None => {
             eprintln!("always: always-on voice activation daemon");
             eprintln!("Usage: always <COMMAND>");
             eprintln!();
             eprintln!("Commands:");
-            eprintln!("  start     Start always-on daemon in background");
-            eprintln!("  stop      Stop always-on daemon");
-            eprintln!("  status    Show always-on daemon status");
-            eprintln!("  run       Run always-on in foreground (for debugging)");
-            eprintln!("  config    Manage preferences");
-            eprintln!("  vocab     Manage vocabulary and corrections");
+            eprintln!("  start             Start always-on daemon in background");
+            eprintln!("  stop              Stop always-on daemon");
+            eprintln!("  status            Show always-on daemon status");
+            eprintln!("  run               Run always-on in foreground (for debugging)");
+            eprintln!("  config            Manage preferences");
+            eprintln!("  vocab             Manage vocabulary and corrections");
+            eprintln!("  toggle-pause      Toggle pause/resume state");
+            eprintln!("  toggle-auto-enter Toggle auto-enter state");
             eprintln!();
             eprintln!("Use 'always <COMMAND> --help' for more information on a command.");
             Ok(())
@@ -218,6 +231,58 @@ fn handle_vocab(action: VocabAction) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn handle_toggle_pause() -> Result<()> {
+    let new_state = always::always::pause::toggle_pause();
+    
+    // Send distributed notification via Swift script
+    let notification_name = if new_state { "com.always.pause" } else { "com.always.resume" };
+    std::process::Command::new("swift")
+        .arg("scripts/send_notification.swift")
+        .arg(notification_name)
+        .output()?;
+    
+    // Broadcast event via UDS
+    if new_state {
+        always::always::event::global_broadcaster().paused();
+    } else {
+        always::always::event::global_broadcaster().resumed();
+    }
+    
+    println!("Pause state: {}", if new_state { "paused" } else { "resumed" });
+    Ok(())
+}
+
+fn handle_toggle_auto_enter() -> Result<()> {
+    let new_state = always::always::pause::toggle_auto_enter();
+    
+    // Send distributed notification via Swift script
+    let notification_name = if new_state { "com.always.autoEnterEnabled" } else { "com.always.autoEnterDisabled" };
+    std::process::Command::new("swift")
+        .arg("scripts/send_notification.swift")
+        .arg(notification_name)
+        .output()?;
+    
+    // Broadcast event via UDS
+    if new_state {
+        always::always::event::global_broadcaster().auto_enter_enabled();
+    } else {
+        always::always::event::global_broadcaster().auto_enter_disabled();
+    }
+    
+    println!("Auto-enter state: {}", if new_state { "enabled" } else { "disabled" });
+    Ok(())
+}
+
+fn handle_get_state() {
+    let is_paused = always::always::pause::is_paused();
+    let is_auto_enter = always::always::pause::is_auto_enter_enabled();
+    let state = json!({
+        "isPaused": is_paused,
+        "isAutoEnter": is_auto_enter
+    });
+    println!("{}", state);
 }
 
 fn always_config(

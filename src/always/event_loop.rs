@@ -1,9 +1,10 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use tokio::runtime::Runtime;
 
 use crate::always::log::{Event, Logger};
-use crate::always::{AlwaysConfig, daemon, filter, keyboard, notification, paste, pause, vad};
+use crate::always::{AlwaysConfig, daemon, event, filter, keyboard, mic_monitor, notification, paste, pause, uds_server, vad};
 
 pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     let _pid = daemon::PidGuard::install()?;
@@ -22,16 +23,86 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         eprintln!("Failed to show startup notification: {}", e);
     }
 
+    // Start UDS server in background and track the task
+    let rt = Runtime::new()?;
+    let _uds_handle = rt.spawn(async {
+        if let Err(e) = uds_server::start_server().await {
+            eprintln!("UDS server error: {}", e);
+        }
+    });
+
+    // Send initial state events
+    event::global_broadcaster().listening_started();
+    if cfg.auto_enter {
+        event::global_broadcaster().auto_enter_enabled();
+    }
+
     let mut last_process = Instant::now() - Duration::from_secs(10);
 
+    // Initialize microphone monitor for auto-pause functionality
+    let mut mic_monitor = mic_monitor::MicrophoneMonitor::new();
+    let mut auto_paused_for_mic = false;
+
     loop {
+        // Check if other apps are using the microphone
+        match mic_monitor.is_microphone_in_use() {
+            Ok(true) if !auto_paused_for_mic => {
+                // Another app started using the microphone - pause Always
+                if let Ok(users) = mic_monitor.get_microphone_users() {
+                    let app_list = if users.is_empty() {
+                        "another application".to_string()
+                    } else {
+                        users.join(", ")
+                    };
+                    eprintln!("🎙️  Microphone in use by: {} - Auto-pausing Always", app_list);
+
+                    // Log the auto-pause event
+                    log.write(Event::MicrophoneAutoPaused { apps: &app_list });
+
+                    if let Err(e) = notification::notify("ALWAYS", &format!("🔇 Auto-paused: {} using microphone", app_list), false) {
+                        eprintln!("Failed to show auto-pause notification: {}", e);
+                    }
+                }
+                pause::set_paused(true);
+                auto_paused_for_mic = true;
+            }
+            Ok(false) if auto_paused_for_mic => {
+                // Microphone is no longer in use - resume Always
+                eprintln!("🎙️  Microphone available - Auto-resuming Always");
+
+                // Log the auto-resume event
+                log.write(Event::MicrophoneAutoResumed);
+
+                if let Err(e) = notification::notify("ALWAYS", "🎤 Auto-resumed: microphone available", false) {
+                    eprintln!("Failed to show auto-resume notification: {}", e);
+                }
+
+                pause::set_paused(false);
+                auto_paused_for_mic = false;
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to check microphone usage: {}", e);
+            }
+            _ => {} // No change in microphone state
+        }
+
         if pause::is_paused() {
             // When paused, sleep for a short time to avoid busy waiting
             std::thread::sleep(Duration::from_millis(100));
             continue;
         }
 
-        process_one(&cfg, &mut log, &mut last_process)?;
+        // Note: Removed auto_enter config reload that was causing race conditions
+        // Auto-enter state is now managed consistently through keyboard shortcuts and settings UI
+
+        if let Err(e) = process_one(&cfg, &mut log, &mut last_process) {
+            eprintln!("⚠️  Error in voice processing (continuing): {:#}", e);
+            log.write(Event::Error {
+                message: &format!("Voice processing error: {:#}", e)
+            });
+            // Don't exit - continue running
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 }
 
@@ -68,9 +139,10 @@ fn handle_speech(
     }
     *last_process = now;
 
-    if !filter::should_accept(text, cfg) {
-        eprintln!("filtered {text}");
-        log.write(Event::Filtered { text, energy });
+    let filter_result = filter::should_accept_with_reason(text, cfg);
+    if !matches!(filter_result, filter::FilterReason::None) {
+        eprintln!("filtered {text} - {}", filter_result.to_log_string());
+        log.write(Event::Filtered { text, energy, reason: filter_result });
         return Ok(());
     }
 
@@ -82,9 +154,26 @@ fn handle_speech(
         energy,
     });
 
+    // Send transcript event instead of writing to file
+    event::global_broadcaster().transcript_final(transformed.clone());
+
+    // Always copy to clipboard regardless of Command key state
+    paste::copy_to_clipboard(format!("{} ", transformed))?;
+
+    // Skip paste (and auto-enter) if the user is currently holding Command —
+    // they're likely mid-shortcut (e.g. ⌘+Tab) and an interjecting paste
+    // would corrupt their action. Transcript still broadcasted/logged above.
+    if keyboard::is_cmd_held() {
+        eprintln!("⊘ Skipped paste: Command key held");
+        log.write(Event::Error {
+            message: "Skipped paste: Command key held",
+        });
+        return Ok(());
+    }
+
     // Use the global auto-enter state instead of config
     let auto_enter = pause::is_auto_enter_enabled();
-    paste::paste(&format!("{} ", transformed), auto_enter)?;
+    paste::paste_text(auto_enter)?;
     Ok(())
 }
 
@@ -137,7 +226,7 @@ mod tests {
             auto_enter: false,
             filter_enabled: true,
             energy_threshold: 0.05,
-            onset_ms: 200,
+            onset_ms: 50,
             cooldown_ms: 1500,
             log_path: PathBuf::from("always.log"),
             vocab,
