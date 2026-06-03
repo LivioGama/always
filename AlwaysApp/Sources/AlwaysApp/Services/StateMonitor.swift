@@ -9,22 +9,70 @@ class StateMonitor: ObservableObject {
     @Published var isAutoEnter: Bool = false
     @Published var isTranscribing: Bool = false
     @Published var isVoiceActivity: Bool = false
+    /// Connection state to daemon. UI can show "Reconnecting…" if degraded.
+    @Published var isDaemonConnected: Bool = false
+    @Published var isDaemonDegraded: Bool = false
+
     private var cancellables = Set<AnyCancellable>()
     private var udsClient: UDSClient
+    private let cliService = CLIService()
     private let logger = Logger(subsystem: "com.always.app", category: "state-monitor")
+    private var respawnInFlight = false
 
     private func log(_ message: String) {
         logger.debug("\(message)")
     }
-    
+
     private init() {
         self.udsClient = UDSClient()
         setupUDSEventListener()
         setupOverlaySubscription()
+        setupConnectionMonitoring()
         logger.info("Initialized with UDSClient and overlay subscription")
-        
+
+        // Wire daemon respawn: if UDSClient gives up reconnecting, the daemon
+        // process is dead — start a fresh one. Debounced so multiple watchdog
+        // signals don't pile up subprocesses.
+        udsClient.onDaemonNeedsRespawn = { [weak self] in
+            self?.respawnDaemonIfNeeded()
+        }
+
         // Clean up old log file on launch
         try? FileManager.default.removeItem(atPath: "/tmp/statemonitor.log")
+    }
+
+    /// Mirror UDSClient connection state into @Published props for the UI.
+    private func setupConnectionMonitoring() {
+        udsClient.$isConnected
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] connected in
+                self?.isDaemonConnected = connected
+            }
+            .store(in: &cancellables)
+        udsClient.$isDegraded
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] degraded in
+                self?.isDaemonDegraded = degraded
+            }
+            .store(in: &cancellables)
+    }
+
+    /// Force-restart daemon. Kills any stale process first, then starts
+    /// fresh. This is the nuclear option — used when the watchdog has
+    /// given up on reconnecting, meaning the old daemon is truly broken.
+    private func respawnDaemonIfNeeded() {
+        guard !respawnInFlight else { return }
+        respawnInFlight = true
+        logger.warning("Force-restarting daemon (stale process suspected)")
+        Task { [weak self] in
+            defer { self?.respawnInFlight = false }
+            do {
+                _ = try await self?.cliService.restartDaemon()
+                self?.logger.info("Daemon force-restart completed")
+            } catch {
+                self?.logger.error("Daemon force-restart failed: \(error.localizedDescription)")
+            }
+        }
     }
     
     deinit {
@@ -127,6 +175,14 @@ class StateMonitor: ObservableObject {
                 self.isVoiceActivity = true
             case .voiceActivityEnded:
                 self.isVoiceActivity = false
+            case .transcriptionFiltered:
+                // Transcription was rejected — clear ongoing state and flash
+                // a brief "Filtered" overlay so the user knows the daemon
+                // heard them but suppressed the paste.
+                self.isTranscribing = false
+                self.isVoiceActivity = false
+                let reason = event.data?["reason"] ?? ""
+                StatusOverlayController.shared.flash(state: .filtered(reason: reason), duration: 1.8)
             default:
                 break
             }

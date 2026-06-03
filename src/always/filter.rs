@@ -1,6 +1,6 @@
-use crate::always::{filter_config, AlwaysConfig};
-use std::sync::LazyLock;
+use crate::always::{AlwaysConfig, filter_config};
 use regex;
+use std::sync::LazyLock;
 
 // Load filter config once at startup
 static FILTER_CONFIG: LazyLock<Option<filter_config::FilterConfig>> =
@@ -118,7 +118,7 @@ pub fn should_accept(text: &str, cfg: &AlwaysConfig) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{hard_reject_with_reason, FilterReason};
+    use super::{FilterReason, hard_reject_with_reason};
 
     fn is_rejected(text: &str) -> bool {
         !matches!(hard_reject_with_reason(text), FilterReason::None)

@@ -1,5 +1,5 @@
-use std::fs;
 use always::always::filter;
+use std::fs;
 
 fn main() {
     println!("🧪 Comprehensive Filter Test - Generating and Testing 1000+ Sentences");
@@ -23,7 +23,10 @@ fn main() {
             let reason = if result.accepted {
                 "ACCEPTED".to_string()
             } else {
-                format!("REJECTED: {}", result.rejection_reason.unwrap_or("Unknown".to_string()))
+                format!(
+                    "REJECTED: {}",
+                    result.rejection_reason.unwrap_or("Unknown".to_string())
+                )
             };
 
             println!("{} {} - {}", status, sentence, reason);
@@ -40,6 +43,7 @@ fn main() {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct TestResult {
     accepted: bool,
     rejection_reason: Option<String>,
@@ -65,7 +69,7 @@ impl TestResults {
     fn add_result(&mut self, category: &str, sentence: &str, result: &TestResult) {
         self.categories
             .entry(category.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((sentence.to_string(), result.clone()));
     }
 
@@ -75,36 +79,41 @@ impl TestResults {
 
         let mut total_sentences = 0;
         let mut total_accepted = 0;
-        let mut total_rejected = 0;
 
         for (category, results) in &self.categories {
             let accepted = results.iter().filter(|(_, r)| r.accepted).count();
-            let rejected = results.iter().filter(|(_, r)| !r.accepted).count();
             let acceptance_rate = (accepted as f64 / results.len() as f64) * 100.0;
 
-            println!("📂 {}: {}/{} accepted ({:.1}%)",
-                     category, accepted, results.len(), acceptance_rate);
+            println!(
+                "📂 {}: {}/{} accepted ({:.1}%)",
+                category,
+                accepted,
+                results.len(),
+                acceptance_rate
+            );
 
             total_sentences += results.len();
             total_accepted += accepted;
-            total_rejected += rejected;
         }
 
         let overall_acceptance = (total_accepted as f64 / total_sentences as f64) * 100.0;
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("🎯 OVERALL: {}/{} accepted ({:.1}%)",
-                 total_accepted, total_sentences, overall_acceptance);
+        println!(
+            "🎯 OVERALL: {}/{} accepted ({:.1}%)",
+            total_accepted, total_sentences, overall_acceptance
+        );
 
         // Analyze rejection reasons
         println!("\n📈 REJECTION ANALYSIS:");
-        let mut rejection_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut rejection_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         for results in self.categories.values() {
             for (_, result) in results {
-                if !result.accepted {
-                    if let Some(reason) = &result.rejection_reason {
-                        *rejection_counts.entry(reason.clone()).or_insert(0) += 1;
-                    }
+                if !result.accepted
+                    && let Some(reason) = &result.rejection_reason
+                {
+                    *rejection_counts.entry(reason.clone()).or_insert(0) += 1;
                 }
             }
         }
@@ -124,16 +133,26 @@ impl TestResults {
             content.push_str(&format!("{}\n", "─".repeat(50)));
 
             for (sentence, result) in results {
-                let status = if result.accepted { "✅ ACCEPTED" } else { "❌ REJECTED" };
+                let status = if result.accepted {
+                    "✅ ACCEPTED"
+                } else {
+                    "❌ REJECTED"
+                };
                 let reason = if result.accepted {
                     String::new()
                 } else {
-                    format!(" - {}", result.rejection_reason.as_ref().unwrap_or(&"Unknown".to_string()))
+                    format!(
+                        " - {}",
+                        result
+                            .rejection_reason
+                            .as_ref()
+                            .unwrap_or(&"Unknown".to_string())
+                    )
                 };
 
                 content.push_str(&format!("{} {}{}\n", status, sentence, reason));
             }
-            content.push_str("\n");
+            content.push('\n');
         }
 
         fs::write(filename, content).expect("Failed to write results file");
@@ -141,12 +160,8 @@ impl TestResults {
 }
 
 fn test_sentence(text: &str) -> TestResult {
-    let cfg = always::always::AlwaysConfig::from_cli(
-        "en".to_string(),
-        30,
-        0.5,
-        false
-    ).expect("Failed to create config");
+    let cfg = always::always::AlwaysConfig::from_cli("en".to_string(), 30, 0.5, false)
+        .expect("Failed to create config");
 
     // Test individual filters
     let quick_reject_result = filter::quick_reject_with_reason(text);
@@ -160,7 +175,13 @@ fn test_sentence(text: &str) -> TestResult {
     let accepted = matches!(overall_result, filter::FilterReason::None);
 
     let rejection_reason = if !accepted {
-        Some(format!("{:?}", overall_result).split('(').next().unwrap_or("Unknown").to_string())
+        Some(
+            format!("{:?}", overall_result)
+                .split('(')
+                .next()
+                .unwrap_or("Unknown")
+                .to_string(),
+        )
     } else {
         None
     };

@@ -5,35 +5,18 @@ use std::path::PathBuf;
 pub mod plugins;
 use plugins::get_all_plugins;
 
-/// Detect installed speech-to-text software on the system
+/// Detect installed speech-to-text software on the system.
+///
+/// Only legacy plugins live here; the modern import path goes through
+/// `vocab/plugins.rs::get_all_plugins()` which has typed, real per-source
+/// extractors. Dragon stays because the user explicitly asked for it
+/// even though we don't yet parse `.dvc` files (we only seed a small
+/// list of common technical IT vocabulary).
 pub fn detect_stt_software() -> Vec<String> {
     let mut detected = Vec::new();
 
-    // Check for Dragon NaturallySpeaking (Windows/macOS)
     if is_dragon_installed() {
         detected.push("Dragon NaturallySpeaking".to_string());
-    }
-
-    // Check for Windows Speech Recognition
-    #[cfg(target_os = "windows")]
-    if is_windows_speech_recognition_available() {
-        detected.push("Windows Speech Recognition".to_string());
-    }
-
-    // Check for macOS Dictation
-    #[cfg(target_os = "macos")]
-    if is_macos_dictation_enabled() {
-        detected.push("macOS Dictation".to_string());
-    }
-
-    // Check for Google Speech Recognition
-    if is_google_speech_available() {
-        detected.push("Google Speech Recognition".to_string());
-    }
-
-    // Check for Whisper installation
-    if is_whisper_installed() {
-        detected.push("OpenAI Whisper".to_string());
     }
 
     detected
@@ -77,9 +60,17 @@ pub fn import_vocabulary(software: &[String]) -> Result<Vec<String>> {
     let plugins = get_all_plugins();
     for plugin in plugins {
         if plugin.is_installed() {
-            println!("Found plugin: {} - {}", plugin.name(), plugin.description());
+            tracing::debug!(
+                plugin_name = %plugin.name(),
+                plugin_description = %plugin.description(),
+                "found plugin"
+            );
             if let Ok(terms) = plugin.extract_all_vocabulary() {
-                println!("  Extracted {} terms from plugin", terms.len());
+                tracing::debug!(
+                    plugin_name = %plugin.name(),
+                    term_count = terms.len(),
+                    "extracted terms from plugin"
+                );
                 for term in terms {
                     all_terms.insert(term);
                 }
@@ -124,119 +115,66 @@ fn is_dragon_installed() -> bool {
     }
 }
 
-#[cfg(target_os = "windows")]
-fn is_windows_speech_recognition_available() -> bool {
-    // Windows Speech Recognition is built-in to Windows 7+
-    true
-}
-
-#[cfg(target_os = "macos")]
-fn is_macos_dictation_enabled() -> bool {
-    // macOS Dictation is built-in
-    true
-}
-
-fn is_google_speech_available() -> bool {
-    // Check if we can reach Google Speech API (soft check)
-    // This is a basic check - actual availability requires internet
-    true
-}
-
-fn is_whisper_installed() -> bool {
-    // Check if whisper command is available
-    std::process::Command::new("whisper")
-        .arg("--help")
-        .output()
-        .is_ok()
-}
-
 fn extract_vocabulary_from_software(name: &str) -> Result<Vec<String>> {
-    let mut terms = Vec::new();
-
     match name {
-        "Dragon NaturallySpeaking" => {
-            terms.extend(get_dragon_vocabulary());
-        }
-        "Windows Speech Recognition" => {
-            terms.extend(get_windows_speech_vocabulary());
-        }
-        "macOS Dictation" => {
-            terms.extend(get_macos_dictation_vocabulary());
-        }
-        "Google Speech Recognition" => {
-            terms.extend(get_google_speech_vocabulary());
-        }
-        "OpenAI Whisper" => {
-            terms.extend(get_whisper_vocabulary());
-        }
-        _ => {}
+        "Dragon NaturallySpeaking" => Ok(get_dragon_vocabulary()),
+        _ => Ok(Vec::new()),
     }
-
-    Ok(terms)
 }
 
 fn get_dragon_vocabulary() -> Vec<String> {
     // Common technical terms from Dragon's vocabulary
     vec![
-        "algorithm".to_string(), "application".to_string(), "architecture".to_string(), "authentication".to_string(), "backup".to_string(),
-        "bandwidth".to_string(), "browser".to_string(), "cache".to_string(), "cloud".to_string(), "compile".to_string(), "configure".to_string(),
-        "database".to_string(), "debug".to_string(), "deploy".to_string(), "encryption".to_string(), "firewall".to_string(), "framework".to_string(),
-        "hardware".to_string(), "interface".to_string(), "javascript".to_string(), "kernel".to_string(), "library".to_string(), "middleware".to_string(),
-        "network".to_string(), "operating system".to_string(), "platform".to_string(), "protocol".to_string(), "repository".to_string(),
-        "server".to_string(), "software".to_string(), "terminal".to_string(), "user interface".to_string(), "virtual machine".to_string(),
-        "webhook".to_string(), "xml".to_string(), "yaml".to_string(), "zip".to_string(), "authentication".to_string(), "authorization".to_string(),
-        "container".to_string(), "docker".to_string(), "kubernetes".to_string(), "microservices".to_string(), "api".to_string(), "rest".to_string(),
-        "graphql".to_string(), "websocket".to_string(), "middleware".to_string(), "frontend".to_string(), "backend".to_string(),
-    ]
-}
-
-fn get_windows_speech_vocabulary() -> Vec<String> {
-    // Windows-specific technical terms
-    vec![
-        "powershell".to_string(), "registry".to_string(), "task manager".to_string(), "command prompt".to_string(), "control panel".to_string(),
-        "device manager".to_string(), "event viewer".to_string(), "group policy".to_string(), "hyper-v".to_string(), "iis".to_string(),
-        "microsoft edge".to_string(), "windows defender".to_string(), "windows update".to_string(), "active directory".to_string(),
-        "azure".to_string(), "onedrive".to_string(), "sharepoint".to_string(), "teams".to_string(), "outlook".to_string(), "excel".to_string(), "word".to_string(),
-        "powerpoint".to_string(), "visio".to_string(), "project".to_string(), "visual studio".to_string(), "net".to_string(), "csharp".to_string(),
-        "asp".to_string(), "windows forms".to_string(), "wpf".to_string(), "uwp".to_string(), "winui".to_string(), "directx".to_string(), "hololens".to_string(),
-    ]
-}
-
-fn get_macos_dictation_vocabulary() -> Vec<String> {
-    // macOS-specific technical terms
-    vec![
-        "terminal".to_string(), "finder".to_string(), "spotlight".to_string(), "launchpad".to_string(), "mission control".to_string(),
-        "dashboard".to_string(), "dock".to_string(), "menu bar".to_string(), "system preferences".to_string(), "activity monitor".to_string(),
-        "disk utility".to_string(), "console".to_string(), "keychain access".to_string(), "time machine".to_string(), "airdrop".to_string(),
-        "handoff".to_string(), "continuity".to_string(), "sidecar".to_string(), "universal control".to_string(), "quicktime".to_string(),
-        "preview".to_string(), "textedit".to_string(), "safari".to_string(), "mail".to_string(), "calendar".to_string(), "contacts".to_string(), "notes".to_string(),
-        "reminders".to_string(), "photos".to_string(), "music".to_string(), "podcasts".to_string(), "tv".to_string(), "app store".to_string(), "xcode".to_string(),
-        "swift".to_string(), "objective-c".to_string(), "cocoa".to_string(), "metal".to_string(), "core ml".to_string(), "swiftui".to_string(), "combine".to_string(),
-    ]
-}
-
-fn get_google_speech_vocabulary() -> Vec<String> {
-    // Google/Android-specific technical terms
-    vec![
-        "android".to_string(), "chromecast".to_string(), "chromebook".to_string(), "google assistant".to_string(), "google drive".to_string(),
-        "google docs".to_string(), "google sheets".to_string(), "google slides".to_string(), "gmail".to_string(), "google calendar".to_string(),
-        "google meet".to_string(), "google chat".to_string(), "google workspace".to_string(), "firebase".to_string(), "tensorflow".to_string(),
-        "kubernetes".to_string(), "grpc".to_string(), "protobuf".to_string(), "angular".to_string(), "flutter".to_string(), "dart".to_string(), "go".to_string(),
-        "golang".to_string(), "material design".to_string(), "android studio".to_string(), "gradle".to_string(), "jetpack compose".to_string(),
-        "coroutine".to_string(), "lifecycle".to_string(), "viewmodel".to_string(), "livedata".to_string(), "room".to_string(), "navigation".to_string(),
-    ]
-}
-
-fn get_whisper_vocabulary() -> Vec<String> {
-    // OpenAI/AI-specific technical terms
-    vec![
-        "artificial intelligence".to_string(), "machine learning".to_string(), "deep learning".to_string(), "neural network".to_string(),
-        "transformer".to_string(), "attention mechanism".to_string(), "language model".to_string(), "gpt".to_string(), "chatgpt".to_string(),
-        "openai".to_string(), "api".to_string(), "token".to_string(), "prompt".to_string(), "completion".to_string(), "embedding".to_string(), "fine-tuning".to_string(),
-        "training".to_string(), "inference".to_string(), "gpu".to_string(), "tpu".to_string(), "cuda".to_string(), "pytorch".to_string(), "tensorflow".to_string(),
-        "keras".to_string(), "jupyter".to_string(), "notebook".to_string(), "colab".to_string(), "hugging face".to_string(), "dataset".to_string(),
-        "model".to_string(), "checkpoint".to_string(), "inference".to_string(), "latency".to_string(), "throughput".to_string(), "batch size".to_string(),
-        "learning rate".to_string(), "optimizer".to_string(), "loss function".to_string(), "backpropagation".to_string(), "gradient".to_string(),
+        "algorithm".to_string(),
+        "application".to_string(),
+        "architecture".to_string(),
+        "authentication".to_string(),
+        "backup".to_string(),
+        "bandwidth".to_string(),
+        "browser".to_string(),
+        "cache".to_string(),
+        "cloud".to_string(),
+        "compile".to_string(),
+        "configure".to_string(),
+        "database".to_string(),
+        "debug".to_string(),
+        "deploy".to_string(),
+        "encryption".to_string(),
+        "firewall".to_string(),
+        "framework".to_string(),
+        "hardware".to_string(),
+        "interface".to_string(),
+        "javascript".to_string(),
+        "kernel".to_string(),
+        "library".to_string(),
+        "middleware".to_string(),
+        "network".to_string(),
+        "operating system".to_string(),
+        "platform".to_string(),
+        "protocol".to_string(),
+        "repository".to_string(),
+        "server".to_string(),
+        "software".to_string(),
+        "terminal".to_string(),
+        "user interface".to_string(),
+        "virtual machine".to_string(),
+        "webhook".to_string(),
+        "xml".to_string(),
+        "yaml".to_string(),
+        "zip".to_string(),
+        "authentication".to_string(),
+        "authorization".to_string(),
+        "container".to_string(),
+        "docker".to_string(),
+        "kubernetes".to_string(),
+        "microservices".to_string(),
+        "api".to_string(),
+        "rest".to_string(),
+        "graphql".to_string(),
+        "websocket".to_string(),
+        "middleware".to_string(),
+        "frontend".to_string(),
+        "backend".to_string(),
     ]
 }
 
@@ -401,25 +339,60 @@ fn get_linux_applications() -> Vec<String> {
     Vec::new()
 }
 
+/// Merge newly-imported `terms` into the on-disk glossary at
+/// `~/.always/glossary.json`. Existing entries are preserved untouched
+/// so a user's hand-tuned `mistranscriptions` / `frequency` values
+/// survive every subsequent `always vocab import` run. Only brand-new
+/// terms are appended.
 fn save_to_glossary(terms: &HashSet<String>) -> Result<()> {
+    use crate::glossary::user_glossary_path;
+    use serde_json::Value;
     use serde_json::to_string_pretty;
-    use std::fs::File;
+    use std::fs::{File, create_dir_all};
     use std::io::Write;
 
-    let entries: Vec<serde_json::Value> = terms
+    let path = user_glossary_path().unwrap_or_else(|| std::path::PathBuf::from("glossary.json"));
+    if let Some(parent) = path.parent() {
+        create_dir_all(parent).ok();
+    }
+
+    // Load existing entries (if any) so we don't clobber user edits.
+    let mut existing: Vec<Value> = if path.exists() {
+        match std::fs::read_to_string(&path) {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| Vec::new()),
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
+    let existing_terms: std::collections::HashSet<String> = existing
         .iter()
-        .map(|term| {
-            serde_json::json!({
-                "term": term,
-                "mistranscriptions": [],
-                "frequency": 100
-            })
-        })
+        .filter_map(|e| e.get("term").and_then(|t| t.as_str()).map(String::from))
         .collect();
 
-    let json = to_string_pretty(&entries)?;
-    let mut file = File::create("glossary.json")?;
+    let mut added = 0usize;
+    for term in terms {
+        if existing_terms.contains(term) {
+            continue;
+        }
+        existing.push(serde_json::json!({
+            "term": term,
+            "mistranscriptions": [],
+            "frequency": 100
+        }));
+        added += 1;
+    }
+
+    let json = to_string_pretty(&existing)?;
+    let mut file = File::create(&path)?;
     file.write_all(json.as_bytes())?;
 
+    tracing::info!(
+        path = %path.display(),
+        added,
+        total = existing.len(),
+        "glossary_merged"
+    );
     Ok(())
 }

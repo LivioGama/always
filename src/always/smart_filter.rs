@@ -10,19 +10,11 @@ pub async fn should_accept_with_ai(
     if let Some(ai_filter) = create_ai_filter(config) {
         match ai_filter.evaluate_transcription(text, config).await {
             Ok(result) => {
-                let reason = if result.should_accept {
-                    format!(
-                        "AI: {} (confidence: {:.1}%)",
-                        result.reason,
-                        result.confidence_score * 100.0
-                    )
-                } else {
-                    format!(
-                        "AI: {} (confidence: {:.1}%)",
-                        result.reason,
-                        result.confidence_score * 100.0
-                    )
-                };
+                let reason = format!(
+                    "AI: {} (confidence: {:.1}%)",
+                    result.reason,
+                    result.confidence_score * 100.0
+                );
 
                 // Return corrected text if different and accepted
                 let corrected = if result.corrected_text != text && result.should_accept {
@@ -34,8 +26,7 @@ pub async fn should_accept_with_ai(
                 return (result.should_accept, reason, corrected);
             }
             Err(e) => {
-                eprintln!("AI filter failed, falling back to rule-based: {}", e);
-                // Fall through to rule-based filtering
+                tracing::warn!(error = %e, "AI filter failed, falling back to rule-based");
             }
         }
     }

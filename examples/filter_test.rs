@@ -1,5 +1,5 @@
-use std::env;
 use always::always::filter;
+use std::env;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -50,9 +50,14 @@ fn test_single_text(text: &str) {
     if should_accept {
         println!("✅ ACCEPTED: Text would be pasted");
     } else {
-        println!("❌ REJECTED: {} - {}",
-                 format!("{:?}", overall_result).split('(').next().unwrap_or("Unknown"),
-                 overall_result.to_log_string());
+        println!(
+            "❌ REJECTED: {} - {}",
+            format!("{:?}", overall_result)
+                .split('(')
+                .next()
+                .unwrap_or("Unknown"),
+            overall_result.to_log_string()
+        );
     }
 }
 
@@ -146,13 +151,18 @@ fn run_test_cases() {
     let test_cases = vec![
         // Should be REJECTED
         ("Zaaaayyyyyyy", "should reject repeated chars"),
-        ("stubbornin費이 visit. distortedalgorithm", "should reject mixed gibberish"),
-        ("Subtitles by the Amara.org community", "should reject video artifact"),
+        (
+            "stubbornin費이 visit. distortedalgorithm",
+            "should reject mixed gibberish",
+        ),
+        (
+            "Subtitles by the Amara.org community",
+            "should reject video artifact",
+        ),
         ("thank you for watching", "should reject video ending"),
         ("mmm", "should reject sound"),
         ("uh", "should reject filler"),
         ("okay.", "should reject conversation filler"),
-
         // Should be ACCEPTED
         ("Yes", "should accept valid short word"),
         ("open file", "should accept command"),

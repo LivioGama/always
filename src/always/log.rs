@@ -1,5 +1,5 @@
-use crate::always::{AlwaysConfig, filter::FilterReason};
 use crate::always::telemetry::should_log_transcripts;
+use crate::always::{AlwaysConfig, filter::FilterReason};
 
 pub enum Event<'a> {
     Start {
@@ -7,6 +7,10 @@ pub enum Event<'a> {
     },
     Stop,
     VoiceDetected,
+    Transcribed {
+        text: &'a str,
+        energy: f64,
+    },
     Pasting {
         raw: &'a str,
         processed: &'a str,
@@ -30,6 +34,9 @@ pub enum Event<'a> {
     },
     AutoEnterToggled {
         enabled: bool,
+    },
+    ForcePastedFiltered {
+        text: &'a str,
     },
     MicrophoneAutoPaused {
         apps: &'a str,
@@ -67,7 +74,16 @@ impl Logger {
                 tracing::info!("daemon_stopped");
             }
             Event::VoiceDetected => {
-                tracing::debug!("voice_detected");
+                tracing::info!("voice_detected");
+            }
+            Event::Transcribed { text, energy } => {
+                let log_transcripts = should_log_transcripts();
+                tracing::info!(
+                    chars = text.len(),
+                    energy,
+                    text = if log_transcripts { Some(text) } else { None },
+                    "transcription_received"
+                );
             }
             Event::Pasting {
                 raw,
@@ -80,11 +96,19 @@ impl Logger {
                     energy,
                     processed_chars = processed.len(),
                     raw_text = if log_transcripts { Some(raw) } else { None },
-                    processed_text = if log_transcripts { Some(processed) } else { None },
+                    processed_text = if log_transcripts {
+                        Some(processed)
+                    } else {
+                        None
+                    },
                     "transcription_pasted"
                 );
             }
-            Event::Filtered { text, energy, reason } => {
+            Event::Filtered {
+                text,
+                energy,
+                reason,
+            } => {
                 let log_transcripts = should_log_transcripts();
                 tracing::info!(
                     chars = text.len(),
@@ -116,6 +140,14 @@ impl Logger {
             }
             Event::AutoEnterToggled { enabled } => {
                 tracing::info!(enabled, "auto_enter_toggled");
+            }
+            Event::ForcePastedFiltered { text } => {
+                let log_transcripts = should_log_transcripts();
+                tracing::info!(
+                    chars = text.len(),
+                    text = if log_transcripts { Some(text) } else { None },
+                    "force_pasted_filtered"
+                );
             }
             Event::MicrophoneAutoPaused { apps } => {
                 tracing::info!(apps, "microphone_auto_paused");

@@ -7,8 +7,22 @@ use always::db;
 mod cli;
 use cli::LogsCommand;
 
+/// Full version string: semver + git short SHA stamped at build time.
+/// Read by `--version` and emitted in the daemon-start tracing event so
+/// the Mac app can detect daemon/app revision drift.
+const FULL_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("ALWAYS_BUILD_SHA"),
+    ")"
+);
+
 #[derive(Parser)]
-#[command(name = "always", version, about = "Always-on voice activation daemon — Groq STT with intelligent transcription")]
+#[command(
+    name = "always",
+    version = FULL_VERSION,
+    about = "Always-on voice activation daemon — Groq STT with intelligent transcription"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -25,7 +39,7 @@ enum Commands {
         #[arg(short = 't', long, default_value = "30")]
         timeout: u32,
         /// Seconds of silence before considering phrase complete
-        #[arg(short = 's', long, default_value = "0.8")]
+        #[arg(short = 's', long, default_value = "2.0")]
         silence: f64,
         /// Press Enter automatically after pasting transcript
         #[arg(long, default_value_t = false)]
@@ -47,7 +61,7 @@ enum Commands {
         #[arg(short = 't', long, default_value = "30")]
         timeout: u32,
         /// Seconds of silence before considering phrase complete
-        #[arg(short = 's', long, default_value = "0.8")]
+        #[arg(short = 's', long, default_value = "2.0")]
         silence: f64,
         /// Press Enter automatically after pasting transcript
         #[arg(long, default_value_t = false)]
@@ -63,7 +77,6 @@ enum Commands {
         #[command(subcommand)]
         action: VocabAction,
     },
-    /// Toggle pause/resume state
     /// View and manage Always logs
     Logs {
         #[command(flatten)]
@@ -104,10 +117,30 @@ enum ConfigAction {
     },
     /// Reset all preferences to defaults
     Reset,
+    /// Apply a Mic Sensitivity preset (writes stt_energy_threshold +
+    /// hear_energy_threshold to the underlying preferences). The same
+    /// values are written when the GUI preset picker is used.
+    Preset {
+        /// One of: low, normal (alias: medium), high.
+        level: String,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Initialize structured logging (writes to ~/Library/Logs/Always/ on macOS).
+    // Foreground only for `Run` (the explicit foreground/debug subcommand).
+    let foreground = matches!(cli.command, Some(Commands::RunForeground { .. }));
+    let _logging_guard = always::always::telemetry::init_logging(foreground)
+        .map_err(|e| anyhow::anyhow!("Failed to initialize logging: {}", e))?;
+
+    // One-shot migration: move any plaintext API keys from SQLite to the OS Keychain.
+    // Non-fatal — if Keychain access fails (e.g., headless Linux without secret-service),
+    // existing config flow still works.
+    if let Err(e) = always::always::keyring::migrate_keys_from_db() {
+        tracing::warn!(error = %e, "key migration to keychain failed");
+    }
 
     match cli.command {
         Some(Commands::Start {
@@ -118,7 +151,10 @@ fn main() -> Result<()> {
         }) => always::always::daemon::start(&always_config(lang, timeout, silence, auto_enter)?),
         Some(Commands::Stop) => always::always::daemon::stop(),
         Some(Commands::Status) => always::always::daemon::status(),
-        Some(Commands::GetState) => Ok(handle_get_state()),
+        Some(Commands::GetState) => {
+            handle_get_state();
+            Ok(())
+        }
         Some(Commands::RunForeground {
             lang,
             timeout,
@@ -157,7 +193,7 @@ fn handle_config(action: ConfigAction) -> Result<()> {
     match action {
         ConfigAction::Show => {
             let prefs = db::get_preferences(&conn)?;
-            
+
             // Check keychain for API keys
             let groq_in_keychain = always::always::keyring::get_groq_api_key()
                 .unwrap_or(None)
@@ -232,6 +268,21 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "0.5".to_string())
             );
+            println!(
+                "shortcut_pause: {}",
+                prefs.shortcut_pause.as_deref().unwrap_or("ctrl+alt+p")
+            );
+            println!(
+                "shortcut_auto_enter: {}",
+                prefs.shortcut_auto_enter.as_deref().unwrap_or("ctrl+alt+a")
+            );
+            println!(
+                "shortcut_force_paste: {}",
+                prefs
+                    .shortcut_force_paste
+                    .as_deref()
+                    .unwrap_or("ctrl+alt+v")
+            );
         }
         ConfigAction::Set { key, value } => {
             // Handle API keys specially - store in keychain
@@ -246,25 +297,33 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                 println!("{key} = {value}");
             }
         }
-        ConfigAction::DeleteKey { key } => {
-            match key.as_str() {
-                "groq_api_key" => {
-                    always::always::keyring::delete_groq_api_key()?;
-                    println!("groq_api_key deleted from keychain");
-                }
-                "deepgram_api_key" => {
-                    always::always::keyring::delete_deepgram_api_key()?;
-                    println!("deepgram_api_key deleted from keychain");
-                }
-                _ => {
-                    eprintln!("Unknown key: {key}. Valid keys: groq_api_key, deepgram_api_key");
-                    std::process::exit(1);
-                }
+        ConfigAction::DeleteKey { key } => match key.as_str() {
+            "groq_api_key" => {
+                always::always::keyring::delete_groq_api_key()?;
+                println!("groq_api_key deleted from keychain");
             }
-        }
+            "deepgram_api_key" => {
+                always::always::keyring::delete_deepgram_api_key()?;
+                println!("deepgram_api_key deleted from keychain");
+            }
+            _ => {
+                eprintln!("Unknown key: {key}. Valid keys: groq_api_key, deepgram_api_key");
+                std::process::exit(1);
+            }
+        },
         ConfigAction::Reset => {
             db::reset_preferences(&conn)?;
             println!("Preferences reset to defaults.");
+        }
+        ConfigAction::Preset { level } => {
+            use std::str::FromStr;
+            let preset = always::always::config::SensitivityPreset::from_str(&level)?;
+            let (stt, hear) = preset.thresholds();
+            db::set_preference(&conn, "stt_energy_threshold", &stt.to_string())?;
+            db::set_preference(&conn, "hear_energy_threshold", &hear.to_string())?;
+            println!(
+                "Sensitivity preset = {preset}\n  stt_energy_threshold = {stt}\n  hear_energy_threshold = {hear}"
+            );
         }
     }
     Ok(())
@@ -278,15 +337,30 @@ fn handle_vocab(action: VocabAction) -> Result<()> {
         }
         VocabAction::Import => {
             println!("Scanning for installed speech-to-text software...");
+            // Legacy detection (Dragon only) — plugins run independently
+            // inside `import_vocabulary` regardless.
             let detected = always::always::vocab::detect_stt_software();
-            if detected.is_empty() {
-                println!("No speech-to-text software detected.");
-            } else {
-                println!("Detected: {}", detected.join(", "));
-                println!("Importing vocabulary...");
-                let imported = always::always::vocab::import_vocabulary(&detected)?;
-                println!("Imported {} vocabulary terms.", imported.len());
+            if !detected.is_empty() {
+                println!("Detected legacy software: {}", detected.join(", "));
             }
+            // Enumerate plugin sources (real per-app extractors).
+            let plugins = always::always::vocab::plugins::get_all_plugins();
+            let active: Vec<&str> = plugins
+                .iter()
+                .filter(|p| p.is_installed())
+                .map(|p| p.name())
+                .collect();
+            if active.is_empty() {
+                println!("No vocabulary plugins active on this system.");
+            } else {
+                println!("Active plugins: {}", active.join(", "));
+            }
+            println!("Importing vocabulary...");
+            let imported = always::always::vocab::import_vocabulary(&detected)?;
+            println!(
+                "Scanned {} unique terms. Merged into ~/.always/glossary.json (existing entries preserved).",
+                imported.len()
+            );
         }
     }
     Ok(())
@@ -302,7 +376,10 @@ fn handle_toggle_pause() -> Result<()> {
         always::always::event::global_broadcaster().resumed();
     }
 
-    println!("Pause state: {}", if new_state { "paused" } else { "resumed" });
+    println!(
+        "Pause state: {}",
+        if new_state { "paused" } else { "resumed" }
+    );
     Ok(())
 }
 
@@ -316,7 +393,10 @@ fn handle_toggle_auto_enter() -> Result<()> {
         always::always::event::global_broadcaster().auto_enter_disabled();
     }
 
-    println!("Auto-enter state: {}", if new_state { "enabled" } else { "disabled" });
+    println!(
+        "Auto-enter state: {}",
+        if new_state { "enabled" } else { "disabled" }
+    );
     Ok(())
 }
 

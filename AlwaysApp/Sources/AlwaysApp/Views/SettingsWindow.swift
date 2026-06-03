@@ -1,4 +1,209 @@
 import SwiftUI
+import AppKit
+
+// MARK: - Shortcut formatting helpers
+
+/// Format `"ctrl+alt+p"` → `"⌃⌥P"` for display.
+func formatShortcut(_ s: String) -> String {
+    let symbolMap: [String: String] = [
+        "ctrl": "⌃", "control": "⌃",
+        "alt": "⌥", "option": "⌥",
+        "shift": "⇧",
+        "meta": "⌘", "cmd": "⌘", "command": "⌘"
+    ]
+    let parts = s.lowercased().split(separator: "+").map(String.init)
+    return parts.map { symbolMap[$0] ?? $0.uppercased() }.joined()
+}
+
+// MARK: - Key capture button
+
+struct KeyCaptureButton: View {
+    let label: String
+    @Binding var shortcut: String
+    let onSave: (String) async -> Void
+
+    @State private var isRecording = false
+    @State private var monitor: Any?
+
+    var body: some View {
+        HStack {
+            Text(label)
+            Spacer()
+            Button(action: toggleRecording) {
+                Text(isRecording ? "Press keys…" : formatShortcut(shortcut))
+                    .monospacedDigit()
+                    .foregroundColor(isRecording ? .orange : .secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(isRecording ? Color.orange.opacity(0.08) : Color.clear)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(
+                                isRecording ? Color.orange : Color.secondary.opacity(0.35),
+                                lineWidth: 1
+                            )
+                    )
+                    .cornerRadius(5)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func toggleRecording() {
+        if isRecording { stopRecording(); return }
+        isRecording = true
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let mods = event.modifierFlags
+            var parts: [String] = []
+            if mods.contains(.control) { parts.append("ctrl") }
+            if mods.contains(.option)  { parts.append("alt") }
+            if mods.contains(.shift)   { parts.append("shift") }
+            if mods.contains(.command) { parts.append("meta") }
+
+            let keyChar = event.charactersIgnoringModifiers?.lowercased() ?? ""
+            // require at least one modifier + a single printable key
+            if !keyChar.isEmpty, keyChar.count == 1, !parts.isEmpty {
+                let newShortcut = (parts + [keyChar]).joined(separator: "+")
+                shortcut = newShortcut
+                Task { await onSave(newShortcut) }
+            }
+            stopRecording()
+            return nil
+        }
+    }
+
+    private func stopRecording() {
+        isRecording = false
+        if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+    }
+}
+
+// MARK: - Sensitivity preset
+//
+// Mirrors `SensitivityPreset` in `src/always/config.rs`. The threshold
+// pairs MUST stay in sync — both sides write the same daemon
+// preferences. Adding a new variant requires updating both files.
+
+enum SensitivityPreset: String, CaseIterable, Identifiable {
+    case high
+    case normal
+    case low
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .high:   return "High"
+        case .normal: return "Normal"
+        case .low:    return "Low"
+        }
+    }
+
+    /// `(stt_energy_threshold, hear_energy_threshold)`.
+    var thresholds: (stt: Double, hear: Double) {
+        switch self {
+        case .high:   return (0.005, 0.0005)
+        case .normal: return (0.012, 0.001)
+        case .low:    return (0.025, 0.002)
+        }
+    }
+
+    /// Reverse-lookup: which preset (if any) corresponds to the given
+    /// raw thresholds. Returns `nil` for custom values so the picker
+    /// can fall through to "Custom".
+    static func from(stt: Double, hear: Double) -> SensitivityPreset? {
+        for p in SensitivityPreset.allCases {
+            let (s, h) = p.thresholds
+            if abs(s - stt) < 1e-6 && abs(h - hear) < 1e-6 {
+                return p
+            }
+        }
+        return nil
+    }
+}
+
+// MARK: - Numeric setting row
+
+/// One sensitivity setting laid out as a single row:
+///   Label                                  [Number ⊕]  Default: x.xxxx  ⤺
+///
+/// Replaces the old slider style with a typed number input plus a reset
+/// button. The recommended default is shown alongside so users know what
+/// the safe value is. `recommended` is the value users should prefer
+/// (== `default` here, but kept separate so a future PR can recommend a
+/// per-environment override without touching the type-level default).
+struct NumericSettingRow<T: Numeric & LosslessStringConvertible>: View where T: Comparable {
+    let title: String
+    let help: String
+    let unit: String
+    let formatter: NumberFormatter
+    @Binding var value: T
+    let defaultValue: T
+    let range: ClosedRange<T>?
+
+    init(
+        title: String,
+        help: String = "",
+        unit: String = "",
+        formatter: NumberFormatter,
+        value: Binding<T>,
+        defaultValue: T,
+        range: ClosedRange<T>? = nil
+    ) {
+        self.title = title
+        self.help = help
+        self.unit = unit
+        self.formatter = formatter
+        self._value = value
+        self.defaultValue = defaultValue
+        self.range = range
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.body)
+                if !help.isEmpty {
+                    Text(help)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+            Spacer(minLength: 8)
+            HStack(spacing: 4) {
+                TextField("", value: $value, formatter: formatter)
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 80)
+                    .onChange(of: value) { _, new in
+                        if let range, !range.contains(new) {
+                            value = min(max(new, range.lowerBound), range.upperBound)
+                        }
+                    }
+                if !unit.isEmpty {
+                    Text(unit)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .frame(width: 22, alignment: .leading)
+                }
+            }
+            Text("Default: \(formatter.string(for: defaultValue) ?? "")")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .frame(width: 100, alignment: .trailing)
+            Button {
+                value = defaultValue
+            } label: {
+                Image(systemName: "arrow.counterclockwise")
+            }
+            .buttonStyle(.borderless)
+            .help("Reset to recommended default")
+        }
+    }
+}
+
+// MARK: - Settings window
 
 struct SettingsWindow: View {
     @ObservedObject var cliService: CLIService
@@ -12,254 +217,68 @@ struct SettingsWindow: View {
     @FocusState private var focusedField: Field?
     @State private var vocabularyTermCount: Int = 0
     @State private var vocabularyPath: String = ""
-    
+
     enum Field {
         case apiKey
     }
 
+    // ----- Number formatters used by the sensitivity rows. -----
+    private static let energyFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.minimumFractionDigits = 4
+        f.maximumFractionDigits = 4
+        f.minimum = 0
+        f.maximum = 1
+        return f
+    }()
+
+    private static let secondsFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.minimumFractionDigits = 1
+        f.maximumFractionDigits = 2
+        f.minimum = 0
+        f.maximum = 10
+        return f
+    }()
+
+    private static let intFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .none
+        f.minimum = 0
+        f.maximum = 60_000
+        return f
+    }()
+
+    private static let probabilityFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.minimumFractionDigits = 2
+        f.maximumFractionDigits = 2
+        f.minimum = 0
+        f.maximum = 1
+        return f
+    }()
+
     var body: some View {
-        Form {
-            Section(header: Text("Daemon Control")) {
-                HStack {
-                    Button(action: toggleDaemon) {
-                        HStack {
-                            Image(systemName: status?.isRunning == true ? "stop.circle.fill" : "play.circle.fill")
-                            Text(status?.isRunning == true ? "Stop Daemon" : "Start Daemon")
-                        }
-                    }
-                    .disabled(isLoading)
-                    .buttonStyle(.borderedProminent)
-
-                    Spacer()
-
-                    Text(status?.isRunning == true ? "Running" : "Stopped")
-                        .foregroundColor(status?.isRunning == true ? .green : .red)
-                }
-            }
-
-            Section(header: Text("Behavior")) {
-                HStack {
-                    // Bind the toggle to the daemon's authoritative state.
-                    // Tapping fires a UDS command; the resulting AutoEnter*
-                    // event from the daemon updates stateMonitor.isAutoEnter
-                    // which flips the toggle.
-                    Toggle("Auto-Enter After Paste", isOn: Binding(
-                        get: { stateMonitor.isAutoEnter },
-                        set: { _ in stateMonitor.toggleAutoEnter() }
-                    ))
-                }
-
-                HStack {
-                    Button(action: {
-                        stateMonitor.togglePause()
-                    }) {
-                        HStack {
-                            Image(systemName: stateMonitor.isPaused ? "play.circle.fill" : "pause.circle.fill")
-                            Text(stateMonitor.isPaused ? "Resume" : "Pause")
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                }
-            }
-
-            Section(header: Text("API Configuration")) {
-                HStack {
-                    ZStack(alignment: .trailing) {
-                        if showApiKey {
-                            TextField("Groq API Key", text: $apiKey)
-                                .focused($focusedField, equals: .apiKey)
-                                .textFieldStyle(.plain)
-                                .onChange(of: apiKey) { _, newValue in
-                                    config.groqApiKey = newValue.isEmpty ? nil : newValue
-                                }
-                        } else {
-                            SecureField("Groq API Key", text: $apiKey)
-                                .focused($focusedField, equals: .apiKey)
-                                .textFieldStyle(.plain)
-                                .onChange(of: apiKey) { _, newValue in
-                                    config.groqApiKey = newValue.isEmpty ? nil : newValue
-                                }
-                        }
-
-                        // Show spinner inside the text field when saving
-                        if isSavingApiKey {
-                            HStack {
-                                Spacer()
-                                ProgressView()
-                                    .scaleEffect(0.7)
-                                    .frame(width: 16, height: 16)
-                                    .padding(.trailing, 8)
-                            }
-                        }
-                    }
-
-                    Button(action: {
-                        showApiKey.toggle()
-                        focusedField = nil // Clear focus when toggling visibility
-                    }) {
-                        Image(systemName: showApiKey ? "eye.slash" : "eye")
-                    }
-                    .buttonStyle(.plain)
-
-                    Button(action: {
-                        saveApiKey()
-                    }) {
-                        Image(systemName: "arrow.down.doc")
-                    }
-                    .buttonStyle(.plain)
-                    .help("Save API Key")
-                    .disabled(isSavingApiKey)
-                }
-
-                Text("Required for transcription")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            
-            Section(header: Text("Vocabulary")) {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Image(systemName: "book.fill")
-                            .foregroundColor(.blue)
-                        Text("Glossary")
-                            .font(.headline)
-                        Spacer()
-                        if vocabularyTermCount > 0 {
-                            Text("\(vocabularyTermCount) terms")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    
-                    Text("Custom vocabulary improves transcription accuracy for technical terms, names, and project-specific language.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    
-                    HStack(spacing: 12) {
-                        Button(action: openVocabularyFile) {
-                            HStack {
-                                Image(systemName: "doc.text")
-                                Text("Open glossary.json")
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        
-                        Button(action: revealVocabularyInFinder) {
-                            HStack {
-                                Image(systemName: "folder")
-                                Text("Show in Finder")
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        
-                        Button(action: refreshVocabularyInfo) {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Refresh vocabulary info")
-                    }
-                    
-                    if !vocabularyPath.isEmpty {
-                        Text(vocabularyPath)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-
-            Section(header: Text("Sensitivity Settings")) {
-                HStack(spacing: 20) {
-                    VStack(alignment: .leading) {
-                        Text("STT Energy Threshold")
-                            .font(.headline)
-                        Text("\(config.sttEnergyThreshold, specifier: "%.4f")")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Slider(value: $config.sttEnergyThreshold, in: 0.001...0.05, step: 0.001)
-                        Text("Lower = more sensitive")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-
-                    VStack(alignment: .leading) {
-                        Text("Hear Energy Threshold")
-                            .font(.headline)
-                        Text("\(config.hearEnergyThreshold, specifier: "%.4f")")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Slider(value: $config.hearEnergyThreshold, in: 0.0005...0.01, step: 0.0005)
-                        Text("Lower = more sensitive")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-
-                HStack(spacing: 20) {
-                    VStack(alignment: .leading) {
-                        Text("Silence Timeout")
-                            .font(.headline)
-                        Text("\(config.sttSilence, specifier: "%.1f")s")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Slider(value: $config.sttSilence, in: 0.1...3.0, step: 0.1)
-                    }
-
-                    VStack(alignment: .leading) {
-                        Text("Cooldown")
-                            .font(.headline)
-                        Text("\(config.sttCooldownMs)ms")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Slider(value: Binding(
-                            get: { Double(config.sttCooldownMs) },
-                            set: { config.sttCooldownMs = Int($0) }
-                        ), in: 50...3000, step: 50)
-                    }
-                }
-
-                VStack(alignment: .leading) {
-                    Text("Silero VAD Threshold")
-                        .font(.headline)
-                    Text("\(config.sileroThreshold, specifier: "%.2f")")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Slider(value: $config.sileroThreshold, in: 0.1...0.9, step: 0.05)
-                    Text("Higher = stricter speech detection (less noise, may miss quiet speech)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-
-            Section(header: Text("Keyboard Shortcuts")) {
-                HStack {
-                    Text("Pause/Unpause")
-                    Spacer()
-                    Text("Ctrl+Shift+P")
-                        .foregroundColor(.secondary)
-                }
-
-                HStack {
-                    Text("Toggle Auto-Enter")
-                    Spacer()
-                    Text("Ctrl+Shift+A")
-                        .foregroundColor(.secondary)
-                }
-
-                HStack {
-                    Text("Stop Daemon")
-                    Spacer()
-                    Text("Ctrl+C")
-                        .foregroundColor(.secondary)
-                }
-            }
+        VStack(alignment: .leading, spacing: 14) {
+            statusAndPauseRow
+            Divider()
+            behaviorRow
+            Divider()
+            apiSection
+            Divider()
+            vocabularySection
+            Divider()
+            sensitivitySection
+            Divider()
+            shortcutsSection
         }
-        .formStyle(.grouped)
-        .frame(width: 800, height: 750)
+        .padding(20)
+        .frame(width: 620)
+        .fixedSize(horizontal: false, vertical: true)
         .onAppear {
-            // Clear focus immediately and after a delay to prevent autofocus
             focusedField = nil
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 focusedField = nil
@@ -277,20 +296,269 @@ struct SettingsWindow: View {
         .onChange(of: config.sileroThreshold) { _, _ in saveConfig() }
     }
 
-    private func toggleDaemon() {
-        isLoading = true
-        Task {
-            do {
-                if status?.isRunning == true {
-                    _ = try await cliService.stopDaemon()
-                } else {
-                    _ = try await cliService.startDaemon()
-                }
-                await refreshStatus()
-            } catch {
-                print("Error toggling daemon: \(error)")
+    // MARK: Sections
+
+    private var statusAndPauseRow: some View {
+        HStack(spacing: 12) {
+            Image(
+                systemName: status?.isRunning == true
+                    ? "checkmark.circle.fill"
+                    : "exclamationmark.triangle.fill"
+            )
+            .foregroundColor(status?.isRunning == true ? .green : .orange)
+            Text(status?.isRunning == true ? "Running" : "Reconnecting…")
+                .font(.headline)
+                .foregroundColor(status?.isRunning == true ? .green : .orange)
+            Spacer()
+            Button {
+                stateMonitor.togglePause()
+            } label: {
+                Label(
+                    stateMonitor.isPaused ? "Resume" : "Pause",
+                    systemImage: stateMonitor.isPaused
+                        ? "play.circle.fill"
+                        : "pause.circle.fill"
+                )
             }
-            isLoading = false
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(status?.isRunning != true)
+        }
+    }
+
+    private var behaviorRow: some View {
+        HStack {
+            Toggle(
+                "Auto-Enter After Paste",
+                isOn: Binding(
+                    get: { stateMonitor.isAutoEnter },
+                    set: { _ in stateMonitor.toggleAutoEnter() }
+                )
+            )
+            Spacer()
+        }
+    }
+
+    private var apiSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("API Configuration").font(.headline)
+            HStack {
+                ZStack(alignment: .trailing) {
+                    Group {
+                        if showApiKey {
+                            TextField("Groq API Key", text: $apiKey)
+                                .textFieldStyle(.roundedBorder)
+                        } else {
+                            SecureField("Groq API Key", text: $apiKey)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+                    .focused($focusedField, equals: .apiKey)
+                    .onChange(of: apiKey) { _, newValue in
+                        config.groqApiKey = newValue.isEmpty ? nil : newValue
+                    }
+                    if isSavingApiKey {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .frame(width: 14, height: 14)
+                            .padding(.trailing, 8)
+                    }
+                }
+
+                Button {
+                    showApiKey.toggle()
+                    focusedField = nil
+                } label: {
+                    Image(systemName: showApiKey ? "eye.slash" : "eye")
+                }
+                .buttonStyle(.borderless)
+
+                Button {
+                    saveApiKey()
+                } label: {
+                    Image(systemName: "arrow.down.doc")
+                }
+                .buttonStyle(.borderless)
+                .help("Save API Key")
+                .disabled(isSavingApiKey)
+            }
+            Text("Required for transcription")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var vocabularySection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Vocabulary").font(.headline)
+                Spacer()
+                if vocabularyTermCount > 0 {
+                    Text("\(vocabularyTermCount) terms")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            HStack(spacing: 8) {
+                Button(action: openVocabularyFile) {
+                    Label("Open glossary.json", systemImage: "doc.text")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button(action: revealVocabularyInFinder) {
+                    Label("Show in Finder", systemImage: "folder")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button(action: refreshVocabularyInfo) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("Refresh vocabulary info")
+                Spacer()
+            }
+            if !vocabularyPath.isEmpty {
+                Text(vocabularyPath)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+    }
+
+    private var sensitivitySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Sensitivity").font(.headline)
+
+            // Mic Sensitivity preset — the high-level control most users
+            // ever touch. Internally writes the same thresholds as the
+            // CLI `always config preset <level>` command.
+            HStack {
+                Text("Mic Sensitivity")
+                    .font(.body)
+                Spacer()
+                Picker("", selection: presetBinding) {
+                    ForEach(SensitivityPreset.allCases) { preset in
+                        Text(preset.label).tag(Optional(preset))
+                    }
+                    if currentPreset == nil {
+                        Text("Custom").tag(Optional<SensitivityPreset>.none)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 280)
+            }
+
+            // Raw advanced controls — collapsed by default. Power users
+            // and the CLI keep full per-knob access.
+            DisclosureGroup("Advanced") {
+                VStack(alignment: .leading, spacing: 8) {
+                    NumericSettingRow(
+                        title: "STT Energy Threshold",
+                        help: "Lower = more sensitive to quiet speech",
+                        formatter: Self.energyFormatter,
+                        value: $config.sttEnergyThreshold,
+                        defaultValue: 0.012,
+                        range: 0.0001...0.5
+                    )
+
+                    NumericSettingRow(
+                        title: "Hear Energy Threshold",
+                        help: "Lower = picks up quieter background voice",
+                        formatter: Self.energyFormatter,
+                        value: $config.hearEnergyThreshold,
+                        defaultValue: 0.001,
+                        range: 0.0001...0.5
+                    )
+
+                    NumericSettingRow(
+                        title: "Silence Timeout",
+                        help: "Seconds of silence before utterance ends",
+                        unit: "s",
+                        formatter: Self.secondsFormatter,
+                        value: $config.sttSilence,
+                        defaultValue: 2.0,
+                        range: 0.1...10
+                    )
+
+                    NumericSettingRow(
+                        title: "Cooldown",
+                        help: "Min ms between consecutive pastes",
+                        unit: "ms",
+                        formatter: Self.intFormatter,
+                        value: $config.sttCooldownMs,
+                        defaultValue: 150,
+                        range: 0...60_000
+                    )
+
+                    NumericSettingRow(
+                        title: "Silero VAD Threshold",
+                        help: "Higher = stricter speech detection",
+                        formatter: Self.probabilityFormatter,
+                        value: $config.sileroThreshold,
+                        defaultValue: 0.5,
+                        range: 0...1
+                    )
+                }
+                .padding(.top, 6)
+            }
+        }
+    }
+
+    /// Two-way binding between the segmented picker and the raw
+    /// thresholds. Reads compute the current preset (or `nil` for custom
+    /// values); writes apply the preset's threshold pair to both raw
+    /// fields, which trips the existing `onChange` saveConfig path.
+    private var presetBinding: Binding<SensitivityPreset?> {
+        Binding(
+            get: { self.currentPreset },
+            set: { newValue in
+                guard let preset = newValue else { return }
+                let (stt, hear) = preset.thresholds
+                config.sttEnergyThreshold = stt
+                config.hearEnergyThreshold = hear
+            }
+        )
+    }
+
+    private var currentPreset: SensitivityPreset? {
+        SensitivityPreset.from(
+            stt: config.sttEnergyThreshold,
+            hear: config.hearEnergyThreshold
+        )
+    }
+
+    private var shortcutsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Keyboard Shortcuts").font(.headline)
+            KeyCaptureButton(
+                label: "Pause / Resume",
+                shortcut: $config.shortcutPause,
+                onSave: { value in
+                    _ = try? await cliService.setConfig(key: "shortcut_pause", value: value)
+                }
+            )
+            KeyCaptureButton(
+                label: "Toggle Auto-Enter",
+                shortcut: $config.shortcutAutoEnter,
+                onSave: { value in
+                    _ = try? await cliService.setConfig(key: "shortcut_auto_enter", value: value)
+                }
+            )
+            KeyCaptureButton(
+                label: "Paste Last Filtered",
+                shortcut: $config.shortcutForcePaste,
+                onSave: { value in
+                    _ = try? await cliService.setConfig(key: "shortcut_force_paste", value: value)
+                }
+            )
+            Text("Shortcut changes take effect on next launch.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
         }
     }
 
@@ -324,7 +592,7 @@ struct SettingsWindow: View {
         Task {
             do {
                 // Only save API key if it's not masked (doesn't contain only dots)
-                if !apiKey.allSatisfy({ c in c == "•" }) {
+                if shouldPersistApiKey(apiKey) {
                     _ = try await cliService.setConfig(key: "groq_api_key", value: apiKey.isEmpty ? "" : apiKey)
                 }
                 // Add a small delay to make the loader visible for testing
@@ -346,7 +614,7 @@ struct SettingsWindow: View {
                 _ = try await cliService.setConfig(key: "stt_auto_enter", value: String(config.sttAutoEnter))
                 _ = try await cliService.setConfig(key: "silero_threshold", value: String(config.sileroThreshold))
                 // Only save API key if it's not masked (doesn't contain only dots)
-                if !apiKey.allSatisfy({ c in c == "•" }) {
+                if shouldPersistApiKey(apiKey) {
                     _ = try await cliService.setConfig(key: "groq_api_key", value: apiKey.isEmpty ? "" : apiKey)
                 }
             } catch {
@@ -355,53 +623,48 @@ struct SettingsWindow: View {
         }
     }
     
+    /// Canonical user glossary location. Mirrors `user_glossary_path()`
+    /// in `src/glossary.rs` — both the daemon and the GUI must agree.
+    private func userGlossaryURL() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".always")
+            .appendingPathComponent("glossary.json")
+    }
+
+    /// Ensure the parent directory + an empty file exist before
+    /// LaunchServices is asked to open the path.
+    private func ensureGlossaryExists(at url: URL) {
+        let dir = url.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true
+        )
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? "[]".write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
     private func openVocabularyFile() {
-        let projectPath = findProjectRoot()
-        let glossaryPath = projectPath.appendingPathComponent("glossary.json")
-        
-        if FileManager.default.fileExists(atPath: glossaryPath.path) {
-            NSWorkspace.shared.open(glossaryPath)
-        } else {
-            // Create empty glossary if doesn't exist
-            let emptyGlossary = "[]"
-            try? emptyGlossary.write(to: glossaryPath, atomically: true, encoding: .utf8)
-            NSWorkspace.shared.open(glossaryPath)
-        }
+        let url = userGlossaryURL()
+        ensureGlossaryExists(at: url)
+        NSWorkspace.shared.open(url)
     }
-    
+
     private func revealVocabularyInFinder() {
-        let projectPath = findProjectRoot()
-        let glossaryPath = projectPath.appendingPathComponent("glossary.json")
-        
-        if FileManager.default.fileExists(atPath: glossaryPath.path) {
-            NSWorkspace.shared.activateFileViewerSelecting([glossaryPath])
-        } else {
-            NSWorkspace.shared.activateFileViewerSelecting([projectPath])
-        }
+        let url = userGlossaryURL()
+        ensureGlossaryExists(at: url)
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
-    
+
     private func refreshVocabularyInfo() {
-        let projectPath = findProjectRoot()
-        let glossaryPath = projectPath.appendingPathComponent("glossary.json")
-        vocabularyPath = glossaryPath.path
-        
-        if FileManager.default.fileExists(atPath: glossaryPath.path),
-           let data = try? Data(contentsOf: glossaryPath),
+        let url = userGlossaryURL()
+        vocabularyPath = url.path
+
+        if FileManager.default.fileExists(atPath: url.path),
+           let data = try? Data(contentsOf: url),
            let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
             vocabularyTermCount = json.count
         } else {
             vocabularyTermCount = 0
         }
-    }
-    
-    private func findProjectRoot() -> URL {
-        // Path to the always binary - same logic as CLIService
-        let currentPath = URL(fileURLWithPath: #file)
-        return currentPath
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
     }
 }

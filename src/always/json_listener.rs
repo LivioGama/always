@@ -1,6 +1,9 @@
 //! JSON output mode for integration with voice systems.
 //! Outputs RecordResult as JSON lines for structured parsing.
 
+// `--json` is a structured-output CLI mode; stdout is the wire protocol.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+
 use anyhow::{Context, Result};
 use serde_json::json;
 

@@ -2,31 +2,61 @@
 
 ## Supported Versions
 
-Currently, only the latest version of Always is supported with security updates.
+| Version | Supported |
+|---------|:---------:|
+| 0.13.x  | ✅        |
+| < 0.13  | ❌        |
+
+Only the latest minor release receives security updates. Patch versions are
+released for the latest minor only.
 
 ## Reporting a Vulnerability
 
 If you discover a security vulnerability, please report it responsibly.
+**Do not open a public GitHub issue.**
 
 ### Private Disclosure (Preferred)
 
-For sensitive security issues, please send an email to:
-- [security contact email to be added]
+Use GitHub's private security advisory feature (preferred — encrypted in
+transit and tracked alongside the fix):
+
+1. Go to the **Security** tab of the [`rtk-ai/always`](https://github.com/rtk-ai/always) repository
+2. Click **Report a vulnerability**
+3. Follow the prompts to submit a private report
+
+If GitHub Security Advisories are unavailable to you, send email to:
+
+- **security@always.devliv.io**
+
+GPG fingerprint for encrypted reports: `<TBD — published in v1.0.0 release notes>`
 
 Please include:
 - Description of the vulnerability
 - Steps to reproduce (if applicable)
-- Potential impact
+- Potential impact (CVSS optional)
 - Suggested fix (if known)
+- Whether you want public credit
 
-We will respond within 48 hours and work with you to address the issue.
+## Disclosure Timeline (Embargo Policy)
 
-### GitHub Security Advisories
+| Stage | Target |
+|-------|--------|
+| Acknowledgement of report | within **48 hours** |
+| Initial triage + severity assessment | within **5 business days** |
+| Coordinated patch + advisory drafted | within **30 days** for High/Critical, **60 days** for Medium, **90 days** for Low |
+| Public disclosure (CVE + advisory + fix) | at end of embargo, or sooner with reporter consent |
 
-You can also report vulnerabilities through GitHub's built-in security advisory feature:
-1. Go to the Security tab
-2. Click "Report a vulnerability"
-3. Follow the prompts to submit a private report
+Critical vulnerabilities (RCE, credential exfiltration, microphone hijack)
+are prioritized above all other work and may be patched out-of-band.
+
+We will keep the reporter updated weekly during the embargo. If we miss a
+milestone, the reporter is free to disclose publicly with 7 days' notice.
+
+## Credit
+
+Reporters are credited in the GitHub Security Advisory and CHANGELOG by
+default. Opt out by stating so in the report. We do not currently operate a
+paid bounty program.
 
 ## Security Best Practices
 

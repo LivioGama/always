@@ -1,10 +1,20 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
+/// Wire-format protocol version. Bump on any breaking change to
+/// [`DaemonEvent`] or [`DaemonCommand`]. The daemon sends a `Hello` event
+/// as the first frame of every UDS connection so GUI clients can refuse
+/// to talk to a daemon they were not built against.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 /// Event types for daemon-to-GUI communication
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum DaemonEvent {
+    /// Sent as the very first frame after a client connects. Carries the
+    /// daemon's protocol version. The Mac app rejects the connection if
+    /// the version is not the one it was built with.
+    Hello { version: u32 },
     /// Daemon has started listening for voice input
     ListeningStarted,
     /// Daemon has stopped listening
@@ -33,6 +43,9 @@ pub enum DaemonEvent {
     VoiceActivityDetected,
     /// Voice activity ended
     VoiceActivityEnded,
+    /// Transcription was rejected by the filter or hallucination detector.
+    /// Carries a short, human-readable reason so the GUI can display it.
+    TranscriptionFiltered { reason: String },
     /// Heartbeat for connection health
     Heartbeat,
 }
@@ -152,6 +165,21 @@ impl EventBroadcaster {
     /// Send voice activity ended event
     pub fn voice_activity_ended(&self) {
         self.send(DaemonEvent::VoiceActivityEnded);
+    }
+
+    /// Send transcription-filtered event with the human-readable reason.
+    pub fn transcription_filtered(&self, reason: impl Into<String>) {
+        self.send(DaemonEvent::TranscriptionFiltered {
+            reason: reason.into(),
+        });
+    }
+
+    /// Send the protocol-version handshake. Must be the first frame on
+    /// every new UDS connection.
+    pub fn hello(&self) {
+        self.send(DaemonEvent::Hello {
+            version: PROTOCOL_VERSION,
+        });
     }
 }
 

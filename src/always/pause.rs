@@ -1,7 +1,9 @@
 //! Pause state and auto-enter state management for the always-on mode.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use parking_lot::Mutex;
 
 /// Shared pause state that can be toggled from anywhere
 pub struct PauseState {
@@ -116,4 +118,22 @@ pub fn toggle_auto_enter() -> bool {
 /// Set the auto-enter state
 pub fn set_auto_enter_enabled(enabled: bool) {
     AUTO_ENTER_STATE.set_enabled(enabled);
+}
+
+/// Last filtered transcript — single-slot buffer for the "paste anyway" shortcut.
+/// Set every time a transcription is rejected (filter or hallucination); cleared by `take`.
+static LAST_FILTERED: std::sync::LazyLock<Mutex<Option<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+pub fn set_last_filtered(text: impl Into<String>) {
+    *LAST_FILTERED.lock() = Some(text.into());
+}
+
+pub fn take_last_filtered() -> Option<String> {
+    LAST_FILTERED.lock().take()
+}
+
+#[cfg(test)]
+pub fn clear_last_filtered_for_test() {
+    *LAST_FILTERED.lock() = None;
 }

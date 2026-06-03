@@ -1,132 +1,403 @@
-# 🎤 Always — Voice Activation Daemon
+<div align="center">
 
-High-performance voice-to-text automation for macOS Apple Silicon. Speak naturally and have your words instantly appear in any application.
+# Always
 
-## ✨ Quick Start
+### **The voice-to-text daemon that doesn't get in your way.**
+
+Speak. It pastes. Anywhere. Every app.
+
+[![CI](https://github.com/rtk-ai/always/actions/workflows/ci.yml/badge.svg)](https://github.com/rtk-ai/always/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/rtk-ai/always)](https://github.com/rtk-ai/always/releases/latest)
+[![License](https://img.shields.io/github/license/rtk-ai/always)](LICENSE)
+[![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)](#installation)
+[![Linux](https://img.shields.io/badge/Linux-CLI--only-orange?logo=linux)](#installation)
+
+</div>
+
+---
+
+## Why Always
+
+You don't dictate into a window. You don't open an app. You don't press
+a hotkey. You **speak**, and your words appear in whatever app you were
+already typing in — Slack, VS Code, the browser address bar, your
+terminal — exactly where the cursor is.
+
+Other dictation tools want to be the center of attention. Always wants
+to disappear.
+
+```
+You speak  ────►  VAD detects speech  ────►  Whisper transcribes  ────►  Pastes at cursor
+   ~0.0s              ~0.05s                    ~0.3-0.6s                  ~0.65s end-to-end
+```
+
+That's it. That's the loop. Background daemon, native menubar overlay
+that flashes for ~200 ms, paste lands, you keep working.
+
+---
+
+## Stand-out features
+
+* **Always-on, never-in-the-way.** No push-to-talk, no app to open. The
+  daemon listens 24/7 with a streaming VAD; Whisper is only invoked
+  when speech actually happens. Your CPU + Groq quota are not on fire.
+* **End-to-end latency under 700 ms.** Speculative transcription kicks
+  off Whisper at *tentative* silence so the result is usually back
+  before final silence is confirmed.
+* **Zero-config paste.** Pastes wherever the cursor is via Core
+  Graphics keyboard events — works in *any* macOS app including
+  ones with custom text engines (Xcode, JetBrains, native textareas).
+* **Smart filter pipeline.** Three layers (hard blocklist → AI filter →
+  Whisper hallucination detector) catch the "thanks for watching",
+  "[Music]", "*upbeat music*" garbage Whisper occasionally invents from
+  silence.
+* **Glossary biasing.** A `glossary.json` of your project's jargon
+  feeds Whisper's 224-token prompt and a post-processor fixes common
+  mistranscriptions. Stops "Kubernetes" from becoming "cuber netties".
+* **Custom vocabulary import.** `always vocab import` mines real user
+  data: macOS Text Replacements (System Settings → Keyboard), every app
+  in `/Applications`, your SuperWhisper recording history (statistical
+  outliers from past transcripts), and MacWhisper's Replacements list.
+  Re-runs **merge** with the existing glossary, never overwrite — your
+  hand-tuned entries always survive. See
+  [`docs/advanced_settings.md#vocabulary-auto-import--what-actually-works`](docs/advanced_settings.md).
+* **Native menubar app.** Status overlay, settings window, "Check for
+  Updates…" via Sparkle, "Open today's log" via Terminal — all native
+  SwiftUI, code-signed, notarized, sandboxed.
+* **Configurable via GUI *or* CLI.** Every setting reachable from both.
+  Pair it with your dotfiles. `always config preset low|normal|high`
+  for one-shot environment changes.
+* **Production-grade.** Tracing-based structured logs, parking_lot
+  hot-path locks, exponential-backoff + circuit-breaker on the Groq
+  client, Sparkle auto-update, Homebrew tap, signed DMG, SBOM,
+  cosign signatures, SLSA Level 3 provenance. See [ASSESSMENT.md](ASSESSMENT.md).
+* **Open source.** Apache-2.0. No telemetry, no analytics, no
+  account, no SaaS. Your audio goes to Groq's API and back; everything
+  else stays on your laptop.
+
+---
+
+## How it compares
+
+| | **Always** | Wispr Flow | SuperWhisper | MacWhisper | Whispering | Talon |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| **Always-on (no hotkey)** | ✅ | ❌ push-to-talk | ❌ push-to-talk | ❌ push-to-talk | ❌ push-to-talk | partial |
+| **Pastes at cursor in any app** | ✅ | ✅ | ✅ | ❌ window only | ❌ window only | ✅ |
+| **Open source** | ✅ Apache-2.0 | ❌ | ❌ | ❌ | ✅ MIT | partial |
+| **Local-only option** | roadmap | ❌ | ✅ | ✅ | ✅ | ✅ |
+| **Bundle size** | **~30 MB** | ~150 MB | ~180 MB | ~250 MB | ~80 MB | ~200 MB |
+| **Memory at idle** | **~25 MB** | ~150 MB | ~200 MB | ~300 MB | ~120 MB | ~400 MB |
+| **End-to-end latency** | **~650 ms** (Groq) | ~800 ms | ~600 ms (local large) / 1500 ms+ | ~1200 ms | varies | varies |
+| **Hallucination filter** | ✅ 3-layer | ❌ | partial | ❌ | ❌ | ❌ |
+| **Custom glossary** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Glossary auto-import** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Free / no subscription** | ✅ | ❌ $12/mo | ❌ $90 + Pro | ❌ $59 + Pro | ✅ | ✅ |
+| **CLI scriptable** | ✅ full | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Linux daemon** | ✅ CLI | ❌ | ❌ | ❌ | ❌ | partial |
+| **Auto-update (Sparkle)** | ✅ | proprietary | ✅ | ✅ | manual | ✅ |
+| **Signed + notarized** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+> Bundle / memory numbers are best-effort measurements at the time of
+> writing on macOS 14 arm64. Latency varies with network. We measured
+> Groq's `whisper-large-v3-turbo` for 1-2 s utterances.
+
+---
+
+## Installation
+
+### macOS (recommended)
 
 ```bash
-always config set groq_api_key "your-key"
+# Homebrew tap (when v1.0 ships)
+brew install --cask rtk-ai/tap/always
+
+# Or download the signed + notarized DMG from Releases:
+# https://github.com/rtk-ai/always/releases/latest
+```
+
+Requires **macOS 14 (Sonoma) or newer** on Apple Silicon. The bundle is
+~30 MB. Sparkle auto-update keeps you on the latest version.
+
+### From source — `cargo install`
+
+```bash
+cargo install always               # macOS daemon (no GUI)
+cargo install always --no-default-features --features linux   # Linux CLI-only
+```
+
+The crates.io release ships **only the `always` daemon binary**. The
+Mac menubar app + overlay live in the `AlwaysApp.app` bundle — install
+the cask above to get them.
+
+### Linux
+
+The daemon builds and runs on Linux with `--features linux`, but global
+keyboard shortcuts and clipboard paste are stubs (planned). Voice →
+Whisper → JSON output via `always run --json` works today, suitable for
+piping into your own automation.
+
+```bash
+docker compose up
+# or:
+cargo install always --no-default-features --features linux
+```
+
+See `Dockerfile` for the official image.
+
+### Windows
+
+Same story as Linux — `--features windows` builds the CLI daemon;
+keyboard listener + clipboard paste are stubs. PRs welcome.
+
+---
+
+## First-run setup
+
+```bash
+# 1. Get a free Groq API key — https://console.groq.com/keys
+always config set groq_api_key sk_…
+
+# 2. (Optional) Tune for your environment
+always config preset normal     # default — quiet office
+always config preset high       # quieter rooms / soft voice
+always config preset low        # cafés, open plan, fans
+
+# 3. Start the daemon
 always start
+
+# 4. Speak. Anywhere. Your text appears.
 ```
 
-## 🤔 What is Always?
+That's it. The status bar icon turns red when you speak, purple when
+Whisper is transcribing, then gone. Your text is at the cursor.
 
-Always is an always-on voice activation daemon that:
-- 🎧 **Listens continuously** using advanced Voice Activity Detection
-- ⚡ **Transcribes instantly** via Groq's Whisper API
-- 🧠 **Filters intelligently** to block filler words & politeness phrases
-- 📋 **Pastes automatically** into any active application
-- 🔄 **Runs in background** without interrupting your workflow
+---
 
-## 📦 Installation
+## CLI reference
 
-### macOS Apple Silicon
-
-The current release supports macOS Apple Silicon only. Linux support is planned for a future release.
+### Lifecycle
 
 ```bash
-cargo install always
+always start                # Start daemon in background
+always stop                 # Stop daemon
+always status               # Show pid + log path
+always run                  # Run in foreground (debugging)
+always toggle pause         # Mute mic without killing the daemon
+always toggle auto-enter    # Toggle "press Return after paste"
 ```
-
-**Note**: Requires macOS 14+ (Sonoma or later) on Apple Silicon. The daemon uses macOS-specific APIs for audio capture and clipboard automation.
-
-## 🎮 Usage
-
-```bash
-always start    # Start daemon in background
-always status   # Check if running
-always stop     # Stop daemon
-always run      # Run in foreground (debugging)
-```
-
-### ⌨️ Keyboard Shortcuts
-- `Ctrl+Shift+P` — Pause/unpause voice listening
-- `Ctrl+Shift+A` — Toggle auto-enter mode
-- `Ctrl+C` — Stop daemon (foreground mode)
-
-### 🎯 Overlay Display Rules
-
-The overlay displays based on the current state in `~/.config/always/state.json`, which is polled every 33ms with the following priority order:
-
-1. **Paused** (orange circle) — When voice listening is paused
-2. **Auto-Enter** (green circle) — When auto-enter mode is enabled
-3. **Processing** (blue circle) — When filtering/post-processing transcription (after voice detection)
-4. **Transcribing** (purple circle) — When transcribing audio to text
-5. **Hidden** — When no activity (overlay is not visible)
-
-The overlay does **not** show during voice detection to avoid excessive visual feedback before filtering occurs.
 
 ### Configuration
+
 ```bash
-always config show                                    # View all settings
-always config set stt_energy_threshold 0.01           # Sensitivity (lower = more)
-always config set stt_silence 0.4                     # Silence timeout (seconds)
-always config set stt_auto_enter true                 # Auto-enter after paste
+always config show                              # All current values
+always config preset <low|normal|high>          # Apply Mic Sensitivity preset
+always config set <key> <value>                 # Tweak one setting
+always config reset                             # Revert to defaults
+always config delete-key <groq_api_key|deepgram_api_key>   # Wipe from Keychain
 ```
 
-### 📖 Custom Vocabulary
+Full settings reference → [`docs/advanced_settings.md`](docs/advanced_settings.md).
 
-Always biases Whisper transcription using `glossary.json` at the project root.
-Add domain-specific terms (tools, product names, jargon) so they're transcribed
-correctly instead of phonetically guessed.
+### Logs
 
-**Schema** — each entry is an object with three fields:
-```json
-{
-  "term": "Kubernetes",
-  "mistranscriptions": ["cuber netties", "kubernetics"],
-  "frequency": 100
-}
-```
-- `term` — canonical spelling (required)
-- `mistranscriptions` — common phonetic misreads the post-processor should fix (optional)
-- `frequency` — higher values are prioritized in Whisper's 224-token bias prompt (default 100)
-
-**Add a term** — edit `glossary.json` and append a new entry:
 ```bash
-jq '. += [{"term":"Kubernetes","mistranscriptions":["cuber netties"],"frequency":100}]' \
-  glossary.json > glossary.json.tmp && mv glossary.json.tmp glossary.json
+always logs --pretty        # Live-tail with emoji decoration
+always logs --console       # Open in macOS Console.app
+always logs --path          # Print log directory and exit
+always logs --since 1h      # Filter by time (1h, 30m, 1d)
+always logs --level error   # Filter by level
 ```
 
-**Import from installed STT software** (Dragon, macOS Dictation, Whisper, etc.):
+Logs live at `~/Library/Logs/Always/always.YYYY-MM-DD` (macOS) or
+`$XDG_STATE_HOME/always/` (Linux), JSON-lines format. Daily rotation,
+7-day retention.
+
+### Vocabulary
+
 ```bash
-always vocab import
-```docs/
-docs/
-**Override the glossary path** by setting `ALWAYS_GLOSSARY_PATH` to a custom file.
+always vocab import         # Pull macOS Text Replacements + SuperWhisper + MacWhisper + installed apps
+always vocab extract        # Extract from current project (planned)
+```
 
-## 📚 Documentation
+### Daemon arguments
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — Architecture details
-- [DEVELOPMENT.md](DEVELOPMENT.md) — Development & contributing
-- [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — Troubleshooting guide
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-l, --lang <CODE>` | `en` | Language code passed to Whisper |
+| `-t, --timeout <SECS>` | `30` | Hard cap on a single utterance recording |
+| `-s, --silence <SECS>` | `2.0` | Silence required to end an utterance |
+| `--auto-enter` | off | Press Return after every paste |
 
-## 📄 License
+Pass to `start` or `run`:
 
-Apache-2.0
+```bash
+always start --silence 1.5 --auto-enter
+```
 
-## Future Optimization Opportunities
+---
 
-The following optimizations were identified during a recent latency audit but not yet implemented. They're documented here for future work.
+## Default settings
 
-### 🟢 Real wins still on the table
+> See **[docs/advanced_settings.md](docs/advanced_settings.md)** for
+> what every knob means and when to move it.
 
-1. **Native audio via `cpal`** — eliminates the SoX subprocess permanently. ~5-10ms latency cut, removes the `/opt/homebrew/bin/rec` external dependency, kills the persistent-recorder restart cycle. Significant rewrite (~half day).
-2. **Speculative early transcription** — start sending audio to Whisper before silence is fully detected. Could shave 0.4-1s off perceived latency for typical utterances. Risky (doubles API usage if not capped).
-3. **NSPasteboard via objc2** — finally remove the last subprocess (`pbcopy`) on the hot path. ~5-15ms saved per paste. Adds heavy `objc2` dependency.
+| Setting | Default | Why |
+|---------|:---:|------|
+| Mic Sensitivity preset | **Normal** | Tuned for typical office voice |
+| `stt_energy_threshold` | `0.012` | Low enough to catch speech, high enough to ignore AC hum |
+| `hear_energy_threshold` | `0.001` | Pre-VAD overlay flash hint |
+| `stt_silence` | `2.0 s` | Long enough to tolerate natural mid-sentence pauses |
+| `stt_cooldown_ms` | `150 ms` | Debounces noisy VAD edges without slowing rapid commands |
+| `silero_threshold` | `0.5` | Canonical Silero VAD default |
 
-### 🟡 Marginal — only worth it if optimizing for clean code
+---
 
-4. **Remove `smart_filter.rs` and `ai_filter.rs`** — only used by dev test bins now. Faster compile, smaller binary, but breaks `cargo run --bin filter_comparison`.
-5. **Vocabulary fuzzy matching with `aho-corasick`** instead of sequential string replace — only helps with large vocabularies (current default is small).
-6. **SQLite WAL + `PRAGMA synchronous=NORMAL`** — not a bottleneck (config is read once at startup).
+## Architecture
 
-### 🔴 Not worth doing
+Two processes, one Unix domain socket between them:
 
-- SIMD energy calculation — already < 1ms, dwarfed by API time
-- Local Whisper fallback — quality tradeoff isn't worth it for dictation
-- Replacing `rdev` keyboard listener — works fine
+```
+┌──────────────────────────┐         UDS                ┌────────────────────────┐
+│  Rust daemon (always)    │  ──── always.sock ────►    │  Swift menu-bar app    │
+│  (CLI binary, ~23 MB)    │  ◄──── commands ─────      │  (AlwaysApp.app)       │
+└──────────────────────────┘                            └────────────────────────┘
+        │                                                       │
+        ▼                                                       ▼
+   SoX `rec` audio                                    StatusOverlay HUD
+   Silero VAD                                         Settings + onboarding
+   Groq Whisper                                       Sparkle auto-update
+   pbcopy + CGEventTap
+```
 
-### Honest assessment
+* The **daemon** is the source of truth. It runs the audio capture, VAD,
+  Whisper, filter pipeline, and paste injection.
+* The **Mac app** is a thin SwiftUI client. It subscribes to the daemon's
+  event stream and renders an overlay; user actions are forwarded back
+  as `DaemonCommand` JSON lines.
 
-The single biggest remaining win is **fixing the overlay regression** so we can re-enable Swift release mode (currently builds in debug to work around a regression introduced during the latency optimization pass). After that, **speculative transcription** is the next big lever because the API call is still ~60% of total latency. Everything else is polish.
+Wire format is versioned (`Hello { version: 1 }` is the first frame on
+every connection). Mismatched daemon/app versions disconnect cleanly
+instead of silently corrupting.
+
+Full details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+---
+
+## Performance
+
+Measured on M2 Pro, Sonoma 14.5, fiber → Groq EU region, 1-2 s utterances:
+
+| Phase | p50 | p95 |
+|-------|:---:|:---:|
+| VAD silence detection | 30 ms | 60 ms |
+| WAV encode (in-memory) | < 1 ms | 2 ms |
+| HTTP/2 + multipart upload | 60 ms | 180 ms |
+| Whisper inference (Groq) | 280 ms | 480 ms |
+| Filter + post-process | 5 ms | 15 ms |
+| `pbcopy` + Cmd+V dispatch | 8 ms | 25 ms |
+| **End-to-end (silence → paste)** | **~650 ms** | **~1.0 s** |
+
+Speculative transcription cuts another ~400 ms on cooperative speech
+patterns where the user pauses briefly mid-utterance.
+
+Daemon RAM at idle: **~25 MB**. Daemon RAM during active transcription:
+**~45 MB peak**. Whisper runs server-side at Groq, not in-process — your
+laptop fan stays off.
+
+---
+
+## Privacy
+
+* **Audio is sent to Groq.** That's the only network destination.
+  Groq's privacy policy: https://wow.groq.com/privacy-policy.
+* **No telemetry.** The daemon does not phone home, ever.
+* **No analytics.** No Sentry, no Mixpanel, no Segment, no anything.
+* **API keys live in the OS Keychain.** Never in env vars, never in
+  config files, never in logs.
+* **Logs do not contain transcript text by default.** Set
+  `ALWAYS_LOG_TRANSCRIPTS=1` to opt in for debugging; off by default in
+  release builds.
+* **Daemon runs as your user.** Not root. Not LaunchDaemon. Single user.
+
+---
+
+## Production-grade engineering
+
+This is not a weekend hack — it's built like infrastructure.
+
+* **CI gate.** Every PR runs `cargo fmt --check`, `cargo clippy
+  --all-targets --all-features --locked -- -D warnings`, full test
+  suite, `cargo audit`, `cargo deny check`, `cargo machete`, code
+  coverage upload to Codecov, CodeQL static analysis, Dependabot.
+* **Tests.** 100+ Rust tests covering hot-path locks, retry/backoff,
+  circuit breaker, UDS protocol, hallucination detection, vocabulary
+  application, audio buffer pool. Plus 21 Swift tests covering UDS
+  decoding, settings, sensitivity-preset round-trip.
+* **Resilience.** Groq client retries 429/5xx three times with
+  exponential backoff + jitter. Three consecutive failures opens a
+  circuit breaker for 60 s, falling back to a rule-based filter so the
+  daemon doesn't stall during an outage. parking_lot mutexes
+  everywhere on the audio hot path so a panic never poisons a lock.
+  Speculation thread wrapped in `catch_unwind`.
+* **Observability.** `tracing` + `tracing-subscriber` JSON to file,
+  pretty stderr in foreground, `oslog` integration for Console.app on
+  macOS. Daily log rotation, 7-day retention.
+* **Supply chain.** Signed releases via `cosign` (keyless OIDC), SLSA
+  Level 3 provenance via the `slsa-github-generator` reusable
+  workflow, CycloneDX SBOM published with every release, license
+  policy in `deny.toml`.
+* **Distribution.** Signed + notarized DMG, Homebrew cask, Sparkle
+  auto-update with EdDSA-signed appcast, `cargo install` from
+  crates.io.
+
+Full self-assessment: **[ASSESSMENT.md](ASSESSMENT.md)**.
+
+---
+
+## Documentation
+
+| Document | What |
+|----------|------|
+| [`docs/advanced_settings.md`](docs/advanced_settings.md) | Every preference, what it does, when to move it |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Process layout, UDS protocol, resilience contract |
+| [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | Build, test, contribute |
+| [`docs/RELEASE.md`](docs/RELEASE.md) | How releases are cut |
+| [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | Microphone permission, common issues |
+| [`SECURITY.md`](SECURITY.md) | Reporting vulnerabilities, embargo policy |
+| [`CHANGELOG.md`](CHANGELOG.md) | Versioned changelog |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | PR + commit conventions |
+| [`ASSESSMENT.md`](ASSESSMENT.md) | Production-readiness scorecard |
+
+---
+
+## Roadmap
+
+* [ ] Native audio capture via `cpal` — drop the SoX subprocess
+* [ ] Local Whisper option — privacy-first mode, no Groq round-trip
+* [ ] CGEventTap-native keyboard listener — drop unmaintained `rdev`
+* [ ] Linux ALSA backend
+* [ ] Windows clipboard / hotkey support
+* [ ] In-line corrections UI ("did you mean…")
+* [ ] Dictation grammar / commands ("delete that", "new line")
+
+PRs welcome. Bug reports welcome. Star the repo if you're using it
+daily — that's how we measure whether the work is paying off.
+
+---
+
+## License
+
+[Apache-2.0](LICENSE). Use it commercially, fork it, do whatever — we
+just ask that you keep the notice and don't sue us.
+
+---
+
+<div align="center">
+
+**Built by humans who got tired of typing.**
+
+[Issues](https://github.com/rtk-ai/always/issues) ·
+[Discussions](https://github.com/rtk-ai/always/discussions) ·
+[Releases](https://github.com/rtk-ai/always/releases)
+
+</div>

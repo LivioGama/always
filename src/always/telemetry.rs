@@ -11,10 +11,10 @@ use anyhow::Result;
 use std::path::PathBuf;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
+    EnvFilter, Layer,
     fmt::{self, format::FmtSpan},
     layer::SubscriberExt,
     util::SubscriberInitExt,
-    EnvFilter, Layer,
 };
 
 /// Initialize logging infrastructure
@@ -33,8 +33,8 @@ pub fn init_logging(foreground: bool) -> Result<tracing_appender::non_blocking::
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     // Build the subscriber
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("always=info,warn"));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("always=info,warn"));
 
     // JSON format to file
     let file_layer = fmt::layer()
@@ -63,7 +63,7 @@ pub fn init_logging(foreground: bool) -> Result<tracing_appender::non_blocking::
     }
 
     // Add oslog layer on macOS
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "macos"))]
     {
         init_oslog();
     }
@@ -72,24 +72,32 @@ pub fn init_logging(foreground: bool) -> Result<tracing_appender::non_blocking::
 }
 
 /// Initialize macOS oslog integration
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "macos"))]
 fn init_oslog() {
     use oslog::OsLogger;
 
-    if let Err(e) = OsLogger::new("com.always.daemon")
-        .init()
-    {
-        eprintln!("Failed to initialize oslog: {}", e);
-    }
+    // Ignore "already initialized" — tracing_subscriber owns the log crate
+    // global logger, so this always fails for short-lived CLI invocations.
+    // Not an error; oslog Console.app visibility is best-effort.
+    let _ = OsLogger::new("com.always.daemon").init();
 }
 
-/// Get the platform-specific log directory
+/// Get the platform-specific log directory.
+///
+/// Falls back to `std::env::temp_dir()/always` if the platform's home or
+/// config directory cannot be resolved. Logging is best-effort and must
+/// never panic the daemon.
 pub fn get_log_directory() -> PathBuf {
+    fn fallback() -> PathBuf {
+        tracing::warn!("home/config directory not resolvable; logs will go to a temp directory");
+        std::env::temp_dir().join("always")
+    }
+
     #[cfg(target_os = "macos")]
     {
         dirs::home_dir()
-            .expect("Home directory not found")
-            .join("Library/Logs/Always")
+            .map(|h| h.join("Library/Logs/Always"))
+            .unwrap_or_else(fallback)
     }
 
     #[cfg(target_os = "linux")]
@@ -98,8 +106,8 @@ pub fn get_log_directory() -> PathBuf {
             PathBuf::from(state_home).join("always")
         } else {
             dirs::home_dir()
-                .expect("Home directory not found")
-                .join(".local/state/always")
+                .map(|h| h.join(".local/state/always"))
+                .unwrap_or_else(fallback)
         }
     }
 
@@ -109,23 +117,26 @@ pub fn get_log_directory() -> PathBuf {
             PathBuf::from(local_appdata).join("Always/Logs")
         } else {
             dirs::home_dir()
-                .expect("Home directory not found")
-                .join("AppData/Local/Always/Logs")
+                .map(|h| h.join("AppData/Local/Always/Logs"))
+                .unwrap_or_else(fallback)
         }
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        // Fallback to config directory for other platforms
         dirs::config_dir()
-            .expect("Config directory not found")
-            .join("always")
+            .map(|c| c.join("always"))
+            .unwrap_or_else(fallback)
     }
 }
 
-/// Check if transcript logging is enabled via environment variable
+/// Check if transcript logging is enabled.
+/// Debug builds: on by default for dev visibility. Release builds: off (privacy);
+/// opt-in via `ALWAYS_LOG_TRANSCRIPTS=1`. Setting `=0`/`=false` forces off in any build.
 pub fn should_log_transcripts() -> bool {
-    std::env::var("ALWAYS_LOG_TRANSCRIPTS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    match std::env::var("ALWAYS_LOG_TRANSCRIPTS") {
+        Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => true,
+        Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") => false,
+        _ => cfg!(debug_assertions),
+    }
 }

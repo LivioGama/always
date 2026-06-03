@@ -1,14 +1,15 @@
+use std::collections::VecDeque;
 use std::io;
 use std::io::Read as _;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdout};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 
 pub const RATE: u32 = 16_000;
 pub const FRAME_MS: u32 = 30;
@@ -34,12 +35,15 @@ impl AudioBuffer {
     pub fn get() -> Self {
         let pool = Arc::clone(&AUDIO_BUFFER_POOL);
         let buffer = {
-            let mut pool_lock = pool.lock().unwrap();
-            pool_lock.pop_front().unwrap_or_else(|| Vec::with_capacity(16000)) // 1 second at 16kHz
+            let mut pool_lock = pool.lock();
+            pool_lock
+                .pop_front()
+                .unwrap_or_else(|| Vec::with_capacity(16000)) // 1 second at 16kHz
         };
         Self { buffer, pool }
     }
 
+    #[allow(clippy::should_implement_trait)] // `as_mut` returns the inner Vec, not a generic AsMut
     pub fn as_mut(&mut self) -> &mut Vec<i16> {
         &mut self.buffer
     }
@@ -51,10 +55,10 @@ impl AudioBuffer {
 
 impl Drop for AudioBuffer {
     fn drop(&mut self) {
-        // Return buffer to pool
+        // Return buffer to pool. parking_lot is poison-free, so this can never panic.
         self.buffer.clear();
-        let mut pool_lock = self.pool.lock().unwrap();
-        if pool_lock.len() < 10 { // Limit pool size
+        let mut pool_lock = self.pool.lock();
+        if pool_lock.len() < 10 {
             pool_lock.push_back(std::mem::take(&mut self.buffer));
         }
     }
@@ -92,12 +96,16 @@ impl RecChild {
             .spawn()
             .context("Failed to run 'rec' command. Install SoX: brew install sox")?;
         let stdout = child.stdout.take().context("sox stdout missing")?;
-        Ok(Self { child, stdout, reuse_count: 0 })
+        Ok(Self {
+            child,
+            stdout,
+            reuse_count: 0,
+        })
     }
 
     pub fn get_or_spawn() -> Result<Arc<Mutex<Option<RecChild>>>> {
         let recorder_lock = Arc::clone(&GLOBAL_RECORDER);
-        let mut recorder = recorder_lock.lock().unwrap();
+        let mut recorder = recorder_lock.lock();
 
         match recorder.as_mut() {
             Some(rec) => {
@@ -166,11 +174,11 @@ pub fn create_wav_bytes_i16_mono_16k(samples: &[i16]) -> Result<Vec<u8>> {
     wav_data.extend_from_slice(b"WAVE");
     wav_data.extend_from_slice(b"fmt ");
     wav_data.extend_from_slice(&16u32.to_le_bytes()); // PCM format chunk size
-    wav_data.extend_from_slice(&1u16.to_le_bytes());  // PCM format
-    wav_data.extend_from_slice(&1u16.to_le_bytes());  // Mono
-    wav_data.extend_from_slice(&RATE.to_le_bytes());  // Sample rate
+    wav_data.extend_from_slice(&1u16.to_le_bytes()); // PCM format
+    wav_data.extend_from_slice(&1u16.to_le_bytes()); // Mono
+    wav_data.extend_from_slice(&RATE.to_le_bytes()); // Sample rate
     wav_data.extend_from_slice(&(RATE * 2).to_le_bytes()); // Byte rate
-    wav_data.extend_from_slice(&2u16.to_le_bytes());  // Block align
+    wav_data.extend_from_slice(&2u16.to_le_bytes()); // Block align
     wav_data.extend_from_slice(&16u16.to_le_bytes()); // Bits per sample
     wav_data.extend_from_slice(b"data");
     wav_data.extend_from_slice(&(data_size as u32).to_le_bytes());
@@ -180,9 +188,8 @@ pub fn create_wav_bytes_i16_mono_16k(samples: &[i16]) -> Result<Vec<u8>> {
     // Slice from_raw_parts is safe because we don't escape the borrow.
     #[cfg(target_endian = "little")]
     {
-        let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(samples.as_ptr() as *const u8, samples.len() * 2)
-        };
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(samples.as_ptr() as *const u8, samples.len() * 2) };
         wav_data.extend_from_slice(bytes);
     }
     #[cfg(not(target_endian = "little"))]
@@ -193,6 +200,118 @@ pub fn create_wav_bytes_i16_mono_16k(samples: &[i16]) -> Result<Vec<u8>> {
     }
 
     Ok(wav_data)
+}
+
+/// Pluggable audio frame source.
+///
+/// The default production implementation ([`SoxAudioSource`]) shells out
+/// to `/opt/homebrew/bin/rec` (SoX) on macOS. The trait exists so:
+///
+/// 1. Tests can inject a deterministic [`mock::MockAudioSource`] without
+///    touching the user's microphone.
+/// 2. Future Linux (`cpal`/ALSA) and Windows (`cpal`/WASAPI) backends can
+///    drop in without touching the VAD loop.
+pub trait AudioFrameSource: Send {
+    /// Read one VAD-sized frame ([`FRAME_BYTES`] bytes of little-endian
+    /// 16-bit mono PCM at [`RATE`] Hz). Implementations should fill the
+    /// buffer fully or return `Ok(0)` to signal EOF.
+    fn read_frame(&mut self, buf: &mut [u8; FRAME_BYTES]) -> io::Result<usize>;
+}
+
+/// Production source backed by the SoX `rec` command.
+///
+/// Wraps the existing global `RecChild` pool via [`RecChild::get_or_spawn`].
+/// Acquires the recorder lazily on first frame read.
+#[cfg(feature = "macos")]
+pub struct SoxAudioSource {
+    handle: std::sync::Arc<Mutex<Option<RecChild>>>,
+}
+
+#[cfg(feature = "macos")]
+impl SoxAudioSource {
+    pub fn new() -> Result<Self> {
+        let handle = RecChild::get_or_spawn()?;
+        Ok(Self { handle })
+    }
+}
+
+#[cfg(feature = "macos")]
+impl AudioFrameSource for SoxAudioSource {
+    fn read_frame(&mut self, buf: &mut [u8; FRAME_BYTES]) -> io::Result<usize> {
+        let mut guard = self.handle.lock();
+        let Some(rec) = guard.as_mut() else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "audio recorder not initialized",
+            ));
+        };
+        rec.read_frame(buf)
+    }
+}
+
+/// Linux/Windows stub. Real implementations land with the
+/// `linux`/`windows` features in a follow-up.
+#[cfg(not(feature = "macos"))]
+pub struct StubAudioSource;
+
+#[cfg(not(feature = "macos"))]
+impl Default for StubAudioSource {
+    fn default() -> Self {
+        Self
+    }
+}
+
+#[cfg(not(feature = "macos"))]
+impl AudioFrameSource for StubAudioSource {
+    fn read_frame(&mut self, _buf: &mut [u8; FRAME_BYTES]) -> io::Result<usize> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "audio capture is not yet implemented for this platform",
+        ))
+    }
+}
+
+#[cfg(test)]
+pub mod mock {
+    //! In-memory test double for [`AudioFrameSource`].
+
+    use super::{AudioFrameSource, FRAME_BYTES};
+    use std::collections::VecDeque;
+    use std::io;
+
+    /// Returns canned frames in FIFO order; once exhausted yields EOF.
+    pub struct MockAudioSource {
+        frames: VecDeque<[u8; FRAME_BYTES]>,
+    }
+
+    impl MockAudioSource {
+        pub fn new(frames: Vec<[u8; FRAME_BYTES]>) -> Self {
+            Self {
+                frames: frames.into(),
+            }
+        }
+
+        /// Convenience: build a source of `n` silent frames.
+        pub fn silence(n: usize) -> Self {
+            Self::new(vec![[0u8; FRAME_BYTES]; n])
+        }
+
+        pub fn frames_remaining(&self) -> usize {
+            self.frames.len()
+        }
+    }
+
+    impl AudioFrameSource for MockAudioSource {
+        fn read_frame(&mut self, buf: &mut [u8; FRAME_BYTES]) -> io::Result<usize> {
+            match self.frames.pop_front() {
+                Some(frame) => {
+                    buf.copy_from_slice(&frame);
+                    Ok(FRAME_BYTES)
+                }
+                None => Ok(0),
+            }
+        }
+    }
 }
 
 pub fn temp_wav_path() -> PathBuf {
@@ -212,7 +331,7 @@ pub fn temp_wav_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{temp_wav_path, create_wav_bytes_i16_mono_16k};
+    use super::{create_wav_bytes_i16_mono_16k, temp_wav_path};
 
     #[test]
     fn temp_wav_paths_are_unique() {
@@ -227,5 +346,69 @@ mod tests {
         let wav_data = create_wav_bytes_i16_mono_16k(&samples).unwrap();
         assert!(wav_data.len() > 44); // At least WAV header size
         assert!(wav_data.starts_with(b"RIFF"));
+    }
+
+    #[test]
+    fn audio_buffer_get_drop_get_does_not_leak() {
+        use super::AudioBuffer;
+        // Pool is process-global so other parallel tests share it; we
+        // can't assert capacity reuse deterministically. Assert the basic
+        // contract: get + drop + get does not panic and produces usable
+        // buffers.
+        let cap_before;
+        {
+            let mut buf = AudioBuffer::get();
+            buf.as_mut().reserve(32_768);
+            cap_before = buf.as_mut().capacity();
+        }
+        let _buf = AudioBuffer::get();
+        assert!(cap_before >= 32_768);
+    }
+
+    #[test]
+    fn audio_buffer_pool_caps_at_ten_entries() {
+        use super::AudioBuffer;
+        // Deluge the pool with 20 returns. The pool length is capped at 10
+        // by Drop logic. We can only observe via the absence of OOM and
+        // that subsequent gets succeed.
+        let mut bufs = Vec::new();
+        for _ in 0..20 {
+            bufs.push(AudioBuffer::get());
+        }
+        drop(bufs);
+        // Confirm a fresh get still works after the deluge.
+        let _ = AudioBuffer::get();
+    }
+
+    #[test]
+    fn mock_audio_source_yields_frames_then_eof() {
+        use super::AudioFrameSource;
+        use super::FRAME_BYTES;
+        use super::mock::MockAudioSource;
+
+        let mut src = MockAudioSource::silence(2);
+        let mut buf = [0u8; FRAME_BYTES];
+
+        assert_eq!(src.read_frame(&mut buf).unwrap(), FRAME_BYTES);
+        assert_eq!(src.read_frame(&mut buf).unwrap(), FRAME_BYTES);
+        // After exhaustion: EOF (Ok(0)).
+        assert_eq!(src.read_frame(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn mock_audio_source_preserves_frame_contents() {
+        use super::AudioFrameSource;
+        use super::FRAME_BYTES;
+        use super::mock::MockAudioSource;
+
+        let mut frame_a = [0u8; FRAME_BYTES];
+        frame_a[0] = 0xAB;
+        frame_a[1] = 0xCD;
+        let mut src = MockAudioSource::new(vec![frame_a]);
+
+        let mut buf = [0u8; FRAME_BYTES];
+        assert_eq!(src.read_frame(&mut buf).unwrap(), FRAME_BYTES);
+        assert_eq!(buf[0], 0xAB);
+        assert_eq!(buf[1], 0xCD);
     }
 }

@@ -1,11 +1,17 @@
-use std::time::{Duration, Instant};
 use anyhow::Result;
+use std::time::{Duration, Instant};
 
 /// Cross-platform microphone usage monitor
 pub struct MicrophoneMonitor {
     last_check: Instant,
     check_interval: Duration,
     last_usage_state: bool,
+}
+
+impl Default for MicrophoneMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MicrophoneMonitor {
@@ -117,7 +123,7 @@ impl MicrophoneMonitor {
         // Single subprocess: lsof for CoreAudio file descriptors,
         // excluding our own processes (always, rec, sox, coreaudiod itself).
         let output = Command::new("sh")
-            .args(&[
+            .args([
                 "-c",
                 "lsof -c /coreaudio/i 2>/dev/null | grep -iv -e always -e '\\brec\\b' -e sox -e coreaudiod | head -5",
             ])
@@ -170,9 +176,7 @@ impl MicrophoneMonitor {
         }
 
         // Try pw-cli (PipeWire)
-        let output = Command::new("pw-cli")
-            .args(&["list-objects"])
-            .output();
+        let output = Command::new("pw-cli").args(&["list-objects"]).output();
 
         match output {
             Ok(result) if result.status.success() => {
@@ -188,27 +192,23 @@ impl MicrophoneMonitor {
     fn check_alsa_devices(&self) -> Result<bool> {
         use std::fs;
 
-        // Check if any ALSA capture devices are in use
-        match fs::read_to_string("/proc/asound/cards") {
-            Ok(content) => {
-                // Basic check - if there are sound cards present, we can do more detailed checks
-                if !content.is_empty() {
-                    // Check for active PCM streams
-                    for card_dir in fs::read_dir("/proc/asound/").unwrap_or_else(|_| {
-                        return std::fs::read_dir("/dev/null").unwrap();
-                    }) {
-                        if let Ok(entry) = card_dir {
-                            let path = entry.path().join("pcm0c").join("info");
-                            if path.exists() {
-                                return Ok(true);
-                            }
-                        }
-                    }
-                }
-            }
-            Err(_) => {}
+        // Check if any ALSA capture devices are in use. Best-effort: any I/O
+        // failure here is treated as "no device in use" rather than panicking.
+        let Ok(content) = fs::read_to_string("/proc/asound/cards") else {
+            return Ok(false);
+        };
+        if content.is_empty() {
+            return Ok(false);
         }
-
+        let Ok(entries) = fs::read_dir("/proc/asound/") else {
+            return Ok(false);
+        };
+        for card_dir in entries {
+            let Ok(entry) = card_dir else { continue };
+            if entry.path().join("pcm0c").join("info").exists() {
+                return Ok(true);
+            }
+        }
         Ok(false)
     }
 
@@ -224,13 +224,23 @@ impl MicrophoneMonitor {
             return Ok(false);
         }
 
-        let processes = String::from_utf8(output.stdout)
-            .context("Invalid UTF-8 in ps output")?;
+        let processes = String::from_utf8(output.stdout).context("Invalid UTF-8 in ps output")?;
 
         const AUDIO_APPS: &[&str] = &[
-            "zoom", "skype", "teams", "discord", "firefox", "chrome",
-            "obs", "audacity", "kdenlive", "openshot", "audacious",
-            "pulseaudio", "pipewire", "jack"
+            "zoom",
+            "skype",
+            "teams",
+            "discord",
+            "firefox",
+            "chrome",
+            "obs",
+            "audacity",
+            "kdenlive",
+            "openshot",
+            "audacious",
+            "pulseaudio",
+            "pipewire",
+            "jack",
         ];
 
         let processes_lower = processes.to_lowercase();
@@ -288,8 +298,7 @@ impl MicrophoneMonitor {
             return Ok(users);
         }
 
-        let processes = String::from_utf8(output.stdout)
-            .context("Invalid UTF-8 in ps output")?;
+        let processes = String::from_utf8(output.stdout).context("Invalid UTF-8 in ps output")?;
 
         const AUDIO_APPS: &[(&str, &str)] = &[
             ("zoom", "Zoom"),

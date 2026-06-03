@@ -27,16 +27,64 @@ cp Info.plist AlwaysApp.app/Contents/
 cp .build/debug/AlwaysApp AlwaysApp.app/Contents/MacOS/
 cp Resources/AlwaysIcon.icns AlwaysApp.app/Contents/Resources/
 
-# Copy daemon binary into app bundle
-DAEMON_PATH="../target/release/always"
+# Copy daemon binary into app bundle.
+# Pick newest of release/debug so local dev (debug build) keeps showing
+# transcripts in logs (privacy gate is auto-on in debug builds).
+# Override with ALWAYS_BUILD_PROFILE=release|debug to pin a specific profile.
+RELEASE_BIN="../target/release/always"
+DEBUG_BIN="../target/debug/always"
+DAEMON_PATH=""
+case "${ALWAYS_BUILD_PROFILE:-}" in
+    release) DAEMON_PATH="$RELEASE_BIN" ;;
+    debug)   DAEMON_PATH="$DEBUG_BIN" ;;
+    *)
+        if [ -f "$RELEASE_BIN" ] && [ -f "$DEBUG_BIN" ]; then
+            if [ "$DEBUG_BIN" -nt "$RELEASE_BIN" ]; then
+                DAEMON_PATH="$DEBUG_BIN"
+            else
+                DAEMON_PATH="$RELEASE_BIN"
+            fi
+        elif [ -f "$DEBUG_BIN" ]; then
+            DAEMON_PATH="$DEBUG_BIN"
+        else
+            DAEMON_PATH="$RELEASE_BIN"
+        fi
+        ;;
+esac
+
 if [ -f "$DAEMON_PATH" ]; then
-    echo "Copying daemon binary to app bundle..."
+    echo "Copying daemon binary to app bundle ($DAEMON_PATH)..."
     mkdir -p AlwaysApp.app/Contents/MacOS
     cp "$DAEMON_PATH" AlwaysApp.app/Contents/MacOS/always
     echo "✓ Daemon binary copied"
 else
     echo "⚠️  Warning: Daemon binary not found at $DAEMON_PATH"
-    echo "   Build the daemon first: cd .. && cargo build --release --bin always"
+    echo "   Build the daemon first: cd .. && cargo build --bin always (or --release)"
+fi
+
+# Bundle Sparkle.framework. Swift Package Manager downloads it as part of
+# the Sparkle xcframework; we ship the macos-arm64_x86_64 slice. Without
+# this step the app crashes at launch with a dyld "Library not loaded:
+# @rpath/Sparkle.framework" error because @rpath resolves under
+# Contents/Frameworks/ in a real bundle.
+SPARKLE_SRC=".build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+if [ -d "$SPARKLE_SRC" ]; then
+    echo "Bundling Sparkle.framework..."
+    mkdir -p AlwaysApp.app/Contents/Frameworks
+    rm -rf AlwaysApp.app/Contents/Frameworks/Sparkle.framework
+    cp -R "$SPARKLE_SRC" AlwaysApp.app/Contents/Frameworks/Sparkle.framework
+    # `swift build` does NOT add @executable_path/../Frameworks to LC_RPATH.
+    # Without this the dyld lookup at launch fails because the framework
+    # only resolves at the standard bundle search path.
+    if ! otool -l AlwaysApp.app/Contents/MacOS/AlwaysApp \
+            | grep -A2 LC_RPATH | grep -q "@executable_path/../Frameworks"; then
+        install_name_tool -add_rpath "@executable_path/../Frameworks" \
+            AlwaysApp.app/Contents/MacOS/AlwaysApp
+        echo "✓ Added @executable_path/../Frameworks rpath"
+    fi
+    echo "✓ Sparkle.framework copied"
+else
+    echo "⚠️  Sparkle.framework not found at $SPARKLE_SRC — auto-update will not work"
 fi
 
 echo "Code signing app..."

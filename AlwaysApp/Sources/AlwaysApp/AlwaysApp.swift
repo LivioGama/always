@@ -15,8 +15,11 @@ struct AlwaysApp: App {
         Window("Always Settings", id: "settings") {
             SettingsWindow(cliService: CLIService())
         }
-        .defaultSize(width: 800, height: 750)
-        
+        // `.contentSize` makes the window grow to exactly fit its SwiftUI
+        // content and disables manual resize handles. The settings view
+        // is laid out to fit on a 14" laptop without any scrolling.
+        .windowResizability(.contentSize)
+
         Window("Welcome to Always", id: "onboarding") {
             OnboardingView()
         }
@@ -73,13 +76,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Check if onboarding is needed
         onboardingState?.checkAndShowOnboardingIfNeeded()
-        
+
         // Show onboarding window if needed
         if onboardingState?.showOnboarding == true {
-            if let window = NSApp.windows.first(where: { $0.title == "Welcome to Always" }) {
+            if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "AlwaysOnboarding" }) {
                 window.makeKeyAndOrderFront(nil)
             }
         }
+
+        // Kill any stale daemon from a previous session (crash, force-quit, etc.)
+        // before starting fresh. This prevents the broken-pipe bug where a new
+        // Mac app connects to an old daemon with stale UDS state.
+        Self.killStaleDaemon()
 
         // Bootstrap the singleton — touching .shared lazily creates it,
         // which connects to the daemon over UDS and wires the overlay
@@ -89,5 +97,42 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Task {
             _ = try? await cliService?.startDaemon()
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        Self.killStaleDaemon()
+    }
+
+    /// Read the daemon PID file and send SIGTERM. Synchronous so it works
+    /// in applicationWillTerminate (no time for async). Also removes the
+    /// PID file so the next launch sees a clean slate.
+    static func killStaleDaemon() {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let pidPath = home
+            .appendingPathComponent("Library/Application Support/always/always.pid")
+            .path
+
+        guard let pidString = try? String(contentsOfFile: pidPath, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              let pid = pid_t(pidString) else { return }
+
+        // Check if the process is actually running before killing
+        if kill(pid, 0) == 0 {
+            kill(pid, SIGTERM)
+            // Give it a moment to clean up, then force-kill if still alive
+            usleep(200_000) // 200ms
+            if kill(pid, 0) == 0 {
+                kill(pid, SIGKILL)
+            }
+        }
+
+        // Remove PID file regardless — it's stale either way
+        try? FileManager.default.removeItem(atPath: pidPath)
+
+        // Remove socket file so daemon starts with clean socket
+        let sockPath = home
+            .appendingPathComponent("Library/Caches/Always/always.sock")
+            .path
+        try? FileManager.default.removeItem(atPath: sockPath)
     }
 }

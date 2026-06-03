@@ -1,13 +1,27 @@
 import AppKit
 
-enum OverlayState: String, CaseIterable {
-    case paused = "Paused"
-    case resumed = "Resumed"
-    case autoEnterOn = "Auto-Enter On"
-    case autoEnterOff = "Auto-Enter Off"
-    case transcribing = "Transcribing"
-    case processing = "Processing"
-    case voiceActivity = "Listening"
+enum OverlayState: Equatable, Hashable {
+    case paused
+    case resumed
+    case autoEnterOn
+    case autoEnterOff
+    case transcribing
+    case processing
+    case voiceActivity
+    case filtered(reason: String)
+
+    var rawValue: String {
+        switch self {
+        case .paused: return "Paused"
+        case .resumed: return "Resumed"
+        case .autoEnterOn: return "Auto-Enter On"
+        case .autoEnterOff: return "Auto-Enter Off"
+        case .transcribing: return "Transcribing"
+        case .processing: return "Processing"
+        case .voiceActivity: return "Listening"
+        case .filtered(let reason): return reason.isEmpty ? "Filtered" : "Filtered · \(reason)"
+        }
+    }
 
     var iconName: String {
         switch self {
@@ -18,6 +32,7 @@ enum OverlayState: String, CaseIterable {
         case .transcribing: return "waveform.circle.fill"
         case .processing: return "waveform.circle"
         case .voiceActivity: return "waveform"
+        case .filtered: return "xmark.octagon.fill"
         }
     }
 
@@ -30,6 +45,7 @@ enum OverlayState: String, CaseIterable {
         case .transcribing: return .systemPurple
         case .processing: return .systemBlue
         case .voiceActivity: return .systemRed
+        case .filtered: return .systemPink
         }
     }
 }
@@ -460,7 +476,10 @@ class StatusOverlayController {
         window?.hide()
     }
 
-    private func isFlashActive() -> Bool {
+    /// Internal so `@testable import AlwaysApp` can verify flash protection
+    /// (a flash must outlive subsequent `show(state:)` calls during its
+    /// duration). Outside of tests this is an implementation detail.
+    func isFlashActive() -> Bool {
         guard let endsAt = flashEndsAt else { return false }
         return endsAt > Date()
     }

@@ -44,7 +44,7 @@ async fn test_single_text(text: &str) {
                 println!("🎯 Confidence: {:.1}%", result.confidence_score * 100.0);
                 println!(
                     "📊 Category: {:?}",
-                    result.filter_category.unwrap_or_else(|| {
+                    result.filter_category.unwrap_or({
                         always::always::ai_filter::FilterCategory::NaturalConversation
                     })
                 );

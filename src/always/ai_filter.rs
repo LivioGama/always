@@ -468,7 +468,7 @@ Focus on whether the text represents something a user would want to act on or re
             };
         }
 
-        let has_non_ascii = normalized.chars().any(|c| !c.is_ascii());
+        let has_non_ascii = !normalized.is_ascii();
         let has_url_shape = normalized.contains('.');
         let has_latin_letter = normalized.chars().any(|c| c.is_ascii_alphabetic());
         if text.split_whitespace().count() == 1
@@ -532,6 +532,7 @@ mod tests {
     }
 }
 #[cfg(test)]
+#[allow(clippy::print_stdout)]
 mod test_malformed_domains {
     use crate::always::ai_filter::AiFilter;
 
