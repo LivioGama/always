@@ -90,9 +90,9 @@ always config set stt_silence 1.5
 
 | | |
 |---|---|
-| Default | `150` (milliseconds) |
+| Default | `800` (milliseconds) |
 | Range   | `0 – 60_000` |
-| What    | Minimum time between two consecutive paste actions. Prevents the daemon from double-firing on a single VAD edge. |
+| What    | Minimum time between two consecutive paste actions. Prevents the daemon from double-firing on a single VAD edge. Built-in dedupe also suppresses identical/near-identical pastes for at least 3 seconds regardless of this setting. |
 | Lower → | Faster back-to-back commands; risk of duplicate paste on noisy edges. |
 | Higher → | Safer debounce; first-pass-of-many feels sluggish. |
 
@@ -156,7 +156,7 @@ A quick troubleshooting tree:
 | Quiet voice / whispered commands ignored | Preset → **High**, or lower `stt_energy_threshold` |
 | Sentences get cut off mid-thought | Raise `stt_silence` |
 | Lag between speaking and paste feels too long | Lower `stt_silence` |
-| One utterance pasted twice | Raise `stt_cooldown_ms` |
+| One utterance pasted twice | Usually auto-suppressed (3s near-duplicate window). If it persists, raise `stt_cooldown_ms` or check for duplicate daemon processes (`ps aux \| grep always`) |
 | Random YouTube-style "thanks for watching" hallucinations | Already filtered by [`hallucination`](../src/always/hallucination.rs); if persistent, raise `silero_threshold` to `0.6` |
 
 ---

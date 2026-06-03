@@ -1,5 +1,15 @@
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
+
+/// Minimum gap between low-mic overlay hints so a quiet room doesn't
+/// spam the HUD on every utterance.
+const LOW_MIC_OVERLAY_COOLDOWN: Duration = Duration::from_secs(45);
+static LAST_LOW_MIC_OVERLAY: LazyLock<Mutex<Option<Instant>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 /// Wire-format protocol version. Bump on any breaking change to
 /// [`DaemonEvent`] or [`DaemonCommand`]. The daemon sends a `Hello` event
@@ -21,7 +31,10 @@ use tokio::sync::broadcast;
 /// **v5 (2026-05-20):** Live preference sync from Settings.
 /// `SetAutoEnter` + `ApplyRuntimePreferences` so sensitivity and
 /// auto-enter delay apply without a daemon restart.
-pub const PROTOCOL_VERSION: u32 = 5;
+///
+/// **v6 (2026-05-25):** Low microphone volume warning event.
+/// `LowMicrophoneVolume` notifies GUI when mic energy is barely above threshold.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Event types for daemon-to-GUI communication
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,6 +204,11 @@ pub enum DaemonEvent {
     ModelExtractionFailed {
         model_id: String,
         error: String,
+    },
+    /// Microphone volume appears to be too low for reliable detection.
+    /// The daemon is detecting voice but at very low energy levels.
+    LowMicrophoneVolume {
+        energy: f64,
     },
     /// Active STT backend changed (user picked a different model in
     /// Settings → Models, or deleted the currently-active one). The
@@ -492,6 +510,20 @@ impl EventBroadcaster {
 
     pub fn focused_app_changed(&self, bundle_id: Option<String>) {
         self.send(DaemonEvent::FocusedAppChanged { bundle_id });
+    }
+
+    pub fn low_microphone_volume(&self, energy: f64) {
+        self.send(DaemonEvent::LowMicrophoneVolume { energy });
+    }
+
+    /// Rate-limited wrapper for [`Self::low_microphone_volume`].
+    pub fn low_microphone_volume_maybe(&self, energy: f64) {
+        let mut last = LAST_LOW_MIC_OVERLAY.lock();
+        if last.is_some_and(|t| t.elapsed() < LOW_MIC_OVERLAY_COOLDOWN) {
+            return;
+        }
+        *last = Some(Instant::now());
+        self.low_microphone_volume(energy);
     }
 
     pub fn master_pause_changed(&self, master_paused: bool) {

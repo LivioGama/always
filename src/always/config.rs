@@ -370,7 +370,7 @@ impl AlwaysConfig {
             filter_enabled: true, // Always enabled - filter is always on
             energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.012),
             onset_ms: 30,
-            cooldown_ms: prefs.stt_cooldown_ms.unwrap_or(150),
+            cooldown_ms: prefs.stt_cooldown_ms.unwrap_or(800),
             log_path: log_path_from_preferences(&prefs),
             post_processor,
             project_root,
@@ -419,7 +419,7 @@ impl Default for AlwaysConfig {
             filter_enabled: true,
             energy_threshold: 0.012,
             onset_ms: 30,
-            cooldown_ms: 150,
+            cooldown_ms: 800,
             log_path: default_log_path(),
             post_processor: None,
             project_root: detect_project_root(),

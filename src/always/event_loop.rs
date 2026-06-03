@@ -6,7 +6,10 @@ use parking_lot::RwLock;
 use tokio::runtime::{Handle, Runtime};
 
 use crate::always::log::{Event, Logger};
-use crate::always::speech_action::{SpeechAction, classify_transcription, merge_dictation_with};
+use crate::always::speech_action::{
+    SpeechAction, classify_transcription, merge_dictation_with, normalize_for_paste_dedupe,
+    paste_dedupe_window,
+};
 use crate::always::{
     AlwaysConfig, auto_enter_countdown, clipboard_watcher, daemon, event, filter, idle_watcher,
     keyboard, mic_monitor, paste, pause, per_app, uds_server, vad,
@@ -264,6 +267,7 @@ fn process_one(
         vad::RecordResult::Timeout => log.write(Event::Timeout),
         vad::RecordResult::DroppedLowEnergy { energy } => {
             log.write(Event::DroppedLowEnergy { energy });
+            event::global_broadcaster().low_microphone_volume_maybe(energy);
         }
         vad::RecordResult::DroppedNoise { raw } => {
             tracing::debug!(raw, "dropped_noise");
@@ -321,22 +325,6 @@ fn handle_speech(
             Ok(())
         }
         SpeechAction::Paste { text: transformed } => {
-            // Suppress identical back-to-back pastes from VAD edge noise or
-            // duplicate daemon processes. Window is at least 2s even when
-            // cooldown_ms is configured lower.
-            let dup_window = Duration::from_millis(cfg.cooldown_ms.max(2000) as u64);
-            if let Some(recent) = pause::last_pasted_text_within(dup_window)
-                && recent.trim() == transformed.trim()
-            {
-                tracing::info!(
-                    text = %transformed,
-                    dup_window_ms = dup_window.as_millis() as u64,
-                    "duplicate_paste_suppressed"
-                );
-                event::global_broadcaster().voice_activity_ended();
-                return Ok(());
-            }
-
             // Log the raw Whisper transcript for debugging STT quality issues
             tracing::info!(
                 stage = "whisper_raw",
@@ -432,6 +420,31 @@ fn handle_speech(
                 (format!("{} ", final_text), final_text.clone())
             };
 
+            let dup_window = paste_dedupe_window(cfg.cooldown_ms);
+            let paste_payload = paste_clipboard.trim();
+            if pause::should_suppress_duplicate_paste(paste_payload, dup_window) {
+                tracing::info!(
+                    text = %paste_payload,
+                    dup_window_ms = dup_window.as_millis() as u64,
+                    "duplicate_paste_suppressed"
+                );
+                event::global_broadcaster().voice_activity_ended();
+                return Ok(());
+            }
+
+            if !pause::try_begin_paste() {
+                tracing::info!(
+                    text = %paste_payload,
+                    "duplicate_paste_suppressed_in_flight"
+                );
+                event::global_broadcaster().voice_activity_ended();
+                return Ok(());
+            }
+
+            if daemon::list_daemon_pids().len() > 1 {
+                daemon::reconcile_duplicate_processes();
+            }
+
             paste::copy_to_clipboard(paste_clipboard)?;
 
             // Skip paste if Command is held — likely a shortcut in flight.
@@ -444,10 +457,8 @@ fn handle_speech(
                     message: "Skipped paste: Command key held",
                 });
                 event::global_broadcaster().transcription_filtered("Held Command key — not pasted");
-                // Drop the merge buffer too: the user is in the middle of
-                // a shortcut, the next utterance shouldn't try to append
-                // to text that never reached the field.
                 pause::dictation_buffer_clear();
+                pause::end_paste();
                 return Ok(());
             }
 
@@ -456,11 +467,16 @@ fn handle_speech(
             // the user can intercept (any key cancels). When
             // `auto_enter_delay_ms == 0` the countdown helper presses
             // Return immediately, preserving the legacy behavior.
-            paste::paste_text(false)?;
+            if let Err(err) = paste::paste_text(false) {
+                pause::end_paste();
+                return Err(err);
+            }
             let pasted_at = Instant::now();
 
             if grammar_patch_async {
                 spawn_grammar_patch(rt, cfg, final_text.clone(), pasted_at);
+            } else {
+                pause::end_paste();
             }
 
             let auto_enter_effective =
@@ -612,6 +628,15 @@ fn spawn_grammar_patch(
     }
 
     rt.spawn(async move {
+        // Release the paste-in-flight lock held since the initial Cmd+V.
+        struct PasteRelease;
+        impl Drop for PasteRelease {
+            fn drop(&mut self) {
+                pause::end_paste();
+            }
+        }
+        let _paste_release = PasteRelease;
+
         let started = Instant::now();
         let cleaned = match pp.process(&acoustic_pasted, None).await {
             Ok(c) => c,
@@ -625,7 +650,10 @@ fn spawn_grammar_patch(
             }
         };
 
-        if cleaned == acoustic_pasted {
+        if cleaned == acoustic_pasted
+            || normalize_for_paste_dedupe(&cleaned)
+                == normalize_for_paste_dedupe(&acoustic_pasted)
+        {
             tracing::debug!(
                 stage = "grammar_patch",
                 text = %cleaned,

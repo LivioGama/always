@@ -83,6 +83,13 @@ final class AudioOutputMonitor {
         }
     }
 
+    /// Re-push output-device playback state after UDS reconnect.
+    func resyncToDaemon() {
+        let device = deviceID != kAudioObjectUnknown ? deviceID : defaultOutputDevice()
+        guard let device else { return }
+        notify(playing: isRunningSomewhere(device: device))
+    }
+
     private func notify(playing: Bool) {
         logger.info("system audio playing=\(playing) — notifying daemon")
         stateMonitor?.sendCommandWithData(

@@ -72,6 +72,8 @@ enum DaemonEventType: String, Codable {
     case modelExtractionCompleted = "ModelExtractionCompleted"
     case modelExtractionFailed = "ModelExtractionFailed"
     case activeTranscriberChanged = "ActiveTranscriberChanged"
+    /// Speech was heard but energy was too low — mic input volume may need raising.
+    case lowMicrophoneVolume = "LowMicrophoneVolume"
 }
 
 // Event data structures
@@ -134,6 +136,10 @@ struct ResumedAppsChangedData: Codable {
 
 struct CorrectionDialogRequestedData: Codable {
     let last_transcript: String
+}
+
+struct LowMicrophoneVolumeData: Codable {
+    let energy: Double
 }
 
 // Models-tab payloads. Defined in `Models/ModelInfo.swift`:
@@ -199,6 +205,8 @@ struct DaemonEvent: Codable {
     /// Populated for `ActiveTranscriberChanged`. `backend` is the
     /// canonical wire form — `groq` or `local:<model_id>`.
     let activeTranscriber: ActiveTranscriberChangedData?
+    /// Populated for `LowMicrophoneVolume`.
+    let lowMicrophoneVolume: LowMicrophoneVolumeData?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -226,6 +234,7 @@ struct DaemonEvent: Codable {
         var modelId: ModelIdData? = nil
         var modelError: ModelErrorData? = nil
         var activeTranscriber: ActiveTranscriberChangedData? = nil
+        var lowMicrophoneVolume: LowMicrophoneVolumeData? = nil
 
         switch type {
         case .hello:
@@ -260,6 +269,8 @@ struct DaemonEvent: Codable {
             modelError = try container.decodeIfPresent(ModelErrorData.self, forKey: .data)
         case .activeTranscriberChanged:
             activeTranscriber = try container.decodeIfPresent(ActiveTranscriberChangedData.self, forKey: .data)
+        case .lowMicrophoneVolume:
+            lowMicrophoneVolume = try container.decodeIfPresent(LowMicrophoneVolumeData.self, forKey: .data)
         default:
             // Fall-through path: text-bearing or empty events. Keep using
             // the loose dict so existing call sites (e.g. transcript chunk
@@ -283,6 +294,7 @@ struct DaemonEvent: Codable {
         self.modelId = modelId
         self.modelError = modelError
         self.activeTranscriber = activeTranscriber
+        self.lowMicrophoneVolume = lowMicrophoneVolume
     }
 
     func encode(to encoder: Encoder) throws {
@@ -323,6 +335,8 @@ struct DaemonEvent: Codable {
             try container.encodeIfPresent(modelError, forKey: .data)
         case .activeTranscriberChanged:
             try container.encodeIfPresent(activeTranscriber, forKey: .data)
+        case .lowMicrophoneVolume:
+            try container.encodeIfPresent(lowMicrophoneVolume, forKey: .data)
         default:
             try container.encodeIfPresent(data, forKey: .data)
         }
@@ -345,7 +359,8 @@ struct DaemonEvent: Codable {
         modelDownloadProgress: ModelDownloadProgressData? = nil,
         modelId: ModelIdData? = nil,
         modelError: ModelErrorData? = nil,
-        activeTranscriber: ActiveTranscriberChangedData? = nil
+        activeTranscriber: ActiveTranscriberChangedData? = nil,
+        lowMicrophoneVolume: LowMicrophoneVolumeData? = nil
     ) {
         self.type = type
         self.data = data
@@ -364,6 +379,7 @@ struct DaemonEvent: Codable {
         self.modelId = modelId
         self.modelError = modelError
         self.activeTranscriber = activeTranscriber
+        self.lowMicrophoneVolume = lowMicrophoneVolume
     }
 }
 
