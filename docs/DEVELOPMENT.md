@@ -21,7 +21,7 @@ cargo test filter
 cargo test audio
 
 # Swift app tests
-cd AlwaysApp && swift test
+cd Always && swift test
 
 # Quality gates used by CI
 cargo fmt --check
@@ -45,7 +45,7 @@ cargo clippy --release -- -D warnings
 2. Create a feature branch
 3. Make changes with tests
 4. Run `cargo fmt --check`, `cargo clippy --release -- -D warnings`, and `cargo test`
-5. Run `cd AlwaysApp && swift build && swift test` for UI-adjacent changes
+5. Run `cd Always && swift build && swift test` for UI-adjacent changes
 6. Submit a pull request
 
 ## Runtime Notes

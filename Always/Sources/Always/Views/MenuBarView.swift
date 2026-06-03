@@ -165,7 +165,7 @@ struct MenuBarView: View {
     private func openTodaysLog() {
         let alwaysCLI = Self.bundledDaemonPath()
         // Use single quotes around the path so spaces in the bundle path
-        // (e.g. "AlwaysApp.app") don't break the AppleScript-driven
+        // (e.g. "Always.app") don't break the AppleScript-driven
         // shell. Escape any single quotes inside the path defensively.
         let escapedCLI = alwaysCLI.replacingOccurrences(of: "'", with: "'\\''")
         let command = "'\(escapedCLI)' logs --pretty"

@@ -1,6 +1,6 @@
 //! Wire-format contract tests for the UDS event/command protocol.
 //!
-//! These tests pin the JSON shape that the Mac app (`AlwaysApp/Sources/.../UDSClient.swift`)
+//! These tests pin the JSON shape that the Mac app (`Always/Sources/.../UDSClient.swift`)
 //! decodes. Breaking either side without bumping `PROTOCOL_VERSION`
 //! silently desynchronizes the daemon and the GUI, which is the kind of
 //! bug that only surfaces in user reports days later.

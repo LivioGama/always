@@ -15,10 +15,11 @@ build/
 *.jsonl
 glossary.json
 .gitnexus
-AlwaysApp/.build/
+Always/.build/
+Always/.swiftpm/
 .filtering_evolution_history.md
-AlwaysApp.app/
-AlwaysApp/AlwaysApp.app/
+Always.app/
+Always/Always.app/
 
 # JetBrains IDE config
 .idea/

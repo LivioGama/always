@@ -130,7 +130,7 @@ cargo install always --no-default-features --features linux   # Linux CLI-only
 ```
 
 The crates.io release ships **only the `always` daemon binary**. The
-Mac menubar app + overlay live in the `AlwaysApp.app` bundle — install
+Mac menubar app + overlay live in the `Always.app` bundle — install
 the cask above to get them.
 
 ### Linux
@@ -278,7 +278,7 @@ Two processes, one Unix domain socket between them:
 ```
 ┌──────────────────────────┐         UDS                ┌────────────────────────┐
 │  Rust daemon (always)    │  ──── always.sock ────►    │  Swift menu-bar app    │
-│  (CLI binary, ~23 MB)    │  ◄──── commands ─────      │  (AlwaysApp.app)       │
+│  (CLI binary, ~23 MB)    │  ◄──── commands ─────      │  (Always.app)          │
 └──────────────────────────┘                            └────────────────────────┘
         │                                                       │
         ▼                                                       ▼

@@ -3,29 +3,29 @@ set -e
 
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-echo "Building AlwaysApp..."
+echo "Building Always..."
 cd "$APP_DIR"
 swift build
 
 echo "Creating app bundle..."
-mkdir -p AlwaysApp.app/Contents/MacOS
-mkdir -p AlwaysApp.app/Contents/Resources
+mkdir -p Always.app/Contents/MacOS
+mkdir -p Always.app/Contents/Resources
 
 # Debug: check if executable exists
-if [ -f .build/debug/AlwaysApp ]; then
-    echo "✓ Executable found at .build/debug/AlwaysApp"
+if [ -f .build/debug/Always ]; then
+    echo "✓ Executable found at .build/debug/Always"
 else
-    echo "✗ Executable NOT found at .build/debug/AlwaysApp"
+    echo "✗ Executable NOT found at .build/debug/Always"
     echo "Trying direct path..."
-    if [ -f .build/arm64-apple-macosx/debug/AlwaysApp ]; then
-        echo "✓ Found at .build/arm64-apple-macosx/debug/AlwaysApp"
+    if [ -f .build/arm64-apple-macosx/debug/Always ]; then
+        echo "✓ Found at .build/arm64-apple-macosx/debug/Always"
     fi
 fi
 
 # Always update bundle contents
-cp Info.plist AlwaysApp.app/Contents/
-cp .build/debug/AlwaysApp AlwaysApp.app/Contents/MacOS/
-cp Resources/AlwaysIcon.icns AlwaysApp.app/Contents/Resources/
+cp Info.plist Always.app/Contents/
+cp .build/debug/Always Always.app/Contents/MacOS/
+cp Resources/AlwaysIcon.icns Always.app/Contents/Resources/
 
 # Copy daemon binary into app bundle.
 # Pick newest of release/debug so local dev (debug build) keeps showing
@@ -54,8 +54,8 @@ esac
 
 if [ -f "$DAEMON_PATH" ]; then
     echo "Copying daemon binary to app bundle ($DAEMON_PATH)..."
-    mkdir -p AlwaysApp.app/Contents/MacOS
-    cp "$DAEMON_PATH" AlwaysApp.app/Contents/MacOS/always
+    mkdir -p Always.app/Contents/MacOS
+    cp "$DAEMON_PATH" Always.app/Contents/MacOS/always
     echo "✓ Daemon binary copied"
 else
     echo "⚠️  Warning: Daemon binary not found at $DAEMON_PATH"
@@ -70,16 +70,16 @@ fi
 SPARKLE_SRC=".build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 if [ -d "$SPARKLE_SRC" ]; then
     echo "Bundling Sparkle.framework..."
-    mkdir -p AlwaysApp.app/Contents/Frameworks
-    rm -rf AlwaysApp.app/Contents/Frameworks/Sparkle.framework
-    cp -R "$SPARKLE_SRC" AlwaysApp.app/Contents/Frameworks/Sparkle.framework
+    mkdir -p Always.app/Contents/Frameworks
+    rm -rf Always.app/Contents/Frameworks/Sparkle.framework
+    cp -R "$SPARKLE_SRC" Always.app/Contents/Frameworks/Sparkle.framework
     # `swift build` does NOT add @executable_path/../Frameworks to LC_RPATH.
     # Without this the dyld lookup at launch fails because the framework
     # only resolves at the standard bundle search path.
-    if ! otool -l AlwaysApp.app/Contents/MacOS/AlwaysApp \
+    if ! otool -l Always.app/Contents/MacOS/Always \
             | grep -A2 LC_RPATH | grep -q "@executable_path/../Frameworks"; then
         install_name_tool -add_rpath "@executable_path/../Frameworks" \
-            AlwaysApp.app/Contents/MacOS/AlwaysApp
+            Always.app/Contents/MacOS/Always
         echo "✓ Added @executable_path/../Frameworks rpath"
     fi
     echo "✓ Sparkle.framework copied"
@@ -97,20 +97,20 @@ if [ -z "$SIGN_IDENTITY" ]; then
     SIGN_IDENTITY="-"
 fi
 echo "Using signing identity: ${SIGN_IDENTITY}"
-codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "com.alwaysapp.daemon" --entitlements AlwaysApp.entitlements AlwaysApp.app
+codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "com.always" --entitlements Always.entitlements Always.app
 
 # Notarization (only if using proper Apple Developer identity, not ad-hoc)
 if [ "$SIGN_IDENTITY" != "-" ] && [ -n "$ALWAYS_NOTARIZE_TEAM_ID" ]; then
     echo "Notarizing app..."
     
     # Create a zip file for notarization
-    ZIP_PATH="AlwaysApp.zip"
-    ditto -c -k --keepParent "AlwaysApp.app" "$ZIP_PATH"
+    ZIP_PATH="Always.zip"
+    ditto -c -k --keepParent "Always.app" "$ZIP_PATH"
     
     # Submit for notarization
     NOTARIZATION_OUTPUT=$(xcrun notarytool submit "$ZIP_PATH" \
         --team-id "$ALWAYS_NOTARIZE_TEAM_ID" \
-        --apple-id "com.alwaysapp.daemon" \
+        --apple-id "com.always" \
         --wait \
         --output-format json)
     
@@ -121,11 +121,11 @@ if [ "$SIGN_IDENTITY" != "-" ] && [ -n "$ALWAYS_NOTARIZE_TEAM_ID" ]; then
         echo "✓ Notarization submitted (ID: $NOTARIZATION_ID)"
         
         # Staple the notarization ticket
-        xcrun stapler staple "AlwaysApp.app"
+        xcrun stapler staple "Always.app"
         echo "✓ Notarization ticket stapled"
         
         # Verify notarization
-        xcrun stapler validate "AlwaysApp.app"
+        xcrun stapler validate "Always.app"
         echo "✓ Notarization validated"
     else
         echo "⚠️  Notarization failed or skipped"
@@ -138,8 +138,8 @@ else
 fi
 
 echo "Deploying to /Applications..."
-rm -rf /Applications/AlwaysApp.app
-cp -r AlwaysApp.app /Applications/
-echo "✓ Deployed to /Applications/AlwaysApp.app"
+rm -rf /Applications/Always.app
+cp -r Always.app /Applications/
+echo "✓ Deployed to /Applications/Always.app"
 
-echo "App bundle ready. Run with: open -a AlwaysApp"
+echo "App bundle ready. Run with: open -a Always"

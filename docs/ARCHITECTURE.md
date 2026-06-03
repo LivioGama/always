@@ -5,7 +5,7 @@
 ```
 ┌──────────────────────────┐         UDS                ┌────────────────────────┐
 │  Rust daemon (`always`)  │  ──── always.sock ────►    │  Swift menu-bar app    │
-│  (CLI binary)            │  ◄──── commands ─────      │  (AlwaysApp.app)       │
+│  (CLI binary)            │  ◄──── commands ─────      │  (Always.app)          │
 └──────────────────────────┘                            └────────────────────────┘
         │                                                       │
         ▼                                                       ▼
@@ -28,7 +28,7 @@ enum); app → daemon uses `DaemonCommand`. The first frame on every
 connection is `Hello { version: u32 }` so a stale Mac app refuses to
 talk to a daemon it was not built against. See
 [`src/always/event.rs`](../src/always/event.rs) and
-[`AlwaysApp/Sources/AlwaysApp/Services/UDSClient.swift`](../AlwaysApp/Sources/AlwaysApp/Services/UDSClient.swift).
+[`Always/Sources/Always/Services/UDSClient.swift`](../Always/Sources/Always/Services/UDSClient.swift).
 
 ```
 Daemon                                 Mac app (UDSClient)
@@ -53,7 +53,7 @@ Daemon                                 Mac app (UDSClient)
 
 Bumping `PROTOCOL_VERSION` in `event.rs` requires bumping
 `UDS_PROTOCOL_VERSION` in `UDSClient.swift` in the same PR; the
-`tests/uds_protocol_test.rs` and `AlwaysAppTests::testProtocolVersionMatchesDaemon`
+`tests/uds_protocol_test.rs` and `AlwaysTests::testProtocolVersionMatchesDaemon`
 tests pin both.
 
 ## Resilience contract
@@ -92,7 +92,7 @@ CI builds all three on every PR.
 - `src/always/config.rs` — Configuration management
 - `src/always/event_loop.rs` — Main daemon processing loop
 - `src/always/uds_server.rs` — Unix domain socket event/control stream for the UI
-- `AlwaysApp/Sources/AlwaysApp/` — macOS menu bar app, onboarding, settings, and overlay UI
+- `Always/Sources/Always/` — macOS menu bar app, onboarding, settings, and overlay UI
 
 ## Performance Optimizations
 

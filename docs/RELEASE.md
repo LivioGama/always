@@ -36,7 +36,7 @@ secrets.
 
 3. **CI runs `release.yml` automatically.** It:
    * Builds a universal-binary daemon (`aarch64` + `x86_64` via `lipo`).
-   * Codesigns + notarizes the Swift app via `AlwaysApp/build.sh`.
+   * Codesigns + notarizes the Swift app via `Always/build.sh`.
    * Builds a DMG with a `/Applications` symlink.
    * Generates a CycloneDX SBOM.
    * Signs the DMG with `cosign` (keyless OIDC).
@@ -78,7 +78,7 @@ The Sparkle update feed is signed with an EdDSA private key kept in the
 1. Generate a fresh keypair with `bin/sparkle-generate_keys` from the
    Sparkle distribution.
 2. Update `SPARKLE_ED_PRIVATE_KEY` in repo secrets.
-3. Update the `SUPublicEDKey` value in `AlwaysApp/Sources/AlwaysApp/Info.plist`.
+3. Update the `SUPublicEDKey` value in `Always/Info.plist`.
 4. Cut a release; existing installs will refuse the new appcast (the
    stored public key won't match the new signature) and prompt the user
    to download the new release manually. Plan rotations alongside major
@@ -92,7 +92,7 @@ but the most useful manual validation is:
 ```bash
 # Drive the existing build script with notarization disabled to catch
 # pure build failures.
-ALWAYS_BUILD_PROFILE=release ./AlwaysApp/build.sh
+ALWAYS_BUILD_PROFILE=release ./Always/build.sh
 
 # Build the Linux artifact:
 docker build -t always:linux -f Dockerfile .

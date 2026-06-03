@@ -706,7 +706,7 @@ class StatusOverlayController {
         // Send toggle-pause command to resume (unpause) the daemon
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/Applications/AlwaysApp.app/Contents/MacOS/always")
+            task.executableURL = URL(fileURLWithPath: "/Applications/Always.app/Contents/MacOS/always")
             task.arguments = ["toggle-pause"]
             do {
                 try task.run()
@@ -741,7 +741,7 @@ class StatusOverlayController {
         idleResumeWindow?.hide()
     }
 
-    /// Internal so `@testable import AlwaysApp` can verify flash protection
+    /// Internal so `@testable import Always` can verify flash protection
     /// (a flash must outlive subsequent `show(state:)` calls during its
     /// duration). Outside of tests this is an implementation detail.
     func isFlashActive() -> Bool {

@@ -18,7 +18,7 @@ Thank you for your interest in contributing to Always! This document provides gu
 cargo build --release
 
 # Build the Swift menu bar app
-cd AlwaysApp
+cd Always
 swift build
 ```
 
@@ -68,7 +68,7 @@ cargo test
 
 ```
 .
-├── AlwaysApp/              # SwiftUI menu bar application
+├── Always/                 # SwiftUI menu bar application
 │   ├── Sources/
 │   └── Package.swift
 ├── src/
