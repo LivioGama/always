@@ -24,6 +24,9 @@ class StateMonitor: ObservableObject {
     /// stay visible between phrases — without this, every `transcriptFinal`
     /// would hide the overlay until the user spoke again.
     @Published var isListeningActive: Bool = false
+    /// Most recent speculative (streaming) transcript preview. Set when
+    /// a TranscriptChunk arrives; cleared when a new utterance starts.
+    @Published var partialTranscript: String = ""
     /// Connection state to daemon. UI can show "Reconnecting…" if degraded.
     @Published var isDaemonConnected: Bool = false
     @Published var isDaemonDegraded: Bool = false
@@ -39,6 +42,10 @@ class StateMonitor: ObservableObject {
     private let logger = Logger(subsystem: "com.always.app", category: "state-monitor")
     private var respawnInFlight = false
     private var isBootstrapping = false
+    /// True for ~300ms after receiving a `Hello` event — suppresses
+    /// overlay flashes for initial-state events that the daemon sends
+    /// immediately after every (re)connection (AutoEnterEnabled, etc.).
+    private var isInitialSync = false
 
     /// Diagnostic logger — goes only to `os.Logger`. The previous
     /// implementation also wrote `/tmp/statemonitor.log`; that file
@@ -328,6 +335,14 @@ class StateMonitor: ObservableObject {
 
     private func handleDaemonEvent(_ event: DaemonEvent) {
         switch event.type {
+        case .hello:
+            // Daemon sends a batch of current-state events immediately after Hello.
+            // Suppress overlay flashes during this ~300ms window so reconnecting
+            // doesn't pop "Auto-Enter On" / "Paused" badges at the user.
+            isInitialSync = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.isInitialSync = false
+            }
         case .paused:
             let changed = !isPaused
             isPaused = true
@@ -350,13 +365,13 @@ class StateMonitor: ObservableObject {
         case .autoEnterEnabled:
             let changed = !isAutoEnter
             isAutoEnter = true
-            if changed {
+            if changed && !isInitialSync {
                 StatusOverlayController.shared.flash(state: .autoEnterOn)
             }
         case .autoEnterDisabled:
             let changed = isAutoEnter
             isAutoEnter = false
-            if changed {
+            if changed && !isInitialSync {
                 StatusOverlayController.shared.flash(state: .autoEnterOff)
             }
         case .listeningStarted:
@@ -367,9 +382,15 @@ class StateMonitor: ObservableObject {
             isVoiceActivity = false
         case .transcribingStarted:
             isTranscribing = true
+            partialTranscript = ""   // reset preview for new utterance
             StatusOverlayController.shared.show(state: .transcribing)
         case .transcribingStopped:
             isTranscribing = false
+        case .transcriptChunk:
+            // Speculative transcription result — update the streaming preview.
+            if let text = event.data?["text"], !text.isEmpty {
+                partialTranscript = text
+            }
         case .transcriptFinal:
             // The phrase is fully done. Force-clear the ongoing state
             // so the "Listening" overlay disappears immediately —
@@ -377,6 +398,7 @@ class StateMonitor: ObservableObject {
             // residual room noise.
             isTranscribing = false
             isVoiceActivity = false
+            partialTranscript = ""
         case .voiceActivityDetected:
             isVoiceActivity = true
             showOngoingOverlayIfNeeded()
@@ -408,6 +430,10 @@ class StateMonitor: ObservableObject {
                     duration: 2.5
                 )
             }
+        case .grammarCorrected:
+            // Async LLM grammar patch replaced the pasted text — flash a
+            // brief confirmation so the user knows their text was silently updated.
+            StatusOverlayController.shared.flash(state: .grammarCorrected, duration: 1.5)
         case .correctionCaptureResult:
             // Summary outcome of a ⌃⌥X press. The "applied" case
             // is already covered by per-pair `.correctionLogged`

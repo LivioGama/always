@@ -48,6 +48,8 @@ struct Config: Codable {
     var idlePauseSecs: Int
     /// Action on idle timeout: "pause" or "pause_and_mute".
     var idlePauseAction: String
+    /// Language code for transcription ("auto", "en", "fr", etc.) or nil if not set.
+    var lang: String?
 
     // Defaults match `SensitivityPreset::Normal` and the Rust
     // `AlwaysConfig::default()` values.
@@ -67,7 +69,8 @@ struct Config: Codable {
         postprocessEnabled: true,
         perAppSettingsJson: nil,
         idlePauseSecs: 600,
-        idlePauseAction: "pause"
+        idlePauseAction: "pause",
+        lang: nil
     )
 
     static func fromCLI(output: String) -> Config? {
@@ -138,6 +141,8 @@ struct Config: Codable {
                     if value == "pause" || value == "pause_and_mute" {
                         config.idlePauseAction = value
                     }
+                case "lang":
+                    config.lang = value.isEmpty || value.contains("(not set)") ? nil : value
                 default:
                     // Surface drift: if the CLI emits a new key the GUI
                     // doesn't bind, log it once per parse so a daemon

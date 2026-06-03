@@ -74,6 +74,7 @@ pub struct ModelInfo {
     pub accuracy_score: f32,
     pub speed_score: f32,
     pub supports_translation: bool,
+    pub supports_streaming: bool,
     pub is_recommended: bool,
     pub supported_languages: Vec<String>,
     pub supports_language_selection: bool,
@@ -905,6 +906,7 @@ fn discover_custom_whisper_models(
                 accuracy_score: 0.0,
                 speed_score: 0.0,
                 supports_translation: false,
+                supports_streaming: false,
                 is_recommended: false,
                 supported_languages: vec![],
                 supports_language_selection: true,
@@ -950,6 +952,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             accuracy_score: 0.60,
             speed_score: 0.85,
             supports_translation: true,
+            supports_streaming: false,
             is_recommended: false,
             supported_languages: whisper_languages.clone(),
             supports_language_selection: true,
@@ -975,6 +978,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             accuracy_score: 0.75,
             speed_score: 0.60,
             supports_translation: true,
+            supports_streaming: false,
             is_recommended: false,
             supported_languages: whisper_languages.clone(),
             supports_language_selection: true,
@@ -987,7 +991,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
         ModelInfo {
             id: "turbo".into(),
             name: "Whisper Turbo".into(),
-            description: "Balanced accuracy and speed.".into(),
+            description: "Distilled large-v3: near-large accuracy at faster speed. Multilingual, supports translation.".into(),
             filename: "ggml-large-v3-turbo.bin".into(),
             url: Some("https://blob.handy.computer/ggml-large-v3-turbo.bin".into()),
             sha256: Some("1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69".into()),
@@ -999,7 +1003,8 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             engine_type: EngineType::Whisper,
             accuracy_score: 0.80,
             speed_score: 0.40,
-            supports_translation: false,
+            supports_translation: true,
+            supports_streaming: false,
             is_recommended: false,
             supported_languages: whisper_languages.clone(),
             supports_language_selection: true,
@@ -1025,6 +1030,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             accuracy_score: 0.85,
             speed_score: 0.30,
             supports_translation: true,
+            supports_streaming: false,
             is_recommended: false,
             supported_languages: whisper_languages.clone(),
             supports_language_selection: true,
@@ -1037,7 +1043,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
         ModelInfo {
             id: "breeze-asr".into(),
             name: "Breeze ASR".into(),
-            description: "Optimized for Taiwanese Mandarin. Code-switching support.".into(),
+            description: "Optimized for Taiwanese Mandarin and Chinese code-switching. Other languages technically accepted but quality is not guaranteed.".into(),
             filename: "breeze-asr-q5_k.bin".into(),
             url: Some("https://blob.handy.computer/breeze-asr-q5_k.bin".into()),
             sha256: Some("8efbf0ce8a3f50fe332b7617da787fb81354b358c288b008d3bdef8359df64c6".into()),
@@ -1050,8 +1056,9 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             accuracy_score: 0.85,
             speed_score: 0.35,
             supports_translation: false,
+            supports_streaming: false,
             is_recommended: false,
-            supported_languages: whisper_languages,
+            supported_languages: vec!["zh".into(), "zh-Hans".into(), "zh-Hant".into(), "en".into()],
             supports_language_selection: true,
             is_custom: false,
         },
@@ -1076,26 +1083,28 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             accuracy_score: 0.85,
             speed_score: 0.85,
             supports_translation: false,
-            is_recommended: false,
+            supports_streaming: false,
+            // Recommended over V3 in THIS app: transcribe-rs treats both as
+            // English-only, so V3's multilingual edge (its whole reason to be
+            // preferred upstream in Handy) doesn't function here — leaving V2
+            // strictly better for English (higher accuracy, same speed/size).
+            is_recommended: true,
             supported_languages: vec!["en".to_string()],
             supports_language_selection: false,
             is_custom: false,
         },
     );
 
-    let parakeet_v3_languages: Vec<String> = [
-        "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt",
-        "mt", "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect();
+    // NOTE: NVIDIA Parakeet-TDT v3 model weights support 25 European languages,
+    // but transcribe-rs treats the Parakeet engine as English-only (ParakeetParams.language
+    // is marked "currently unused" and CAPABILITIES.languages = &["en"]).
+    // Update this entry when transcribe-rs wires up multilingual Parakeet support.
     map.insert(
         "parakeet-tdt-0.6b-v3".into(),
         ModelInfo {
             id: "parakeet-tdt-0.6b-v3".into(),
             name: "Parakeet V3".into(),
-            description: "Fast and accurate. Supports 25 European languages.".into(),
+            description: "English only here (multilingual pending in transcribe-rs). For English, Parakeet V2 is more accurate — prefer it.".into(),
             filename: "parakeet-tdt-0.6b-v3-int8".into(),
             url: Some("https://blob.handy.computer/parakeet-v3-int8.tar.gz".into()),
             sha256: Some("43d37191602727524a7d8c6da0eef11c4ba24320f5b4730f1a2497befc2efa77".into()),
@@ -1108,8 +1117,11 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             accuracy_score: 0.80,
             speed_score: 0.85,
             supports_translation: false,
-            is_recommended: true,
-            supported_languages: parakeet_v3_languages,
+            supports_streaming: false,
+            // Not recommended in THIS app — its multilingual advantage isn't
+            // wired up in transcribe-rs, so it's just a lower-accuracy V2 here.
+            is_recommended: false,
+            supported_languages: vec!["en".to_string()],
             supports_language_selection: false,
             is_custom: false,
         },
@@ -1133,6 +1145,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             accuracy_score: 0.70,
             speed_score: 0.90,
             supports_translation: false,
+            supports_streaming: false,
             is_recommended: false,
             supported_languages: vec!["en".into()],
             supports_language_selection: false,
@@ -1157,6 +1170,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             accuracy_score: 0.55,
             speed_score: 0.95,
             supports_translation: false,
+            supports_streaming: true,
             is_recommended: false,
             supported_languages: vec!["en".into()],
             supports_language_selection: false,
@@ -1181,6 +1195,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             accuracy_score: 0.65,
             speed_score: 0.90,
             supports_translation: false,
+            supports_streaming: true,
             is_recommended: false,
             supported_languages: vec!["en".into()],
             supports_language_selection: false,
@@ -1205,6 +1220,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             accuracy_score: 0.75,
             speed_score: 0.80,
             supports_translation: false,
+            supports_streaming: true,
             is_recommended: false,
             supported_languages: vec!["en".into()],
             supports_language_selection: false,
@@ -1212,7 +1228,9 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
         },
     );
 
-    let sense_voice_languages: Vec<String> = ["zh", "zh-Hans", "zh-Hant", "en", "yue", "ja", "ko"]
+    // zh-Hans/zh-Hant are NOT in the engine's lang2id map — selecting them causes
+    // a TranscribeError::Config("Unknown language") at runtime. Use plain "zh".
+    let sense_voice_languages: Vec<String> = ["zh", "en", "yue", "ja", "ko"]
         .into_iter()
         .map(String::from)
         .collect();
@@ -1234,6 +1252,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             accuracy_score: 0.65,
             speed_score: 0.95,
             supports_translation: false,
+            supports_streaming: false,
             is_recommended: false,
             supported_languages: sense_voice_languages,
             supports_language_selection: true,
@@ -1259,6 +1278,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             accuracy_score: 0.85,
             speed_score: 0.75,
             supports_translation: false,
+            supports_streaming: false,
             is_recommended: false,
             supported_languages: vec!["ru".into()],
             supports_language_selection: false,
@@ -1289,6 +1309,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             accuracy_score: 0.75,
             speed_score: 0.85,
             supports_translation: true,
+            supports_streaming: false,
             is_recommended: false,
             supported_languages: canary_flash_languages,
             supports_language_selection: true,
@@ -1322,6 +1343,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             accuracy_score: 0.85,
             speed_score: 0.70,
             supports_translation: true,
+            supports_streaming: false,
             is_recommended: false,
             supported_languages: canary_1b_languages,
             supports_language_selection: true,
@@ -1329,9 +1351,10 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
         },
     );
 
+    // zh-Hans/zh-Hant are normalised to "zh" by the engine's build_prompt_ids —
+    // they are not distinct capabilities. List only what CAPABILITIES declares.
     let cohere_languages: Vec<String> = [
-        "en", "fr", "de", "it", "es", "pt", "el", "nl", "pl", "zh", "zh-Hans", "zh-Hant", "ja",
-        "ko", "vi", "ar",
+        "en", "fr", "de", "it", "es", "pt", "el", "nl", "pl", "zh", "ja", "ko", "vi", "ar",
     ]
     .into_iter()
     .map(String::from)
@@ -1354,6 +1377,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             accuracy_score: 0.90,
             speed_score: 0.60,
             supports_translation: false,
+            supports_streaming: false,
             is_recommended: false,
             supported_languages: cohere_languages,
             supports_language_selection: true,

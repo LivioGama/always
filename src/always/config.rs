@@ -311,6 +311,13 @@ impl AlwaysConfig {
             .unwrap_or_default();
         let prefs = load_preferences()?;
         let transcriber_backend = resolve_transcriber_backend(&prefs);
+        // CLI default "auto" means unset — honor the user's saved DB pref.
+        // Explicit CLI override (e.g. `always run --lang fr`) always wins.
+        let lang = if lang == "auto" || lang.is_empty() {
+            prefs.lang.clone().unwrap_or_else(|| "auto".to_string())
+        } else {
+            lang
+        };
         // CLI flag wins when explicitly set; otherwise read the user's
         // saved pref; final fallback to the canonical default (true).
         // This is the single auto-enter source-of-truth resolution —

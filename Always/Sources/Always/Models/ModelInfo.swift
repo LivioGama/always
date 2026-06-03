@@ -47,6 +47,7 @@ struct ModelInfo: Codable, Identifiable, Equatable, Hashable {
     let accuracy_score: Float
     let speed_score: Float
     let supports_translation: Bool
+    let supports_streaming: Bool
     let is_recommended: Bool
     let supported_languages: [String]
     let supports_language_selection: Bool
@@ -83,6 +84,10 @@ struct ModelInfo: Codable, Identifiable, Equatable, Hashable {
 
     var translateLabel: String? {
         supports_translation ? "Translate to English" : nil
+    }
+
+    var streamingLabel: String? {
+        supports_streaming ? "Live streaming" : nil
     }
 }
 

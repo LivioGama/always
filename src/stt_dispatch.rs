@@ -178,7 +178,13 @@ fn build_groq(cfg: &AlwaysConfig) -> Result<Arc<dyn Transcriber>> {
                  select a downloaded local model in Settings → Models."
             )
         })?;
-    Ok(Arc::new(GroqTranscriber::new(key)))
+    let t = Arc::new(GroqTranscriber::new(key));
+    tracing::info!(
+        backend = "groq",
+        model = crate::stt::GROQ_MODEL_NAME,
+        "transcriber_ready"
+    );
+    Ok(t)
 }
 
 #[cfg(feature = "local-stt")]
@@ -203,9 +209,10 @@ fn build_local(
     let t = LocalTranscriber::load(info.engine_type, &path, lang)
         .with_context(|| format!("loading local engine for model {}", info.id))?;
     tracing::info!(
+        backend = "local",
         model = %info.id,
         engine = ?info.engine_type,
-        "local_transcriber_ready"
+        "transcriber_ready"
     );
     Ok(Arc::new(t))
 }

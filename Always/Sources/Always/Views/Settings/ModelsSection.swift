@@ -1,5 +1,18 @@
 import SwiftUI
 
+private enum LanguageFilter: String, CaseIterable {
+    case all = "All"
+    case englishOnly = "English"
+    case multilingual = "Multilingual"
+}
+
+private enum SortOrder: String, CaseIterable {
+    case `default` = "Default"
+    case best = "Best"
+    case accuracy = "Accuracy"
+    case speed = "Speed"
+}
+
 /// "Transcription Models" section — Handy-style catalog of local
 /// engines plus the always-available remote Groq backend.
 ///
@@ -12,31 +25,118 @@ import SwiftUI
 struct ModelsSection: View {
     @ObservedObject private var models: ModelManagerClient = .shared
 
+    @State private var languageFilter: LanguageFilter = .all
+    @State private var translationOnly = false
+    @State private var fastOnly = false
+    @State private var streamingOnly = false
+    @State private var sortOrder: SortOrder = .default
+
+    private var filtersActive: Bool {
+        languageFilter != .all || translationOnly || fastOnly || streamingOnly
+    }
+
+    private func filtered(_ list: [ModelInfo]) -> [ModelInfo] {
+        let filtered = list.filter { model in
+            switch languageFilter {
+            case .all: break
+            case .englishOnly: if model.supportsMultipleLanguages { return false }
+            case .multilingual: if !model.supportsMultipleLanguages { return false }
+            }
+            if translationOnly && !model.supports_translation { return false }
+            if fastOnly && model.speed_score < 0.75 { return false }
+            if streamingOnly && !model.supports_streaming { return false }
+            return true
+        }
+        switch sortOrder {
+        case .default: return filtered
+        case .best: return filtered.sorted { ($0.accuracy_score + $0.speed_score) > ($1.accuracy_score + $1.speed_score) }
+        case .accuracy: return filtered.sorted { $0.accuracy_score > $1.accuracy_score }
+        case .speed: return filtered.sorted { $0.speed_score > $1.speed_score }
+        }
+    }
+
+    private var filterBar: some View {
+        HStack(spacing: 8) {
+            Picker("", selection: $languageFilter) {
+                ForEach(LanguageFilter.allCases, id: \.self) { f in
+                    Text(f.rawValue).tag(f)
+                }
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+
+            Divider().frame(height: 16)
+
+            Toggle("Translation", isOn: $translationOnly)
+                .toggleStyle(.button)
+                .controlSize(.small)
+
+            Toggle("Fast", isOn: $fastOnly)
+                .toggleStyle(.button)
+                .controlSize(.small)
+
+            Toggle("Streaming", isOn: $streamingOnly)
+                .toggleStyle(.button)
+                .controlSize(.small)
+
+            Divider().frame(height: 16)
+
+            Picker("Sort", selection: $sortOrder) {
+                ForEach(SortOrder.allCases, id: \.self) { o in
+                    Text(o == .default ? "Sort" : "↓ \(o.rawValue)").tag(o)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .controlSize(.small)
+            .foregroundStyle(sortOrder == .default ? .secondary : .primary)
+
+            if filtersActive || sortOrder != .default {
+                Spacer()
+                Button("Clear") {
+                    languageFilter = .all
+                    translationOnly = false
+                    fastOnly = false
+                    streamingOnly = false
+                    sortOrder = .default
+                }
+                .buttonStyle(.plain)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionHeader
 
             backendBar
 
-            if !models.downloadedModels.isEmpty {
+            filterBar
+
+            let downloaded = filtered(models.downloadedModels)
+            let available = filtered(models.availableModels)
+
+            if !downloaded.isEmpty {
                 Text("Downloaded Models")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.top, 4)
                 VStack(spacing: 8) {
-                    ForEach(models.downloadedModels) { model in
+                    ForEach(downloaded) { model in
                         ModelRow(model: model, isDownloaded: true)
                     }
                 }
             }
 
-            if !models.availableModels.isEmpty {
+            if !available.isEmpty {
                 Text("Available to Download")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.top, 8)
                 VStack(spacing: 8) {
-                    ForEach(models.availableModels) { model in
+                    ForEach(available) { model in
                         ModelRow(model: model, isDownloaded: false)
                     }
                 }
@@ -51,6 +151,11 @@ struct ModelsSection: View {
                         .foregroundStyle(.secondary)
                 }
                 .padding(.vertical, 6)
+            } else if filtersActive && downloaded.isEmpty && available.isEmpty {
+                Text("No models match the current filters.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 6)
             }
         }
         .onAppear { models.requestModelsList() }
@@ -161,6 +266,11 @@ private struct ModelRow: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+                if let streaming = model.streamingLabel {
+                    Label(streaming, systemImage: "dot.radiowaves.left.and.right")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 if isDownloaded {
                     actionsForDownloaded
@@ -176,6 +286,8 @@ private struct ModelRow: View {
                 infoLine(systemImage: "shield.checkered", text: "Verifying checksum…")
             } else if manager.extracting.contains(model.id) {
                 infoLine(systemImage: "shippingbox", text: "Extracting archive…")
+            } else if manager.installing.contains(model.id) {
+                infoLine(systemImage: "arrow.down.app.fill", text: "Installing…")
             } else if let error = manager.errors[model.id] {
                 infoLine(
                     systemImage: "exclamationmark.triangle.fill",
@@ -197,11 +309,27 @@ private struct ModelRow: View {
 
     private var actionsForDownloaded: some View {
         HStack(spacing: 8) {
-            if !isActive {
-                Button("Use") {
-                    manager.setActive(backend: "local:\(model.id)")
+            if isActive {
+                Text("Active")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                let isLoading = manager.loadingBackend == "local:\(model.id)"
+                if isLoading {
+                    HStack(spacing: 4) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Loading…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Button("Use") {
+                        manager.setActive(backend: "local:\(model.id)")
+                    }
+                    .controlSize(.small)
+                    .disabled(manager.loadingBackend != nil)
                 }
-                .controlSize(.small)
             }
             Button(role: .destructive) {
                 manager.delete(model.id)
@@ -209,16 +337,26 @@ private struct ModelRow: View {
                 Image(systemName: "trash")
             }
             .controlSize(.small)
-            .help("Delete \(model.name)")
+            // Can't delete the model you're currently transcribing with —
+            // it would yank the active engine out from under the daemon.
+            // Switch to another model (or Groq) first.
+            .disabled(isActive || manager.loadingBackend != nil)
+            .help(isActive
+                ? "Switch to another model before deleting \(model.name)"
+                : "Delete \(model.name)")
         }
     }
 
     @ViewBuilder
     private var actionsForAvailable: some View {
+        let isInstalling = manager.installing.contains(model.id)
         let inFlight = manager.downloadProgress[model.id] != nil
             || manager.verifying.contains(model.id)
             || manager.extracting.contains(model.id)
-        if inFlight {
+        if isInstalling {
+            ProgressView()
+                .controlSize(.small)
+        } else if inFlight {
             Button("Cancel") { manager.cancelDownload(model.id) }
                 .controlSize(.small)
         } else {

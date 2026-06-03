@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 pub const SUPPORTED_LANGS: &[&str] = &[
-    "en", "fr", "es", "de", "it", "pt", "zh", "ja", "ko", "ru", "ar", "nl",
+    "en", "fr", "es", "de", "it", "pt", "zh", "ja", "ko", "ru", "ar", "nl", "auto",
 ];
 
 pub fn config_dir() -> PathBuf {

@@ -65,6 +65,11 @@ pub enum DaemonEvent {
     TranscriptFinal {
         text: String,
     },
+    /// Grammar correction was applied — carries before/after for overlay feedback
+    GrammarCorrected {
+        before: String,
+        after: String,
+    },
     /// Daemon is paused
     Paused,
     /// Daemon is resumed
@@ -277,6 +282,18 @@ impl DaemonEvent {
             DaemonEvent::TranscriptFinal { text } => {
                 cap_field(text).map(|text| DaemonEvent::TranscriptFinal { text })
             }
+            DaemonEvent::GrammarCorrected { before, after } => {
+                let cb = cap_field(before);
+                let ca = cap_field(after);
+                if cb.is_some() || ca.is_some() {
+                    Some(DaemonEvent::GrammarCorrected {
+                        before: cb.unwrap_or_else(|| before.clone()),
+                        after: ca.unwrap_or_else(|| after.clone()),
+                    })
+                } else {
+                    None
+                }
+            }
             DaemonEvent::TranscriptionFiltered { reason } => {
                 cap_field(reason).map(|reason| DaemonEvent::TranscriptionFiltered { reason })
             }
@@ -401,6 +418,14 @@ pub enum DaemonCommand {
     SetActiveTranscriber {
         backend: String,
     },
+    /// Change the transcription language live. `lang` is an ISO 639-1 code
+    /// or "auto". Daemon updates `cfg.lang`, persists it, and rebuilds the
+    /// active transcriber so the change takes effect without a restart.
+    /// Critical for engines like Canary that bake the language into the
+    /// decode prompt (a stale language silently mistranscribes).
+    SetLanguage {
+        lang: String,
+    },
 }
 
 impl DaemonCommand {
@@ -462,9 +487,19 @@ impl EventBroadcaster {
         self.send(DaemonEvent::TranscribingStopped);
     }
 
+    /// Send partial transcript chunk (speculative / streaming preview)
+    pub fn transcript_chunk(&self, text: String) {
+        self.send(DaemonEvent::TranscriptChunk { text });
+    }
+
     /// Send transcript final event
     pub fn transcript_final(&self, text: String) {
         self.send(DaemonEvent::TranscriptFinal { text });
+    }
+
+    /// Notify the UI that async grammar correction replaced the pasted text
+    pub fn grammar_corrected(&self, before: String, after: String) {
+        self.send(DaemonEvent::GrammarCorrected { before, after });
     }
 
     /// Send paused event

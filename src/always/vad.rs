@@ -501,6 +501,15 @@ fn record_with_local_vad(
                         tracing::error!(panic = %msg, "speculation transcription panicked");
                         Err(anyhow::anyhow!("speculation transcription panicked: {msg}"))
                     });
+                    // Emit the speculative text as a TranscriptChunk so the
+                    // overlay can show a streaming preview while we wait for
+                    // final silence. If the user keeps talking, the final
+                    // transcription will supersede this.
+                    if let Ok(ref r) = outcome {
+                        if !r.text.is_empty() {
+                            event::global_broadcaster().transcript_chunk(r.text.clone());
+                        }
+                    }
                     slot.store_if_current(captured_gen, outcome);
                 });
             }
