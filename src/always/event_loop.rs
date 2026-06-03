@@ -1,13 +1,30 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use parking_lot::RwLock;
 use tokio::runtime::{Handle, Runtime};
 
 use crate::always::log::{Event, Logger};
+use crate::always::speech_action::{SpeechAction, classify_transcription, merge_dictation_with};
 use crate::always::{
     AlwaysConfig, auto_enter_countdown, clipboard_watcher, daemon, event, filter, idle_watcher,
     keyboard, mic_monitor, paste, pause, per_app, uds_server, vad,
 };
+use crate::managers::model_registry::ModelRegistry;
+use crate::stt::Transcriber;
+use crate::stt_dispatch::{TranscriberBackendChoice, build_transcriber};
+
+/// Active [`Transcriber`] shared between the main loop, the UDS server
+/// (which swaps it when the user picks a different model in Settings),
+/// and any future hot-reload sources. `RwLock<Arc<dyn Transcriber>>`
+/// gives us cheap cloned reads (one Arc bump per utterance) and a
+/// trivial swap on user model change — no need to restart the daemon.
+pub type ActiveTranscriber = Arc<RwLock<Arc<dyn Transcriber>>>;
+
+/// Active [`AlwaysConfig`] shared between the main loop and the UDS
+/// server so Settings changes apply without a daemon restart.
+pub type ActiveConfig = Arc<RwLock<AlwaysConfig>>;
 
 pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     let _pid = daemon::PidGuard::install()?;
@@ -22,9 +39,24 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     // the pid + socket files and calls `std::process::exit(0)`.
     daemon::install_signal_handlers(rt.handle());
 
-    // Pre-warm TLS+HTTP/2 connection to Groq API in background using existing runtime
+    // Model registry (catalog + downloader). Loaded once at startup;
+    // shared by reference with the UDS server. Cloning is cheap — the
+    // struct holds Arcs for the inner state.
+    let registry = ModelRegistry::new().context("init model registry")?;
+
+    // Build the initial transcriber based on the resolved backend.
+    // Wrapped in RwLock so the UDS server can swap it when the user
+    // selects a different model in Settings without a daemon restart.
+    let initial_transcriber =
+        build_transcriber(cfg, &registry).context("construct initial transcriber")?;
+    let active: ActiveTranscriber = Arc::new(RwLock::new(initial_transcriber));
+
+    let active_cfg: ActiveConfig = Arc::new(RwLock::new(cfg.clone()));
+
+    // Pre-warm Groq TLS only when the active backend actually uses it.
+    if matches!(cfg.transcriber_backend, TranscriberBackendChoice::Groq)
+        && let Some(api_key) = cfg.groq_stt_api_key.clone()
     {
-        let api_key = cfg.groq_stt_api_key.clone();
         rt.spawn(async move {
             let client = crate::http_client::async_client();
             let _ = client
@@ -41,9 +73,16 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     // Start keyboard listener for shortcuts
     keyboard::start_keyboard_listener()?;
 
-    // Start UDS server in background and track the task
-    let _uds_handle = rt.spawn(async {
-        if let Err(e) = uds_server::start_server().await {
+    // Start UDS server in background and track the task. Hands it a
+    // clone of the registry + active-transcriber lock so the
+    // `models.*` commands can mutate them.
+    let cfg_for_uds = Arc::clone(&active_cfg);
+    let registry_for_uds = registry.clone();
+    let active_for_uds = Arc::clone(&active);
+    let _uds_handle = rt.spawn(async move {
+        if let Err(e) =
+            uds_server::start_server(registry_for_uds, active_for_uds, cfg_for_uds).await
+        {
             tracing::error!(error = %e, "UDS server error");
         }
     });
@@ -84,12 +123,18 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     }
 
     let mut last_process = Instant::now() - Duration::from_secs(10);
+    let mut last_dup_check = Instant::now();
 
     // Initialize microphone monitor for auto-pause functionality
     let mut mic_monitor = mic_monitor::MicrophoneMonitor::new();
     let mut auto_paused_for_mic = false;
 
     loop {
+        if last_dup_check.elapsed() >= Duration::from_secs(30) {
+            last_dup_check = Instant::now();
+            daemon::reconcile_duplicate_processes();
+        }
+
         // Check if other apps are using the microphone
         match mic_monitor.is_microphone_in_use() {
             Ok(true) if !auto_paused_for_mic => {
@@ -150,7 +195,23 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         }
 
         if pause::is_paused() {
-            // When paused, sleep for a short time to avoid busy waiting
+            // Wake-on-voice while idle-paused: keep the mic hot enough to
+            // detect speech without running the full VAD/transcribe loop.
+            if pause::is_idle_auto_paused()
+                && !pause::is_master_paused()
+                && !auto_paused_for_mic
+                && vad::poll_speech_energy(&active_cfg.read()).unwrap_or(false)
+            {
+                pause::set_idle_auto_paused(false);
+                pause::mark_voice_seen();
+                let (effective, changed) = pause::recompute_effective();
+                event::global_broadcaster().idle_auto_resumed();
+                if changed && !effective {
+                    event::global_broadcaster().resumed();
+                }
+                tracing::info!(effective, changed, "idle_wake_on_voice");
+                continue;
+            }
             std::thread::sleep(Duration::from_millis(100));
             continue;
         }
@@ -158,7 +219,17 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         // Note: Removed auto_enter config reload that was causing race conditions
         // Auto-enter state is now managed consistently through keyboard shortcuts and settings UI
 
-        if let Err(e) = process_one(cfg, &mut log, &mut last_process, rt.handle()) {
+        // Take a cheap snapshot of the active transcriber per utterance —
+        // if the user swaps models mid-session, the next loop iteration
+        // picks up the new backend automatically.
+        let transcriber_snapshot = active.read().clone();
+        if let Err(e) = process_one(
+            &active_cfg,
+            &mut log,
+            &mut last_process,
+            rt.handle(),
+            &transcriber_snapshot,
+        ) {
             tracing::error!(error = %e, "voice_processing_error");
             log.write(Event::Error {
                 message: &format!("Voice processing error: {:#}", e),
@@ -170,18 +241,22 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
 }
 
 fn process_one(
-    cfg: &AlwaysConfig,
+    active_cfg: &ActiveConfig,
     log: &mut Logger,
     last_process: &mut Instant,
     rt: &Handle,
+    transcriber: &Arc<dyn Transcriber>,
 ) -> Result<()> {
-    match vad::record_utterance(cfg, log).context("failed to record/transcribe utterance")? {
+    let cfg = active_cfg.read();
+    match vad::record_utterance(&cfg, log, transcriber)
+        .context("failed to record/transcribe utterance")?
+    {
         vad::RecordResult::Speech {
             text,
             energy,
             transcription,
         } => {
-            handle_speech(cfg, log, &text, energy, &transcription, last_process, rt)?;
+            handle_speech(&cfg, log, &text, energy, &transcription, last_process, rt)?;
         }
         vad::RecordResult::Silence => {
             // Don't log silence events - they're too frequent and not useful
@@ -196,143 +271,6 @@ fn process_one(
         }
     }
     Ok(())
-}
-
-/// Classification of an incoming transcription. Keeping this an enum
-/// instead of the original tangled control flow makes the decision tree
-/// testable in isolation — we can feed in any combination of text +
-/// transcription metadata and assert the outcome without spawning a
-/// daemon, calling Groq, or touching the user's pasteboard.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SpeechAction {
-    /// In cooldown window (anti-double-paste). No-op.
-    InCooldown,
-    /// Hard or AI filter rejected the text. The reason is the human-readable
-    /// label emitted on the UDS stream so the GUI can display it.
-    Rejected { reason: String },
-    /// Whisper hallucination detector rejected the text.
-    Hallucinated { reason: String },
-    /// Accepted — daemon should copy + paste this final text.
-    Paste { text: String },
-}
-
-/// Words that Whisper often capitalizes at sentence start which are
-/// safe to lowercase when appending mid-sentence. Conservative on
-/// purpose — anything not in this set is left as-is so proper nouns
-/// (Kubernetes, John, Berlin) are preserved when starting a continuation.
-///
-/// "I" and its contractions are intentionally absent: they MUST stay
-/// capitalized even mid-sentence.
-const SAFE_LOWERCASE_STARTERS: &[&str] = &[
-    "The", "A", "An", "And", "But", "Or", "So", "Yet", "Nor",
-    "If", "When", "While", "Because", "Since", "Although", "Though",
-    "Then", "Now", "Just", "Also", "Only", "Even", "Still",
-    "We", "You", "They", "He", "She", "It",
-    "This", "That", "These", "Those", "There", "Here",
-    "In", "On", "At", "To", "For", "Of", "With", "Without", "From",
-    "By", "About", "Into", "Onto", "Over", "Under", "Through",
-    "As", "Is", "Are", "Was", "Were", "Will", "Would", "Should",
-    "Could", "Can", "May", "Might", "Must", "Has", "Have", "Had", "Do",
-    "Does", "Did", "Be", "Been", "Being",
-    "Some", "Any", "All", "Most", "Many", "Few", "Each", "Every",
-    "My", "Your", "Our", "Their", "His", "Her", "Its",
-    "So", "Such", "What", "Which", "How", "Why", "Where",
-];
-
-/// Append `addition` to `previous` for the dictation-merge case.
-///
-/// Rules:
-///   - If `previous` already ends with a sentence terminator (`. ! ?`),
-///     the addition starts a new sentence — keep its capitalization.
-///   - Else, attempt to lowercase the first word IF and ONLY IF it's a
-///     known "safe" sentence starter (see `SAFE_LOWERCASE_STARTERS`).
-///     This biases toward preserving proper nouns when in doubt.
-///   - Always insert a single space between the two pieces unless
-///     `previous` already ends with whitespace.
-///
-/// Returns `(joined_full_text, delta_to_paste)`. The delta is what
-/// should be pasted at the cursor; the joined text is what becomes the
-/// new dictation buffer.
-pub fn merge_dictation(previous: &str, addition: &str) -> (String, String) {
-    let addition = addition.trim_start();
-    if addition.is_empty() {
-        return (previous.to_string(), String::new());
-    }
-
-    let previous_trimmed = previous.trim_end();
-    let ends_sentence = previous_trimmed
-        .chars()
-        .last()
-        .map(|c| matches!(c, '.' | '!' | '?'))
-        .unwrap_or(false);
-
-    let adjusted = if ends_sentence {
-        addition.to_string()
-    } else {
-        lowercase_if_safe_starter(addition)
-    };
-
-    let needs_space = !previous.ends_with(char::is_whitespace) && !previous.is_empty();
-    let delta = if needs_space {
-        format!(" {}", adjusted)
-    } else {
-        adjusted.clone()
-    };
-    let joined = format!("{}{}", previous, delta);
-    (joined, delta)
-}
-
-fn lowercase_if_safe_starter(text: &str) -> String {
-    // Split first whitespace-delimited token; preserve trailing exactly.
-    let trimmed = text.trim_start();
-    let first_word_end = trimmed
-        .find(|c: char| c.is_whitespace())
-        .unwrap_or(trimmed.len());
-    let first_word = &trimmed[..first_word_end];
-    let rest = &trimmed[first_word_end..];
-
-    // Strip trailing punctuation for lookup so "And," still matches "And".
-    let lookup = first_word.trim_end_matches(|c: char| !c.is_alphanumeric());
-    if SAFE_LOWERCASE_STARTERS.contains(&lookup) {
-        let mut chars = first_word.chars();
-        if let Some(first_char) = chars.next() {
-            let lowered = first_char.to_lowercase().collect::<String>();
-            return format!("{}{}{}", lowered, chars.as_str(), rest);
-        }
-    }
-    text.to_string()
-}
-
-/// Pure decision function — no I/O, no globals. Takes the raw
-/// transcription and returns what the daemon should do next.
-pub fn classify_transcription(
-    cfg: &AlwaysConfig,
-    text: &str,
-    transcription: &crate::stt::TranscriptionResult,
-    now: Instant,
-    last_process: Instant,
-) -> SpeechAction {
-    if in_cooldown(now, last_process, cfg.cooldown_ms) {
-        return SpeechAction::InCooldown;
-    }
-
-    let filter_result = filter::should_accept_with_reason(text, cfg);
-    if !matches!(filter_result, filter::FilterReason::None) {
-        return SpeechAction::Rejected {
-            reason: filter_result.to_log_string(),
-        };
-    }
-
-    if let Some(reason) = crate::always::hallucination::is_hallucination(transcription) {
-        return SpeechAction::Hallucinated {
-            reason: reason.to_string(),
-        };
-    }
-
-    let _ = cfg; // `cfg` reserved for future per-utterance decisions
-    SpeechAction::Paste {
-        text: text.to_string(),
-    }
 }
 
 fn handle_speech(
@@ -383,6 +321,22 @@ fn handle_speech(
             Ok(())
         }
         SpeechAction::Paste { text: transformed } => {
+            // Suppress identical back-to-back pastes from VAD edge noise or
+            // duplicate daemon processes. Window is at least 2s even when
+            // cooldown_ms is configured lower.
+            let dup_window = Duration::from_millis(cfg.cooldown_ms.max(2000) as u64);
+            if let Some(recent) = pause::last_pasted_text_within(dup_window)
+                && recent.trim() == transformed.trim()
+            {
+                tracing::info!(
+                    text = %transformed,
+                    dup_window_ms = dup_window.as_millis() as u64,
+                    "duplicate_paste_suppressed"
+                );
+                event::global_broadcaster().voice_activity_ended();
+                return Ok(());
+            }
+
             // Log the raw Whisper transcript for debugging STT quality issues
             tracing::info!(
                 stage = "whisper_raw",
@@ -390,21 +344,37 @@ fn handle_speech(
                 "speech-to-text output"
             );
 
+            // Resume-merge must use the full blocking pipeline — async
+            // grammar patch only replaces the last paste via Cmd+Z, which
+            // cannot safely rewrite a merged delta mid-countdown.
+            let merge_active = pause::dictation_buffer_text().is_some();
+
             // Short-utterance bypass: tiny inputs like "yes", "ok", "done"
-            // get pasted verbatim. They don't benefit from acoustic fix-up
-            // (no glossary term that short) and the LLM round-trip adds
-            // latency for zero quality gain. Thresholds are intentionally
-            // conservative — anything beyond a one- or two-word reply
-            // still flows through the full pipeline.
-            let final_text = if is_short_utterance(&transformed) {
+            // get pasted verbatim. Longer utterances: acoustic fix-up is
+            // sync (fast); LLM grammar runs async after paste when enabled
+            // so the user sees text immediately (~300-800ms sooner).
+            let (final_text, grammar_patch_async) = if is_short_utterance(&transformed) {
                 tracing::info!(
                     stage = "short_utterance_bypass",
                     text = %transformed,
                     "skipping correction stack — too short to benefit"
                 );
-                transformed.clone()
+                (transformed.clone(), false)
             } else {
-                run_corrections(&transformed, cfg, rt)
+                let acoustic = apply_acoustic_corrections(&transformed);
+                let async_grammar = cfg.postprocess_config.grammar_correction_enabled
+                    && cfg.post_processor.is_some()
+                    && !merge_active;
+                if async_grammar {
+                    tracing::debug!(
+                        stage = "paste_first",
+                        text = %acoustic,
+                        "pasting acoustic result; grammar patch will follow async"
+                    );
+                    (acoustic, true)
+                } else {
+                    (apply_grammar_blocking(&acoustic, cfg, rt), false)
+                }
             };
 
             tracing::info!(
@@ -438,10 +408,10 @@ fn handle_speech(
             // produced split-sentence pastes. The buffer is still
             // cleared on Return commit / pause / explicit user cancel,
             // so this can't leak across sessions.
-            let merge_active = pause::dictation_buffer_text().is_some();
             let (paste_clipboard, buffer_text) = if merge_active {
                 let previous = pause::dictation_buffer_text().unwrap_or_default();
-                let (joined, delta) = merge_dictation(&previous, &final_text);
+                let (joined, delta) =
+                    merge_dictation_with(&cfg.localization, &previous, &final_text);
                 tracing::info!(
                     stage = "dictation_merge",
                     previous = %previous,
@@ -473,8 +443,7 @@ fn handle_speech(
                 log.write(Event::Error {
                     message: "Skipped paste: Command key held",
                 });
-                event::global_broadcaster()
-                    .transcription_filtered("Held Command key — not pasted");
+                event::global_broadcaster().transcription_filtered("Held Command key — not pasted");
                 // Drop the merge buffer too: the user is in the middle of
                 // a shortcut, the next utterance shouldn't try to append
                 // to text that never reached the field.
@@ -488,8 +457,14 @@ fn handle_speech(
             // `auto_enter_delay_ms == 0` the countdown helper presses
             // Return immediately, preserving the legacy behavior.
             paste::paste_text(false)?;
+            let pasted_at = Instant::now();
 
-            let auto_enter_effective = per_app::effective_auto_enter(pause::is_auto_enter_enabled());
+            if grammar_patch_async {
+                spawn_grammar_patch(rt, cfg, final_text.clone(), pasted_at);
+            }
+
+            let auto_enter_effective =
+                per_app::effective_auto_enter(pause::is_auto_enter_enabled());
             if auto_enter_effective {
                 // Hold the merged buffer so the NEXT utterance can
                 // append again if it arrives before the countdown
@@ -522,10 +497,6 @@ fn handle_speech(
     }
 }
 
-fn in_cooldown(now: Instant, last_process: Instant, cooldown_ms: u32) -> bool {
-    now.duration_since(last_process).as_millis() < cooldown_ms as u128
-}
-
 /// Maximum word count for the short-utterance bypass. Inputs at or below
 /// this go straight to paste without the acoustic+LLM correction stack.
 pub const SHORT_UTTERANCE_MAX_WORDS: usize = 2;
@@ -549,13 +520,8 @@ pub fn is_short_utterance(text: &str) -> bool {
     words <= SHORT_UTTERANCE_MAX_WORDS || chars <= SHORT_UTTERANCE_MAX_CHARS
 }
 
-/// Run the two-stage correction pipeline:
-///   1. acoustic glossary fix (`text_match::apply_custom_words`)
-///   2. optional LLM grammar cleanup (`PostProcessor::process`)
-fn run_corrections(text: &str, cfg: &AlwaysConfig, rt: &Handle) -> String {
-    // Stage 1 — acoustic glossary fix-up (Soundex + Levenshtein).
-    // Catches Whisper mishears like `cloud → Claude`, deterministic,
-    // doesn't invent: substitutes only from the user's approved list.
+/// Stage 1 — acoustic glossary fix-up (Soundex + Levenshtein).
+fn apply_acoustic_corrections(text: &str) -> String {
     let custom_words = crate::glossary::user_glossary_terms();
     let (acoustic, acoustic_subs) = crate::always::text_match::apply_custom_words(
         text,
@@ -582,21 +548,22 @@ fn run_corrections(text: &str, cfg: &AlwaysConfig, rt: &Handle) -> String {
             "no glossary corrections needed"
         );
     }
+    acoustic
+}
 
-    // Stage 2 — optional LLM grammar cleanup. Gated on the user pref
-    // `grammar_correction_enabled` AND a constructed post_processor
-    // (which itself silently no-ops without an API key).
+/// Stage 2 — blocking LLM grammar cleanup (merge path or grammar disabled).
+fn apply_grammar_blocking(text: &str, cfg: &AlwaysConfig, rt: &Handle) -> String {
     if cfg.postprocess_config.grammar_correction_enabled
         && let Some(ref pp) = cfg.post_processor
     {
         let started = Instant::now();
-        match rt.block_on(pp.process(&acoustic, None)) {
+        match rt.block_on(pp.process(text, None)) {
             Ok(cleaned) => {
                 let elapsed_ms = started.elapsed().as_millis() as u64;
-                if acoustic != cleaned {
+                if text != cleaned {
                     tracing::info!(
                         stage = "grammar_correction",
-                        before = %acoustic,
+                        before = %text,
                         after = %cleaned,
                         elapsed_ms = elapsed_ms,
                         "grammar correction applied"
@@ -614,20 +581,93 @@ fn run_corrections(text: &str, cfg: &AlwaysConfig, rt: &Handle) -> String {
             Err(err) => {
                 tracing::warn!(
                     error = %err,
-                    fallback_text = %acoustic,
+                    fallback_text = %text,
                     "grammar correction failed, using acoustic match result"
                 );
-                acoustic
+                text.to_string()
             }
         }
     } else {
         tracing::debug!(
             stage = "grammar_correction",
-            text = %acoustic,
+            text = %text,
             "grammar correction disabled"
         );
-        acoustic
+        text.to_string()
     }
+}
+
+/// After paste-first, patch grammar via Cmd+Z + repaste when the LLM returns.
+fn spawn_grammar_patch(
+    rt: &Handle,
+    cfg: &AlwaysConfig,
+    acoustic_pasted: String,
+    pasted_at: Instant,
+) {
+    let Some(pp) = cfg.post_processor.clone() else {
+        return;
+    };
+    if !cfg.postprocess_config.grammar_correction_enabled {
+        return;
+    }
+
+    rt.spawn(async move {
+        let started = Instant::now();
+        let cleaned = match pp.process(&acoustic_pasted, None).await {
+            Ok(c) => c,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    fallback_text = %acoustic_pasted,
+                    "async grammar patch failed"
+                );
+                return;
+            }
+        };
+
+        if cleaned == acoustic_pasted {
+            tracing::debug!(
+                stage = "grammar_patch",
+                text = %cleaned,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "no grammar changes"
+            );
+            return;
+        }
+
+        if pasted_at.elapsed() > paste::GRAMMAR_PATCH_MAX_AGE {
+            tracing::debug!(
+                stage = "grammar_patch",
+                elapsed_since_paste_ms = pasted_at.elapsed().as_millis() as u64,
+                "skipped — paste too old to safely undo"
+            );
+            return;
+        }
+
+        if keyboard::is_cmd_held() {
+            tracing::debug!("grammar_patch_skipped_cmd_held");
+            return;
+        }
+
+        let clipboard = format!("{cleaned} ");
+        if let Err(err) = paste::replace_via_undo(&clipboard) {
+            tracing::warn!(
+                error = %err,
+                "grammar patch replace failed; acoustic paste kept"
+            );
+            return;
+        }
+
+        tracing::info!(
+            stage = "grammar_patch",
+            before = %acoustic_pasted,
+            after = %cleaned,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "async grammar correction applied"
+        );
+        pause::set_last_pasted(cleaned.clone());
+        event::global_broadcaster().transcript_final(cleaned);
+    });
 }
 
 fn print_banner(cfg: &AlwaysConfig) {
@@ -643,49 +683,11 @@ fn print_banner(cfg: &AlwaysConfig) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::time::{Duration, Instant};
-
-    use super::in_cooldown;
-    use crate::always::AlwaysConfig;
-
-    fn test_config() -> AlwaysConfig {
-        use crate::always::config::{IdlePauseAction, PostprocessConfig, VocabConfig};
-
-        AlwaysConfig {
-            lang: "en".to_string(),
-            timeout_secs: 30,
-            silence_secs: 2.0,
-            auto_enter: false,
-            filter_enabled: true,
-            energy_threshold: 0.05,
-            onset_ms: 50,
-            cooldown_ms: 1500,
-            log_path: PathBuf::from("always.log"),
-            post_processor: None,
-            project_root: None,
-            learning_enabled: false,
-            groq_stt_api_key: "test-key".to_string(),
-            vad_mode: crate::always::config::VadMode::Local,
-            silero_threshold: 0.5,
-            vocab_config: VocabConfig::default(),
-            postprocess_config: PostprocessConfig::default(),
-            auto_enter_delay_ms: 0,
-            idle_pause_secs: 0,
-            idle_pause_action: IdlePauseAction::default(),
-        }
-    }
-
-    #[test]
-    fn cooldown_uses_millisecond_window() {
-        let now = Instant::now();
-        assert!(in_cooldown(now, now - Duration::from_millis(1499), 1500));
-        assert!(!in_cooldown(now, now - Duration::from_millis(1500), 1500));
-    }
-
-    // ----------------------------------------------------------------------
-    // is_short_utterance — bypass thresholds.
-    // ----------------------------------------------------------------------
+    // Pure-logic tests for the speech pipeline (classifier, dictation
+    // merge, cooldown window, localization seam) live in
+    // `super::speech_action::tests` — they were extracted alongside
+    // the functions they cover so daemon orchestration and pure
+    // decision logic can be exercised in isolation.
 
     use super::{SHORT_UTTERANCE_MAX_CHARS, SHORT_UTTERANCE_MAX_WORDS, is_short_utterance};
 
@@ -731,183 +733,5 @@ mod tests {
         // Sanity: thresholds are at the documented values.
         assert_eq!(SHORT_UTTERANCE_MAX_WORDS, 2);
         assert_eq!(SHORT_UTTERANCE_MAX_CHARS, 8);
-    }
-
-    // ----------------------------------------------------------------------
-    // classify_transcription — pure decision tree.
-    // These cover the speech-handling control flow end-to-end without
-    // spawning a daemon, calling Groq, or touching the pasteboard.
-    // ----------------------------------------------------------------------
-
-    use super::{SpeechAction, classify_transcription};
-    use crate::stt::TranscriptionResult;
-
-    fn empty_transcription(text: &str) -> TranscriptionResult {
-        TranscriptionResult {
-            text: text.to_string(),
-            duration: 1.0,
-            language: "en".to_string(),
-            segments: vec![],
-        }
-    }
-
-    #[test]
-    fn classify_in_cooldown_returns_no_op() {
-        let cfg = test_config();
-        let now = Instant::now();
-        let action = classify_transcription(
-            &cfg,
-            "open file",
-            &empty_transcription("open file"),
-            now,
-            // last_process is just now → still in cooldown
-            now,
-        );
-        assert_eq!(action, SpeechAction::InCooldown);
-    }
-
-    #[test]
-    fn classify_outside_cooldown_pastes_clean_text() {
-        let cfg = test_config();
-        let now = Instant::now();
-        let action = classify_transcription(
-            &cfg,
-            "open file",
-            &empty_transcription("open file"),
-            now,
-            now - Duration::from_secs(10),
-        );
-        match action {
-            SpeechAction::Paste { text } => assert_eq!(text, "open file"),
-            other => panic!("expected Paste, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn classify_does_not_rewrite_text_pre_llm() {
-        // Post-simplification: the pre-LLM pass is a no-op. Text reaches
-        // the LLM postprocessor (or paste) verbatim from Whisper.
-        let cfg = test_config();
-        let now = Instant::now();
-        let action = classify_transcription(
-            &cfg,
-            "open src/main.rs",
-            &empty_transcription("open src/main.rs"),
-            now,
-            now - Duration::from_secs(10),
-        );
-        match action {
-            SpeechAction::Paste { text } => assert_eq!(text, "open src/main.rs"),
-            other => panic!("expected Paste, got {:?}", other),
-        }
-    }
-
-    // ----------------------------------------------------------------------
-    // merge_dictation — bug 3: resume after a pause appends to the in-flight
-    // dictation buffer instead of pasting a fresh capitalized sentence.
-    // ----------------------------------------------------------------------
-
-    use super::{lowercase_if_safe_starter, merge_dictation};
-
-    #[test]
-    fn merge_lowercases_safe_starter_mid_sentence() {
-        let (joined, delta) = merge_dictation("I went to the store", "And bought milk");
-        assert_eq!(joined, "I went to the store and bought milk");
-        assert_eq!(delta, " and bought milk");
-    }
-
-    #[test]
-    fn merge_preserves_capitalization_after_sentence_terminator() {
-        let (joined, delta) = merge_dictation("Done.", "And now we continue");
-        // Period ended the prior sentence — leave the new sentence's
-        // capitalization intact.
-        assert_eq!(joined, "Done. And now we continue");
-        assert_eq!(delta, " And now we continue");
-    }
-
-    #[test]
-    fn merge_preserves_proper_noun_at_start_of_continuation() {
-        // "Kubernetes" is NOT in the safe-lowercase whitelist, so even
-        // mid-sentence we keep its capitalization — the false-positive
-        // bias is deliberate.
-        let (joined, _) = merge_dictation("I work on", "Kubernetes clusters");
-        assert_eq!(joined, "I work on Kubernetes clusters");
-    }
-
-    #[test]
-    fn merge_keeps_i_capitalized_mid_sentence() {
-        // "I" must stay capitalized even when appended mid-sentence.
-        let (joined, _) = merge_dictation("Then", "I went home");
-        assert_eq!(joined, "Then I went home");
-    }
-
-    #[test]
-    fn merge_handles_safe_starter_with_trailing_punctuation() {
-        // Whisper sometimes emits "And, ..." — punctuation after the
-        // first word must not block the lowercase rule.
-        let (joined, _) = merge_dictation("Let's go", "And, well, maybe later");
-        assert_eq!(joined, "Let's go and, well, maybe later");
-    }
-
-    #[test]
-    fn merge_does_not_double_space_when_previous_ends_in_space() {
-        let (joined, delta) = merge_dictation("Hello ", "And then");
-        assert_eq!(joined, "Hello and then");
-        assert_eq!(delta, "and then");
-    }
-
-    #[test]
-    fn merge_with_empty_addition_is_noop() {
-        let (joined, delta) = merge_dictation("Existing text", "");
-        assert_eq!(joined, "Existing text");
-        assert_eq!(delta, "");
-    }
-
-    #[test]
-    fn merge_after_question_mark_keeps_capital() {
-        let (joined, _) = merge_dictation("Ready?", "Then let's start");
-        assert_eq!(joined, "Ready? Then let's start");
-    }
-
-    #[test]
-    fn merge_after_exclamation_keeps_capital() {
-        let (joined, _) = merge_dictation("Wow!", "That was fast");
-        assert_eq!(joined, "Wow! That was fast");
-    }
-
-    #[test]
-    fn lowercase_safe_starter_leaves_acronyms_alone() {
-        // First word "API" is NOT in the safe-starter list (not in
-        // SAFE_LOWERCASE_STARTERS) so it survives untouched — defensive
-        // behavior for acronyms.
-        let out = lowercase_if_safe_starter("API request was made");
-        assert_eq!(out, "API request was made");
-    }
-
-    #[test]
-    fn lowercase_safe_starter_only_touches_first_word() {
-        // Only the first word is considered; "The" gets lowercased,
-        // "Cake" is left intact (proper noun by default heuristic).
-        let out = lowercase_if_safe_starter("The Cake is ready");
-        assert_eq!(out, "the Cake is ready");
-    }
-
-    #[test]
-    fn classify_rejects_filler_phrases() {
-        let cfg = test_config();
-        let now = Instant::now();
-        let action = classify_transcription(
-            &cfg,
-            "thanks for watching", // hard-blocklisted phrase
-            &empty_transcription("thanks for watching"),
-            now,
-            now - Duration::from_secs(10),
-        );
-        match action {
-            SpeechAction::Rejected { reason } => {
-                assert!(!reason.is_empty(), "rejection should carry a reason");
-            }
-            other => panic!("expected Rejected, got {:?}", other),
-        }
     }
 }

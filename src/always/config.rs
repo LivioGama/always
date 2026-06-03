@@ -5,13 +5,17 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use super::localization::Localization;
 use super::postprocess::PostProcessor;
 use crate::db;
 use crate::db::Preferences;
+use crate::stt_dispatch::TranscriberBackendChoice;
 
 // Default configuration values
 const DEFAULT_AUTO_ENTER_DELAY_MS: u32 = 4000;
-const DEFAULT_IDLE_PAUSE_SECS: u32 = 120;
+/// Ten minutes of no voice before idle auto-pause. Short values (e.g. 120s)
+/// felt like the daemon "randomly" paused during normal desk work.
+const DEFAULT_IDLE_PAUSE_SECS: u32 = 600;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub enum IdlePauseAction {
@@ -29,7 +33,9 @@ impl FromStr for IdlePauseAction {
         match s.to_lowercase().as_str() {
             "pause" => Ok(Self::Pause),
             "pause_and_mute" => Ok(Self::PauseAndMute),
-            _ => anyhow::bail!("invalid idle pause action: {s}, must be 'pause' or 'pause_and_mute'"),
+            _ => {
+                anyhow::bail!("invalid idle pause action: {s}, must be 'pause' or 'pause_and_mute'")
+            }
         }
     }
 }
@@ -201,7 +207,14 @@ pub struct AlwaysConfig {
     pub post_processor: Option<Arc<PostProcessor>>,
     pub project_root: Option<PathBuf>,
     pub learning_enabled: bool,
-    pub groq_stt_api_key: String,
+    /// Groq Whisper API key. `None` when no key is configured — valid
+    /// state once local models exist (user can run fully offline).
+    /// The Groq backend refuses to start without one; local backends
+    /// don't read this field.
+    pub groq_stt_api_key: Option<String>,
+    /// Active STT backend. Defaults to [`TranscriberBackendChoice::Groq`]
+    /// so existing installs keep their current behavior on upgrade.
+    pub transcriber_backend: TranscriberBackendChoice,
     pub vad_mode: VadMode,
     pub silero_threshold: f32,
     pub vocab_config: VocabConfig,
@@ -216,6 +229,11 @@ pub struct AlwaysConfig {
     pub idle_pause_secs: u32,
     /// What action to take when idle timeout occurs: pause only, or pause+mute.
     pub idle_pause_action: IdlePauseAction,
+    /// Locale-specific heuristics for post-processing (sentence-terminator
+    /// detection + "safe to lowercase mid-sentence" word list). Defaults
+    /// to [`Localization::ENGLISH`]; overridable so non-English users
+    /// get correct merge-time casing without code changes.
+    pub localization: Localization,
 }
 
 #[derive(Debug, Clone)]
@@ -277,21 +295,29 @@ impl AlwaysConfig {
         silence_secs: f64,
         auto_enter: Option<bool>,
     ) -> Result<Self> {
-        let groq_stt_api_key = get_groq_stt_api_key()?;
+        // API key is now optional: the daemon can run with a local
+        // model only. A missing key surfaces an error at the point the
+        // Groq backend is actually invoked, not at startup.
+        let groq_stt_api_key = match get_groq_stt_api_key() {
+            Ok(k) => Some(k),
+            Err(e) => {
+                tracing::info!(reason = %e, "no_groq_api_key");
+                None
+            }
+        };
         let vad_mode = std::env::var("ALWAYS_VAD_MODE")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or_default();
         let prefs = load_preferences()?;
+        let transcriber_backend = resolve_transcriber_backend(&prefs);
         // CLI flag wins when explicitly set; otherwise read the user's
         // saved pref; final fallback to the canonical default (true).
         // This is the single auto-enter source-of-truth resolution —
         // the previous code always took the CLI value, so a user-saved
         // `stt_auto_enter = false` was silently ignored when the daemon
         // was relaunched without an explicit override.
-        let auto_enter = auto_enter
-            .or(prefs.stt_auto_enter)
-            .unwrap_or(true);
+        let auto_enter = auto_enter.or(prefs.stt_auto_enter).unwrap_or(true);
 
         let vocab_config = load_vocab_config();
         let postprocess_config = load_postprocess_config();
@@ -315,13 +341,9 @@ impl AlwaysConfig {
         // build it with sensible empty defaults so the prompt-driven
         // glossary cleanup always runs when enabled.
         let post_processor = {
-            let groq_api_key = std::env::var("GROQ_API_KEY").ok().or_else(|| {
-                if groq_stt_api_key.is_empty() {
-                    None
-                } else {
-                    Some(groq_stt_api_key.clone())
-                }
-            });
+            let groq_api_key = std::env::var("GROQ_API_KEY")
+                .ok()
+                .or_else(|| groq_stt_api_key.clone());
             tracing::info!(
                 grammar_correction_enabled = effective_postprocess.grammar_correction_enabled,
                 has_api_key = groq_api_key.is_some(),
@@ -337,7 +359,10 @@ impl AlwaysConfig {
         let config = Self {
             lang,
             timeout_secs,
-            silence_secs: prefs.stt_silence.unwrap_or(silence_secs),
+            // Respect saved prefs / CLI; clamp to the same bounds as the
+            // Settings UI (1.5s minimum keeps brief thinking-pause room
+            // without the old hard 2.5s floor that added ~500ms latency).
+            silence_secs: prefs.stt_silence.unwrap_or(silence_secs).clamp(1.5, 15.0),
             // `auto_enter` was already resolved above: CLI flag → DB pref →
             // canonical default. The previous code re-read `prefs.stt_auto_enter`
             // here, which silently undid an explicit CLI override.
@@ -351,17 +376,24 @@ impl AlwaysConfig {
             project_root,
             learning_enabled: postprocess_config.learning_history_limit > 0,
             groq_stt_api_key,
+            transcriber_backend,
             vad_mode,
             silero_threshold: prefs.silero_threshold.unwrap_or(0.5) as f32,
             vocab_config,
             postprocess_config: effective_postprocess,
-            auto_enter_delay_ms: prefs.auto_enter_delay_ms.unwrap_or(DEFAULT_AUTO_ENTER_DELAY_MS),
+            auto_enter_delay_ms: prefs
+                .auto_enter_delay_ms
+                .unwrap_or(DEFAULT_AUTO_ENTER_DELAY_MS),
             idle_pause_secs: prefs.idle_pause_secs.unwrap_or(DEFAULT_IDLE_PAUSE_SECS),
             idle_pause_action: prefs
                 .idle_pause_action
                 .as_ref()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or_default(),
+            // English is the only built-in locale today; non-English
+            // users can override at the call site (or via a future
+            // CLI/preference) without touching the merge logic.
+            localization: Localization::ENGLISH,
         };
 
         Ok(config)
@@ -378,11 +410,10 @@ impl Default for AlwaysConfig {
             timeout_secs: 30,
             // Defaults aligned with `SensitivityPreset::Normal` and the
             // Mic Sensitivity / Speaking Style picker in the GUI.
-            // 2.0s — gives natural prose dictation room to breathe
-            // (1.5s cut off "modular" sentences with brief thinking
-            // pauses). Speculative transcription kicks off at 85% of
-            // this (≈1.7s) so end-to-end paste latency rarely exceeds
-            // ~2.0s after the user truly stops talking.
+            // 2.0s balances snappy paste with natural mid-thought pauses.
+            // Speculative STT kicks off at 60% (~1.2s); overlay flips
+            // then too (not before). Users can raise to 2.5s in Settings
+            // if they get mid-sentence splits.
             silence_secs: 2.0,
             auto_enter: true,
             filter_enabled: true,
@@ -393,7 +424,8 @@ impl Default for AlwaysConfig {
             post_processor: None,
             project_root: detect_project_root(),
             learning_enabled: postprocess_config.learning_history_limit > 0,
-            groq_stt_api_key: String::new(),
+            groq_stt_api_key: None,
+            transcriber_backend: TranscriberBackendChoice::default(),
             vad_mode: VadMode::default(),
             silero_threshold: 0.5,
             vocab_config,
@@ -401,6 +433,7 @@ impl Default for AlwaysConfig {
             auto_enter_delay_ms: DEFAULT_AUTO_ENTER_DELAY_MS,
             idle_pause_secs: DEFAULT_IDLE_PAUSE_SECS,
             idle_pause_action: IdlePauseAction::default(),
+            localization: Localization::ENGLISH,
         }
     }
 }
@@ -517,6 +550,25 @@ fn default_log_path() -> PathBuf {
     // so the actual file is `always.YYYY-MM-DD` in UTC, not local time.
     let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
     crate::always::telemetry::get_log_directory().join(format!("always.{date}"))
+}
+
+/// Resolve the active STT backend from the prefs DB, with env override.
+/// Order: `ALWAYS_TRANSCRIBER` env var → DB pref → default Groq.
+/// An invalid stored value falls back to Groq with a warning rather
+/// than refusing to start the daemon.
+fn resolve_transcriber_backend(prefs: &Preferences) -> TranscriberBackendChoice {
+    if let Ok(env_val) = std::env::var("ALWAYS_TRANSCRIBER")
+        && let Ok(parsed) = env_val.parse()
+    {
+        return parsed;
+    }
+    if let Some(stored) = prefs.transcriber_backend.as_deref() {
+        match stored.parse() {
+            Ok(parsed) => return parsed,
+            Err(e) => tracing::warn!(stored, error = %e, "ignoring_invalid_transcriber_backend"),
+        }
+    }
+    TranscriberBackendChoice::default()
 }
 
 fn get_groq_stt_api_key() -> Result<String> {

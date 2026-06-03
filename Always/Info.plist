@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.always</string>
+    <string>com.always.v2</string>
     <key>CFBundleName</key>
     <string>Always</string>
     <key>CFBundleDisplayName</key>
@@ -17,20 +17,22 @@
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
     <!--
-      Regular foreground app: keep a Dock tile/running dot while still
-      installing our own NSStatusItem from AppDelegate.
-    -->
-    <!--
-      LSUIElement=true is REQUIRED to match setActivationPolicy(.accessory)
-      in App.init(). Mismatching them is a confirmed Tahoe 26 trap: macOS
-      treats the bundle as a Dock-bearing regular app at the LaunchServices
-      level, then we partially override at runtime, and the result is a
-      status item that gets created but never slotted into the menu bar
-      (renders at screen origin 0,0 instead of top-right). Keep these
-      two declarations consistent.
+      Show Dock icon so Settings stay reachable when the menu-bar icon is
+      hidden by Control Center cache. Menu bar UI uses SwiftUI MenuBarExtra.
     -->
     <key>LSUIElement</key>
-    <true/>
+    <false/>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.always.url</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>always</string>
+            </array>
+        </dict>
+    </array>
     <!--
       Even as a regular app, keep automatic/sudden termination disabled
       so the background voice daemon survives idle periods and macOS

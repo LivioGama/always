@@ -108,7 +108,7 @@ if [ -z "$SIGN_IDENTITY" ]; then
     SIGN_IDENTITY="-"
 fi
 echo "Using signing identity: ${SIGN_IDENTITY}"
-codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "com.always" --entitlements Always.entitlements Always.app
+codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "com.always.v2" --entitlements Always.entitlements Always.app
 
 # Notarization (only if using a proper Apple Developer identity, not ad-hoc).
 # All three env vars are required to authenticate notarytool:

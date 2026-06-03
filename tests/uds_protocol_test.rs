@@ -14,7 +14,7 @@ fn protocol_version_matches_swift_client() {
     // one without the other will fail both this test and the Swift
     // `testProtocolVersionMatchesDaemon` mirror.
     assert_eq!(
-        PROTOCOL_VERSION, 3,
+        PROTOCOL_VERSION, 5,
         "protocol version bumped without updating UDSClient.swift?"
     );
 }
@@ -88,6 +88,23 @@ fn command_round_trip() {
     let json2 = r#"{"type":"ToggleAutoEnter"}"#;
     let cmd2 = DaemonCommand::from_json_line(json2).unwrap();
     assert!(matches!(cmd2, DaemonCommand::ToggleAutoEnter));
+
+    let json3 = r#"{"type":"SetAutoEnter","data":{"enabled":true}}"#;
+    let cmd3 = DaemonCommand::from_json_line(json3).unwrap();
+    assert!(matches!(
+        cmd3,
+        DaemonCommand::SetAutoEnter { enabled: true }
+    ));
+
+    let json4 = r#"{"type":"ApplyRuntimePreferences","data":{"auto_enter_delay_ms":2000,"energy_threshold":0.012,"silence_secs":2.0,"cooldown_ms":150,"silero_threshold":0.5}}"#;
+    let cmd4 = DaemonCommand::from_json_line(json4).unwrap();
+    assert!(matches!(
+        cmd4,
+        DaemonCommand::ApplyRuntimePreferences {
+            auto_enter_delay_ms: 2000,
+            ..
+        }
+    ));
 }
 
 #[test]

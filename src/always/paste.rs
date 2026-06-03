@@ -70,6 +70,61 @@ pub fn copy_to_clipboard(text: String) -> Result<()> {
     Ok(())
 }
 
+/// How long after the initial paste we may undo+repaste a grammar patch.
+/// Beyond this the user may have edited the field and undo is unsafe.
+pub const GRAMMAR_PATCH_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(4);
+
+#[cfg(feature = "macos")]
+fn post_cmd_key(
+    source: &core_graphics::event_source::CGEventSource,
+    keycode: core_graphics::event::CGKeyCode,
+) -> Result<()> {
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+
+    let down = CGEvent::new_keyboard_event(source.clone(), keycode, true)
+        .map_err(|_| anyhow::anyhow!("Failed to create key down event"))?;
+    down.set_flags(CGEventFlags::CGEventFlagCommand);
+    down.post(CGEventTapLocation::HID);
+
+    let up = CGEvent::new_keyboard_event(source.clone(), keycode, false)
+        .map_err(|_| anyhow::anyhow!("Failed to create key up event"))?;
+    up.set_flags(CGEventFlags::CGEventFlagCommand);
+    up.post(CGEventTapLocation::HID);
+    Ok(())
+}
+
+/// Undo the most recent paste in the focused app (Cmd+Z).
+#[cfg(feature = "macos")]
+pub fn undo_last_paste() -> Result<()> {
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| anyhow::anyhow!("Failed to create CGEventSource"))?;
+    // 'z' key
+    post_cmd_key(&source, 6)?;
+    // Let the target app process undo before we repaste.
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    Ok(())
+}
+
+/// Replace the last paste with `text` via undo + clipboard paste (no Return).
+#[cfg(feature = "macos")]
+pub fn replace_via_undo(text: &str) -> Result<()> {
+    undo_last_paste()?;
+    copy_to_clipboard(text.to_string())?;
+    paste_text(false)
+}
+
+#[cfg(not(feature = "macos"))]
+pub fn undo_last_paste() -> Result<()> {
+    anyhow::bail!("undo_last_paste not implemented for this platform")
+}
+
+#[cfg(not(feature = "macos"))]
+pub fn replace_via_undo(_text: &str) -> Result<()> {
+    anyhow::bail!("replace_via_undo not implemented for this platform")
+}
+
 #[cfg(feature = "macos")]
 pub fn paste_text(auto_enter: bool) -> Result<()> {
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};

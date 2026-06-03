@@ -30,15 +30,22 @@ cd "$REPO_ROOT"
 
 echo "▶ killing Always..."
 play "$SOUND_KILL"
-pkill -f "Always.app" 2>/dev/null || true
+pkill -9 -f "Always.app" 2>/dev/null || true
+pkill -9 -f "/Applications/Always.app" 2>/dev/null || true
+# Stale project-dir bundle can steal LaunchServices resolution.
+pkill -9 -f "Documents/always/Always/Always.app" 2>/dev/null || true
 # Kill the Rust daemon too. The GUI's applicationWillTerminate handler
 # usually does this, but a hard pkill on Always.app skips it, so the
 # daemon outlives the rebuild and the next launch hits a stale UDS
 # socket / pid file. Send SIGTERM first (lets PidGuard::Drop fire),
 # then SIGKILL if still alive.
-pkill -TERM -f "MacOS/always run" 2>/dev/null || true
+for _pat in "always-daemon run" "always run"; do
+  pkill -TERM -f "$_pat" 2>/dev/null || true
+done
 sleep 0.5   # PidGuard::Drop + socket cleanup
-pkill -KILL -f "MacOS/always run" 2>/dev/null || true
+for _pat in "always-daemon run" "always run"; do
+  pkill -KILL -f "$_pat" 2>/dev/null || true
+done
 sleep 0.2   # let processes actually die before rebuild
 
 echo "▶ cargo build ($PROFILE)..."

@@ -29,10 +29,40 @@ print_error() {
     echo -e "${RED}✗${NC} $1"
 }
 
+daemon_pids() {
+    ps -eo pid=,args= | awk '{
+        pid=$1
+        exe=$2
+        sub(/^.*\//, "", exe)
+        if ((exe == "always" || exe == "always-daemon") && $3 == "run") {
+            print pid
+        }
+    }'
+}
+
+kill_daemons() {
+    local pids
+    pids="$(daemon_pids)"
+    if [[ -z "$pids" ]]; then
+        echo "  No always daemon running"
+        return 1
+    fi
+    while read -r pid; do
+        [[ -n "$pid" ]] && kill -TERM "$pid" 2>/dev/null || true
+    done <<< "$pids"
+    sleep 1
+    while read -r pid; do
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done <<< "$pids"
+    print_success "Killed always daemon"
+}
+
 # Step 1: Kill existing processes
 print_step "Stopping existing Always processes..."
 pkill -f "Always.app" 2>/dev/null && print_success "Killed Always" || echo "  No Always running"
-pkill -f "always run" 2>/dev/null && print_success "Killed always daemon" || echo "  No always daemon running"
+kill_daemons || true
 sleep 1
 
 # Step 2: Build Rust CLI binary
@@ -92,12 +122,18 @@ else
 fi
 
 # Check if daemon is running (should be auto-started by Always)
-sleep 2  # Give daemon time to start
-if pgrep -f "always run" > /dev/null; then
-    DAEMON_PID=$(pgrep -f "always run")
+DAEMON_PID=""
+for _ in {1..60}; do
+    DAEMON_PID=$(daemon_pids | paste -sd "," -)
+    if [[ -n "$DAEMON_PID" ]]; then
+        break
+    fi
+    sleep 1
+done
+if [[ -n "$DAEMON_PID" ]]; then
     print_success "Voice daemon running (PID: $DAEMON_PID)"
 else
-    print_warning "Voice daemon not detected yet (may still be starting...)"
+    print_warning "Voice daemon not detected after 60 seconds"
 fi
 
 # Step 8: Display system status
@@ -113,11 +149,17 @@ echo ""
 echo -e "${BLUE}🎙️  How to use:${NC}"
 echo "  • Speak normally - voice will be auto-transcribed"
 echo "  • Click menu bar icon for controls and settings"
-echo "  • Ctrl+Shift+P to pause/resume"
-echo "  • Ctrl+Shift+A to toggle auto-enter"
+echo "  • Ctrl+Alt+P to pause/resume"
+echo "  • Ctrl+Alt+A to toggle auto-enter"
 echo ""
 echo -e "${BLUE}📊 Current processes:${NC}"
-ps aux | grep -E "(Always.app|always run)" | grep -v grep | while read line; do
+ps -eo pid=,args= | awk '{
+    exe=$2
+    sub(/^.*\//, "", exe)
+    if ($0 ~ /Always.app\/Contents\/MacOS\/Always/ || ((exe == "always" || exe == "always-daemon") && $3 == "run")) {
+        print
+    }
+}' | while read line; do
     echo "  $line"
 done
 echo ""
@@ -131,4 +173,4 @@ fi
 
 echo -e "${GREEN}✓ Always is ready for voice detection!${NC}"
 echo ""
-echo "To stop: Click menu bar icon → Quit, or run 'pkill -f Always.app'"
+echo "To stop: Click menu bar icon → Quit, or run 'always stop && pkill -f Always.app'"

@@ -74,7 +74,7 @@ that flashes for ~200 ms, paste lands, you keep working.
 * **Production-grade.** Tracing-based structured logs, parking_lot
   hot-path locks, exponential-backoff + circuit-breaker on the Groq
   client, Sparkle auto-update, Homebrew tap, signed DMG, SBOM,
-  cosign signatures, SLSA Level 3 provenance. See [ASSESSMENT.md](ASSESSMENT.md).
+  cosign signatures, SLSA Level 3 provenance. See [docs/ASSESSMENT.md](docs/ASSESSMENT.md).
 * **Open source.** Apache-2.0. No telemetry, no analytics, no
   account, no SaaS. Your audio goes to Groq's API and back; everything
   else stays on your laptop.
@@ -186,8 +186,8 @@ always start                # Start daemon in background
 always stop                 # Stop daemon
 always status               # Show pid + log path
 always run                  # Run in foreground (debugging)
-always toggle pause         # Mute mic without killing the daemon
-always toggle auto-enter    # Toggle "press Return after paste"
+always toggle-pause         # Mute mic without killing the daemon
+always toggle-auto-enter    # Toggle "press Return after paste"
 ```
 
 ### Configuration
@@ -369,7 +369,7 @@ This is not a weekend hack — it's built like infrastructure.
   auto-update with EdDSA-signed appcast, `cargo install` from
   crates.io.
 
-Full self-assessment: **[ASSESSMENT.md](ASSESSMENT.md)**.
+Full self-assessment: **[docs/ASSESSMENT.md](docs/ASSESSMENT.md)**.
 
 ---
 
@@ -381,11 +381,11 @@ Full self-assessment: **[ASSESSMENT.md](ASSESSMENT.md)**.
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Process layout, UDS protocol, resilience contract |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | Build, test, contribute |
 | [`docs/RELEASE.md`](docs/RELEASE.md) | How releases are cut |
-| [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | Microphone permission, common issues |
+| [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Microphone permission, common issues |
 | [`SECURITY.md`](SECURITY.md) | Reporting vulnerabilities, embargo policy |
 | [`CHANGELOG.md`](CHANGELOG.md) | Versioned changelog |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | PR + commit conventions |
-| [`ASSESSMENT.md`](ASSESSMENT.md) | Production-readiness scorecard |
+| [`docs/ASSESSMENT.md`](docs/ASSESSMENT.md) | Production-readiness scorecard |
 
 ---
 

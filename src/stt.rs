@@ -22,7 +22,6 @@ use reqwest::blocking::multipart as blocking_multipart;
 use serde::Deserialize;
 use thiserror::Error;
 
-
 const GROQ_TRANSCRIPTIONS_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 const WHISPER_MODEL: &str = "whisper-large-v3-turbo";
 
@@ -32,6 +31,13 @@ const CIRCUIT_OPEN_FAILURES: u32 = 3;
 const CIRCUIT_OPEN_DURATION: Duration = Duration::from_secs(60);
 
 static AUTH_HEADER: OnceLock<String> = OnceLock::new();
+
+/// Process-wide guard for tests that mutate `ALWAYS_GROQ_BASE_URL`.
+/// Environment variables are global, so unit and integration tests must
+/// share one lock when pointing the Groq client at mock servers.
+#[doc(hidden)]
+pub static GROQ_BASE_URL_ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
 /// Consecutive transcription failures since the last success.
 static CONSECUTIVE_FAILURES: AtomicU32 = AtomicU32::new(0);
@@ -98,7 +104,7 @@ fn transcriptions_url() -> String {
         .unwrap_or_else(|_| GROQ_TRANSCRIPTIONS_URL.to_string())
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct TranscriptionSegment {
     #[serde(default)]
     pub id: u32,
@@ -118,7 +124,7 @@ pub struct TranscriptionSegment {
     pub temperature: f32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct TranscriptionResult {
     #[serde(default)]
     pub text: String,
@@ -344,13 +350,18 @@ mod stt_unit_tests {
 
     #[test]
     fn transcriptions_url_default() {
-        // SAFETY: tests run serialized for env mutation.
+        let _guard = GROQ_BASE_URL_ENV_LOCK
+            .lock()
+            .expect("GROQ_BASE_URL_ENV_LOCK poisoned");
         unsafe { std::env::remove_var("ALWAYS_GROQ_BASE_URL") };
         assert_eq!(transcriptions_url(), GROQ_TRANSCRIPTIONS_URL);
     }
 
     #[test]
     fn transcriptions_url_honors_override() {
+        let _guard = GROQ_BASE_URL_ENV_LOCK
+            .lock()
+            .expect("GROQ_BASE_URL_ENV_LOCK poisoned");
         unsafe { std::env::set_var("ALWAYS_GROQ_BASE_URL", "http://localhost:9999/") };
         assert_eq!(
             transcriptions_url(),

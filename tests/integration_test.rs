@@ -93,7 +93,7 @@ async fn test_config_commands() {
 
     // Test setting a config value
     let output = Command::new("always")
-        .args(["config", "set", "energy_threshold", "0.5"])
+        .args(["config", "set", "stt_energy_threshold", "0.5"])
         .output()
         .expect("Failed to set config");
 
@@ -107,8 +107,8 @@ async fn test_config_commands() {
 
     let config_output = String::from_utf8_lossy(&output.stdout);
     assert!(
-        config_output.contains("energy_threshold"),
-        "Config should contain energy_threshold"
+        config_output.contains("stt_energy_threshold"),
+        "Config should contain stt_energy_threshold"
     );
 
     println!("Config commands test passed");
@@ -126,7 +126,7 @@ async fn test_toggle_pause() {
 
     // Toggle pause
     let output = Command::new("always")
-        .args(["toggle", "pause"])
+        .arg("toggle-pause")
         .output()
         .expect("Failed to toggle pause");
 
@@ -134,7 +134,7 @@ async fn test_toggle_pause() {
 
     // Toggle auto-enter
     let output = Command::new("always")
-        .args(["toggle", "auto-enter"])
+        .arg("toggle-auto-enter")
         .output()
         .expect("Failed to toggle auto-enter");
 

@@ -9,6 +9,17 @@ import os.log
 
 private let settingsLogger = Logger(subsystem: "com.always.app", category: "settings")
 
+/// Fixed settings panel size (matches pre–Models-section layout + Models block).
+enum SettingsWindowMetrics {
+    static let width: CGFloat = 660
+    static let height: CGFloat = 920
+
+    static func apply(to window: NSWindow) {
+        window.setContentSize(NSSize(width: width, height: height))
+        window.minSize = NSSize(width: 620, height: 560)
+    }
+}
+
 // MARK: - Settings window
 
 struct SettingsWindow: View {
@@ -95,6 +106,8 @@ struct SettingsWindow: View {
             Divider()
             apiSection
             Divider()
+            ModelsSection()
+            Divider()
             vocabularySection
             Divider()
             sensitivitySection
@@ -102,8 +115,8 @@ struct SettingsWindow: View {
             shortcutsSection
         }
         .padding(20)
-        .frame(width: 620)
-        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: 620, alignment: .topLeading)
+        .background(SettingsWindowFrameFix())
         .onAppear {
             focusedField = nil
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -174,14 +187,18 @@ struct SettingsWindow: View {
                     "Auto-Enter After Paste",
                     isOn: Binding(
                         get: { stateMonitor.isAutoEnter },
-                        set: { _ in stateMonitor.toggleAutoEnter() }
+                        set: { newValue in
+                            config.sttAutoEnter = newValue
+                            stateMonitor.setAutoEnter(newValue)
+                        }
                     )
                 )
+                .disabled(!stateMonitor.isDaemonConnected)
                 Spacer()
             }
             NumericSettingRow(
                 title: "Auto-Enter Delay",
-                help: "Seconds before auto-enter. Set to 0 to disable.",
+                help: "Seconds before Return is pressed. Set to 0 for immediate Return. Use the toggle above to disable auto-enter.",
                 unit: "s",
                 formatter: Self.intFormatter,
                 value: Binding(
@@ -207,13 +224,20 @@ struct SettingsWindow: View {
                 .font(.subheadline.bold())
                 .foregroundColor(.secondary)
 
+            Text(
+                "Pauses listening after a stretch with no speech. Does not flip the global master switch — switch to a resumed app or speak to wake. Changes apply on next daemon restart."
+            )
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
             NumericSettingRow(
                 title: "Pause After Inactivity",
-                help: "Seconds of no voice before the daemon auto-pauses. Set to 0 to disable.",
+                help: "Seconds of no voice before idle auto-pause. Default 600 (10 min). Set to 0 to disable.",
                 unit: "s",
                 formatter: Self.intFormatter,
                 value: $config.idlePauseSecs,
-                defaultValue: 120,
+                defaultValue: 600,
                 range: 0...86_400
             )
 
@@ -354,7 +378,10 @@ struct SettingsWindow: View {
 
     private func currentAppStateText(isResumed: Bool, isPaused: Bool) -> String {
         if stateMonitor.isMasterPaused {
-            return "Globally paused — toggle “Pause globally” to lift the master switch."
+            return "Globally paused — use “Lift pause” above to resume all apps."
+        }
+        if stateMonitor.isIdleAutoPaused {
+            return "Idle timeout — speak or switch to a resumed app to wake listening."
         }
         if isResumed && isPaused {
             return "On the allowlist but paused for another reason."
@@ -681,7 +708,6 @@ struct SettingsWindow: View {
                 _ = try await cliService.setConfig(key: "hear_energy_threshold", value: String(config.hearEnergyThreshold))
                 _ = try await cliService.setConfig(key: "stt_silence", value: String(config.sttSilence))
                 _ = try await cliService.setConfig(key: "stt_cooldown_ms", value: String(config.sttCooldownMs))
-                _ = try await cliService.setConfig(key: "stt_auto_enter", value: String(config.sttAutoEnter))
                 _ = try await cliService.setConfig(key: "auto_enter_delay_ms", value: String(config.autoEnterDelayMs))
                 _ = try await cliService.setConfig(key: "silero_threshold", value: String(config.sileroThreshold))
                 _ = try await cliService.setConfig(key: "postprocess_enabled", value: String(config.postprocessEnabled))
@@ -690,6 +716,9 @@ struct SettingsWindow: View {
                 // Only save API key if it's not masked (doesn't contain only dots)
                 if shouldPersistApiKey(apiKey) {
                     _ = try await cliService.setConfig(key: "groq_api_key", value: apiKey.isEmpty ? "" : apiKey)
+                }
+                await MainActor.run {
+                    stateMonitor.applyRuntimePreferences(from: config)
                 }
             } catch {
                 settingsLogger.error("saveConfig failed: \(error.localizedDescription, privacy: .public)")
@@ -739,6 +768,28 @@ struct SettingsWindow: View {
             vocabularyTermCount = json.count
         } else {
             vocabularyTermCount = 0
+        }
+    }
+}
+
+/// Re-applies the intended content size once the `NSWindow` exists (SwiftUI
+/// `defaultSize` alone is unreliable on macOS 26 menu-bar apps).
+private struct SettingsWindowFrameFix: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async {
+            if let window = view.window {
+                SettingsWindowMetrics.apply(to: window)
+            }
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            if let window = nsView.window {
+                SettingsWindowMetrics.apply(to: window)
+            }
         }
     }
 }

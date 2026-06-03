@@ -10,7 +10,18 @@ use tokio::sync::broadcast;
 /// OR per-app rule). Added [`DaemonEvent::MasterPauseChanged`] and
 /// [`DaemonEvent::ResumedAppsChanged`] so the UI can render the
 /// allowlist + master kill switch separately.
-pub const PROTOCOL_VERSION: u32 = 3;
+///
+/// **v4 (2026-05-19):** Local-model registry. New
+/// [`DaemonCommand`] variants for the Settings → Models tab
+/// (`ListModels`, `DownloadModel`, `CancelModelDownload`,
+/// `DeleteModel`, `SetActiveTranscriber`) and matching
+/// [`DaemonEvent`]s for catalog snapshot + download / verification /
+/// extraction progress + active-backend changes.
+///
+/// **v5 (2026-05-20):** Live preference sync from Settings.
+/// `SetAutoEnter` + `ApplyRuntimePreferences` so sensitivity and
+/// auto-enter delay apply without a daemon restart.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Event types for daemon-to-GUI communication
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,7 +30,9 @@ pub enum DaemonEvent {
     /// Sent as the very first frame after a client connects. Carries the
     /// daemon's protocol version. The Mac app rejects the connection if
     /// the version is not the one it was built with.
-    Hello { version: u32 },
+    Hello {
+        version: u32,
+    },
     /// Daemon has started listening for voice input
     ListeningStarted,
     /// Daemon has stopped listening
@@ -33,13 +46,25 @@ pub enum DaemonEvent {
     /// Transcription has stopped
     TranscribingStopped,
     /// Partial transcript (streaming update)
-    TranscriptChunk { text: String },
+    TranscriptChunk {
+        text: String,
+    },
     /// Final transcript result
-    TranscriptFinal { text: String },
+    TranscriptFinal {
+        text: String,
+    },
     /// Daemon is paused
     Paused,
     /// Daemon is resumed
     Resumed,
+    /// Daemon is paused as a side-effect of focus change (per-app rule).
+    /// Functionally identical to `Paused` for state tracking, but the GUI
+    /// MUST NOT flash the overlay — focus changes that the user initiated
+    /// with a mouse / window switcher should not advertise themselves.
+    PausedQuietly,
+    /// Daemon is resumed as a side-effect of focus change (per-app rule).
+    /// See `PausedQuietly` — no overlay flash.
+    ResumedQuietly,
     /// Auto-enter mode enabled
     AutoEnterEnabled,
     /// Auto-enter mode disabled
@@ -50,12 +75,17 @@ pub enum DaemonEvent {
     VoiceActivityEnded,
     /// Transcription was rejected by the filter or hallucination detector.
     /// Carries a short, human-readable reason so the GUI can display it.
-    TranscriptionFiltered { reason: String },
+    TranscriptionFiltered {
+        reason: String,
+    },
     /// A `(wrong → right)` correction pair was just applied to
     /// `~/.always/glossary.json` (typically by the user pressing the
     /// correction-capture hotkey or approving a queued candidate).
     /// The GUI uses this to flash a brief toast.
-    CorrectionLogged { wrong: String, right: String },
+    CorrectionLogged {
+        wrong: String,
+        right: String,
+    },
     /// A passive clipboard re-copy looked like a correction but was
     /// not auto-applied — it sits in the pending-corrections queue
     /// awaiting user approval. Carries the queue entry's UUID as a
@@ -77,34 +107,98 @@ pub enum DaemonEvent {
     Heartbeat,
     /// Auto-enter delay started — countdown overlay is now active.
     /// `total_ms` is the full delay; `remaining_ms == total_ms` on start.
-    AutoEnterCountdownStarted { remaining_ms: u32, total_ms: u32 },
+    AutoEnterCountdownStarted {
+        remaining_ms: u32,
+        total_ms: u32,
+    },
     /// Tick of the auto-enter countdown.
-    AutoEnterCountdownTick { remaining_ms: u32 },
+    AutoEnterCountdownTick {
+        remaining_ms: u32,
+    },
     /// Auto-enter countdown cancelled by user (key press) or override.
     AutoEnterCountdownCancelled,
     /// Auto-enter countdown reached zero — Return was just synthesized.
     AutoEnterCountdownFinished,
     /// Daemon auto-paused after going `seconds` with no voice activity.
-    IdleAutoPaused { seconds: u32 },
+    IdleAutoPaused {
+        seconds: u32,
+    },
     /// Daemon auto-resumed after the idle-pause condition cleared.
     IdleAutoResumed,
     /// Focused application changed (macOS only).
-    FocusedAppChanged { bundle_id: Option<String> },
+    FocusedAppChanged {
+        bundle_id: Option<String>,
+    },
     /// Master pause flag flipped — the user (or the audio/idle/mic
     /// watchdogs) explicitly toggled the global force-pause switch.
     /// `Paused`/`Resumed` continue to track *effective* state; this
     /// event is what the UI uses to label the global pause toggle
     /// ("Pause globally" vs "Resume globally").
-    MasterPauseChanged { master_paused: bool },
+    MasterPauseChanged {
+        master_paused: bool,
+    },
     /// Snapshot of the resumed-app allowlist (bundle ids whose
     /// `paused` override is set to `false`). Sent on connect and
     /// whenever a `SetAppPaused` command mutates the list.
-    ResumedAppsChanged { bundles: Vec<String> },
+    ResumedAppsChanged {
+        bundles: Vec<String>,
+    },
     /// Daemon wants the GUI to open the correction dialog. Carries the
     /// most recently-pasted transcript so the dialog can offer a
     /// best-guess match for the wrong word once the user types the
     /// intended one.
-    CorrectionDialogRequested { last_transcript: String },
+    CorrectionDialogRequested {
+        last_transcript: String,
+    },
+    /// Snapshot of the local-model catalog (every entry with its
+    /// current `is_downloaded` / `is_downloading` / `partial_size`
+    /// fields). Broadcast in response to [`DaemonCommand::ListModels`]
+    /// and whenever the catalog mutates so all connected clients see
+    /// the same view.
+    ModelsList {
+        models: Vec<crate::managers::model_registry::ModelInfo>,
+    },
+    /// Streaming progress for an in-flight download. Throttled to
+    /// ~10 events/sec at the registry layer.
+    ModelDownloadProgress {
+        model_id: String,
+        downloaded: u64,
+        total: u64,
+        percentage: f64,
+    },
+    ModelDownloadComplete {
+        model_id: String,
+    },
+    ModelDownloadCancelled {
+        model_id: String,
+    },
+    ModelDownloadFailed {
+        model_id: String,
+        error: String,
+    },
+    ModelVerificationStarted {
+        model_id: String,
+    },
+    ModelVerificationCompleted {
+        model_id: String,
+    },
+    ModelExtractionStarted {
+        model_id: String,
+    },
+    ModelExtractionCompleted {
+        model_id: String,
+    },
+    ModelExtractionFailed {
+        model_id: String,
+        error: String,
+    },
+    /// Active STT backend changed (user picked a different model in
+    /// Settings → Models, or deleted the currently-active one). The
+    /// `backend` field is the canonical wire form — `groq` or
+    /// `local:<model_id>`.
+    ActiveTranscriberChanged {
+        backend: String,
+    },
 }
 
 impl DaemonEvent {
@@ -128,6 +222,18 @@ impl DaemonEvent {
 pub enum DaemonCommand {
     TogglePause,
     ToggleAutoEnter,
+    /// Set auto-enter on/off to an explicit value (Settings toggle).
+    SetAutoEnter {
+        enabled: bool,
+    },
+    /// Hot-reload sensitivity + auto-enter delay without restart.
+    ApplyRuntimePreferences {
+        auto_enter_delay_ms: u32,
+        energy_threshold: f64,
+        silence_secs: f64,
+        cooldown_ms: u32,
+        silero_threshold: f32,
+    },
     /// Approve a pending correction in the queue and apply it to the
     /// glossary. The daemon emits `CorrectionLogged` on success.
     ApproveCorrection {
@@ -143,20 +249,29 @@ pub enum DaemonCommand {
     CaptureCorrection,
     /// Explicit pause set/clear with optional reason string (for logs).
     /// Used by the Swift audio-output monitor and per-app overrides.
-    SetPaused { paused: bool, reason: Option<String> },
+    SetPaused {
+        paused: bool,
+        reason: Option<String>,
+    },
     /// Cancel the active auto-enter countdown (e.g. Mac app saw a
     /// keystroke land in the focused app).
     CancelAutoEnterCountdown,
     /// macOS Swift app reports the user switched focused application.
-    NotifyFocusedAppChanged { bundle_id: Option<String> },
+    NotifyFocusedAppChanged {
+        bundle_id: Option<String>,
+    },
     /// macOS Swift app reports the system audio-output device started
     /// or stopped producing sound. Daemon may auto-pause/resume.
-    NotifySystemAudioState { playing: bool },
+    NotifySystemAudioState {
+        playing: bool,
+    },
     /// User submitted the correction dialog with the intended spelling.
     /// Daemon diffs against `last_pasted`/`last_transcript`, finds the
     /// closest wrong-word match, and updates the glossary (add entry,
     /// remove over-fired entry, or bump weight).
-    LogCorrection { intended: String },
+    LogCorrection {
+        intended: String,
+    },
     /// Set (or clear) the per-app `paused` override for `bundle_id`.
     /// `paused = Some(false)` → app is on the resumed-allowlist.
     /// `paused = Some(true)` → app is force-paused even though it
@@ -166,6 +281,32 @@ pub enum DaemonCommand {
     SetAppPaused {
         bundle_id: String,
         paused: Option<bool>,
+    },
+    /// Settings → Models requested a catalog snapshot. Daemon
+    /// responds with [`DaemonEvent::ModelsList`].
+    ListModels,
+    /// Begin downloading `model_id`. Idempotent — already-downloaded
+    /// or in-progress IDs are no-ops. Progress events stream on the
+    /// `ModelDownload*` channel until completion or cancel.
+    DownloadModel {
+        model_id: String,
+    },
+    /// Cancel an in-flight download. Partial file is kept so the next
+    /// `DownloadModel` for the same id resumes.
+    CancelModelDownload {
+        model_id: String,
+    },
+    /// Remove a downloaded model from disk.
+    DeleteModel {
+        model_id: String,
+    },
+    /// Switch the active STT backend. `backend` is the canonical wire
+    /// form parsed by
+    /// [`crate::stt_dispatch::TranscriberBackendChoice`] — `groq` or
+    /// `local:<model_id>`. Daemon emits
+    /// [`DaemonEvent::ActiveTranscriberChanged`] on success.
+    SetActiveTranscriber {
+        backend: String,
     },
 }
 
@@ -238,9 +379,21 @@ impl EventBroadcaster {
         self.send(DaemonEvent::Paused);
     }
 
+    /// Same as `paused` but tells the GUI to update state silently — no
+    /// overlay flash. Used by focus-change-driven per-app pause so a
+    /// manual mouse window switch doesn't pop pause/play badges.
+    pub fn paused_quietly(&self) {
+        self.send(DaemonEvent::PausedQuietly);
+    }
+
     /// Send resumed event
     pub fn resumed(&self) {
         self.send(DaemonEvent::Resumed);
+    }
+
+    /// Silent counterpart to `resumed` — see `paused_quietly`.
+    pub fn resumed_quietly(&self) {
+        self.send(DaemonEvent::ResumedQuietly);
     }
 
     /// Send auto-enter enabled event

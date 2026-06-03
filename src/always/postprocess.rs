@@ -149,7 +149,10 @@ mod tests {
     /// is disabled — voice-to-text default is "deliver what was said".
     #[tokio::test]
     async fn process_passthrough_when_disabled() {
-        let cfg = PostprocessConfig { grammar_correction_enabled: false, ..Default::default() };
+        let cfg = PostprocessConfig {
+            grammar_correction_enabled: false,
+            ..Default::default()
+        };
         let processor = PostProcessor::new_with_config(cfg, None);
         let out = processor
             .process("I have an idea about Kubernetes.", None)

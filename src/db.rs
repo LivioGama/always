@@ -39,6 +39,9 @@ pub struct Preferences {
     pub shortcut_correction_dialog: Option<String>,
     /// JSON-encoded per-app overrides: `{ "<bundle_id>": { "auto_enter": bool, "paused": bool } }`.
     pub per_app_settings_json: Option<String>,
+    /// Active STT backend. Stored as `groq` or `local:<model_id>`.
+    /// Parsed via [`crate::stt_dispatch::TranscriberBackendChoice`].
+    pub transcriber_backend: Option<String>,
 }
 
 pub fn open() -> Result<Connection> {
@@ -190,9 +193,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         .prepare("SELECT shortcut_correction_dialog FROM preferences LIMIT 0")
         .is_ok();
     if !has_shortcut_correction_dialog {
-        conn.execute_batch(
-            "ALTER TABLE preferences ADD COLUMN shortcut_correction_dialog TEXT;",
-        )?;
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN shortcut_correction_dialog TEXT;")?;
     }
 
     let has_per_app_settings_json = conn
@@ -202,6 +203,13 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN per_app_settings_json TEXT;")?;
     }
 
+    let has_transcriber_backend = conn
+        .prepare("SELECT transcriber_backend FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_transcriber_backend {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN transcriber_backend TEXT;")?;
+    }
+
     Ok(())
 }
 
@@ -209,7 +217,7 @@ fn migrate(conn: &Connection) -> Result<()> {
 
 pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
     let mut stmt = conn.prepare(
-        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, idle_pause_action, shortcut_correction_dialog, per_app_settings_json FROM preferences WHERE id = 1",
+        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, idle_pause_action, shortcut_correction_dialog, per_app_settings_json, transcriber_backend FROM preferences WHERE id = 1",
     )?;
     let result = stmt.query_row([], |row| {
         Ok(Preferences {
@@ -237,6 +245,7 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             idle_pause_action: row.get(21)?,
             shortcut_correction_dialog: row.get(22)?,
             per_app_settings_json: row.get(23)?,
+            transcriber_backend: row.get(24)?,
         })
     });
     match result {
@@ -276,6 +285,7 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "idle_pause_action",
         "shortcut_correction_dialog",
         "per_app_settings_json",
+        "transcriber_backend",
     ];
     if !valid_keys.contains(&key) {
         anyhow::bail!(
@@ -347,7 +357,10 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
                 anyhow::bail!("silero_threshold must be between 0.1 and 0.9");
             }
         }
-        "stt_trim_silence" | "stt_auto_enter" | "postprocess_enabled" | "passive_correction_capture" => {
+        "stt_trim_silence"
+        | "stt_auto_enter"
+        | "postprocess_enabled"
+        | "passive_correction_capture" => {
             if !matches!(value, "true" | "false" | "1" | "0") {
                 anyhow::bail!("{key} must be one of: true, false, 1, 0");
             }
@@ -378,6 +391,13 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
                 let _: serde_json::Value = serde_json::from_str(value)
                     .context("per_app_settings_json must be valid JSON")?;
             }
+        }
+        "transcriber_backend" => {
+            // Reuse the canonical parser so `groq` / `local:<id>` is
+            // the single source of truth for the wire format.
+            let _: crate::stt_dispatch::TranscriberBackendChoice = value
+                .parse()
+                .context("transcriber_backend must be 'groq' or 'local:<model_id>'")?;
         }
         _ => {}
     }

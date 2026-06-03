@@ -16,6 +16,7 @@ pub mod hud;
 pub mod idle_watcher;
 pub mod keyboard;
 pub mod keyring;
+pub mod localization;
 pub mod log;
 pub mod mic_monitor;
 pub mod notification;
@@ -23,12 +24,14 @@ pub mod paste;
 pub mod pause;
 pub mod per_app;
 pub mod postprocess;
+pub mod speech_action;
 #[cfg(feature = "local-stt")]
 pub mod stt_local;
 pub mod telemetry;
 pub mod text_match;
 pub mod uds_server;
 pub mod vad;
+pub mod vad_silero;
 pub mod vocab;
 
 pub use config::AlwaysConfig;

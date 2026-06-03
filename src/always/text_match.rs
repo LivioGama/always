@@ -151,7 +151,8 @@ fn find_best_match<'a>(
         // Length-difference fast reject (≥25% of max length, or 2 chars).
         // Catches `openaigpt` ≠ `openai` cases that string similarity
         // would otherwise rank suspiciously close.
-        let len_diff = (candidate.len() as i32 - custom_word_nospace.len() as i32).unsigned_abs() as f64;
+        let len_diff =
+            (candidate.len() as i32 - custom_word_nospace.len() as i32).unsigned_abs() as f64;
         let max_len = candidate.len().max(custom_word_nospace.len()) as f64;
         let max_allowed_diff = (max_len * 0.25).max(2.0);
         if len_diff > max_allowed_diff {
@@ -161,8 +162,8 @@ fn find_best_match<'a>(
         let dist = levenshtein(candidate, custom_word_nospace) as f64;
         let lev_score = if max_len > 0.0 { dist / max_len } else { 1.0 };
 
-        let phonetic = soundex(candidate) == soundex(custom_word_nospace)
-            && !soundex(candidate).is_empty();
+        let phonetic =
+            soundex(candidate) == soundex(custom_word_nospace) && !soundex(candidate).is_empty();
 
         let combined = if phonetic { lev_score * 0.3 } else { lev_score };
 
@@ -245,10 +246,7 @@ fn soundex_digit(c: char) -> Option<char> {
 /// yields an empty string (rather than `0000`) so phonetic matching
 /// can disambiguate "no signal" from "starts with 0-mappable letter".
 pub fn soundex(s: &str) -> String {
-    let chars: Vec<char> = s
-        .chars()
-        .filter(|c| c.is_ascii_alphabetic())
-        .collect();
+    let chars: Vec<char> = s.chars().filter(|c| c.is_ascii_alphabetic()).collect();
     let Some(&first) = chars.first() else {
         return String::new();
     };
