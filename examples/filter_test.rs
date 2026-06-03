@@ -1,4 +1,5 @@
-use always::always::filter;
+use always::always::{filter, hallucination};
+use always::stt::TranscriptionResult;
 use std::env;
 
 fn main() {
@@ -41,14 +42,20 @@ fn test_single_text(text: &str) {
     let non_ascii = filter::non_ascii_reject(text);
     println!("non_ascii_reject: {}", non_ascii);
 
+    let hallucination_result = hallucination::is_hallucination(&make_transcription_result(text));
+    println!("hallucination_reject: {:?}", hallucination_result);
+
     // Test overall filter decision
     let cfg = always::always::AlwaysConfig::default();
     let overall_result = filter::should_accept_with_reason(text, &cfg);
-    let should_accept = matches!(overall_result, filter::FilterReason::None);
+    let should_accept =
+        matches!(overall_result, filter::FilterReason::None) && hallucination_result.is_none();
 
     println!("{}", "─".repeat(50));
     if should_accept {
         println!("✅ ACCEPTED: Text would be pasted");
+    } else if let Some(reason) = hallucination_result {
+        println!("❌ REJECTED: Hallucination - {}", reason);
     } else {
         println!(
             "❌ REJECTED: {} - {}",
@@ -58,6 +65,15 @@ fn test_single_text(text: &str) {
                 .unwrap_or("Unknown"),
             overall_result.to_log_string()
         );
+    }
+}
+
+fn make_transcription_result(text: &str) -> TranscriptionResult {
+    TranscriptionResult {
+        text: text.to_string(),
+        duration: 0.0,
+        language: "en".to_string(),
+        segments: Vec::new(),
     }
 }
 
@@ -159,6 +175,7 @@ fn run_test_cases() {
             "Subtitles by the Amara.org community",
             "should reject video artifact",
         ),
+        ("Ffff", "should reject meaningless repeated letters"),
         ("thank you for watching", "should reject video ending"),
         ("mmm", "should reject sound"),
         ("uh", "should reject filler"),

@@ -64,18 +64,23 @@ pub fn postprocess_system_prompt() -> &'static str {
 }
 
 /// All canonical `term` strings from the loaded glossary, deduped
-/// (case-insensitive) and non-empty. Restricted to entries with
-/// non-empty `mistranscriptions` so the acoustic-match pass only
-/// fires on user-curated terms — bare auto-imported app names
-/// (`IntelliJ IDEA`, etc.) would over-trigger the Soundex matcher
-/// on common English words. Returned in glossary order
+/// (case-insensitive) and non-empty. Returned in glossary order
 /// (`entries()` is sorted frequency-desc).
+///
+/// This feeds the local acoustic matcher, not the LLM rewrite prompt.
+/// Bare terms are useful here because the matcher has length/phonetic
+/// guards and can fix cases like `Cloud Code` -> `Claude Code` even
+/// when the user has not listed an explicit mistranscription.
 pub fn user_glossary_terms() -> Vec<String> {
+    collect_user_glossary_terms(entries())
+}
+
+fn collect_user_glossary_terms(entries: &[Entry]) -> Vec<String> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for e in entries() {
+    for e in entries {
         let term = e.term.trim();
-        if term.is_empty() || e.mistranscriptions.is_empty() {
+        if term.is_empty() {
             continue;
         }
         if seen.insert(term.to_lowercase()) {
@@ -336,5 +341,37 @@ mod tests {
         let prompt = build_whisper_bias_prompt(&entries).unwrap();
         assert!(prompt.contains("IntelliJ IDEA"));
         assert!(prompt.contains("Notion"));
+    }
+
+    #[test]
+    fn acoustic_terms_include_bare_canonical_glossary_entries() {
+        let entries = vec![
+            entry("Claude Code", &[]),
+            entry("Kubernetes", &["kubernetics"]),
+            entry("  ", &[]),
+            entry("claude code", &["cloud code"]),
+        ];
+
+        let terms = collect_user_glossary_terms(&entries);
+
+        assert_eq!(terms, vec!["Claude Code", "Kubernetes"]);
+    }
+
+    #[test]
+    fn bare_glossary_entry_can_fix_cloud_code_acoustically() {
+        let entries = vec![entry("Claude Code", &[])];
+        let terms = collect_user_glossary_terms(&entries);
+
+        let (out, subs) = crate::always::text_match::apply_custom_words(
+            "Open Cloud Code please",
+            &terms,
+            crate::always::text_match::DEFAULT_THRESHOLD,
+        );
+
+        assert_eq!(out, "Open Claude Code please");
+        assert_eq!(
+            subs,
+            vec![("Cloud Code".to_string(), "Claude Code".to_string())]
+        );
     }
 }

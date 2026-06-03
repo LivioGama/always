@@ -107,11 +107,11 @@ pub fn poll_speech_energy(cfg: &AlwaysConfig) -> Result<bool> {
 /// mid-thought.
 const SHORT_SPEECH_MS: u32 = 400;
 /// Silence-after-speech window for short utterances. Standard window
-/// is `cfg.silence_secs` (1.5s default); for a short utterance we cut
-/// at 400ms so single words ("yes", "ok") paste in ~700ms total.
-/// Reverted from 900ms — felt laggy. Mid-sentence safety is covered
-/// by the higher-level `silence_secs` which catches longer phrases.
-const SHORT_SILENCE_MS: u32 = 400;
+/// is `cfg.silence_secs`; for a short utterance we cut at 300ms so
+/// single words ("yes", "ok") do not sit behind the normal phrase window.
+/// Mid-sentence safety is covered by the higher-level `silence_secs` which
+/// catches longer phrases once the utterance grows beyond `SHORT_SPEECH_MS`.
+const SHORT_SILENCE_MS: u32 = 300;
 
 fn record_with_local_vad(
     cfg: &AlwaysConfig,
@@ -145,12 +145,12 @@ fn record_with_local_vad(
     // - At final, if speculation is still valid (no resume), use its result —
     //   transcription has been running in parallel during the silence wait, so
     //   the user gets snappy paste with no extra latency cost.
-    // Tentative at 50% of final window — starts Whisper while the user
+    // Tentative at 20% of final window — starts Whisper while the user
     // is still in the trailing-silence wait, but we still require the
     // full `silence_secs` of quiet before finalizing. Wrong guesses are
-    // discarded if speech resumes. 50% (vs 60%) saves ~200ms on a 2.0s
-    // silence budget without cutting the hard silence limit short.
-    let tentative_silence_secs = (cfg.silence_secs * 0.50).clamp(0.4, 1.8);
+    // discarded if speech resumes. This only moves the preview/STT kickoff;
+    // it does not shorten the hard final silence limit.
+    let tentative_silence_secs = (cfg.silence_secs * 0.20).clamp(0.15, 1.0);
     let tentative_silence_frames =
         ((tentative_silence_secs * 1000.0) / FRAME_MS as f64).ceil() as usize;
     // Pre-buffer: keep 200ms of audio before speech detection to catch first words.
@@ -354,6 +354,8 @@ fn record_with_local_vad(
             smoothed_max >= silence_threshold || energy_above_threshold
         } else {
             last_prob >= speech_threshold
+                || (last_prob >= speech_threshold * 0.65
+                    && frame_energy >= cfg.energy_threshold * 1.1)
         };
 
         if is_speech {

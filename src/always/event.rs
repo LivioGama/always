@@ -33,7 +33,7 @@ static LAST_LOW_MIC_OVERLAY: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(||
 ///
 /// **v6 (2026-05-25):** Low microphone volume warning event.
 /// `LowMicrophoneVolume` notifies GUI when mic energy is barely above threshold.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Event types for daemon-to-GUI communication
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,6 +221,14 @@ pub enum DaemonEvent {
     ActiveTranscriberChanged {
         backend: String,
     },
+    /// Transcription failed (e.g. Groq API error: bad key, quota, or
+    /// network). Surfaced to the GUI as a red error overlay so the user
+    /// isn't left on a stuck "Processing…". `kind` is a stable machine tag
+    /// (`auth` | `quota` | `network` | `error`); `message` is short human text.
+    TranscriptionFailed {
+        kind: String,
+        message: String,
+    },
 }
 
 /// Upper bound (in chars) on any single user-/network-supplied string
@@ -296,6 +304,12 @@ impl DaemonEvent {
             }
             DaemonEvent::TranscriptionFiltered { reason } => {
                 cap_field(reason).map(|reason| DaemonEvent::TranscriptionFiltered { reason })
+            }
+            DaemonEvent::TranscriptionFailed { kind, message } => {
+                cap_field(message).map(|message| DaemonEvent::TranscriptionFailed {
+                    kind: kind.clone(),
+                    message,
+                })
             }
             DaemonEvent::CorrectionDialogRequested { last_transcript } => {
                 cap_field(last_transcript).map(|last_transcript| {
@@ -548,6 +562,15 @@ impl EventBroadcaster {
     pub fn transcription_filtered(&self, reason: impl Into<String>) {
         self.send(DaemonEvent::TranscriptionFiltered {
             reason: reason.into(),
+        });
+    }
+
+    /// Send a transcription-failed event (Groq/STT error) so the GUI can
+    /// flash a red error overlay instead of leaving a stuck "Processing…".
+    pub fn transcription_failed(&self, kind: impl Into<String>, message: impl Into<String>) {
+        self.send(DaemonEvent::TranscriptionFailed {
+            kind: kind.into(),
+            message: message.into(),
         });
     }
 

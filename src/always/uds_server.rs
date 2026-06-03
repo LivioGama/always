@@ -788,7 +788,7 @@ fn apply_runtime_preferences(
     let mut cfg = ctx.cfg.write();
     cfg.auto_enter_delay_ms = auto_enter_delay_ms.min(60_000);
     cfg.energy_threshold = energy_threshold.clamp(0.0001, 0.5);
-    cfg.silence_secs = silence_secs.clamp(1.5, 15.0);
+    cfg.silence_secs = silence_secs.clamp(0.7, 15.0);
     cfg.cooldown_ms = cooldown_ms;
     cfg.silero_threshold = silero_threshold.clamp(0.0, 1.0);
     tracing::info!(

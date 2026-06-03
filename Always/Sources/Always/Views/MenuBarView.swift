@@ -69,20 +69,11 @@ struct MenuBarView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Status line — a normal, non-interactive menu entry. Same icon
-            // width + padding as MenuRow so it reads as part of the menu.
-            HStack(spacing: 8) {
-                Image(systemName: statusIcon)
-                    .frame(width: 16, alignment: .center)
-                    .foregroundColor(statusColor)
-                Text(statusText)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .foregroundColor(.secondary)
+            MenuStatusRow(
+                label: statusText,
+                systemImage: statusIcon,
+                iconColor: statusColor
+            )
 
             Divider()
 
@@ -261,6 +252,33 @@ private struct MenuRow: View {
         .onHover { hovering in
             isHovering = hovering && !isDisabled
         }
+    }
+}
+
+private struct MenuStatusRow: View {
+    let label: String
+    let systemImage: String
+    let iconColor: Color
+
+    var body: some View {
+        Button(action: {}) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .frame(width: 16, alignment: .center)
+                    .foregroundColor(iconColor)
+                Text(label)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+            .foregroundColor(.secondary)
+        }
+        .buttonStyle(.plain)
+        .disabled(true)
     }
 }
 

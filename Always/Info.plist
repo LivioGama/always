@@ -71,7 +71,7 @@
     <key>SUFeedURL</key>
     <string>https://github.com/rtk-ai/always/releases/latest/download/appcast.xml</string>
     <key>SUPublicEDKey</key>
-    <string>REPLACE_WITH_BASE64_EDDSA_PUBLIC_KEY</string>
+    <string>34fr+qLt9APKQfR2FSQfyEY4iAGjJOjZ5MIFMaGkK68=</string>
     <key>SUEnableAutomaticChecks</key>
     <true/>
     <key>SUScheduledCheckInterval</key>

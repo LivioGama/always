@@ -1406,7 +1406,7 @@ mod tests {
     }
 
     #[test]
-    fn parakeet_v3_is_the_only_recommended_model() {
+    fn parakeet_v2_is_the_only_recommended_model() {
         let mut map = HashMap::new();
         populate_catalog(&mut map);
         let recommended: Vec<&str> = map
@@ -1414,7 +1414,7 @@ mod tests {
             .filter(|m| m.is_recommended)
             .map(|m| m.id.as_str())
             .collect();
-        assert_eq!(recommended, vec!["parakeet-tdt-0.6b-v3"]);
+        assert_eq!(recommended, vec!["parakeet-tdt-0.6b-v2"]);
     }
 
     #[test]
