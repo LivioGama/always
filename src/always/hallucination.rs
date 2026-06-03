@@ -301,7 +301,7 @@ pub fn is_hallucination(result: &TranscriptionResult) -> Option<&'static str> {
     if text.contains('\u{FFFD}') {
         return Some("unicode replacement char");
     }
-    let chars: Vec<char> = text.chars().collect();
+    let chars: Vec<char> = text.chars().flat_map(|c| c.to_lowercase()).collect();
     if chars
         .windows(4)
         .any(|w| w[0] == w[1] && w[1] == w[2] && w[2] == w[3] && w[0].is_alphabetic())
@@ -420,6 +420,8 @@ mod tests {
 
     #[test]
     fn rejects_repeated_char_run() {
+        assert!(is_hallucination(&make("Ffff")).is_some());
+        assert!(is_hallucination(&make("FFFF")).is_some());
         assert!(is_hallucination(&make("aaaaah what was that")).is_some());
         assert!(is_hallucination(&make("noooo way that happened")).is_some());
     }

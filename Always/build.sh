@@ -102,7 +102,14 @@ echo "Code signing app..."
 # Use stable bundle identifier for permissions persistence
 SIGN_IDENTITY="${ALWAYS_CODESIGN_IDENTITY:-}"
 if [ -z "$SIGN_IDENTITY" ]; then
-    SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)"
+    if [ "${ALWAYS_BUILD_PROFILE:-debug}" = "release" ]; then
+        SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)"
+    else
+        # Local dev rebuilds should not hit Keychain private-key prompts.
+        # Release builds can still use a real identity, and any build can
+        # override this with ALWAYS_CODESIGN_IDENTITY.
+        SIGN_IDENTITY="-"
+    fi
 fi
 if [ -z "$SIGN_IDENTITY" ]; then
     SIGN_IDENTITY="-"
@@ -197,8 +204,25 @@ fi
 echo "✓ Bundle integrity: GUI=${gui_size}B, daemon=${daemon_size}B"
 
 echo "Deploying to /Applications..."
-rm -rf /Applications/Always.app
-cp -r Always.app /Applications/
+DEST_APP="/Applications/Always.app"
+if [ -d "$DEST_APP" ]; then
+    if [ ! -w "$DEST_APP" ]; then
+        echo "✗ $DEST_APP is not writable by $(id -un)."
+        echo "  One-time repair: sudo chown -R $(id -un):admin $DEST_APP"
+        echo "  After that, dev rebuilds update the app in place without sudo prompts."
+        exit 1
+    fi
+    rm -rf "$DEST_APP/Contents"
+    mkdir -p "$DEST_APP"
+    cp -R Always.app/Contents "$DEST_APP/"
+else
+    if [ ! -w /Applications ]; then
+        echo "✗ /Applications is not writable by $(id -un)."
+        echo "  Install Always.app once from Finder, or repair /Applications permissions."
+        exit 1
+    fi
+    cp -R Always.app "$DEST_APP"
+fi
 echo "✓ Deployed to /Applications/Always.app"
 
 echo "App bundle ready. Run with: open -a Always"
