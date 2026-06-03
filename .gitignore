@@ -19,3 +19,7 @@ AlwaysApp/.build/
 .filtering_evolution_history.md
 AlwaysApp.app/
 AlwaysApp/AlwaysApp.app/
+
+# JetBrains IDE config
+.idea/
+

@@ -10,6 +10,10 @@ use super::text::Vocabulary;
 use crate::db;
 use crate::db::Preferences;
 
+// Default configuration values
+const DEFAULT_AUTO_ENTER_DELAY_MS: u32 = 4000;
+const DEFAULT_IDLE_PAUSE_SECS: u32 = 120;
+
 #[derive(Debug, Clone, Default)]
 pub enum VadMode {
     #[default]
@@ -160,6 +164,7 @@ pub struct AlwaysConfig {
     pub timeout_secs: u32,
     pub silence_secs: f64,
     pub auto_enter: bool,
+    pub auto_enter_delay_secs: u64,
     pub filter_enabled: bool,
     pub energy_threshold: f64,
     pub onset_ms: u32,
@@ -175,6 +180,14 @@ pub struct AlwaysConfig {
     pub silero_threshold: f32,
     pub vocab_config: VocabConfig,
     pub postprocess_config: PostprocessConfig,
+    /// Delay (ms) between paste and the synthesized Return when
+    /// `auto_enter` is on. `0` = press Return immediately (legacy
+    /// behavior). When > 0, a countdown overlay is shown; any key
+    /// press cancels.
+    pub auto_enter_delay_ms: u32,
+    /// Auto-pause the daemon after this many seconds with no voice
+    /// activity. `0` = disabled. Default 120 (matches requirement).
+    pub idle_pause_secs: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -303,6 +316,10 @@ impl AlwaysConfig {
             timeout_secs,
             silence_secs: prefs.stt_silence.unwrap_or(silence_secs),
             auto_enter,
+            auto_enter_delay_secs: prefs
+                .auto_enter_delay_ms
+                .map(|ms| (ms as u64 + 999) / 1000) // Convert ms to seconds, round up
+                .unwrap_or(2),
             filter_enabled: true, // Always enabled - filter is always on
             energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.012),
             onset_ms: 30,
@@ -318,6 +335,8 @@ impl AlwaysConfig {
             silero_threshold: prefs.silero_threshold.unwrap_or(0.5) as f32,
             vocab_config,
             postprocess_config: effective_postprocess,
+            auto_enter_delay_ms: prefs.auto_enter_delay_ms.unwrap_or(DEFAULT_AUTO_ENTER_DELAY_MS),
+            idle_pause_secs: prefs.idle_pause_secs.unwrap_or(DEFAULT_IDLE_PAUSE_SECS),
         };
 
         Ok(config)
@@ -339,7 +358,8 @@ impl Default for AlwaysConfig {
             // kicks off at 75% of this (≈1.1s) so end-to-end paste
             // latency rarely exceeds ~1.5s after the user stops talking.
             silence_secs: 1.5,
-            auto_enter: false,
+            auto_enter: true,
+            auto_enter_delay_secs: 4,
             filter_enabled: true,
             energy_threshold: 0.012,
             onset_ms: 30,
@@ -355,6 +375,8 @@ impl Default for AlwaysConfig {
             silero_threshold: 0.5,
             vocab_config,
             postprocess_config,
+            auto_enter_delay_ms: DEFAULT_AUTO_ENTER_DELAY_MS,
+            idle_pause_secs: DEFAULT_IDLE_PAUSE_SECS,
         }
     }
 }

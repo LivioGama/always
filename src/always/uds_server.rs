@@ -317,6 +317,74 @@ fn execute_command(cmd: DaemonCommand) {
         DaemonCommand::ApproveCorrection { id } => handle_approve_correction(&id),
         DaemonCommand::RejectCorrection { id } => handle_reject_correction(&id),
         DaemonCommand::CaptureCorrection => handle_capture_correction(),
+        DaemonCommand::SetPaused { paused, reason } => {
+            let was_paused = pause::is_paused();
+            if was_paused != paused {
+                pause::set_paused(paused);
+                if !paused {
+                    pause::set_idle_auto_paused(false);
+                    pause::mark_voice_seen();
+                }
+                if paused {
+                    global_broadcaster().paused();
+                } else {
+                    global_broadcaster().resumed();
+                }
+            }
+            tracing::info!(paused, reason = reason.as_deref().unwrap_or(""), "uds_set_paused");
+        }
+        DaemonCommand::CancelAutoEnterCountdown => {
+            if pause::countdown_active() {
+                pause::countdown_request_cancel();
+                tracing::info!("uds_cancel_auto_enter_countdown");
+            }
+        }
+        DaemonCommand::NotifyFocusedAppChanged { bundle_id } => {
+            pause::set_current_app(bundle_id.clone());
+            global_broadcaster().focused_app_changed(bundle_id.clone());
+            // Apply per-app paused override on focus change. We compute
+            // the effective paused state from the override table (if
+            // any) and the *current* global flag, then sync the global
+            // flag to it. Without this push, an app that wants
+            // "always paused" would still record while focused unless
+            // the user manually toggles.
+            let global = pause::is_paused();
+            let effective = crate::always::per_app::effective_paused(global);
+            if effective != global {
+                pause::set_paused(effective);
+                if effective {
+                    global_broadcaster().paused();
+                } else {
+                    pause::mark_voice_seen();
+                    global_broadcaster().resumed();
+                }
+                tracing::info!(effective, "per_app_paused_applied");
+            }
+            tracing::info!(bundle = ?bundle_id, "uds_focused_app_changed");
+        }
+        DaemonCommand::NotifySystemAudioState { playing } => {
+            // Audio output started → pause. Audio output stopped → if
+            // we were paused for audio, resume. Distinguish from
+            // idle-auto-pause via the dedicated flag.
+            if playing {
+                if !pause::is_paused() {
+                    pause::set_paused(true);
+                    global_broadcaster().paused();
+                    tracing::info!("audio_output_auto_paused");
+                }
+            } else {
+                // Only auto-resume if we weren't already in idle-pause.
+                if pause::is_paused() && !pause::is_idle_auto_paused() {
+                    pause::set_paused(false);
+                    pause::mark_voice_seen();
+                    global_broadcaster().resumed();
+                    tracing::info!("audio_output_auto_resumed");
+                }
+            }
+        }
+        DaemonCommand::LogCorrection { intended } => {
+            handle_log_correction(&intended);
+        }
     }
 }
 
@@ -393,6 +461,109 @@ fn handle_capture_correction() {
             global_broadcaster().correction_logged(&p.wrong, &p.right);
         }
     }
+}
+
+/// Handle the dialog-driven correction: the user typed the intended
+/// spelling (`intended`); we diff it against the most recently-pasted
+/// transcript to extract the wrong word and apply a correction pair.
+///
+/// Matching: tokenize the last transcript, pick the token with the
+/// lowest case-insensitive Levenshtein distance to `intended`. If the
+/// best distance is too large (>= half the intended length), the user
+/// probably entered a *new* term — we add a glossary entry with that
+/// term and no mistranscriptions but bumped weight.
+fn handle_log_correction(intended: &str) {
+    let intended = intended.trim();
+    if intended.is_empty() {
+        tracing::warn!("uds_log_correction_empty_input");
+        global_broadcaster().correction_capture_result("no_correction_pairs");
+        return;
+    }
+
+    let Some(last) = pause::last_transcript_for_correction() else {
+        tracing::info!("uds_log_correction_no_recent_paste");
+        global_broadcaster().correction_capture_result("no_recent_paste");
+        return;
+    };
+
+    let best = best_token_match(&last, intended);
+    match best {
+        Some((wrong, distance)) if distance <= intended.chars().count() / 2 => {
+            let pair = crate::always::correction::CorrectionPair {
+                wrong: wrong.clone(),
+                right: intended.to_string(),
+            };
+            match crate::always::correction::apply_pairs_to_glossary(std::slice::from_ref(&pair)) {
+                Ok(_) => {
+                    global_broadcaster().correction_logged(&pair.wrong, &pair.right);
+                    global_broadcaster().correction_capture_result("applied");
+                    tracing::info!(wrong = %pair.wrong, right = %pair.right, "uds_log_correction_applied");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "uds_log_correction_apply_failed");
+                    global_broadcaster().correction_capture_result("error");
+                }
+            }
+        }
+        _ => {
+            // No close match — treat as a new vocabulary term with bumped weight.
+            match crate::always::correction::add_or_bump_term(intended) {
+                Ok(_) => {
+                    global_broadcaster().correction_logged("", intended);
+                    global_broadcaster().correction_capture_result("applied");
+                    tracing::info!(term = %intended, "uds_log_correction_added_term");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "uds_log_correction_term_apply_failed");
+                    global_broadcaster().correction_capture_result("error");
+                }
+            }
+        }
+    }
+}
+
+/// Return the token in `haystack` with the smallest case-insensitive
+/// Levenshtein distance to `needle`, paired with that distance.
+fn best_token_match(haystack: &str, needle: &str) -> Option<(String, usize)> {
+    let needle_lc = needle.to_lowercase();
+    let mut best: Option<(String, usize)> = None;
+    for tok in haystack.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_') {
+        if tok.is_empty() {
+            continue;
+        }
+        let d = levenshtein(&tok.to_lowercase(), &needle_lc);
+        match &best {
+            Some((_, prev)) if *prev <= d => {}
+            _ => best = Some((tok.to_string(), d)),
+        }
+    }
+    best
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let m = a.len();
+    let n = b.len();
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr: Vec<usize> = vec![0; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1)
+                .min(curr[j - 1] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
 }
 
 /// Send an event to all connected clients

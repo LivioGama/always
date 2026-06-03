@@ -93,7 +93,7 @@ impl Combo {
 }
 
 #[allow(dead_code)] // referenced only in tests + macos listener
-fn default_shortcuts() -> (Combo, Combo, Combo, Combo) {
+fn default_shortcuts() -> (Combo, Combo, Combo, Combo, Combo) {
     (
         Combo::from_str("ctrl+alt+p").expect("default pause shortcut is valid"),
         Combo::from_str("ctrl+alt+a").expect("default auto-enter shortcut is valid"),
@@ -101,10 +101,10 @@ fn default_shortcuts() -> (Combo, Combo, Combo, Combo) {
         // ⌃⌥X is the hotkey-driven correction capture: read the user's
         // current selection, diff it against the most recent paste, and
         // append the resulting `(wrong → right)` pairs to the glossary.
-        // Default chosen so it doesn't collide with the existing trio
-        // and stays inside the "ctrl+alt+<letter>" pattern users already
-        // know.
         Combo::from_str("ctrl+alt+x").expect("default log-correction shortcut is valid"),
+        // ⌃⌥W opens the dialog-driven correction path: type the
+        // intended spelling, daemon diffs against the last transcript.
+        Combo::from_str("ctrl+alt+w").expect("default correction-dialog shortcut is valid"),
     )
 }
 
@@ -114,9 +114,15 @@ fn resolve_shortcuts(
     auto_enter: Option<&str>,
     force_paste: Option<&str>,
     log_correction: Option<&str>,
-) -> (Combo, Combo, Combo, Combo) {
-    let (default_pause, default_auto_enter, default_force_paste, default_log_correction) =
-        default_shortcuts();
+    correction_dialog: Option<&str>,
+) -> (Combo, Combo, Combo, Combo, Combo) {
+    let (
+        default_pause,
+        default_auto_enter,
+        default_force_paste,
+        default_log_correction,
+        default_correction_dialog,
+    ) = default_shortcuts();
     let pause_combo = pause.and_then(Combo::from_str).unwrap_or(default_pause);
     let auto_enter_combo = auto_enter
         .and_then(Combo::from_str)
@@ -127,17 +133,21 @@ fn resolve_shortcuts(
     let log_correction_combo = log_correction
         .and_then(Combo::from_str)
         .unwrap_or(default_log_correction);
+    let correction_dialog_combo = correction_dialog
+        .and_then(Combo::from_str)
+        .unwrap_or(default_correction_dialog);
 
     (
         pause_combo,
         auto_enter_combo,
         force_paste_combo,
         log_correction_combo,
+        correction_dialog_combo,
     )
 }
 
 #[cfg(feature = "macos")]
-fn load_shortcuts() -> (Combo, Combo, Combo, Combo) {
+fn load_shortcuts() -> (Combo, Combo, Combo, Combo, Combo) {
     let defaults = default_shortcuts();
 
     let Ok(conn) = crate::db::open() else {
@@ -152,6 +162,7 @@ fn load_shortcuts() -> (Combo, Combo, Combo, Combo) {
         prefs.shortcut_auto_enter.as_deref(),
         prefs.shortcut_force_paste.as_deref(),
         prefs.shortcut_log_correction.as_deref(),
+        prefs.shortcut_correction_dialog.as_deref(),
     )
 }
 
@@ -197,7 +208,13 @@ fn key_to_shortcut_name(key: &rdev::Key) -> Option<&'static str> {
 pub fn start_keyboard_listener() -> Result<()> {
     use rdev::{EventType, Key, listen};
 
-    let (pause_combo, auto_enter_combo, force_paste_combo, log_correction_combo) = load_shortcuts();
+    let (
+        pause_combo,
+        auto_enter_combo,
+        force_paste_combo,
+        log_correction_combo,
+        correction_dialog_combo,
+    ) = load_shortcuts();
     let (tx, _rx) = mpsc::channel();
 
     thread::spawn(move || {
@@ -232,8 +249,21 @@ pub fn start_keyboard_listener() -> Result<()> {
             }
             EventType::KeyPress(ref key) => {
                 let Some(name) = key_to_shortcut_name(key) else {
+                    // Even unknown keys cancel an in-flight countdown
+                    // (e.g. Tab, arrow keys) — the user typed *something*
+                    // and intended for that to take precedence over the
+                    // auto-Return.
+                    if pause::countdown_active() {
+                        pause::countdown_request_cancel();
+                    }
                     return;
                 };
+                if pause::countdown_active() {
+                    // Any keypress that isn't a pure modifier cancels
+                    // the active auto-enter countdown. The user is
+                    // typing — they don't want the synthesized Return.
+                    pause::countdown_request_cancel();
+                }
                 if pause_combo.matches_name(ctrl_pressed, shift_pressed, alt_pressed, name) {
                     let new_state = pause::toggle_pause();
                     if new_state {
@@ -332,9 +362,33 @@ pub fn start_keyboard_listener() -> Result<()> {
                                 .correction_capture_result("error");
                         }
                     }
+                } else if correction_dialog_combo.matches_name(
+                    ctrl_pressed,
+                    shift_pressed,
+                    alt_pressed,
+                    name,
+                ) {
+                    // Dialog-driven correction: surface the last
+                    // transcript to the Mac app, which then opens a
+                    // sheet for the user to type the intended word.
+                    // Selection on the screen is irrelevant here —
+                    // the diff happens against `last_pasted` inside
+                    // the daemon when `LogCorrection { intended }`
+                    // comes back.
+                    let last = pause::last_transcript_for_correction().unwrap_or_default();
+                    event::global_broadcaster()
+                        .correction_dialog_requested(last);
                 }
             }
-            _ => {}
+            _ => {
+                // Non-key events (e.g. MouseMove, MouseClick) also
+                // cancel an in-flight countdown — they reflect
+                // intentional user input directed at the focused app,
+                // not a quiescent "let auto-enter run" state.
+                if pause::countdown_active() && matches!(event.event_type, EventType::ButtonPress(_)) {
+                    pause::countdown_request_cancel();
+                }
+            }
         }) {
             tracing::error!(?error, "keyboard_listener_error");
             let _ = tx.send(());
@@ -453,48 +507,48 @@ mod tests {
     #[cfg(feature = "macos")]
     #[test]
     fn falls_back_to_defaults_for_invalid_configured_shortcuts() {
-        // Each invalid string falls through to the corresponding
-        // hard-coded default. We feed one bogus value per slot to make
-        // sure the per-shortcut fallback is wired independently — a
-        // single shared default would silently mask a regression where
-        // e.g. force-paste's combo overrode log-correction's.
-        let (pause, auto_enter, force_paste, log_correction) = super::resolve_shortcuts(
-            Some("ctrl+alt+return"),
-            Some("a"),
-            Some("v"),
-            Some("not a combo"),
-        );
+        let (pause, auto_enter, force_paste, log_correction, correction_dialog) =
+            super::resolve_shortcuts(
+                Some("ctrl+alt+return"),
+                Some("a"),
+                Some("v"),
+                Some("not a combo"),
+                Some(""),
+            );
         assert!(pause.matches_name(true, false, true, "p"));
         assert!(auto_enter.matches_name(true, false, true, "a"));
         assert!(force_paste.matches_name(true, false, true, "v"));
         assert!(log_correction.matches_name(true, false, true, "x"));
+        assert!(correction_dialog.matches_name(true, false, true, "w"));
     }
 
     #[cfg(feature = "macos")]
     #[test]
     fn uses_configured_shortcuts_when_valid() {
-        let (pause, auto_enter, force_paste, log_correction) = super::resolve_shortcuts(
-            Some("shift+x"),
-            Some("ctrl+space"),
-            Some("ctrl+shift+v"),
-            Some("ctrl+alt+l"),
-        );
+        let (pause, auto_enter, force_paste, log_correction, correction_dialog) =
+            super::resolve_shortcuts(
+                Some("shift+x"),
+                Some("ctrl+space"),
+                Some("ctrl+shift+v"),
+                Some("ctrl+alt+l"),
+                Some("ctrl+alt+m"),
+            );
         assert!(pause.matches_name(false, true, false, "x"));
         assert!(auto_enter.matches_name(true, false, false, "space"));
         assert!(force_paste.matches_name(true, true, false, "v"));
         assert!(log_correction.matches_name(true, false, true, "l"));
+        assert!(correction_dialog.matches_name(true, false, true, "m"));
     }
 
     #[cfg(feature = "macos")]
     #[test]
     fn log_correction_default_is_ctrl_alt_x() {
-        // Sanity: nothing configured → all four slots resolve to their
-        // documented defaults. Guards against silent default drift.
-        let (pause, auto_enter, force_paste, log_correction) =
-            super::resolve_shortcuts(None, None, None, None);
+        let (pause, auto_enter, force_paste, log_correction, correction_dialog) =
+            super::resolve_shortcuts(None, None, None, None, None);
         assert!(pause.matches_name(true, false, true, "p"));
         assert!(auto_enter.matches_name(true, false, true, "a"));
         assert!(force_paste.matches_name(true, false, true, "v"));
         assert!(log_correction.matches_name(true, false, true, "x"));
+        assert!(correction_dialog.matches_name(true, false, true, "w"));
     }
 }

@@ -29,6 +29,14 @@ pub struct Preferences {
     pub postprocess_enabled: Option<bool>,
     pub shortcut_log_correction: Option<String>,
     pub passive_correction_capture: Option<bool>,
+    /// Auto-enter countdown delay (ms). 0 = immediate (legacy).
+    pub auto_enter_delay_ms: Option<u32>,
+    /// Auto-pause after no voice for this many seconds. 0 = disabled.
+    pub idle_pause_secs: Option<u32>,
+    /// Shortcut to open the manual correction dialog (intended-word input).
+    pub shortcut_correction_dialog: Option<String>,
+    /// JSON-encoded per-app overrides: `{ "<bundle_id>": { "auto_enter": bool, "paused": bool } }`.
+    pub per_app_settings_json: Option<String>,
 }
 
 pub fn open() -> Result<Connection> {
@@ -155,6 +163,45 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    let has_auto_enter_delay_ms = conn
+        .prepare("SELECT auto_enter_delay_ms FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_auto_enter_delay_ms {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN auto_enter_delay_ms INTEGER;")?;
+    }
+
+    let has_idle_pause_secs = conn
+        .prepare("SELECT idle_pause_secs FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_idle_pause_secs {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN idle_pause_secs INTEGER;")?;
+    }
+
+    let has_shortcut_correction_dialog = conn
+        .prepare("SELECT shortcut_correction_dialog FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_shortcut_correction_dialog {
+        conn.execute_batch(
+            "ALTER TABLE preferences ADD COLUMN shortcut_correction_dialog TEXT;",
+        )?;
+    }
+
+    let has_per_app_settings_json = conn
+        .prepare("SELECT per_app_settings_json FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_per_app_settings_json {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN per_app_settings_json TEXT;")?;
+    }
+
+    let has_stt_auto_enter_delay_secs = conn
+        .prepare("SELECT stt_auto_enter_delay_secs FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_stt_auto_enter_delay_secs {
+        conn.execute_batch(
+            "ALTER TABLE preferences ADD COLUMN stt_auto_enter_delay_secs INTEGER;",
+        )?;
+    }
+
     Ok(())
 }
 
@@ -162,7 +209,7 @@ fn migrate(conn: &Connection) -> Result<()> {
 
 pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
     let mut stmt = conn.prepare(
-        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture FROM preferences WHERE id = 1",
+        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, shortcut_correction_dialog, per_app_settings_json, stt_auto_enter_delay_secs FROM preferences WHERE id = 1",
     )?;
     let result = stmt.query_row([], |row| {
         Ok(Preferences {
@@ -185,6 +232,11 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             postprocess_enabled: row.get::<_, Option<i64>>(16)?.map(|v| v != 0),
             shortcut_log_correction: row.get(17)?,
             passive_correction_capture: row.get::<_, Option<i64>>(18)?.map(|v| v != 0),
+            auto_enter_delay_ms: row.get::<_, Option<i64>>(19)?.map(|v| v as u32),
+            idle_pause_secs: row.get::<_, Option<i64>>(20)?.map(|v| v as u32),
+            shortcut_correction_dialog: row.get(21)?,
+            per_app_settings_json: row.get(22)?,
+            stt_auto_enter_delay_secs: row.get::<_, Option<i64>>(23)?.map(|v| v as u64),
         })
     });
     match result {
@@ -215,6 +267,10 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "postprocess_enabled",
         "shortcut_log_correction",
         "passive_correction_capture",
+        "auto_enter_delay_ms",
+        "idle_pause_secs",
+        "shortcut_correction_dialog",
+        "per_app_settings_json",
     ];
     if !valid_keys.contains(&key) {
         anyhow::bail!(
@@ -286,12 +342,31 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
                 anyhow::bail!("silero_threshold must be between 0.1 and 0.9");
             }
         }
-        "stt_trim_silence"
-        | "stt_auto_enter"
-        | "postprocess_enabled"
-        | "passive_correction_capture" => {
+        "stt_trim_silence" | "stt_auto_enter" | "postprocess_enabled" | "passive_correction_capture" => {
             if !matches!(value, "true" | "false" | "1" | "0") {
                 anyhow::bail!("{key} must be one of: true, false, 1, 0");
+            }
+        }
+        "auto_enter_delay_ms" => {
+            let parsed = value
+                .parse::<u32>()
+                .context("auto_enter_delay_ms must be a non-negative integer")?;
+            if parsed > 60_000 {
+                anyhow::bail!("auto_enter_delay_ms must be <= 60000");
+            }
+        }
+        "idle_pause_secs" => {
+            let parsed = value
+                .parse::<u32>()
+                .context("idle_pause_secs must be a non-negative integer")?;
+            if parsed > 86_400 {
+                anyhow::bail!("idle_pause_secs must be <= 86400 (1 day)");
+            }
+        }
+        "per_app_settings_json" => {
+            if !value.is_empty() {
+                let _: serde_json::Value = serde_json::from_str(value)
+                    .context("per_app_settings_json must be valid JSON")?;
             }
         }
         _ => {}

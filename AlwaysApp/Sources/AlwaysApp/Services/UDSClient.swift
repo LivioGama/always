@@ -6,7 +6,7 @@ import os.log
 // Wire-format protocol version. MUST match `PROTOCOL_VERSION` in
 // `src/always/event.rs`. Bumping either side without the other will
 // cause the client to refuse the connection.
-let UDS_PROTOCOL_VERSION: UInt32 = 1
+let UDS_PROTOCOL_VERSION: UInt32 = 2
 
 // Event types matching Rust DaemonEvent enum
 enum DaemonEventType: String, Codable {
@@ -33,6 +33,19 @@ enum DaemonEventType: String, Codable {
     case correctionLogged = "CorrectionLogged"
     case correctionPending = "CorrectionPending"
     case correctionCaptureResult = "CorrectionCaptureResult"
+    // Auto-enter countdown lifecycle (delay > 0). The Mac app shows
+    // a visible countdown overlay between Started and Finished/Cancelled.
+    case autoEnterCountdownStarted = "AutoEnterCountdownStarted"
+    case autoEnterCountdownTick = "AutoEnterCountdownTick"
+    case autoEnterCountdownCancelled = "AutoEnterCountdownCancelled"
+    case autoEnterCountdownFinished = "AutoEnterCountdownFinished"
+    // Daemon went/came from idle auto-pause.
+    case idleAutoPaused = "IdleAutoPaused"
+    case idleAutoResumed = "IdleAutoResumed"
+    // App focus broadcast from daemon back to us (idempotent echo).
+    case focusedAppChanged = "FocusedAppChanged"
+    // Daemon asks app to show the correction dialog.
+    case correctionDialogRequested = "CorrectionDialogRequested"
 }
 
 // Event data structures
@@ -65,6 +78,30 @@ struct CorrectionPendingData: Codable {
     let right: String
 }
 
+// Countdown lifecycle payloads. Daemon sends remaining_ms (and total_ms
+// on Started); both are unsigned ints so we decode through Int64 to
+// be safe with Swift's signed default.
+struct AutoEnterCountdownStartData: Codable {
+    let remaining_ms: UInt32
+    let total_ms: UInt32
+}
+
+struct AutoEnterCountdownTickData: Codable {
+    let remaining_ms: UInt32
+}
+
+struct IdleAutoPausedData: Codable {
+    let seconds: UInt32
+}
+
+struct FocusedAppChangedData: Codable {
+    let bundle_id: String?
+}
+
+struct CorrectionDialogRequestedData: Codable {
+    let last_transcript: String
+}
+
 // Main event structure - matches Rust serde tagged enum format
 // Rust uses #[serde(tag = "type", content = "data")]
 // This produces JSON like: {"type":"ListeningStarted"} or {"type":"TranscriptFinal","data":{"text":"hello"}}
@@ -90,6 +127,16 @@ struct DaemonEvent: Codable {
     /// when the user approves/rejects.
     let correctionPending: CorrectionPendingData?
 
+    /// Populated for the auto-enter countdown lifecycle events.
+    let countdownStart: AutoEnterCountdownStartData?
+    let countdownTick: AutoEnterCountdownTickData?
+    /// Populated for `IdleAutoPaused`.
+    let idleAutoPaused: IdleAutoPausedData?
+    /// Populated for `FocusedAppChanged`.
+    let focusedApp: FocusedAppChangedData?
+    /// Populated for `CorrectionDialogRequested`.
+    let correctionDialogRequest: CorrectionDialogRequestedData?
+
     enum CodingKeys: String, CodingKey {
         case type
         case data
@@ -99,35 +146,50 @@ struct DaemonEvent: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let type = try container.decode(DaemonEventType.self, forKey: .type)
         self.type = type
+        // Default-nil everything; concrete cases below set what they need.
+        var data: [String: String]? = nil
+        var helloVersion: UInt32? = nil
+        var correctionLogged: CorrectionLoggedData? = nil
+        var correctionPending: CorrectionPendingData? = nil
+        var countdownStart: AutoEnterCountdownStartData? = nil
+        var countdownTick: AutoEnterCountdownTickData? = nil
+        var idleAutoPaused: IdleAutoPausedData? = nil
+        var focusedApp: FocusedAppChangedData? = nil
+        var correctionDialogRequest: CorrectionDialogRequestedData? = nil
+
         switch type {
         case .hello:
-            // Protocol-version handshake — typed payload, not a string dict.
-            let payload = try container.decodeIfPresent(HelloData.self, forKey: .data)
-            self.helloVersion = payload?.version
-            self.data = nil
-            self.correctionLogged = nil
-            self.correctionPending = nil
+            helloVersion = try container.decodeIfPresent(HelloData.self, forKey: .data)?.version
         case .correctionLogged:
-            let payload = try container.decodeIfPresent(CorrectionLoggedData.self, forKey: .data)
-            self.correctionLogged = payload
-            self.data = nil
-            self.helloVersion = nil
-            self.correctionPending = nil
+            correctionLogged = try container.decodeIfPresent(CorrectionLoggedData.self, forKey: .data)
         case .correctionPending:
-            let payload = try container.decodeIfPresent(CorrectionPendingData.self, forKey: .data)
-            self.correctionPending = payload
-            self.data = nil
-            self.helloVersion = nil
-            self.correctionLogged = nil
+            correctionPending = try container.decodeIfPresent(CorrectionPendingData.self, forKey: .data)
+        case .autoEnterCountdownStarted:
+            countdownStart = try container.decodeIfPresent(AutoEnterCountdownStartData.self, forKey: .data)
+        case .autoEnterCountdownTick:
+            countdownTick = try container.decodeIfPresent(AutoEnterCountdownTickData.self, forKey: .data)
+        case .idleAutoPaused:
+            idleAutoPaused = try container.decodeIfPresent(IdleAutoPausedData.self, forKey: .data)
+        case .focusedAppChanged:
+            focusedApp = try container.decodeIfPresent(FocusedAppChangedData.self, forKey: .data)
+        case .correctionDialogRequested:
+            correctionDialogRequest = try container.decodeIfPresent(CorrectionDialogRequestedData.self, forKey: .data)
         default:
             // Fall-through path: text-bearing or empty events. Keep using
             // the loose dict so existing call sites (e.g. transcript chunk
             // text extraction) continue to work unchanged.
-            self.data = try container.decodeIfPresent([String: String].self, forKey: .data)
-            self.helloVersion = nil
-            self.correctionLogged = nil
-            self.correctionPending = nil
+            data = try container.decodeIfPresent([String: String].self, forKey: .data)
         }
+
+        self.data = data
+        self.helloVersion = helloVersion
+        self.correctionLogged = correctionLogged
+        self.correctionPending = correctionPending
+        self.countdownStart = countdownStart
+        self.countdownTick = countdownTick
+        self.idleAutoPaused = idleAutoPaused
+        self.focusedApp = focusedApp
+        self.correctionDialogRequest = correctionDialogRequest
     }
 
     func encode(to encoder: Encoder) throws {
@@ -142,6 +204,16 @@ struct DaemonEvent: Codable {
             try container.encodeIfPresent(correctionLogged, forKey: .data)
         case .correctionPending:
             try container.encodeIfPresent(correctionPending, forKey: .data)
+        case .autoEnterCountdownStarted:
+            try container.encodeIfPresent(countdownStart, forKey: .data)
+        case .autoEnterCountdownTick:
+            try container.encodeIfPresent(countdownTick, forKey: .data)
+        case .idleAutoPaused:
+            try container.encodeIfPresent(idleAutoPaused, forKey: .data)
+        case .focusedAppChanged:
+            try container.encodeIfPresent(focusedApp, forKey: .data)
+        case .correctionDialogRequested:
+            try container.encodeIfPresent(correctionDialogRequest, forKey: .data)
         default:
             try container.encodeIfPresent(data, forKey: .data)
         }
@@ -152,13 +224,23 @@ struct DaemonEvent: Codable {
         data: [String: String]? = nil,
         helloVersion: UInt32? = nil,
         correctionLogged: CorrectionLoggedData? = nil,
-        correctionPending: CorrectionPendingData? = nil
+        correctionPending: CorrectionPendingData? = nil,
+        countdownStart: AutoEnterCountdownStartData? = nil,
+        countdownTick: AutoEnterCountdownTickData? = nil,
+        idleAutoPaused: IdleAutoPausedData? = nil,
+        focusedApp: FocusedAppChangedData? = nil,
+        correctionDialogRequest: CorrectionDialogRequestedData? = nil
     ) {
         self.type = type
         self.data = data
         self.helloVersion = helloVersion
         self.correctionLogged = correctionLogged
         self.correctionPending = correctionPending
+        self.countdownStart = countdownStart
+        self.countdownTick = countdownTick
+        self.idleAutoPaused = idleAutoPaused
+        self.focusedApp = focusedApp
+        self.correctionDialogRequest = correctionDialogRequest
     }
 }
 

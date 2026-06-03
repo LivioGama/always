@@ -289,6 +289,13 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .unwrap_or_else(|| "false".to_string())
             );
             println!(
+                "stt_auto_enter_delay_secs: {}",
+                prefs
+                    .auto_enter_delay_ms
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "2000".to_string())
+            );
+            println!(
                 "groq_api_key: {}",
                 if groq_in_keychain {
                     "*** (in keychain)".to_string()
@@ -328,6 +335,13 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .unwrap_or("ctrl+alt+x")
             );
             println!(
+                "shortcut_correction_dialog: {}",
+                prefs
+                    .shortcut_correction_dialog
+                    .as_deref()
+                    .unwrap_or("ctrl+alt+w")
+            );
+            println!(
                 "passive_correction_capture: {}",
                 prefs
                     .passive_correction_capture
@@ -340,6 +354,13 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .postprocess_enabled
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "true".to_string())
+            );
+            println!(
+                "per_app_settings_json: {}",
+                prefs
+                    .per_app_settings_json
+                    .as_deref()
+                    .unwrap_or("{}")
             );
         }
         ConfigAction::Set { key, value } => {

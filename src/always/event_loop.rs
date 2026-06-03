@@ -5,8 +5,8 @@ use tokio::runtime::{Handle, Runtime};
 
 use crate::always::log::{Event, Logger};
 use crate::always::{
-    AlwaysConfig, clipboard_watcher, daemon, event, filter, keyboard, mic_monitor, paste, pause,
-    uds_server, vad,
+    AlwaysConfig, auto_enter_countdown, clipboard_watcher, daemon, event, filter, idle_watcher,
+    keyboard, mic_monitor, paste, pause, per_app, uds_server, vad,
 };
 
 pub fn run(cfg: &AlwaysConfig) -> Result<()> {
@@ -67,6 +67,10 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         .and_then(|p| p.passive_correction_capture)
         .unwrap_or(false);
     clipboard_watcher::spawn_if_enabled(rt.handle(), passive_correction_enabled);
+
+    // Idle-pause watchdog. Spawns at most one task; no-op when
+    // `idle_pause_secs == 0`. Lives for the daemon lifetime.
+    idle_watcher::spawn(rt.handle(), cfg.idle_pause_secs);
 
     // Send initial state events
     event::global_broadcaster().listening_started();
@@ -263,34 +267,98 @@ fn handle_speech(
             Ok(())
         }
         SpeechAction::Paste { text: transformed } => {
-            // Single optional cleanup: LLM postprocess (off by default).
-            // The Whisper transcript is otherwise pasted verbatim. The
-            // glossary's curated `mistranscriptions` are surfaced to the
-            // LLM via the postprocess prompt; deterministic regex
-            // substitution was tried and removed because it kept firing
-            // on natural speech ("structure" → "struct" etc.).
+            // Log the raw Whisper transcript for debugging STT quality issues
+            tracing::info!(
+                stage = "whisper_raw",
+                transcript = %text,
+                "speech-to-text output"
+            );
+
+            // Pre-LLM acoustic fix-up (ported from Handy):
+            // Soundex + Levenshtein + n-gram fusion against the user's
+            // curated glossary terms. Catches Whisper acoustic
+            // mishears like `cloud → Claude`, `kubernetics → Kubernetes`
+            // BEFORE we pay the LLM round-trip. Cheap, deterministic,
+            // doesn't invent — purely substitutes from the user's
+            // approved canonical list.
+            let custom_words = crate::glossary::user_glossary_terms();
+            let (acoustic, acoustic_subs) = crate::always::text_match::apply_custom_words(
+                &transformed,
+                &custom_words,
+                crate::always::text_match::DEFAULT_THRESHOLD,
+            );
+            if !acoustic_subs.is_empty() {
+                let pairs: Vec<String> = acoustic_subs
+                    .iter()
+                    .map(|(w, r)| format!("{w}->{r}"))
+                    .collect();
+                tracing::info!(
+                    stage = "acoustic_match",
+                    before = %transformed,
+                    after = %acoustic,
+                    count = acoustic_subs.len(),
+                    pairs = %pairs.join(", "),
+                    "glossary corrections applied"
+                );
+            } else {
+                tracing::debug!(
+                    stage = "acoustic_match",
+                    text = %acoustic,
+                    "no glossary corrections needed"
+                );
+            }
+
+            // Optional LLM postprocess on top of the acoustic-fixed
+            // text. Default ON via `grammar_correction_enabled`.
             let final_text = if cfg.postprocess_config.grammar_correction_enabled
                 && let Some(ref pp) = cfg.post_processor
             {
                 let started = Instant::now();
-                match rt.block_on(pp.process(&transformed, None)) {
+                match rt.block_on(pp.process(&acoustic, None)) {
                     Ok(cleaned) => {
-                        tracing::debug!(
-                            elapsed_ms = started.elapsed().as_millis() as u64,
-                            "postprocess_applied"
-                        );
+                        let elapsed_ms = started.elapsed().as_millis() as u64;
+                        if acoustic != cleaned {
+                            tracing::info!(
+                                stage = "grammar_correction",
+                                before = %acoustic,
+                                after = %cleaned,
+                                elapsed_ms = elapsed_ms,
+                                "grammar correction applied"
+                            );
+                        } else {
+                            tracing::debug!(
+                                stage = "grammar_correction",
+                                text = %cleaned,
+                                elapsed_ms = elapsed_ms,
+                                "no grammar changes"
+                            );
+                        }
                         cleaned
                     }
                     Err(err) => {
-                        tracing::warn!(error = %err, "postprocess_failed_fallback_to_vocab");
-                        transformed
+                        tracing::warn!(
+                            error = %err,
+                            fallback_text = %acoustic,
+                            "grammar correction failed, using acoustic match result"
+                        );
+                        acoustic
                     }
                 }
             } else {
-                transformed
+                tracing::debug!(
+                    stage = "grammar_correction",
+                    text = %acoustic,
+                    "grammar correction disabled"
+                );
+                acoustic
             };
 
-            tracing::debug!(final_text = %final_text, energy, "pasting");
+            tracing::info!(
+                stage = "final_result",
+                text = %final_text,
+                energy = energy,
+                "transcript ready for pasting"
+            );
             log.write(Event::Pasting {
                 raw: text,
                 processed: &final_text,
@@ -310,7 +378,18 @@ fn handle_speech(
                 return Ok(());
             }
 
-            paste::paste_text(pause::is_auto_enter_enabled())?;
+            // Always paste WITHOUT enter — the auto-enter Return key
+            // is now decoupled, gated behind an optional countdown so
+            // the user can intercept (any key cancels). When
+            // `auto_enter_delay_ms == 0` the countdown helper presses
+            // Return immediately, preserving the legacy behavior.
+            paste::paste_text(false)?;
+
+            let auto_enter_effective = per_app::effective_auto_enter(pause::is_auto_enter_enabled());
+            if auto_enter_effective {
+                let delay = per_app::effective_auto_enter_delay_ms(cfg.auto_enter_delay_ms);
+                auto_enter_countdown::schedule(rt, delay);
+            }
 
             // Snapshot the freshly-pasted text as the diff baseline for
             // the manual-correction capture pipeline. We store the
@@ -376,6 +455,7 @@ mod tests {
             timeout_secs: 30,
             silence_secs: 2.0,
             auto_enter: false,
+            auto_enter_delay_secs: 2,
             filter_enabled: true,
             energy_threshold: 0.05,
             onset_ms: 50,
@@ -391,6 +471,8 @@ mod tests {
             silero_threshold: 0.5,
             vocab_config: VocabConfig::default(),
             postprocess_config: PostprocessConfig::default(),
+            auto_enter_delay_ms: 0,
+            idle_pause_secs: 0,
         }
     }
 

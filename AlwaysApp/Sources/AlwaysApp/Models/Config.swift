@@ -1,17 +1,32 @@
 import Foundation
 
+struct AppOverride: Codable {
+    var autoEnter: Bool?
+    var paused: Bool?
+    var autoEnterDelayMs: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case autoEnter = "auto_enter"
+        case paused
+        case autoEnterDelayMs = "auto_enter_delay_ms"
+    }
+}
+
 struct Config: Codable {
     var sttEnergyThreshold: Double
     var hearEnergyThreshold: Double
     var sttCooldownMs: Int
     var sttSilence: Double
     var sttAutoEnter: Bool
+    var sttAutoEnterDelaySecs: Int
     var groqApiKey: String?
     var sileroThreshold: Float
     var shortcutPause: String
     var shortcutAutoEnter: String
     var shortcutForcePaste: String
+    var shortcutCorrectionDialog: String
     var postprocessEnabled: Bool
+    var perAppSettingsJson: String?
 
     // Defaults match `SensitivityPreset::Normal` and the Rust
     // `AlwaysConfig::default()` values.
@@ -20,13 +35,16 @@ struct Config: Codable {
         hearEnergyThreshold: 0.001,
         sttCooldownMs: 150,
         sttSilence: 1.5,
-        sttAutoEnter: false,
+        sttAutoEnter: true,
+        sttAutoEnterDelaySecs: 4,
         groqApiKey: nil,
         sileroThreshold: 0.5,
         shortcutPause: "ctrl+alt+p",
         shortcutAutoEnter: "ctrl+alt+a",
         shortcutForcePaste: "ctrl+alt+v",
-        postprocessEnabled: true
+        shortcutCorrectionDialog: "ctrl+alt+w",
+        postprocessEnabled: true,
+        perAppSettingsJson: nil
     )
 
     static func fromCLI(output: String) -> Config? {
@@ -50,6 +68,14 @@ struct Config: Codable {
                     config.sttSilence = Double(value.replacingOccurrences(of: "s", with: "")) ?? defaultConfig.sttSilence
                 case "stt_auto_enter":
                     config.sttAutoEnter = value == "true"
+                case "auto_enter_delay_ms":
+                    if let ms = Int(value) {
+                        config.sttAutoEnterDelaySecs = ms / 1000
+                    } else {
+                        config.sttAutoEnterDelaySecs = defaultConfig.sttAutoEnterDelaySecs
+                    }
+                case "stt_auto_enter_delay_secs":
+                    config.sttAutoEnterDelaySecs = Int(value) ?? defaultConfig.sttAutoEnterDelaySecs
                 case "groq_api_key":
                     if !value.contains("(not set)") {
                         config.groqApiKey = value
@@ -68,8 +94,14 @@ struct Config: Codable {
                     if !value.contains("(not set)") {
                         config.shortcutForcePaste = value
                     }
+                case "shortcut_correction_dialog":
+                    if !value.contains("(not set)") {
+                        config.shortcutCorrectionDialog = value
+                    }
                 case "postprocess_enabled":
                     config.postprocessEnabled = (value == "true" || value == "1")
+                case "per_app_settings_json":
+                    config.perAppSettingsJson = value == "{}" ? nil : value
                 default:
                     break
                 }

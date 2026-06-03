@@ -8,6 +8,7 @@ use crate::always::audio::{self, FRAME_BYTES, FRAME_MS, FRAME_SAMPLES};
 use crate::always::config::AlwaysConfig;
 use crate::always::event;
 use crate::always::log::{Event, Logger};
+use crate::always::pause;
 
 /// Speculative transcription result, populated by a background thread.
 type SpeculationSlot = Arc<Mutex<Option<Result<crate::stt::TranscriptionResult>>>>;
@@ -32,10 +33,31 @@ pub fn record_utterance(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordRe
     record_with_local_vad(cfg, log)
 }
 
+/// Speech shorter than this is treated as a "short utterance" and gets
+/// the aggressive silence cutoff below. Tuned so single-word commands
+/// ("yes", "no", "done", "stop", "next") trip the fast path while
+/// normal phrases ("open the pull request") do not.
+const SHORT_SPEECH_MS: u32 = 600;
+/// Silence-after-speech window for short utterances. Standard window
+/// is `cfg.silence_secs` (1.5s default); for a short utterance we cut
+/// at 400ms so "yes" pastes in ~700ms total instead of ~1.8s. Cost:
+/// if the user pauses >400ms mid-thought after a short opener
+/// ("yes, … actually no"), we paste the opener and start a fresh
+/// utterance for the rest. Acceptable for the latency win.
+const SHORT_SILENCE_MS: u32 = 400;
+
 fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordResult> {
     let silence_frames = ((cfg.silence_secs * 1000.0) / FRAME_MS as f64).ceil() as usize;
     let max_frames = (cfg.timeout_secs as usize * 1000) / FRAME_MS as usize;
     let min_speech_frames = (cfg.onset_ms / FRAME_MS).max(1) as usize;
+    // Short-utterance cutoff. Computed once; activated per-iteration
+    // when `speech_samples` duration is still under SHORT_SPEECH_MS.
+    let short_silence_frames =
+        ((SHORT_SILENCE_MS as f64) / FRAME_MS as f64).ceil() as usize;
+    // Tentative kickoff at 50% of the short window — earlier than the
+    // 85% used for normal utterances because the speech itself is so
+    // brief that even a misfired speculation is cheap to retry.
+    let short_tentative_frames = (short_silence_frames / 2).max(1);
     // Two-stage end-of-utterance detection (Option B):
     // - At `tentative_silence_frames`, kick off a SPECULATIVE transcription in a
     //   background thread using the audio captured so far.
@@ -182,6 +204,9 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
 
                         // Send voice activity detected event
                         event::global_broadcaster().voice_activity_detected();
+                        // Anchor the idle-pause watchdog: real voice
+                        // arrived right now, so any prior gap is reset.
+                        pause::mark_voice_seen();
                     }
                 }
                 // Prepend pre-buffer to capture audio before VAD triggered
@@ -197,10 +222,29 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
             consecutive_speech = 0;
             speech_samples.extend_from_slice(samples);
 
+            // Short-utterance fast path. Speech duration is just
+            // samples / 16 (16kHz mono). While we're still under
+            // SHORT_SPEECH_MS, use the aggressive cutoff. If speech
+            // resumes and the total grows past the threshold, we
+            // automatically fall back to the standard window on the
+            // next iteration. No state, no commitment.
+            let speech_ms = (speech_samples.len() as u32) / 16;
+            let is_short = speech_ms < SHORT_SPEECH_MS;
+            let eff_silence_frames = if is_short {
+                short_silence_frames
+            } else {
+                silence_frames
+            };
+            let eff_tentative_frames = if is_short {
+                short_tentative_frames
+            } else {
+                tentative_silence_frames
+            };
+
             // At tentative silence, kick off speculative transcription in the
             // background so the result is ready (or nearly so) by the time we
             // hit final silence. If the user resumes, we discard it above.
-            if !speculation_pending && consecutive_silence >= tentative_silence_frames {
+            if !speculation_pending && consecutive_silence >= eff_tentative_frames {
                 speculation_pending = true;
                 let audio_snapshot = speech_samples.clone();
                 let api_key = cfg.groq_stt_api_key.clone();
@@ -232,7 +276,7 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
                 });
             }
 
-            if consecutive_silence >= silence_frames {
+            if consecutive_silence >= eff_silence_frames {
                 break;
             }
         } else {

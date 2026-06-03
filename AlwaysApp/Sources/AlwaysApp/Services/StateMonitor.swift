@@ -233,6 +233,34 @@ class StateMonitor: ObservableObject {
                     state: .correctionEmpty(reason: label),
                     duration: 1.8
                 )
+            case .autoEnterCountdownStarted, .autoEnterCountdownTick:
+                let ms = event.countdownStart?.remaining_ms ?? event.countdownTick?.remaining_ms ?? 0
+                let seconds = max(0, Int((ms + 999) / 1000))
+                // Persistent overlay: replaces flash. Stays visible
+                // until Finished/Cancelled clears it.
+                StatusOverlayController.shared.show(state: .autoEnterCountdown(secondsRemaining: seconds))
+            case .autoEnterCountdownCancelled, .autoEnterCountdownFinished:
+                StatusOverlayController.shared.hide()
+            case .idleAutoPaused:
+                let secs = Int(event.idleAutoPaused?.seconds ?? 0)
+                self.isPaused = true
+                StatusOverlayController.shared.flash(state: .idleAutoPaused(seconds: secs), duration: 2.0)
+            case .idleAutoResumed:
+                self.isPaused = false
+                StatusOverlayController.shared.flash(state: .resumed)
+            case .correctionDialogRequested:
+                let last = event.correctionDialogRequest?.last_transcript ?? ""
+                CorrectionDialog.shared.present(lastTranscript: last) { intended in
+                    self.udsClient.sendCommandWithData(
+                        "LogCorrection",
+                        ["intended": intended]
+                    )
+                }
+            case .focusedAppChanged:
+                // Idempotent echo — daemon confirms it accepted our app
+                // bundle id push. No UI action needed; logged in
+                // statemonitor.log for debugging.
+                self.log("daemon acknowledged focused app: \(event.focusedApp?.bundle_id ?? "nil")")
             default:
                 break
             }

@@ -1,7 +1,8 @@
 //! Pause state and auto-enter state management for the always-on mode.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::Instant;
 
 use parking_lot::Mutex;
 
@@ -180,4 +181,97 @@ pub fn take_last_pasted_within(
 #[cfg(test)]
 pub fn clear_last_pasted_for_test() {
     *LAST_PASTED.lock() = None;
+}
+
+/// Last moment voice activity was detected. Used by the idle-pause
+/// watchdog: if more than `idle_pause_secs` elapses without voice, the
+/// daemon auto-pauses. Initialized to `Instant::now()` at startup so we
+/// don't immediately auto-pause on boot.
+static LAST_VOICE: std::sync::LazyLock<Mutex<Instant>> =
+    std::sync::LazyLock::new(|| Mutex::new(Instant::now()));
+
+/// Update the last-voice timestamp to now. Called by the VAD whenever
+/// it detects speech. Also called on manual resume so unpausing always
+/// resets the idle window.
+pub fn mark_voice_seen() {
+    *LAST_VOICE.lock() = Instant::now();
+}
+
+/// How long since voice was last seen.
+pub fn since_last_voice() -> std::time::Duration {
+    LAST_VOICE.lock().elapsed()
+}
+
+/// True iff the daemon paused itself because of the idle-pause
+/// watchdog. Manual resumes / mic-conflict / audio-output reasons set
+/// this flag distinctly so the resume path can pick the right log line.
+static IDLE_AUTO_PAUSED: AtomicBool = AtomicBool::new(false);
+
+pub fn is_idle_auto_paused() -> bool {
+    IDLE_AUTO_PAUSED.load(Ordering::Relaxed)
+}
+
+pub fn set_idle_auto_paused(v: bool) {
+    IDLE_AUTO_PAUSED.store(v, Ordering::Relaxed);
+}
+
+/// Set when an auto-enter countdown is in flight. The keyboard
+/// listener consults this to decide whether to cancel on the next
+/// keystroke; the post-paste hook consults it before scheduling a new
+/// countdown so two pastes in quick succession don't pile up.
+static COUNTDOWN_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Cancel flag — set by the keyboard listener (any key) or by an
+/// explicit `CancelAutoEnterCountdown` UDS command. The countdown
+/// task polls this and aborts before pressing Return.
+static COUNTDOWN_CANCEL: AtomicBool = AtomicBool::new(false);
+/// Remaining-ms snapshot exposed for diagnostics. Not consulted by
+/// the countdown loop itself.
+static COUNTDOWN_REMAINING_MS: AtomicU32 = AtomicU32::new(0);
+
+pub fn countdown_active() -> bool {
+    COUNTDOWN_ACTIVE.load(Ordering::Relaxed)
+}
+
+pub fn countdown_set_active(v: bool) {
+    COUNTDOWN_ACTIVE.store(v, Ordering::Relaxed);
+    if !v {
+        COUNTDOWN_REMAINING_MS.store(0, Ordering::Relaxed);
+    }
+}
+
+pub fn countdown_request_cancel() {
+    COUNTDOWN_CANCEL.store(true, Ordering::Relaxed);
+}
+
+pub fn countdown_take_cancel() -> bool {
+    COUNTDOWN_CANCEL.swap(false, Ordering::Relaxed)
+}
+
+pub fn countdown_set_remaining_ms(ms: u32) {
+    COUNTDOWN_REMAINING_MS.store(ms, Ordering::Relaxed);
+}
+
+pub fn countdown_remaining_ms() -> u32 {
+    COUNTDOWN_REMAINING_MS.load(Ordering::Relaxed)
+}
+
+/// Bundle identifier of the currently-focused macOS application
+/// (Swift app pushes this via `NotifyFocusedAppChanged`). `None` on
+/// non-mac builds or before the first event arrives.
+static CURRENT_APP: std::sync::LazyLock<Mutex<Option<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+pub fn current_app() -> Option<String> {
+    CURRENT_APP.lock().clone()
+}
+
+pub fn set_current_app(bundle_id: Option<String>) {
+    *CURRENT_APP.lock() = bundle_id;
+}
+
+/// Last final transcript text pasted (or filtered+force-pasted). Same
+/// freshness model as `LAST_PASTED` but only the text, no timestamp —
+/// used by the manual correction dialog to anchor its diff.
+pub fn last_transcript_for_correction() -> Option<String> {
+    LAST_PASTED.lock().as_ref().map(|(t, _)| t.clone())
 }

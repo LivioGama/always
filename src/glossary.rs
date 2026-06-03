@@ -18,6 +18,16 @@ struct Entry {
     mistranscriptions: Vec<String>,
     #[serde(default)]
     frequency: i64,
+    /// User-bumped priority. Higher = surfaced earlier in both the
+    /// Whisper bias prompt and the LLM cleanup prompt. Bumped each
+    /// time the manual correction dialog re-confirms this canonical
+    /// form; defaults to `1`.
+    #[serde(default = "default_weight")]
+    weight: i64,
+}
+
+fn default_weight() -> i64 {
+    1
 }
 
 static ENTRIES: OnceLock<Vec<Entry>> = OnceLock::new();
@@ -28,7 +38,10 @@ static AI_FILTER_CONTEXT: OnceLock<String> = OnceLock::new();
 fn entries() -> &'static [Entry] {
     ENTRIES.get_or_init(|| match load_entries() {
         Ok(mut v) => {
-            v.sort_by(|a, b| b.frequency.cmp(&a.frequency));
+            // Primary sort: weight (user-curated importance). Secondary:
+            // frequency (auto-tracked usage). Both descending — the
+            // most-trusted terms go first into the prompt budget.
+            v.sort_by(|a, b| b.weight.cmp(&a.weight).then(b.frequency.cmp(&a.frequency)));
             v
         }
         Err(e) => {
@@ -56,6 +69,28 @@ pub fn postprocess_system_prompt() -> &'static str {
 /// this contains only term/correction facts and no output-format instructions.
 pub fn ai_filter_vocabulary_context() -> &'static str {
     AI_FILTER_CONTEXT.get_or_init(|| build_ai_filter_context(entries()))
+}
+
+/// All canonical `term` strings from the loaded glossary, deduped
+/// (case-insensitive) and non-empty. Restricted to entries with
+/// non-empty `mistranscriptions` so the acoustic-match pass only
+/// fires on user-curated terms — bare auto-imported app names
+/// (`IntelliJ IDEA`, etc.) would over-trigger the Soundex matcher
+/// on common English words. Returned in glossary order
+/// (`entries()` is sorted frequency-desc).
+pub fn user_glossary_terms() -> Vec<String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for e in entries() {
+        let term = e.term.trim();
+        if term.is_empty() || e.mistranscriptions.is_empty() {
+            continue;
+        }
+        if seen.insert(term.to_lowercase()) {
+            out.push(term.to_string());
+        }
+    }
+    out
 }
 
 fn build_whisper_bias_prompt(entries: &[Entry]) -> Option<String> {
@@ -264,6 +299,7 @@ mod tests {
             term: term.to_string(),
             mistranscriptions: miss.iter().map(|s| s.to_string()).collect(),
             frequency: 100,
+            weight: 1,
         }
     }
 

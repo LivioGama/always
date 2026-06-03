@@ -91,14 +91,22 @@ pub fn paste_text(auto_enter: bool) -> Result<()> {
     key_up.post(CGEventTapLocation::HID);
 
     if auto_enter {
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        // Longer sleep: the Cmd flag from the V keystrokes above can
+        // still register as held when Return posts < 20ms later. In
+        // Ghostty (and other apps that bind Cmd+Return) that surfaces
+        // as a spurious binding hit instead of a newline. Bumping to
+        // 50ms and explicitly clearing flags on the Return events
+        // makes the keystroke read as a bare Return everywhere.
+        std::thread::sleep(std::time::Duration::from_millis(50));
         let enter_keycode: CGKeyCode = 36; // Return key
         let enter_down = CGEvent::new_keyboard_event(source.clone(), enter_keycode, true)
             .map_err(|_| anyhow::anyhow!("Failed to create enter key down event"))?;
+        enter_down.set_flags(CGEventFlags::empty());
         enter_down.post(CGEventTapLocation::HID);
 
         let enter_up = CGEvent::new_keyboard_event(source, enter_keycode, false)
             .map_err(|_| anyhow::anyhow!("Failed to create enter key up event"))?;
+        enter_up.set_flags(CGEventFlags::empty());
         enter_up.post(CGEventTapLocation::HID);
     }
 
@@ -117,6 +125,39 @@ pub fn paste(text: &str, auto_enter: bool) -> Result<()> {
     copy_to_clipboard(text.to_string())?;
     paste_text(auto_enter)?;
     Ok(())
+}
+
+/// Synthesize a single Return keypress in the focused app. Used to
+/// commit auto-enter after a countdown overlay completes (vs.
+/// inline in `paste_text(auto_enter=true)`).
+///
+/// Explicitly clears `CGEventFlags` on both down and up events: without
+/// this the Return can inherit lingering Command/Option state from a
+/// preceding Cmd+V (or from a modifier the user happens to be holding)
+/// and apps like Ghostty interpret the result as Cmd+Return — a
+/// configured binding, not a newline.
+#[cfg(feature = "macos")]
+pub fn press_return() -> Result<()> {
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| anyhow::anyhow!("Failed to create CGEventSource"))?;
+    let enter_keycode: CGKeyCode = 36;
+    let enter_down = CGEvent::new_keyboard_event(source.clone(), enter_keycode, true)
+        .map_err(|_| anyhow::anyhow!("Failed to create enter key down event"))?;
+    enter_down.set_flags(CGEventFlags::empty());
+    enter_down.post(CGEventTapLocation::HID);
+    let enter_up = CGEvent::new_keyboard_event(source, enter_keycode, false)
+        .map_err(|_| anyhow::anyhow!("Failed to create enter key up event"))?;
+    enter_up.set_flags(CGEventFlags::empty());
+    enter_up.post(CGEventTapLocation::HID);
+    Ok(())
+}
+
+#[cfg(not(feature = "macos"))]
+pub fn press_return() -> Result<()> {
+    anyhow::bail!("press_return not implemented for this platform")
 }
 
 #[cfg(test)]

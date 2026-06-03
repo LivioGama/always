@@ -92,7 +92,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Bootstrap the singleton — touching .shared lazily creates it,
         // which connects to the daemon over UDS and wires the overlay
         // subscription. Without this access nothing else triggers it.
-        _ = StateMonitor.shared
+        let monitor = StateMonitor.shared
+
+        // System audio output watcher — auto-pauses the daemon when
+        // any app starts producing sound. Idempotent: start() is
+        // safe to call multiple times.
+        AudioOutputMonitor.shared.start(stateMonitor: monitor)
+        // Push the frontmost app's bundle id to the daemon so per-app
+        // settings overlay applies from the first paste.
+        FocusedAppMonitor.shared.start(stateMonitor: monitor)
 
         Task {
             _ = try? await cliService?.startDaemon()

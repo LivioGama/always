@@ -344,6 +344,64 @@ pub fn apply_pairs_to_glossary(pairs: &[CorrectionPair]) -> Result<usize> {
     Ok(written)
 }
 
+/// Add or bump-weight a glossary entry for a standalone canonical term
+/// (no `wrong` form known). Used by the dialog-driven correction path
+/// when the diff against the last transcript cannot find a close match
+/// — the user is teaching the daemon a brand-new word.
+///
+/// Behavior:
+/// * If an entry with `term == term` exists: increment its `weight` (default 1).
+/// * Otherwise: create `{term, mistranscriptions: [], frequency: 100, weight: 2}`.
+pub fn add_or_bump_term(term: &str) -> Result<()> {
+    let term = term.trim();
+    if term.is_empty() {
+        anyhow::bail!("term is empty");
+    }
+    let path = user_glossary_path()
+        .ok_or_else(|| anyhow::anyhow!("could not resolve ~/.always glossary path"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    let mut entries: Vec<serde_json::Value> = if path.exists() {
+        let content = std::fs::read_to_string(&path).context("read glossary.json")?;
+        if content.trim().is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_str(&content).context("parse glossary.json")?
+        }
+    } else {
+        Vec::new()
+    };
+
+    let idx = entries
+        .iter()
+        .position(|e| e.get("term").and_then(|v| v.as_str()) == Some(term));
+    match idx {
+        Some(i) => {
+            let entry = &mut entries[i];
+            let current = entry
+                .get("weight")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(1);
+            entry["weight"] = serde_json::json!(current + 1);
+        }
+        None => {
+            entries.push(serde_json::json!({
+                "term": term,
+                "mistranscriptions": [],
+                "frequency": 100,
+                "weight": 2,
+            }));
+        }
+    }
+
+    let json = serde_json::to_string_pretty(&entries)?;
+    std::fs::write(&path, json).context("write glossary.json")?;
+    tracing::info!(term, "glossary_term_bumped");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Live capture (clipboard + Cmd+C) — macOS-only
 // ---------------------------------------------------------------------------
