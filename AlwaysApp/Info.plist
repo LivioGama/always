@@ -16,12 +16,26 @@
     <string>1.0</string>
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
+    <!--
+      Back to LSUIElement=true (status-bar-only). The `.regular` /
+      LSUIElement=false experiment broke status-item visibility on the
+      user's MacBook (the icon was created in com.apple.controlcenter
+      but never appeared in the visible menu bar). The May-14 config —
+      LSUIElement=true + setActivationPolicy(.accessory) — reliably
+      showed the orange mic icon, so we revert. Trade-off: no Dock
+      running-dot indicator.
+    -->
     <key>LSUIElement</key>
     <true/>
+    <!--
+      Even as a regular app, keep automatic/sudden termination disabled
+      so the background voice daemon survives idle periods and macOS
+      doesn't reap the GUI when no windows are open.
+    -->
     <key>NSSupportsAutomaticTermination</key>
-    <true/>
+    <false/>
     <key>NSSupportsSuddenTermination</key>
-    <true/>
+    <false/>
     <key>NSAccessibilityUsageDescription</key>
     <string>AlwaysApp needs accessibility access to position the voice indicator near your active text cursor.</string>
     <key>NSAppleEventsUsageDescription</key>

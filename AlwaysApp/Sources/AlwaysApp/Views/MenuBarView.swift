@@ -108,6 +108,7 @@ struct MenuBarView: View {
 
             Button("Quit Always") {
                 AppDelegate.killStaleDaemon()
+                AppDelegate.userInitiatedQuit = true
                 NSApplication.shared.terminate(nil)
             }
             .buttonStyle(.plain)
