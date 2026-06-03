@@ -1,0 +1,16 @@
+/target
+*.wav
+.env
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg-info/
+dist/
+build/
+*.log
+*.jsonl
+glossary.json
