@@ -44,10 +44,9 @@ enum Commands {
         #[arg(short = 't', long, default_value = "30")]
         timeout: u32,
         /// Seconds of silence before considering phrase complete.
-        /// Default matches `AlwaysConfig::default().silence_secs` so the
-        /// CLI doesn't silently override the prefs/canonical default.
-        #[arg(short = 's', long, default_value = "2.5")]
-        silence: f64,
+        /// Omit to use the saved preference/canonical default.
+        #[arg(short = 's', long)]
+        silence: Option<f64>,
         /// Press Enter automatically after pasting transcript. Omitting
         /// the flag (the default) reads `stt_auto_enter` from the prefs
         /// table — so the GUI toggle is the source of truth. Pass
@@ -71,9 +70,9 @@ enum Commands {
         #[arg(short = 't', long, default_value = "30")]
         timeout: u32,
         /// Seconds of silence before considering phrase complete.
-        /// Default matches `AlwaysConfig::default().silence_secs`.
-        #[arg(short = 's', long, default_value = "2.5")]
-        silence: f64,
+        /// Omit to use the saved preference/canonical default.
+        #[arg(short = 's', long)]
+        silence: Option<f64>,
         /// Press Enter automatically after pasting transcript. See
         /// `Start::auto_enter` — same opt-in semantics; DB pref wins
         /// when the flag is omitted.
@@ -263,10 +262,7 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                 .unwrap_or(None)
                 .is_some();
 
-            println!(
-                "lang: {}",
-                prefs.lang.as_deref().unwrap_or("auto")
-            );
+            println!("lang: {}", prefs.lang.as_deref().unwrap_or("auto"));
             println!(
                 "deepgram_api_key: {}",
                 if deepgram_in_keychain {
@@ -689,7 +685,7 @@ fn handle_get_state() {
 fn always_config(
     lang: String,
     timeout: u32,
-    silence: f64,
+    silence: Option<f64>,
     auto_enter: Option<bool>,
 ) -> Result<always::always::AlwaysConfig> {
     always::always::AlwaysConfig::from_cli(lang, timeout, silence, auto_enter)

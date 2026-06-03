@@ -60,10 +60,10 @@ class CLIService: ObservableObject {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cliPath)
-        // CLI flags are defaults; `AlwaysConfig::from_cli` reads prefs from DB.
-        // "auto" lets the engine detect language; multilingual models (Whisper,
-        // SenseVoice, Canary) will auto-detect, English-only models ignore it.
-        process.arguments = ["run", "--lang", "auto", "--timeout", "30", "--silence", "1.5"]
+        // Omit `--silence` so `AlwaysConfig::from_cli` honors the saved DB
+        // preference. Passing a hardcoded value here made the GUI-launched
+        // daemon ignore user latency tuning on every restart.
+        process.arguments = ["run", "--lang", "auto", "--timeout", "30"]
         var env = ProcessInfo.processInfo.environment
         applyCLIEnvironment(&env)
         process.environment = env

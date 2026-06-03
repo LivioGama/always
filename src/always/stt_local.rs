@@ -155,8 +155,8 @@ impl Transcriber for LocalTranscriber {
         // time. Processing time (how fast the engine ran) is logged separately.
         let audio_duration_secs = samples.len() as f64 / 16_000.0;
         let started = std::time::Instant::now();
-        let text = run_engine(&mut engine, &samples, self.language.clone())
-            .map_err(SttError::Other)?;
+        let text =
+            run_engine(&mut engine, &samples, self.language.clone()).map_err(SttError::Other)?;
         let elapsed = started.elapsed().as_secs_f64();
         tracing::debug!(
             elapsed_ms = (elapsed * 1000.0) as u64,

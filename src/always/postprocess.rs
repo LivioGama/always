@@ -12,28 +12,6 @@ use super::config::PostprocessConfig;
 /// response cap (~500 chars) so 1 000 entries ~= 1 MB upper bound.
 const CACHE_MAX_ENTRIES: usize = 1_000;
 
-/// Rule-based punctuation fix for offline use (no Groq API key).
-/// Capitalises the first character and appends a period when the text
-/// ends without sentence-terminating punctuation.
-fn rule_based_correct(text: &str) -> String {
-    let text = text.trim();
-    if text.is_empty() {
-        return String::new();
-    }
-    let mut chars = text.chars();
-    let first_upper: String = chars
-        .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_default();
-    let rest: String = chars.collect();
-    let body = format!("{first_upper}{rest}");
-    if body.ends_with(['.', '!', '?', ';', ':']) {
-        body
-    } else {
-        format!("{body}.")
-    }
-}
-
 /// Optional LLM cleanup pass for the transcript.
 ///
 /// Single transformation: send the transcript to the Groq LLM with a
@@ -79,8 +57,7 @@ impl PostProcessor {
             return Ok(text.to_string());
         }
         let Some(ref api_key) = self.groq_api_key else {
-            // No API key — apply rule-based punctuation as offline fallback.
-            return Ok(rule_based_correct(text));
+            return Ok(text.to_string());
         };
         Ok(self
             .correct_grammar(text, api_key, context)
@@ -88,7 +65,12 @@ impl PostProcessor {
             .unwrap_or_else(|_| text.to_string()))
     }
 
-    async fn correct_grammar(&self, text: &str, api_key: &str, context: Option<&str>) -> Result<String> {
+    async fn correct_grammar(
+        &self,
+        text: &str,
+        api_key: &str,
+        context: Option<&str>,
+    ) -> Result<String> {
         // Check cache first
         if let Some(cached) = self.cache.lock().get(text) {
             return Ok(cached.clone());

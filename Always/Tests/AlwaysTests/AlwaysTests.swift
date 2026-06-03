@@ -163,6 +163,12 @@ final class AlwaysTests: XCTestCase {
         // No assertion needed — just touching .shared is enough on macOS.
     }
 
+    private func isStatusOverlayVisible() -> Bool {
+        NSApplication.shared.windows.contains {
+            ($0 is StatusOverlayWindow) && $0.isVisible && $0.alphaValue > 0
+        }
+    }
+
     func testFlashIsNotClobberedByShow() throws {
         try ensureAppKit()
         let controller = StatusOverlayController.shared
@@ -244,6 +250,33 @@ final class AlwaysTests: XCTestCase {
         XCTAssertFalse(monitor.isVoiceActivity)
     }
 
+    func testListeningStartedWithoutVoiceDoesNotShowOverlay() throws {
+        try ensureAppKit()
+        let monitor = StateMonitor.shared
+        let controller = StatusOverlayController.shared
+
+        controller.hide()
+        monitor.isDaemonConnected = true
+        monitor.isPaused = false
+        monitor.isMasterPaused = false
+        monitor.isIdleAutoPaused = false
+        monitor.isTranscribing = false
+        monitor.isVoiceActivity = false
+        monitor.isListeningActive = false
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.5))
+
+        let listeningStarted = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: #"{"type":"ListeningStarted","data":null}"#.data(using: .utf8)!
+        )
+        NotificationCenter.default.post(name: .daemonEvent, object: listeningStarted)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+
+        XCTAssertTrue(monitor.isListeningActive)
+        XCTAssertFalse(monitor.isVoiceActivity)
+        XCTAssertFalse(isStatusOverlayVisible())
+    }
+
     func testStateMonitorTogglesPauseFromEvents() throws {
         try ensureAppKit()
         let monitor = StateMonitor.shared
@@ -315,7 +348,7 @@ final class AlwaysTests: XCTestCase {
         // `src/always/event.rs` and `tests/uds_protocol_test.rs`. Bumping
         // either side without updating the matching constant on the
         // other side will fail both tests at once.
-        XCTAssertEqual(UDS_PROTOCOL_VERSION, 6)
+        XCTAssertEqual(UDS_PROTOCOL_VERSION, 7)
     }
 
     func testHelloWithMismatchedVersionIsObservable() throws {

@@ -13,6 +13,7 @@ use crate::stt_dispatch::TranscriberBackendChoice;
 
 // Default configuration values
 const DEFAULT_AUTO_ENTER_DELAY_MS: u32 = 4000;
+const DEFAULT_SILENCE_SECS: f64 = 0.7;
 /// Ten minutes of no voice before idle auto-pause. Short values (e.g. 120s)
 /// felt like the daemon "randomly" paused during normal desk work.
 const DEFAULT_IDLE_PAUSE_SECS: u32 = 600;
@@ -292,7 +293,7 @@ impl AlwaysConfig {
     pub fn from_cli(
         lang: String,
         timeout_secs: u32,
-        silence_secs: f64,
+        silence_secs: Option<f64>,
         auto_enter: Option<bool>,
     ) -> Result<Self> {
         // API key is now optional: the daemon can run with a local
@@ -366,12 +367,11 @@ impl AlwaysConfig {
         let config = Self {
             lang,
             timeout_secs,
-            // Respect saved prefs / CLI; clamp to the same bounds as the
-            // Settings UI. 1.0s minimum — was 1.5s but that floor added
-            // 500ms to perceived transcribe latency for anyone who tuned
-            // sub-second cutoffs in the UI. Users still constrained from
-            // setting absurd <1s windows that would split phrases.
-            silence_secs: prefs.stt_silence.unwrap_or(silence_secs).clamp(1.0, 15.0),
+            // Explicit CLI/app launch value wins; otherwise use saved prefs.
+            // Clamp to the same bounds as the
+            // Settings UI. 0.7s minimum keeps paste responsive without
+            // allowing absurdly tiny windows that split normal phrases.
+            silence_secs: resolve_silence_secs(silence_secs, &prefs),
             // `auto_enter` was already resolved above: CLI flag → DB pref →
             // canonical default. The previous code re-read `prefs.stt_auto_enter`
             // here, which silently undid an explicit CLI override.
@@ -437,11 +437,10 @@ impl Default for AlwaysConfig {
             timeout_secs: 30,
             // Defaults aligned with `SensitivityPreset::Normal` and the
             // Mic Sensitivity / Speaking Style picker in the GUI.
-            // 1.5s reverts the 2.0s "snappier overlay" pad — that 500ms
-            // dominated perceived transcribe latency. Speculative STT
-            // still kicks off at 60% (~900ms). Users who get mid-sentence
+            // 0.7s keeps the default responsive. Speculative STT starts
+            // before the final cutoff, and users who get mid-sentence
             // splits can raise this in Settings.
-            silence_secs: 1.5,
+            silence_secs: DEFAULT_SILENCE_SECS,
             auto_enter: true,
             filter_enabled: true,
             energy_threshold: 0.012,
@@ -596,6 +595,46 @@ fn resolve_transcriber_backend(prefs: &Preferences) -> TranscriberBackendChoice 
         }
     }
     TranscriberBackendChoice::default()
+}
+
+fn resolve_silence_secs(cli_silence_secs: Option<f64>, prefs: &Preferences) -> f64 {
+    cli_silence_secs
+        .or(prefs.stt_silence)
+        .unwrap_or(DEFAULT_SILENCE_SECS)
+        .clamp(0.7, 15.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_cli_silence_overrides_saved_preference() {
+        let prefs = Preferences {
+            stt_silence: Some(2.0),
+            ..Default::default()
+        };
+
+        assert_eq!(resolve_silence_secs(Some(1.5), &prefs), 1.5);
+    }
+
+    #[test]
+    fn omitted_cli_silence_uses_saved_preference() {
+        let prefs = Preferences {
+            stt_silence: Some(2.0),
+            ..Default::default()
+        };
+
+        assert_eq!(resolve_silence_secs(None, &prefs), 2.0);
+    }
+
+    #[test]
+    fn silence_default_and_lower_bound_are_seven_hundred_ms() {
+        let prefs = Preferences::default();
+
+        assert_eq!(resolve_silence_secs(None, &prefs), 0.7);
+        assert_eq!(resolve_silence_secs(Some(0.2), &prefs), 0.7);
+    }
 }
 
 fn get_groq_stt_api_key() -> Result<String> {

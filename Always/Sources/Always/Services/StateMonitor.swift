@@ -20,9 +20,8 @@ class StateMonitor: ObservableObject {
     @Published var isTranscribing: Bool = false
     @Published var isVoiceActivity: Bool = false
     /// Sticky between the daemon's `listeningStarted` and `listeningStopped`
-    /// (or disconnect). Drives the idle "Listening" overlay that should
-    /// stay visible between phrases — without this, every `transcriptFinal`
-    /// would hide the overlay until the user spoke again.
+    /// (or disconnect). Tracks daemon state only; the HUD is activity-only
+    /// and should appear for voice activity or transcription, not idle waiting.
     @Published var isListeningActive: Bool = false
     /// Most recent speculative (streaming) transcript preview. Set when
     /// a TranscriptChunk arrives; cleared when a new utterance starts.
@@ -306,10 +305,6 @@ class StateMonitor: ObservableObject {
         }
         // Activity-only model: the overlay represents something happening
         // (you speaking or the daemon transcribing), not "daemon is alive".
-        // Always-on felt like noise — the indicator triggered with no
-        // justification. The snappy feel is delivered by the lower VAD
-        // cutoffs, not by painting the overlay before there's anything
-        // to react to.
         if isTranscribing {
             StatusOverlayController.shared.show(state: .transcribing)
         } else if isVoiceActivity {
@@ -414,6 +409,13 @@ class StateMonitor: ObservableObject {
             isVoiceActivity = false
             let reason = event.data?["reason"] ?? ""
             StatusOverlayController.shared.flash(state: .filtered(reason: reason), duration: 1.8)
+        case .transcriptionFailed:
+            // STT/Groq error — clear ongoing state and flash a red error
+            // overlay so the user isn't left on a stuck "Processing…".
+            isTranscribing = false
+            isVoiceActivity = false
+            let message = event.data?["message"] ?? "Transcription failed"
+            StatusOverlayController.shared.flash(state: .transcriptionFailed(message: message), duration: 3.0)
         case .lowMicrophoneVolume:
             // Microphone volume is too low - flash a warning overlay
             if let energy = event.data?["energy"] as? Double {

@@ -341,8 +341,7 @@ pub fn start_keyboard_listener() -> Result<()> {
             // need to swallow Meta key events here so they don't fall through
             // to the general key handler and cancel the auto-enter countdown.
             EventType::KeyPress(Key::MetaLeft) | EventType::KeyPress(Key::MetaRight) => {}
-            EventType::KeyRelease(Key::MetaLeft) | EventType::KeyRelease(Key::MetaRight) => {
-            }
+            EventType::KeyRelease(Key::MetaLeft) | EventType::KeyRelease(Key::MetaRight) => {}
             EventType::KeyPress(ref key) => {
                 let Some(name) = key_to_shortcut_name(key) else {
                     // Even unknown keys cancel an in-flight countdown
@@ -368,7 +367,13 @@ pub fn start_keyboard_listener() -> Result<()> {
                 // `is_cmd_held`. A stuck flag would otherwise break every
                 // ctrl+alt shortcut (they require ⌘ released).
                 let cmd_pressed = is_cmd_held();
-                if pause_combo.matches_name(cmd_pressed, ctrl_pressed, shift_pressed, alt_pressed, name) {
+                if pause_combo.matches_name(
+                    cmd_pressed,
+                    ctrl_pressed,
+                    shift_pressed,
+                    alt_pressed,
+                    name,
+                ) {
                     // Context-aware pause hotkey:
                     //   1. Master pause is set (idle/audio/mic watchdog
                     //      or explicit "Pause everything") → clear

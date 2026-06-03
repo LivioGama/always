@@ -253,6 +253,38 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     }
 }
 
+/// Map a record/transcribe error to a (kind, message) pair for the
+/// `TranscriptionFailed` event. `kind` is a stable machine tag the GUI can
+/// branch on; `message` is short human-facing text. Best-effort substring
+/// matching on the anyhow error chain since the STT layer surfaces opaque strings.
+fn classify_transcription_error(err: &anyhow::Error) -> (&'static str, String) {
+    let s = format!("{err:#}").to_lowercase();
+    if s.contains("401")
+        || s.contains("unauthorized")
+        || s.contains("invalid api key")
+        || s.contains("invalid_api_key")
+        || s.contains("api key")
+    {
+        ("auth", "Invalid or missing Groq API key".to_string())
+    } else if s.contains("429")
+        || s.contains("rate limit")
+        || s.contains("quota")
+        || s.contains("too many requests")
+    {
+        ("quota", "Groq rate limit or quota exceeded".to_string())
+    } else if s.contains("timed out")
+        || s.contains("timeout")
+        || s.contains("dns")
+        || s.contains("connect")
+        || s.contains("network")
+        || s.contains("sending request")
+    {
+        ("network", "Network error reaching Groq".to_string())
+    } else {
+        ("error", "Transcription failed".to_string())
+    }
+}
+
 fn process_one(
     active_cfg: &ActiveConfig,
     log: &mut Logger,
@@ -261,9 +293,15 @@ fn process_one(
     transcriber: &Arc<dyn Transcriber>,
 ) -> Result<()> {
     let cfg = active_cfg.read();
-    match vad::record_utterance(&cfg, log, transcriber)
-        .context("failed to record/transcribe utterance")?
-    {
+    let record_result = match vad::record_utterance(&cfg, log, transcriber) {
+        Ok(r) => r,
+        Err(e) => {
+            let (kind, message) = classify_transcription_error(&e);
+            event::global_broadcaster().transcription_failed(kind, message);
+            return Err(e).context("failed to record/transcribe utterance");
+        }
+    };
+    match record_result {
         vad::RecordResult::Speech {
             text,
             energy,

@@ -111,6 +111,7 @@ enum OverlayState: Equatable, Hashable {
     case lowMicrophoneVolume(energy: Double)
     /// Async grammar correction silently replaced the pasted text.
     case grammarCorrected
+    case transcriptionFailed(message: String)
 
     /// Persistent HUD states that should appear instantly (no fade-in).
     var isInstantShow: Bool {
@@ -138,6 +139,7 @@ enum OverlayState: Equatable, Hashable {
         case .idleAutoPaused(let s): return "Idle for \(s)s · paused"
         case .lowMicrophoneVolume(let energy): return String(format: "Low mic volume · energy %.3f", energy)
         case .grammarCorrected: return "✓ Grammar corrected"
+        case .transcriptionFailed(let message): return message.isEmpty ? "Transcription failed" : message
         }
     }
 
@@ -157,6 +159,7 @@ enum OverlayState: Equatable, Hashable {
         case .idleAutoPaused: return "moon.zzz.fill"
         case .lowMicrophoneVolume: return "speaker.slash.fill"
         case .grammarCorrected: return "sparkles"
+        case .transcriptionFailed: return "exclamationmark.triangle.fill"
         }
     }
 
@@ -176,6 +179,7 @@ enum OverlayState: Equatable, Hashable {
         case .idleAutoPaused: return .systemOrange
         case .lowMicrophoneVolume: return .systemRed
         case .grammarCorrected: return .systemTeal
+        case .transcriptionFailed: return .systemRed
         }
     }
 }
