@@ -445,6 +445,27 @@ fn handle_speech(
                 return Ok(());
             }
 
+            // Focus moved to a paused app (or master/idle pause kicked in)
+            // between when we started recording and now. Drop the paste so
+            // the transcript doesn't leak into the wrong window once the
+            // user gets there. Surface as `transcription_filtered` so the
+            // GUI flashes a "not pasted" overlay — same channel as the
+            // cmd-held drop below.
+            if pause::is_paused() {
+                tracing::info!(
+                    text = %paste_payload,
+                    "paste_dropped_paused_mid_utterance"
+                );
+                log.write(Event::Error {
+                    message: "Skipped paste: app paused mid-utterance",
+                });
+                event::global_broadcaster()
+                    .transcription_filtered("App paused mid-utterance — not pasted");
+                pause::dictation_buffer_clear();
+                pause::end_paste();
+                return Ok(());
+            }
+
             if daemon::list_daemon_pids().len() > 1 {
                 daemon::reconcile_duplicate_processes();
             }

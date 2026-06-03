@@ -293,15 +293,19 @@ class StateMonitor: ObservableObject {
 
     private func updateOverlay() {
         // Connection lost or any pause-class state active → hide.
-        // Pauses include the master kill switch, per-app override for the
-        // currently focused app, and the idle auto-pause watchdog.
         if !isDaemonConnected || isMasterPaused || isPaused || isIdleAutoPaused {
             StatusOverlayController.shared.hide()
             return
         }
+        // Activity-only model: the overlay represents something happening
+        // (you speaking or the daemon transcribing), not "daemon is alive".
+        // Always-on felt like noise — the indicator triggered with no
+        // justification. The snappy feel is delivered by the lower VAD
+        // cutoffs, not by painting the overlay before there's anything
+        // to react to.
         if isTranscribing {
             StatusOverlayController.shared.show(state: .transcribing)
-        } else if isVoiceActivity || isListeningActive {
+        } else if isVoiceActivity {
             StatusOverlayController.shared.show(state: .voiceActivity)
         } else {
             StatusOverlayController.shared.hide()
