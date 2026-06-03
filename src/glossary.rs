@@ -23,6 +23,7 @@ struct Entry {
 static ENTRIES: OnceLock<Vec<Entry>> = OnceLock::new();
 static WHISPER_PROMPT: OnceLock<Option<String>> = OnceLock::new();
 static POSTPROCESS_PROMPT: OnceLock<String> = OnceLock::new();
+static AI_FILTER_CONTEXT: OnceLock<String> = OnceLock::new();
 
 fn entries() -> &'static [Entry] {
     ENTRIES.get_or_init(|| match load_entries() {
@@ -49,6 +50,12 @@ pub fn whisper_bias_prompt() -> Option<&'static String> {
 /// when the glossary is empty.
 pub fn postprocess_system_prompt() -> &'static str {
     POSTPROCESS_PROMPT.get_or_init(|| build_postprocess_prompt(entries()))
+}
+
+/// Glossary context for JSON-producing AI filters. Unlike the postprocess prompt,
+/// this contains only term/correction facts and no output-format instructions.
+pub fn ai_filter_vocabulary_context() -> &'static str {
+    AI_FILTER_CONTEXT.get_or_init(|| build_ai_filter_context(entries()))
 }
 
 fn build_whisper_bias_prompt(entries: &[Entry]) -> Option<String> {
@@ -122,6 +129,43 @@ on the right.\n\n",
 6. Preserve informal style — \"gonna\" stays \"gonna\", profanity stays.\n\
 7. Output only the cleaned transcript. No preamble, no explanation, no quotes.\n",
     );
+    out
+}
+
+fn build_ai_filter_context(entries: &[Entry]) -> String {
+    if entries.is_empty() {
+        return "No glossary entries available.".to_string();
+    }
+
+    let mut out = String::from(
+        "Canonical glossary terms and common mistranscriptions. Prefer the canonical term when the input is a phonetic match:\n",
+    );
+
+    for e in entries.iter().take(80) {
+        let term = e.term.trim();
+        if term.is_empty() {
+            continue;
+        }
+
+        if e.mistranscriptions.is_empty() {
+            out.push_str(&format!("- {term}\n"));
+        } else {
+            let miss: Vec<&str> = e
+                .mistranscriptions
+                .iter()
+                .take(5)
+                .map(|s| s.as_str())
+                .collect();
+            out.push_str(&format!(
+                "- canonical: \"{term}\"; mistranscriptions: {}\n",
+                miss.iter()
+                    .map(|s| format!("\"{s}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+
     out
 }
 

@@ -7,7 +7,7 @@ use super::context_vocab::ContextVocabulary;
 use super::postprocess::PostProcessor;
 use super::text::Vocabulary;
 use crate::db::Preferences;
-use crate::{config, db};
+use crate::db;
 
 #[derive(Debug, Clone)]
 pub enum VadMode {
@@ -57,6 +57,7 @@ pub struct AlwaysConfig {
     pub learning_enabled: bool,
     pub groq_stt_api_key: String,
     pub vad_mode: VadMode,
+    pub silero_threshold: f32,
     pub vocab_config: VocabConfig,
     pub postprocess_config: PostprocessConfig,
 }
@@ -91,7 +92,7 @@ pub struct PostprocessConfig {
 impl Default for PostprocessConfig {
     fn default() -> Self {
         Self {
-            groq_model: "llama3-8b-8192".to_string(),
+            groq_model: "llama-3.1-8b-instant".to_string(),
             learning_history_limit: 1000,
             grammar_correction_enabled: true,
             cache_ttl_seconds: 300,
@@ -143,7 +144,7 @@ impl AlwaysConfig {
         let config = Self {
             lang,
             timeout_secs,
-            silence_secs,
+            silence_secs: prefs.stt_silence.unwrap_or(silence_secs),
             auto_enter,
             filter_enabled: true, // Always enabled - filter is always on
             energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.15),
@@ -157,11 +158,41 @@ impl AlwaysConfig {
             learning_enabled: postprocess_config.learning_history_limit > 0,
             groq_stt_api_key,
             vad_mode,
+            silero_threshold: prefs.silero_threshold.unwrap_or(0.5) as f32,
             vocab_config,
             postprocess_config,
         };
 
         Ok(config)
+    }
+}
+
+impl Default for AlwaysConfig {
+    fn default() -> Self {
+        let vocab_config = VocabConfig::default();
+        let postprocess_config = PostprocessConfig::default();
+
+        Self {
+            lang: "en".to_string(),
+            timeout_secs: 30,
+            silence_secs: 0.5,
+            auto_enter: false,
+            filter_enabled: true,
+            energy_threshold: 0.15,
+            onset_ms: 30,
+            cooldown_ms: 150,
+            log_path: default_log_path(),
+            vocab: Vocabulary::load(),
+            context_vocab: None,
+            post_processor: None,
+            project_root: detect_project_root(),
+            learning_enabled: postprocess_config.learning_history_limit > 0,
+            groq_stt_api_key: String::new(),
+            vad_mode: VadMode::default(),
+            silero_threshold: 0.5,
+            vocab_config,
+            postprocess_config,
+        }
     }
 }
 
@@ -189,7 +220,7 @@ fn load_vocab_config() -> VocabConfig {
 fn load_postprocess_config() -> PostprocessConfig {
     PostprocessConfig {
         groq_model: std::env::var("ALWAYS_GROQ_MODEL")
-            .unwrap_or_else(|_| "llama3-8b-8192".to_string()),
+            .unwrap_or_else(|_| "llama-3.1-8b-instant".to_string()),
         learning_history_limit: std::env::var("ALWAYS_LEARNING_LIMIT")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -207,21 +238,20 @@ fn load_postprocess_config() -> PostprocessConfig {
 
 fn default_vocab_patterns() -> Vec<String> {
     vec![
-        r"\b[A-Z][a-zA-Z0-9]*\b".to_string(), // CamelCase
-        r"\b[a-z]+_[a-z_]+\b".to_string(), // snake_case
-        r"\b[A-Z_]+\b".to_string(), // SCREAMING_SNAKE_CASE
+        r"\b[A-Z][a-zA-Z0-9]*\b".to_string(),       // CamelCase
+        r"\b[a-z]+_[a-z_]+\b".to_string(),          // snake_case
+        r"\b[A-Z_]+\b".to_string(),                 // SCREAMING_SNAKE_CASE
         r"\b[a-z]+[A-Z][a-zA-Z0-9]*\b".to_string(), // camelCase
     ]
 }
 
 fn default_common_words() -> Vec<String> {
     vec![
-        "the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
-        "her", "was", "one", "our", "out", "with", "have", "this", "that", "from",
-        "they", "will", "would", "there", "their", "what", "about", "which", "when",
-        "make", "like", "into", "year", "your", "just", "over", "also", "such",
-        "because", "these", "first", "being", "through", "after", "where", "should",
-        "some", "those",
+        "the", "and", "for", "are", "but", "not", "you", "all", "can", "had", "her", "was", "one",
+        "our", "out", "with", "have", "this", "that", "from", "they", "will", "would", "there",
+        "their", "what", "about", "which", "when", "make", "like", "into", "year", "your", "just",
+        "over", "also", "such", "because", "these", "first", "being", "through", "after", "where",
+        "should", "some", "those",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -230,12 +260,12 @@ fn default_common_words() -> Vec<String> {
 
 fn detect_project_root() -> Option<PathBuf> {
     let current = std::env::current_dir().ok()?;
-    
+
     // Check if current directory has .git
     if current.join(".git").exists() {
         return Some(current);
     }
-    
+
     // Check parents
     let mut path = current.clone();
     while path.pop() {
@@ -243,7 +273,7 @@ fn detect_project_root() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    
+
     None
 }
 
@@ -264,25 +294,36 @@ fn log_path_from_preferences(prefs: &Preferences) -> PathBuf {
 }
 
 fn default_log_path() -> PathBuf {
-    config::config_dir().join("always.log")
+    // Use platform-standard log directory from telemetry module
+    crate::always::telemetry::get_log_directory().join("always.log")
 }
 
 fn get_groq_stt_api_key() -> Result<String> {
-    // Try environment variable first
+    use crate::always::keyring;
+
+    // Try environment variable first (highest priority)
     if let Ok(key) = std::env::var("GROQ_API_KEY") {
-        eprintln!("🔑 Using GROQ_API_KEY from environment variable (first 12 chars): {}...", &key[..key.len().min(12)]);
+        tracing::info!("Groq API key loaded from environment variable");
         return Ok(key);
     }
 
-    // Try database preferences (reusing groq_api_key field for STT)
+    // Try keyring
+    if let Ok(Some(key)) = keyring::get_groq_api_key() {
+        tracing::info!("Groq API key loaded from keychain");
+        return Ok(key);
+    }
+
+    // Fallback to database preferences for migration purposes
     if let Ok(conn) = db::open() {
         if let Ok(prefs) = db::get_preferences(&conn) {
             if let Some(key) = prefs.groq_api_key {
-                eprintln!("🔑 Using GROQ_API_KEY from database (first 12 chars): {}...", &key[..key.len().min(12)]);
+                tracing::warn!("Groq API key loaded from database (should migrate to keychain)");
                 return Ok(key);
             }
         }
     }
 
-    anyhow::bail!("GROQ_API_KEY environment variable not set and no key found in preferences. Set it with: always config set groq_api_key <your-key>")
+    anyhow::bail!(
+        "GROQ_API_KEY environment variable not set and no key found in keychain. Set it with: always config set groq_api_key <your-key>"
+    )
 }

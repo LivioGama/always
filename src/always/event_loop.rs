@@ -4,7 +4,10 @@ use anyhow::{Context, Result};
 use tokio::runtime::Runtime;
 
 use crate::always::log::{Event, Logger};
-use crate::always::{AlwaysConfig, daemon, event, filter, keyboard, mic_monitor, notification, paste, pause, uds_server, vad};
+use crate::always::{
+    AlwaysConfig, daemon, event, filter, keyboard, mic_monitor, paste, pause,
+    uds_server, vad,
+};
 
 pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     let _pid = daemon::PidGuard::install()?;
@@ -12,19 +15,28 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     log.write(Event::Start { cfg });
     print_banner(&cfg);
 
+    let rt = Runtime::new()?;
+
+    // Pre-warm TLS+HTTP/2 connection to Groq API in background using existing runtime
+    {
+        let api_key = cfg.groq_stt_api_key.clone();
+        rt.spawn(async move {
+            let client = crate::http_client::async_client();
+            let _ = client
+                .get("https://api.groq.com/openai/v1/models")
+                .header("Authorization", format!("Bearer {}", api_key))
+                .send()
+                .await;
+        });
+    }
+
     // Initialize the auto-enter state from config
     pause::init_auto_enter(cfg.auto_enter);
 
     // Start keyboard listener for shortcuts
     keyboard::start_keyboard_listener()?;
 
-    // Show startup notification
-    if let Err(e) = notification::notify("ALWAYS", "🎤 Voice activation started", false) {
-        eprintln!("Failed to show startup notification: {}", e);
-    }
-
     // Start UDS server in background and track the task
-    let rt = Runtime::new()?;
     let _uds_handle = rt.spawn(async {
         if let Err(e) = uds_server::start_server().await {
             eprintln!("UDS server error: {}", e);
@@ -54,34 +66,28 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
                     } else {
                         users.join(", ")
                     };
-                    eprintln!("🎙️  Microphone in use by: {} - Auto-pausing Always", app_list);
+                    tracing::info!(apps = %app_list, "microphone_auto_paused");
 
                     // Log the auto-pause event
                     log.write(Event::MicrophoneAutoPaused { apps: &app_list });
-
-                    if let Err(e) = notification::notify("ALWAYS", &format!("🔇 Auto-paused: {} using microphone", app_list), false) {
-                        eprintln!("Failed to show auto-pause notification: {}", e);
-                    }
                 }
                 pause::set_paused(true);
+                event::global_broadcaster().paused();
                 auto_paused_for_mic = true;
             }
             Ok(false) if auto_paused_for_mic => {
                 // Microphone is no longer in use - resume Always
-                eprintln!("🎙️  Microphone available - Auto-resuming Always");
+                tracing::info!("microphone_auto_resumed");
 
                 // Log the auto-resume event
                 log.write(Event::MicrophoneAutoResumed);
 
-                if let Err(e) = notification::notify("ALWAYS", "🎤 Auto-resumed: microphone available", false) {
-                    eprintln!("Failed to show auto-resume notification: {}", e);
-                }
-
                 pause::set_paused(false);
+                event::global_broadcaster().resumed();
                 auto_paused_for_mic = false;
             }
             Err(e) => {
-                eprintln!("Warning: Failed to check microphone usage: {}", e);
+                tracing::warn!(error = %e, "microphone_check_failed");
             }
             _ => {} // No change in microphone state
         }
@@ -96,9 +102,9 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         // Auto-enter state is now managed consistently through keyboard shortcuts and settings UI
 
         if let Err(e) = process_one(&cfg, &mut log, &mut last_process) {
-            eprintln!("⚠️  Error in voice processing (continuing): {:#}", e);
+            tracing::error!(error = %e, "voice_processing_error");
             log.write(Event::Error {
-                message: &format!("Voice processing error: {:#}", e)
+                message: &format!("Voice processing error: {:#}", e),
             });
             // Don't exit - continue running
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -106,10 +112,14 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     }
 }
 
-fn process_one(cfg: &AlwaysConfig, log: &mut Logger, last_process: &mut Instant) -> Result<()> {
+fn process_one(
+    cfg: &AlwaysConfig,
+    log: &mut Logger,
+    last_process: &mut Instant,
+) -> Result<()> {
     match vad::record_utterance(cfg, log).context("failed to record/transcribe utterance")? {
-        vad::RecordResult::Speech { text, energy } => {
-            handle_speech(cfg, log, &text, energy, last_process)?;
+        vad::RecordResult::Speech { text, energy, transcription } => {
+            handle_speech(cfg, log, &text, energy, &transcription, last_process)?;
         }
         vad::RecordResult::Silence => {
             // Don't log silence events - they're too frequent and not useful
@@ -119,7 +129,7 @@ fn process_one(cfg: &AlwaysConfig, log: &mut Logger, last_process: &mut Instant)
             log.write(Event::DroppedLowEnergy { energy });
         }
         vad::RecordResult::DroppedNoise { raw } => {
-            eprintln!("noise {raw:?}");
+            tracing::debug!(raw, "dropped_noise");
             log.write(Event::DroppedNoise { raw: &raw });
         }
     }
@@ -131,6 +141,7 @@ fn handle_speech(
     log: &mut Logger,
     text: &str,
     energy: f64,
+    transcription: &crate::stt::TranscriptionResult,
     last_process: &mut Instant,
 ) -> Result<()> {
     let now = Instant::now();
@@ -141,13 +152,32 @@ fn handle_speech(
 
     let filter_result = filter::should_accept_with_reason(text, cfg);
     if !matches!(filter_result, filter::FilterReason::None) {
-        eprintln!("filtered {text} - {}", filter_result.to_log_string());
-        log.write(Event::Filtered { text, energy, reason: filter_result });
+        let filter_reason = filter_result.to_log_string();
+        tracing::info!(text, filter_reason, "filtered");
+        log.write(Event::Filtered {
+            text,
+            energy,
+            reason: filter_result,
+        });
+        event::global_broadcaster().voice_activity_ended();
         return Ok(());
     }
 
-    let transformed = apply_vocabulary(text, cfg);
-    eprintln!("{transformed} (energy: {energy:.4})");
+    // Hallucination detection (post-API, uses Whisper segment metrics)
+    if let Some(reason) = crate::always::hallucination::is_hallucination(transcription) {
+        eprintln!("⊘ Hallucination filtered: {text} - {reason}");
+        log.write(Event::Filtered {
+            text,
+            energy,
+            reason: filter::FilterReason::HardPhrase(reason.to_string()),
+        });
+        event::global_broadcaster().voice_activity_ended();
+        return Ok(());
+    }
+
+    let accepted_text = text;
+    let transformed = apply_vocabulary(accepted_text, cfg);
+    tracing::debug!(transformed, energy, "pasting");
     log.write(Event::Pasting {
         raw: text,
         processed: &transformed,
@@ -164,7 +194,7 @@ fn handle_speech(
     // they're likely mid-shortcut (e.g. ⌘+Tab) and an interjecting paste
     // would corrupt their action. Transcript still broadcasted/logged above.
     if keyboard::is_cmd_held() {
-        eprintln!("⊘ Skipped paste: Command key held");
+        tracing::debug!("skipped_paste_cmd_held");
         log.write(Event::Error {
             message: "Skipped paste: Command key held",
         });
@@ -199,11 +229,13 @@ fn apply_vocabulary(text: &str, cfg: &AlwaysConfig) -> String {
 }
 
 fn print_banner(cfg: &AlwaysConfig) {
-    eprintln!("Always-on mode enabled. Shortcuts: Ctrl+C=stop, Ctrl+Shift+P=pause, Ctrl+Shift+A=auto-enter");
-    eprintln!("Log: {}", cfg.log_path.display());
-    eprintln!(
-        "Settings -> energy_threshold: {} silence: {}s auto_enter: {} filter: {}",
-        cfg.energy_threshold, cfg.silence_secs, cfg.auto_enter, cfg.filter_enabled
+    tracing::info!(
+        energy_threshold = cfg.energy_threshold,
+        silence_secs = cfg.silence_secs,
+        auto_enter = cfg.auto_enter,
+        filter_enabled = cfg.filter_enabled,
+        log_path = %cfg.log_path.display(),
+        "daemon_banner"
     );
 }
 
@@ -217,7 +249,7 @@ mod tests {
     use crate::always::text::Vocabulary;
 
     fn test_config(vocab: Option<Vocabulary>) -> AlwaysConfig {
-        use crate::always::config::{VocabConfig, PostprocessConfig};
+        use crate::always::config::{PostprocessConfig, VocabConfig};
 
         AlwaysConfig {
             lang: "en".to_string(),
@@ -236,6 +268,7 @@ mod tests {
             learning_enabled: false,
             groq_stt_api_key: "test-key".to_string(),
             vad_mode: crate::always::config::VadMode::Local,
+            silero_threshold: 0.5,
             vocab_config: VocabConfig::default(),
             postprocess_config: PostprocessConfig::default(),
         }

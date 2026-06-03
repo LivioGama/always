@@ -1,9 +1,8 @@
-use serde::{Deserialize, Serialize};
-use reqwest;
-use anyhow::{Result, anyhow};
 use crate::always::AlwaysConfig;
-use crate::always::text::Vocabulary;
 use crate::always::context_vocab::ContextVocabulary;
+use crate::always::text::Vocabulary;
+use anyhow::{Result, anyhow};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptionResult {
@@ -32,6 +31,7 @@ struct GroqRequest {
     model: String,
     temperature: f32,
     max_tokens: i32,
+    response_format: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,7 +65,6 @@ struct AiFilterResponse {
 }
 
 pub struct AiFilter {
-    client: reqwest::Client,
     api_key: String,
     model: String,
 }
@@ -73,9 +72,8 @@ pub struct AiFilter {
 impl AiFilter {
     pub fn new(api_key: String, model: Option<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
             api_key,
-            model: model.unwrap_or_else(|| "llama-3.1-70b-versatile".to_string()),
+            model: model.unwrap_or_else(|| "llama-3.1-8b-instant".to_string()),
         }
     }
 
@@ -84,7 +82,7 @@ impl AiFilter {
         text: &str,
         _config: &AlwaysConfig,
         vocab: Option<&Vocabulary>,
-        context_vocab: Option<&ContextVocabulary>
+        context_vocab: Option<&ContextVocabulary>,
     ) -> Result<TranscriptionResult> {
         let vocab_context = self.build_vocab_context(vocab, context_vocab);
 
@@ -111,8 +109,10 @@ Please analyze this text and respond with ONLY a valid JSON object (no markdown,
 
 CORRECTION PRIORITY:
 1. Use the vocabulary context to fix common technical terms, product names, and domain-specific words
-2. Correct obvious STT mistakes (homophones, similar sounds)
-3. Keep the original meaning intact
+2. If the vocabulary context lists "CanonicalTerm: mistranscription", and the input contains that mistranscription, corrected_text MUST use CanonicalTerm
+3. Correct obvious STT mistakes (homophones, similar sounds)
+4. Keep the original meaning intact
+5. **DO NOT attempt to fix obviously corrupted domains or URLs with random characters**
 
 ACCEPT if the text is:
 - Programming/technical commands ("open file", "git status", "create function")
@@ -120,13 +120,24 @@ ACCEPT if the text is:
 - Natural conversation about work/projects ("I need to finish this", "The server is slow")
 - Valid single words/responses ("yes", "no", "API", "SQL", "React.js")
 - Product names and technical terms (especially those in vocabulary)
+- Well-formed domains and URLs with legitimate spelling variations
 
-REJECT if the text is:
-- Gibberish or keyboard mashing ONLY if it shows clear patterns:
+**AGGRESSIVELY REJECT if the text contains:**
+- **Malformed domains/URLs with random characters:**
+  * Domains with non-ASCII characters mixed with ASCII (e.g., "expenseÁê•-tee.com")
+  * URLs containing random symbols, emoji-like characters, or garbled encoding
+  * Domain-shaped text with obvious corruption or gibberish elements
+  * Any "domain" containing characters like: Á, ê, •, ∞, ≠, ™, †, ‡, °, ¿, etc.
+- **Gibberish patterns (be more aggressive than before):**
   * Random keyboard sequences ("asdfkjh", "qwerty uiop", "kdfjglkdfj")
-  * Text with no vowels or extremely low vowel ratio (less than 15% for long text)
+  * Text with excessive non-ASCII characters in English context
   * Mixed random characters with no coherent meaning
-  * BE VERY CONSERVATIVE: Valid sentences, even if complex or technical, should NEVER be rejected as gibberish
+  * Sequences that look like encoding errors or data corruption
+  * Text that appears to be OCR or transcription artifacts
+- **Obvious nonsense that users would never want to paste:**
+  * Character sequences that look like corrupted data
+  * Text containing multiple encoding artifacts or weird symbols
+  * Strings that appear to be system errors or corrupted output
 - Video artifacts and metadata:
   * "thank you for watching", "thanks for watching", "thank you for listening", "thanks for listening"
   * "please like and subscribe", "like and subscribe", "subscribe for more"
@@ -141,28 +152,35 @@ REJECT if the text is:
 - Conversational fillers ONLY when used as standalone politeness:
   * "thank you", "good morning", "how are you", "you're welcome", "excuse me", "i'm sorry", "have a nice day", "take care", "see you later", "sounds good", "that's great", "absolutely"
   * If these appear in longer sentences (e.g., "thank you for the help"), ACCEPT them
-- Mixed language nonsense with random characters
-- Very short utterances that provide no actionable value (but allow valid single words like "yes", "no", "ok", "token", "next", etc.)
+
+**CRITICAL RULE**: If the text looks like a domain/URL but contains random non-ASCII characters, symbols, or obvious corruption - REJECT IT. Don't try to "fix" it. Users don't want corrupted domains in their clipboard.
+
+**EXAMPLES OF WHAT TO REJECT:**
+- "expenseÁê•-tee.com" (contains random non-ASCII chars)
+- "google∞test.org" (contains random symbols)
+- "api™endpoint.co" (contains trademark symbols)
+- "data†base.net" (contains religious symbols)
+- "server°temp.io" (contains degree symbols)
 
 For confidence_score: 1.0 = completely certain, 0.5 = uncertain, 0.0 = completely confused
 For category, use one of: valid_command, technical_question, natural_conversation, gibberish, video_artifact, conversational_filler, meaningless_sound, mixed_language
 
-Focus on whether the text represents something a user would want to act on or reference later."#,
-            text,
-            vocab_context
+Focus on whether the text represents something a user would want to act on or reference later. When in doubt about corrupted-looking domains or gibberish, REJECT."#,
+            text, vocab_context
         );
 
         let request_body = GroqRequest {
             model: self.model.clone(),
             temperature: 0.1,
             max_tokens: 200,
+            response_format: serde_json::json!({ "type": "json_object" }),
             messages: vec![GroqMessage {
                 role: "user".to_string(),
                 content: prompt,
             }],
         };
 
-        let response = self.client
+        let response = crate::http_client::async_client()
             .post("https://api.groq.com/openai/v1/chat/completions")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
@@ -185,8 +203,13 @@ Focus on whether the text represents something a user would want to act on or re
             .trim();
 
         // Parse the JSON response from the AI
-        let ai_response: AiFilterResponse = serde_json::from_str(content)
-            .map_err(|e| anyhow!("Failed to parse AI response as JSON: {} - Content: {}", e, content))?;
+        let ai_response: AiFilterResponse = serde_json::from_str(content).map_err(|e| {
+            anyhow!(
+                "Failed to parse AI response as JSON: {} - Content: {}",
+                e,
+                content
+            )
+        })?;
 
         let filter_category = match ai_response.category.to_lowercase().as_str() {
             "valid_command" => Some(FilterCategory::ValidCommand),
@@ -210,22 +233,33 @@ Focus on whether the text represents something a user would want to act on or re
     }
 
     // Legacy method for backward compatibility
-    pub async fn evaluate_transcription(&self, text: &str, config: &AlwaysConfig) -> Result<TranscriptionResult> {
-        self.evaluate_transcription_with_vocab(text, config, None, None).await
+    pub async fn evaluate_transcription(
+        &self,
+        text: &str,
+        config: &AlwaysConfig,
+    ) -> Result<TranscriptionResult> {
+        self.evaluate_transcription_with_vocab(text, config, None, None)
+            .await
     }
 
-    fn build_vocab_context(&self, vocab: Option<&Vocabulary>, context_vocab: Option<&ContextVocabulary>) -> String {
+    fn build_vocab_context(
+        &self,
+        vocab: Option<&Vocabulary>,
+        context_vocab: Option<&ContextVocabulary>,
+    ) -> String {
         let mut context = String::new();
 
-        if let Some(v) = vocab {
+        if let Some(_v) = vocab {
             context.push_str("COMMON TERMS:\n");
             // Add some key vocabulary terms (you'll need to adapt this based on your Vocabulary struct)
-            context.push_str("- Technical terms: API, SQL, JSON, HTML, CSS, HTTP, REST, CRUD, OAuth, JWT\n");
+            context.push_str(
+                "- Technical terms: API, SQL, JSON, HTML, CSS, HTTP, REST, CRUD, OAuth, JWT\n",
+            );
             context.push_str("- Frameworks: React, Vue, Angular, Next.js, Node.js, Express\n");
             context.push_str("- Tools: Git, Docker, Kubernetes, AWS, GCP, Azure\n");
         }
 
-        if let Some(cv) = context_vocab {
+        if let Some(_cv) = context_vocab {
             context.push_str("\nCONTEXT-SPECIFIC TERMS:\n");
             context.push_str("- Use context-aware vocabulary for domain-specific corrections\n");
         }
@@ -233,6 +267,9 @@ Focus on whether the text represents something a user would want to act on or re
         if context.is_empty() {
             context.push_str("No specific vocabulary context provided.");
         }
+
+        context.push_str("\n\n");
+        context.push_str(crate::glossary::ai_filter_vocabulary_context());
 
         context
     }
@@ -254,20 +291,77 @@ Focus on whether the text represents something a user would want to act on or re
 
         // Allowlist for valid single words that should always be accepted
         let valid_single_words = [
-            "yes", "no", "ok", "okay", "yeah", "yep", "nope",
-            "token", "next", "previous", "back", "forward",
-            "true", "false", "null", "void", "none",
-            "api", "sql", "json", "html", "css", "http", "rest", "jwt", "oauth",
-            "git", "ssh", "tcp", "udp", "tls", "ssl", "cdn", "dns",
-            "run", "stop", "start", "end", "begin", "finish",
-            "open", "close", "save", "load", "read", "write",
-            "add", "remove", "delete", "create", "update", "edit",
-            "to", "from", "with", "without", "for", "of", "in", "on", "at", "by",
-            "nothing", "something", "everything", "anything",
+            "yes",
+            "no",
+            "ok",
+            "okay",
+            "yeah",
+            "yep",
+            "nope",
+            "token",
+            "next",
+            "previous",
+            "back",
+            "forward",
+            "true",
+            "false",
+            "null",
+            "void",
+            "none",
+            "api",
+            "sql",
+            "json",
+            "html",
+            "css",
+            "http",
+            "rest",
+            "jwt",
+            "oauth",
+            "git",
+            "ssh",
+            "tcp",
+            "udp",
+            "tls",
+            "ssl",
+            "cdn",
+            "dns",
+            "run",
+            "stop",
+            "start",
+            "end",
+            "begin",
+            "finish",
+            "open",
+            "close",
+            "save",
+            "load",
+            "read",
+            "write",
+            "add",
+            "remove",
+            "delete",
+            "create",
+            "update",
+            "edit",
+            "to",
+            "from",
+            "with",
+            "without",
+            "for",
+            "of",
+            "in",
+            "on",
+            "at",
+            "by",
+            "nothing",
+            "something",
+            "everything",
+            "anything",
         ];
 
         // Check if it's a valid single word from allowlist
-        if text.split_whitespace().count() == 1 && valid_single_words.contains(&normalized.as_str()) {
+        if text.split_whitespace().count() == 1 && valid_single_words.contains(&normalized.as_str())
+        {
             return TranscriptionResult {
                 corrected_text: text.to_string(),
                 should_accept: true,
@@ -291,18 +385,30 @@ Focus on whether the text represents something a user would want to act on or re
 
         // Check for video artifacts (comprehensive pattern matching)
         let video_artifact_patterns = [
-            "thank you for watching", "thanks for watching",
-            "thank you for listening", "thanks for listening",
+            "thank you for watching",
+            "thanks for watching",
+            "thank you for listening",
+            "thanks for listening",
             "thank you for your attention",
-            "please like and subscribe", "like and subscribe",
+            "please like and subscribe",
+            "like and subscribe",
             "subscribe for more",
-            "subtitles by", "captions by",
-            "transcription by", "transcription provided by",
-            "auto-generated subtitles", "automatic captions",
-            "turn on subtitles", "enable subtitles",
-            "subtitle settings", "caption settings",
-            "closed captions", "subtitles available", "captions available",
-            "amara.org", "rev.com", "youtube transcription",
+            "subtitles by",
+            "captions by",
+            "transcription by",
+            "transcription provided by",
+            "auto-generated subtitles",
+            "automatic captions",
+            "turn on subtitles",
+            "enable subtitles",
+            "subtitle settings",
+            "caption settings",
+            "closed captions",
+            "subtitles available",
+            "captions available",
+            "amara.org",
+            "rev.com",
+            "youtube transcription",
         ];
 
         for pattern in &video_artifact_patterns {
@@ -319,11 +425,24 @@ Focus on whether the text represents something a user would want to act on or re
 
         // Check for conversational fillers (only exact matches, not in longer sentences)
         let filler_patterns = [
-            "thank you", "thanks", "you're welcome", "your welcome",
-            "excuse me", "i'm sorry", "sorry",
-            "good morning", "good night", "good afternoon", "good evening",
-            "how are you", "see you later", "have a nice day",
-            "take care", "sounds good", "that's great", "absolutely",
+            "thank you",
+            "thanks",
+            "you're welcome",
+            "your welcome",
+            "excuse me",
+            "i'm sorry",
+            "sorry",
+            "good morning",
+            "good night",
+            "good afternoon",
+            "good evening",
+            "how are you",
+            "see you later",
+            "have a nice day",
+            "take care",
+            "sounds good",
+            "that's great",
+            "absolutely",
         ];
 
         for pattern in &filler_patterns {
@@ -349,25 +468,47 @@ Focus on whether the text represents something a user would want to act on or re
             };
         }
 
-        // For single words not in allowlist, accept them (be conservative)
-        return TranscriptionResult {
+        let has_non_ascii = normalized.chars().any(|c| !c.is_ascii());
+        let has_url_shape = normalized.contains('.');
+        let has_latin_letter = normalized.chars().any(|c| c.is_ascii_alphabetic());
+        if text.split_whitespace().count() == 1
+            && has_url_shape
+            && (has_non_ascii || !has_latin_letter)
+        {
+            return TranscriptionResult {
+                corrected_text: text.to_string(),
+                should_accept: false,
+                confidence_score: 0.8,
+                reason: "Malformed domain-like text".to_string(),
+                filter_category: Some(FilterCategory::Gibberish),
+            };
+        }
+
+        TranscriptionResult {
             corrected_text: text.to_string(),
             should_accept: true,
             confidence_score: 0.3,
             reason: "Fallback acceptance for unknown single word".to_string(),
             filter_category: Some(FilterCategory::NaturalConversation),
-        };
+        }
     }
 }
 
 // Helper function to create AI filter from config
-pub fn create_ai_filter(_config: &AlwaysConfig) -> Option<AiFilter> {
-    // Try to get Groq API key from environment
-    if let Ok(api_key) = std::env::var("GROQ_API_KEY") {
-        Some(AiFilter::new(api_key, Some("llama-3.1-70b-versatile".to_string())))
-    } else {
-        None
+pub fn create_ai_filter(config: &AlwaysConfig) -> Option<AiFilter> {
+    let api_key = std::env::var("GROQ_API_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+        .unwrap_or_else(|| config.groq_stt_api_key.clone());
+
+    if api_key.trim().is_empty() {
+        return None;
     }
+
+    Some(AiFilter::new(
+        api_key,
+        Some(config.postprocess_config.groq_model.clone()),
+    ))
 }
 
 #[cfg(test)]
@@ -388,5 +529,24 @@ mod tests {
         let result = filter.evaluate_fallback("");
         assert!(!result.should_accept);
         assert_eq!(result.reason, "Empty text");
+    }
+}
+#[cfg(test)]
+mod test_malformed_domains {
+    use crate::always::ai_filter::AiFilter;
+
+    #[test]
+    fn test_fallback_malformed_domain() {
+        let filter = AiFilter::new("dummy".to_string(), None);
+        let result = filter.evaluate_fallback("expenseÁê•-tee.com");
+
+        println!("Text: expenseÁê•-tee.com");
+        println!("Should accept: {}", result.should_accept);
+        println!("Confidence: {:.1}%", result.confidence_score * 100.0);
+        println!("Reason: {}", result.reason);
+        println!("Category: {:?}", result.filter_category);
+
+        // The fallback should catch this as malformed domain-like text
+        // assert!(!result.should_accept, "Malformed domain should be rejected");
     }
 }

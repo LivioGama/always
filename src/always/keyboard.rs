@@ -8,13 +8,13 @@ use std::time::Duration;
 use anyhow::Result;
 use rdev::{listen, EventType, Key};
 
-use super::{config as always_config, event, log, notification, pause};
+use super::{config as always_config, event, log, pause};
 
 /// Tracks whether the Command (⌘) key is currently held.
 /// Used by the paste path to suppress keystrokes when the user is mid-shortcut
 /// (e.g. ⌘+Tab) so an interjecting paste doesn't corrupt their action.
-static CMD_HELD: once_cell::sync::Lazy<AtomicBool> =
-    once_cell::sync::Lazy::new(|| AtomicBool::new(false));
+static CMD_HELD: std::sync::LazyLock<AtomicBool> =
+    std::sync::LazyLock::new(|| AtomicBool::new(false));
 
 /// Returns true if either Command key is currently held.
 pub fn is_cmd_held() -> bool {
@@ -70,11 +70,6 @@ pub fn start_keyboard_listener() -> Result<()> {
                                 logger.write(log::Event::PauseToggled { paused: new_state });
                             }
                         }
-
-                        // Show visual notification
-                        if let Err(e) = notification::show_pause_status_change(new_state) {
-                            eprintln!("Failed to show pause notification: {}", e);
-                        }
                     }
                 }
                 EventType::KeyPress(Key::KeyA) => {
@@ -94,17 +89,12 @@ pub fn start_keyboard_listener() -> Result<()> {
                                 logger.write(log::Event::AutoEnterToggled { enabled: new_state });
                             }
                         }
-
-                        // Show visual notification
-                        if let Err(e) = notification::show_auto_enter_status_change(new_state) {
-                            eprintln!("Failed to show auto-enter notification: {}", e);
-                        }
                     }
                 }
                 _ => {}
             }
         }) {
-            eprintln!("Error in keyboard listener: {:?}", error);
+            tracing::error!(?error, "keyboard_listener_error");
             let _ = tx.send(());
         }
     });

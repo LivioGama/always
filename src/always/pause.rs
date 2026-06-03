@@ -66,12 +66,12 @@ impl AutoEnterState {
 }
 
 /// Global pause state instance
-static PAUSE_STATE: once_cell::sync::Lazy<Arc<PauseState>> =
-    once_cell::sync::Lazy::new(|| Arc::new(PauseState::new()));
+static PAUSE_STATE: std::sync::LazyLock<Arc<PauseState>> =
+    std::sync::LazyLock::new(|| Arc::new(PauseState::new()));
 
 /// Global auto-enter state instance
-static AUTO_ENTER_STATE: once_cell::sync::Lazy<Arc<AutoEnterState>> =
-    once_cell::sync::Lazy::new(|| Arc::new(AutoEnterState::new(false)));
+static AUTO_ENTER_STATE: std::sync::LazyLock<Arc<AutoEnterState>> =
+    std::sync::LazyLock::new(|| Arc::new(AutoEnterState::new(false)));
 
 /// Initialize the auto-enter state with the config value
 pub fn init_auto_enter(initial_value: bool) {

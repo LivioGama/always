@@ -17,6 +17,11 @@ let package = Package(
             name: "AlwaysApp",
             dependencies: [],
             path: "Sources"
+        ),
+        .testTarget(
+            name: "AlwaysAppTests",
+            dependencies: ["AlwaysApp"],
+            path: "Tests"
         )
     ]
 )

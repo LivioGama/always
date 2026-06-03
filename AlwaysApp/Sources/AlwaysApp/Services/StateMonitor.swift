@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import os.log
 
 class StateMonitor: ObservableObject {
     static let shared = StateMonitor()
@@ -10,30 +11,20 @@ class StateMonitor: ObservableObject {
     @Published var isVoiceActivity: Bool = false
     private var cancellables = Set<AnyCancellable>()
     private var udsClient: UDSClient
+    private let logger = Logger(subsystem: "com.always.app", category: "state-monitor")
 
     private func log(_ message: String) {
-        let timestamp = Date().description
-        let line = "[\(timestamp)] StateMonitor: \(message)\n"
-        let path = "/tmp/statemonitor.log"
-        if let data = line.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: path) {
-                if let fileHandle = FileHandle(forWritingAtPath: path) {
-                    fileHandle.seekToEndOfFile()
-                    fileHandle.write(data)
-                    fileHandle.closeFile()
-                }
-            } else {
-                try? data.write(to: URL(fileURLWithPath: path))
-            }
-        }
-        NSLog("StateMonitor: \(message)")
+        logger.debug("\(message)")
     }
-
+    
     private init() {
         self.udsClient = UDSClient()
         setupUDSEventListener()
         setupOverlaySubscription()
-        log("Initialized with UDSClient and overlay subscription")
+        logger.info("Initialized with UDSClient and overlay subscription")
+        
+        // Clean up old log file on launch
+        try? FileManager.default.removeItem(atPath: "/tmp/statemonitor.log")
     }
     
     deinit {

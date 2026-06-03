@@ -1,10 +1,11 @@
-use std::io::Write as _;
-
 use anyhow::{Context, Result};
 
 pub fn copy_to_clipboard(text: String) -> Result<()> {
-    let mut pbcopy = std::process::Command::new("pbcopy")
-        .stdin(std::process::Stdio::piped())
+    use std::process::{Command, Stdio};
+    use std::io::Write as _;
+
+    let mut pbcopy = Command::new("pbcopy")
+        .stdin(Stdio::piped())
         .spawn()
         .context("Failed to run pbcopy")?;
     pbcopy
@@ -21,21 +22,34 @@ pub fn copy_to_clipboard(text: String) -> Result<()> {
 }
 
 pub fn paste_text(auto_enter: bool) -> Result<()> {
-    let mut script =
-        String::from("tell application \"System Events\" to keystroke \"v\" using command down");
-    if auto_enter {
-        script.push_str("\ntell application \"System Events\" to key code 36");
-    }
+    use core_graphics::event::{CGEvent, CGEventFlags, CGKeyCode, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
-    let status = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .status()
-        .context("Failed to run osascript for paste automation")?;
-    if !status.success() {
-        anyhow::bail!(
-            "Paste automation failed. Ensure Accessibility permissions are enabled for always/Terminal"
-        );
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| anyhow::anyhow!("Failed to create CGEventSource"))?;
+
+    // Simulate Cmd+V
+    let v_keycode: CGKeyCode = 9; // 'v' key
+    let key_down = CGEvent::new_keyboard_event(source.clone(), v_keycode, true)
+        .map_err(|_| anyhow::anyhow!("Failed to create key down event"))?;
+    key_down.set_flags(CGEventFlags::CGEventFlagCommand);
+    key_down.post(CGEventTapLocation::HID);
+
+    let key_up = CGEvent::new_keyboard_event(source.clone(), v_keycode, false)
+        .map_err(|_| anyhow::anyhow!("Failed to create key up event"))?;
+    key_up.set_flags(CGEventFlags::CGEventFlagCommand);
+    key_up.post(CGEventTapLocation::HID);
+
+    if auto_enter {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let enter_keycode: CGKeyCode = 36; // Return key
+        let enter_down = CGEvent::new_keyboard_event(source.clone(), enter_keycode, true)
+            .map_err(|_| anyhow::anyhow!("Failed to create enter key down event"))?;
+        enter_down.post(CGEventTapLocation::HID);
+
+        let enter_up = CGEvent::new_keyboard_event(source, enter_keycode, false)
+            .map_err(|_| anyhow::anyhow!("Failed to create enter key up event"))?;
+        enter_up.post(CGEventTapLocation::HID);
     }
 
     Ok(())

@@ -219,6 +219,18 @@ struct SettingsWindow: View {
                         ), in: 50...3000, step: 50)
                     }
                 }
+
+                VStack(alignment: .leading) {
+                    Text("Silero VAD Threshold")
+                        .font(.headline)
+                    Text("\(config.sileroThreshold, specifier: "%.2f")")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Slider(value: $config.sileroThreshold, in: 0.1...0.9, step: 0.05)
+                    Text("Higher = stricter speech detection (less noise, may miss quiet speech)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
 
             Section(header: Text("Keyboard Shortcuts")) {
@@ -262,6 +274,7 @@ struct SettingsWindow: View {
         .onChange(of: config.hearEnergyThreshold) { _, _ in saveConfig() }
         .onChange(of: config.sttSilence) { _, _ in saveConfig() }
         .onChange(of: config.sttCooldownMs) { _, _ in saveConfig() }
+        .onChange(of: config.sileroThreshold) { _, _ in saveConfig() }
     }
 
     private func toggleDaemon() {
@@ -331,6 +344,7 @@ struct SettingsWindow: View {
                 _ = try await cliService.setConfig(key: "stt_silence", value: String(config.sttSilence))
                 _ = try await cliService.setConfig(key: "stt_cooldown_ms", value: String(config.sttCooldownMs))
                 _ = try await cliService.setConfig(key: "stt_auto_enter", value: String(config.sttAutoEnter))
+                _ = try await cliService.setConfig(key: "silero_threshold", value: String(config.sileroThreshold))
                 // Only save API key if it's not masked (doesn't contain only dots)
                 if !apiKey.allSatisfy({ c in c == "•" }) {
                     _ = try await cliService.setConfig(key: "groq_api_key", value: apiKey.isEmpty ? "" : apiKey)

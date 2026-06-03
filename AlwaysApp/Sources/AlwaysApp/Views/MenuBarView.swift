@@ -6,6 +6,8 @@ struct MenuBarView: View {
     @State private var status: DaemonStatus?
     @State private var config: Config?
     @State private var isLoading = false
+    @State private var errorMessage: String?
+    @State private var showingError = false
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -57,6 +59,11 @@ struct MenuBarView: View {
                 await refreshStatus()
             }
         }
+        .alert("Error", isPresented: $showingError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(errorMessage ?? "An unknown error occurred")
+        }
     }
 
     private func toggleDaemon() {
@@ -70,7 +77,7 @@ struct MenuBarView: View {
                 }
                 await refreshStatus()
             } catch {
-                print("Error toggling daemon: \(error)")
+                showError(message: "Failed to \(status?.isRunning == true ? "stop" : "start") daemon: \(error.localizedDescription)")
             }
             isLoading = false
         }
@@ -94,8 +101,13 @@ struct MenuBarView: View {
             status = try await cliService.getStatus()
             config = try await cliService.getConfig()
         } catch {
-            print("Error refreshing status: \(error)")
+            showError(message: "Failed to refresh daemon status: \(error.localizedDescription)")
             status = DaemonStatus(isRunning: false, pid: nil, logPath: nil)
         }
+    }
+    
+    private func showError(message: String) {
+        errorMessage = message
+        showingError = true
     }
 }

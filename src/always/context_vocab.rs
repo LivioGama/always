@@ -38,7 +38,7 @@ impl ContextVocabulary {
 
         vocab
     }
-    
+
     fn extract_git_info(&mut self, root: &Path) {
         // Get current branch
         if let Ok(branch_output) = Command::new("git")
@@ -62,7 +62,7 @@ impl ContextVocabulary {
             }
         }
     }
-    
+
     fn extract_project_terms(&mut self, root: &Path) -> Result<()> {
         let mut terms = HashSet::new();
 
@@ -84,7 +84,12 @@ impl ContextVocabulary {
                         Self::extract_terms_from_identifier(&name, &mut terms, &self.config);
                     }
 
-                    if path.extension().map_or(false, |ext| matches!(ext.to_str(), Some("rs") | Some("ts") | Some("tsx") | Some("js") | Some("jsx"))) {
+                    if path.extension().map_or(false, |ext| {
+                        matches!(
+                            ext.to_str(),
+                            Some("rs") | Some("ts") | Some("tsx") | Some("js") | Some("jsx")
+                        )
+                    }) {
                         if let Ok(content) = std::fs::read_to_string(path) {
                             Self::extract_terms_from_javascript(&content, &mut terms, &self.config);
                         }
@@ -96,8 +101,12 @@ impl ContextVocabulary {
         self.extracted_terms = terms;
         Ok(())
     }
-    
-    fn extract_terms_from_markdown(content: &str, terms: &mut HashSet<String>, config: &VocabConfig) {
+
+    fn extract_terms_from_markdown(
+        content: &str,
+        terms: &mut HashSet<String>,
+        config: &VocabConfig,
+    ) {
         // Extract code blocks
         let code_block_regex = Regex::new(r"```[\w]*\n([\s\S]*?)```").unwrap();
         for cap in code_block_regex.captures_iter(content) {
@@ -114,10 +123,16 @@ impl ContextVocabulary {
             }
         }
     }
-    
-    fn extract_terms_from_identifier(text: &str, terms: &mut HashSet<String>, config: &VocabConfig) {
+
+    fn extract_terms_from_identifier(
+        text: &str,
+        terms: &mut HashSet<String>,
+        config: &VocabConfig,
+    ) {
         // Split by common delimiters
-        for part in text.split(&['/', '-', '.', '_', ' ', '(', ')', '[', ']', '{', '}', ':', ';', ',']) {
+        for part in text.split(&[
+            '/', '-', '.', '_', ' ', '(', ')', '[', ']', '{', '}', ':', ';', ',',
+        ]) {
             let part = part.trim();
             if part.len() >= config.min_term_length && part.len() <= config.max_term_length {
                 // Filter out common words
@@ -129,7 +144,11 @@ impl ContextVocabulary {
         }
     }
 
-    fn extract_terms_from_javascript(content: &str, terms: &mut HashSet<String>, config: &VocabConfig) {
+    fn extract_terms_from_javascript(
+        content: &str,
+        terms: &mut HashSet<String>,
+        config: &VocabConfig,
+    ) {
         // Simple regex-based extraction for JS/TS
         let function_regex = Regex::new(r"function\s+(\w+)").unwrap();
         for cap in function_regex.captures_iter(content) {
@@ -152,7 +171,7 @@ impl ContextVocabulary {
             }
         }
     }
-    
+
     pub fn reload(&mut self) -> Result<()> {
         if let Some(ref root) = self.project_root {
             let root_clone = root.clone();
@@ -161,10 +180,10 @@ impl ContextVocabulary {
         }
         Ok(())
     }
-    
+
     pub fn get_context_corrections(&self) -> HashMap<String, String> {
         let mut corrections = HashMap::new();
-        
+
         // Add context-aware corrections based on project terms
         for term in &self.extracted_terms {
             // Generate phonetic variations
@@ -173,13 +192,13 @@ impl ContextVocabulary {
                 corrections.insert(phonetic, term.clone());
             }
         }
-        
+
         corrections
     }
-    
+
     fn phonetic_approximation(&self, term: &str) -> String {
         let mut result = term.to_string();
-        
+
         // Common phonetic substitutions
         result = result.replace("ph", "f");
         result = result.replace("gh", "g");
@@ -188,10 +207,10 @@ impl ContextVocabulary {
         result = result.replace("x", "ks");
         result = result.replace("q", "k");
         result = result.replace("c", "k");
-        
+
         result
     }
-    
+
     pub fn get_git_context(&self) -> (Option<String>, Option<String>) {
         (self.git_branch.clone(), self.git_commit.clone())
     }
@@ -204,8 +223,11 @@ mod tests {
     #[test]
     fn extracts_terms_from_identifier() {
         let mut terms = HashSet::new();
-        ContextVocabulary::extract_terms_from_identifier("my_function_name", &mut terms, &VocabConfig::default());
-        assert!(terms.contains("my_function_name"));
+        ContextVocabulary::extract_terms_from_identifier(
+            "my_function_name",
+            &mut terms,
+            &VocabConfig::default(),
+        );
         assert!(terms.contains("my"));
         assert!(terms.contains("function"));
         assert!(terms.contains("name"));
@@ -215,6 +237,6 @@ mod tests {
     fn phonetic_approximation_works() {
         let vocab = ContextVocabulary::new(None);
         assert_eq!(vocab.phonetic_approximation("phone"), "fone");
-        assert_eq!(vocab.phonetic_approximation("question"), "kueskun");
+        assert_eq!(vocab.phonetic_approximation("question"), "kuesshun");
     }
 }

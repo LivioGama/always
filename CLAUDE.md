@@ -44,31 +44,71 @@ This project is indexed by GitNexus as **always** (971 symbols, 2059 relationshi
 
 # Always Voice-to-Text Development
 
-## Build & Launch Process
+## What Must Be Rebuilt Together
 
-**CRITICAL RULE:** After making ANY code changes to the AlwaysApp (Swift) or daemon (Rust), you MUST automatically rebuild and relaunch the app to test the changes.
+The overlay system depends on TWO binaries that must be in sync:
+- **Rust daemon** (`target/release/always`) — sends UDS events (voice, transcribing, pause, etc.)
+- **Swift app** (`AlwaysApp/AlwaysApp.app`) — receives UDS events and shows the overlay
+
+**If either is stale, the overlay silently breaks.** This is what causes "overlay disappeared" bugs.
+
+### Rebuild Decision Matrix
+
+| You changed... | Must rebuild |
+|---|---|
+| Any `.rs` file in `src/` | Rust daemon (`cargo build --release`), then Swift app (`build.sh`) |
+| Any `.swift` file in `AlwaysApp/Sources/` | Swift app only (`build.sh`) |
+| Both | Rust first, then Swift |
+
+**Why rebuild Swift after Rust changes?** `build.sh` copies the daemon binary into the Swift app bundle. If you only rebuild Rust, the bundle still has the old binary.
 
 ### Simple Workflow (Do This Every Time)
 
+**After Rust changes:**
 ```bash
 pkill -f AlwaysApp
-cd AlwaysApp && ./build.sh && open AlwaysApp.app
+cargo build --release --lib --bin always
+cd AlwaysApp && ./build.sh && open -a AlwaysApp
 ```
 
-### Why This Process Matters
+**After Swift-only changes:**
+```bash
+pkill -f AlwaysApp
+cd AlwaysApp && ./build.sh && open -a AlwaysApp
+```
 
-**Common Mistake:** Using `swift run` to test changes
-- `swift run` builds in a temporary location
-- It does NOT create the app bundle at the correct location
-- Changes won't apply to the deployed app
-- The running app uses the old version
+### ⚠️ Critical: Always launch from `/Applications/AlwaysApp.app`
 
-**Correct Process:** Use `./build.sh`
-- Builds the Swift app properly
-- Copies the daemon binary into the app bundle
-- Creates the app bundle at `AlwaysApp/AlwaysApp.app`
-- Code signs the app for proper permissions
-- This is the actual deployed version
+`build.sh` automatically deploys to `/Applications/AlwaysApp.app` as the final step. This is the canonical installed location. Always launch from there:
+
+```bash
+open -a AlwaysApp
+```
+
+**Never** run directly from `AlwaysApp/AlwaysApp.app` in the project directory — that is only the intermediate build artifact before deployment.
+
+### Why `./build.sh` and Not `swift run`
+
+`swift run` builds in a temporary location and does NOT create the app bundle. The app bundle is required for:
+- Code signing (Accessibility permissions)
+- Copying the daemon binary into `Contents/MacOS/always`
+- Proper launch via `open`
+
+### Verifying the Overlay Is Wired Up
+
+After launching, check these two logs to confirm the full stack is connected:
+
+```bash
+# UDS client connected to daemon?
+cat /tmp/udsclient.log | tail -5
+# Must show: ✅ Connected to daemon
+
+# StateMonitor receiving events?
+cat /tmp/statemonitor.log | tail -5
+# Must show: received daemon event: ListeningStarted
+```
+
+If `/tmp/udsclient.log` doesn't exist, the running app is a stale build without UDS support.
 
 ### Detailed Steps
 
@@ -76,11 +116,10 @@ cd AlwaysApp && ./build.sh && open AlwaysApp.app
 
 1. **Kill existing processes (no parallel versions):**
    ```bash
-   ./target/release/always stop
-   osascript -e 'tell application "AlwaysApp" to quit'
+   pkill -f AlwaysApp
    ```
 
-2. **Build the Rust daemon:**
+2. **Build the Rust daemon (if any `.rs` changed):**
    ```bash
    cargo build --release --lib --bin always
    ```
@@ -90,17 +129,9 @@ cd AlwaysApp && ./build.sh && open AlwaysApp.app
    cd AlwaysApp && ./build.sh
    ```
 
-4. **Deploy Mac app to correct location:**
-   ```bash
-   # The build script creates AlwaysApp.app in AlwaysApp/
-   # Ensure no other AlwaysApp instances are running before launching
-   ```
-
-5. **Launch the Mac app (which starts both GUI and daemon via CLIService):**
+4. **Launch the Mac app:**
    ```bash
    open -a AlwaysApp
-   # Or from the app bundle:
-   open -a AlwaysApp/AlwaysApp.app
    ```
 
 **IMPORTANT:**
@@ -108,8 +139,7 @@ cd AlwaysApp && ./build.sh && open AlwaysApp.app
 - **NEVER** reference `./target/release/always` in code — the daemon binary is embedded in the Mac app bundle at `AlwaysApp.app/Contents/MacOS/always`
 - **NEVER** have parallel versions running — always stop old instances before launching new ones
 - The Mac app launches the daemon through CLIService which passes environment variables (like GROQ_API_KEY)
-- Both daemon and Mac app must be rebuilt and deployed together after code changes
-- The build script automatically copies the daemon binary into the app bundle
+- `build.sh` builds, bundles the daemon binary, and deploys to `/Applications/AlwaysApp.app` automatically
 
 ## Verification
 
@@ -119,8 +149,8 @@ ps aux | grep -v grep | grep -i always
 ```
 
 Should show:
-- `/Applications/AlwaysApp.app/Contents/MacOS/AlwaysApp` (GUI)  
-- `/path/to/always run --lang en --timeout 30 --silence 0.4` (daemon)
+- `/Applications/AlwaysApp.app/Contents/MacOS/AlwaysApp` (GUI)
+- `.../always run --lang en --timeout 30 --silence 0.4` (daemon)
 
 Check status bar for Always icon and logs:
 ```bash

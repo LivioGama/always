@@ -150,16 +150,17 @@ fileprivate class DotWaveView: NSView {
 /// frosted block with a large SF Symbol icon at the top and a label beneath.
 class StatusOverlayView: NSView {
     private let blurView: NSVisualEffectView
+    private let stackView: NSStackView
+    private let iconContainer: NSView
     private let iconView: NSImageView
     private let dotWaveView: DotWaveView
     private let label: NSTextField
 
-    fileprivate static let iconSize: CGFloat = 56
-    fileprivate static let cornerRadius: CGFloat = 24
-    fileprivate static let topPadding: CGFloat = 28
-    fileprivate static let iconLabelSpacing: CGFloat = 16
-    fileprivate static let bottomPadding: CGFloat = 22
-    fileprivate static let horizontalPadding: CGFloat = 18
+    fileprivate static let iconSize: CGFloat = 42
+    fileprivate static let cornerRadius: CGFloat = 22
+    fileprivate static let iconLabelSpacing: CGFloat = 10
+    fileprivate static let verticalPadding: CGFloat = 14
+    fileprivate static let horizontalPadding: CGFloat = 20
 
     var state: OverlayState = .voiceActivity {
         didSet {
@@ -169,6 +170,8 @@ class StatusOverlayView: NSView {
 
     override init(frame frameRect: NSRect) {
         self.blurView = NSVisualEffectView(frame: frameRect)
+        self.stackView = NSStackView()
+        self.iconContainer = NSView()
         self.iconView = NSImageView()
         self.dotWaveView = DotWaveView()
         self.label = NSTextField(labelWithString: "")
@@ -190,11 +193,11 @@ class StatusOverlayView: NSView {
 
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(iconView)
+        iconContainer.addSubview(iconView)
 
         dotWaveView.translatesAutoresizingMaskIntoConstraints = false
         dotWaveView.isHidden = true
-        addSubview(dotWaveView)
+        iconContainer.addSubview(dotWaveView)
 
         label.font = .systemFont(ofSize: 15, weight: .medium)
         label.textColor = .secondaryLabelColor
@@ -206,24 +209,39 @@ class StatusOverlayView: NSView {
         label.alignment = .center
         label.lineBreakMode = .byTruncatingTail
         label.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(label)
+
+        iconContainer.translatesAutoresizingMaskIntoConstraints = false
+        stackView.orientation = .vertical
+        stackView.alignment = .centerX
+        stackView.spacing = StatusOverlayView.iconLabelSpacing
+        stackView.translatesAutoresizingMaskIntoConstraints = false
+        stackView.addArrangedSubview(iconContainer)
+        stackView.addArrangedSubview(label)
+        addSubview(stackView)
 
         NSLayoutConstraint.activate([
-            iconView.centerXAnchor.constraint(equalTo: centerXAnchor),
-            iconView.topAnchor.constraint(equalTo: topAnchor, constant: StatusOverlayView.topPadding),
+            stackView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            stackView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            stackView.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: StatusOverlayView.verticalPadding),
+            stackView.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -StatusOverlayView.verticalPadding),
+            stackView.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: StatusOverlayView.horizontalPadding),
+            stackView.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -StatusOverlayView.horizontalPadding),
+
+            iconContainer.widthAnchor.constraint(equalToConstant: StatusOverlayView.iconSize),
+            iconContainer.heightAnchor.constraint(equalToConstant: StatusOverlayView.iconSize),
+
+            iconView.centerXAnchor.constraint(equalTo: iconContainer.centerXAnchor),
+            iconView.centerYAnchor.constraint(equalTo: iconContainer.centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: StatusOverlayView.iconSize),
             iconView.heightAnchor.constraint(equalToConstant: StatusOverlayView.iconSize),
 
-            // dotWaveView occupies the same 56x56 slot as iconView.
+            // dotWaveView occupies the same slot as iconView.
             dotWaveView.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
             dotWaveView.centerYAnchor.constraint(equalTo: iconView.centerYAnchor),
             dotWaveView.widthAnchor.constraint(equalTo: iconView.widthAnchor),
             dotWaveView.heightAnchor.constraint(equalTo: iconView.heightAnchor),
 
-            label.topAnchor.constraint(equalTo: iconView.bottomAnchor, constant: StatusOverlayView.iconLabelSpacing),
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: StatusOverlayView.horizontalPadding),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -StatusOverlayView.horizontalPadding),
-            label.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -StatusOverlayView.bottomPadding)
+            label.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -2 * StatusOverlayView.horizontalPadding)
         ])
 
         applyState()
@@ -269,8 +287,8 @@ class StatusOverlayView: NSView {
 class StatusOverlayWindow: NSWindow {
     private var overlayView: StatusOverlayView?
 
-    static let overlayWidth: CGFloat = 200
-    static let overlayHeight: CGFloat = 200
+    static let overlayWidth: CGFloat = 230
+    static let overlayHeight: CGFloat = 130
 
     init() {
         super.init(
@@ -378,10 +396,10 @@ class StatusOverlayController {
 
     private var window: StatusOverlayWindow?
     private var hideWorkItem: DispatchWorkItem?
+    private var flashEndsAt: Date?
+    private var pendingShowState: OverlayState?
 
-    private init() {
-        // Don't create window here - wait until first use
-    }
+    private init() {}
 
     private func ensureWindow() {
         if window == nil {
@@ -392,33 +410,65 @@ class StatusOverlayController {
 
     /// Show the overlay and keep it visible until explicitly hidden. Used
     /// for ongoing states like transcribing or voice activity.
+    /// If a flash is currently active, defer until the flash completes
+    /// so the user actually sees the toggle confirmation.
     func show(state: OverlayState) {
         ensureWindow()
+        if isFlashActive() {
+            pendingShowState = state
+            return
+        }
         cancelPendingHide()
         window?.show(state: state)
     }
 
     /// Show the overlay briefly then auto-hide. Used for transient
     /// notifications like Pause/Resume or Auto-Enter on/off toggles.
-    func flash(state: OverlayState, duration: TimeInterval = 3.5) {
+    /// Always lasts the full `duration` regardless of voice activity.
+    func flash(state: OverlayState, duration: TimeInterval = 1.5) {
         ensureWindow()
         cancelPendingHide()
         window?.show(state: state)
 
+        let endsAt = Date(timeIntervalSinceNow: duration)
+        flashEndsAt = endsAt
+
         let work = DispatchWorkItem { [weak self] in
-            self?.window?.hide()
+            guard let self = self else { return }
+            self.flashEndsAt = nil
+            // If a persistent show was deferred during the flash, honor it now
+            // instead of hiding (avoids a flicker between flash hide and show).
+            if let deferred = self.pendingShowState {
+                self.pendingShowState = nil
+                self.window?.show(state: deferred)
+            } else {
+                self.window?.hide()
+            }
         }
         hideWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
     }
 
     func hide() {
+        // If a flash is active, let it complete naturally — don't kill it
+        // mid-flash because of a stale voice-activity-ended.
+        if isFlashActive() {
+            pendingShowState = nil
+            return
+        }
         cancelPendingHide()
         window?.hide()
+    }
+
+    private func isFlashActive() -> Bool {
+        guard let endsAt = flashEndsAt else { return false }
+        return endsAt > Date()
     }
 
     private func cancelPendingHide() {
         hideWorkItem?.cancel()
         hideWorkItem = nil
+        flashEndsAt = nil
+        pendingShowState = nil
     }
 }

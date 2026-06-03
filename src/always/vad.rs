@@ -1,14 +1,22 @@
 use anyhow::{Context, Result};
 use std::collections::VecDeque;
-use webrtc_vad::{Vad, VadMode};
+use std::sync::{Arc, Mutex};
+use voice_activity_detector::VoiceActivityDetector;
 
-use crate::always::audio::{self, FRAME_BYTES, FRAME_MS};
+use crate::always::audio::{self, FRAME_BYTES, FRAME_MS, FRAME_SAMPLES};
 use crate::always::config::AlwaysConfig;
 use crate::always::event;
 use crate::always::log::{Event, Logger};
 
+/// Speculative transcription result, populated by a background thread.
+type SpeculationSlot = Arc<Mutex<Option<Result<crate::stt::TranscriptionResult>>>>;
+
 pub enum RecordResult {
-    Speech { text: String, energy: f64 },
+    Speech {
+        text: String,
+        energy: f64,
+        transcription: crate::stt::TranscriptionResult,
+    },
     Silence,
     DroppedLowEnergy { energy: f64 },
     DroppedNoise { raw: String },
@@ -23,15 +31,40 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     let silence_frames = ((cfg.silence_secs * 1000.0) / FRAME_MS as f64).ceil() as usize;
     let max_frames = (cfg.timeout_secs as usize * 1000) / FRAME_MS as usize;
     let min_speech_frames = (cfg.onset_ms / FRAME_MS).max(1) as usize;
+    // Two-stage end-of-utterance detection (Option B):
+    // - At `tentative_silence_frames`, kick off a SPECULATIVE transcription in a
+    //   background thread using the audio captured so far.
+    // - Continue recording until `silence_frames` (final).
+    // - If speech resumes during the tentative window, discard the speculation.
+    // - At final, if speculation is still valid (no resume), use its result —
+    //   transcription has been running in parallel during the silence wait, so
+    //   the user gets snappy paste with no extra latency cost.
+    // Tentative is half the final window, clamped to a sane range.
+    let tentative_silence_secs = (cfg.silence_secs * 0.5).clamp(0.4, 1.5);
+    let tentative_silence_frames =
+        ((tentative_silence_secs * 1000.0) / FRAME_MS as f64).ceil() as usize;
     // Pre-buffer: keep 50ms of audio before speech detection to catch first words
     let pre_buffer_frames = (50 / FRAME_MS as usize).max(1);
-    let mut vad =
-        Vad::new_with_rate_and_mode(webrtc_vad::SampleRate::Rate16kHz, VadMode::LowBitrate);
+    let mut vad = VoiceActivityDetector::builder()
+        .sample_rate(16000_i64)
+        .chunk_size(512_usize)
+        .build()
+        .context("failed to build Silero VAD")?;
+    let speech_threshold: f32 = cfg.silero_threshold;
+    // Hysteresis: easier to STAY in speech than to ENTER it.
+    // Silero's probability naturally dips below 0.5 during voiceless consonants
+    // (h, s, f), inter-syllable pauses, and quiet syllables — without hysteresis,
+    // these brief dips accumulate consecutive_silence and prematurely cut the
+    // utterance mid-sentence. The exit threshold is 60% of the entry threshold.
+    let silence_threshold: f32 = speech_threshold * 0.6;
+    let mut vad_accum: Vec<i16> = Vec::with_capacity(1024);
+    let mut last_prob: f32 = 0.0;
 
     // Use persistent recorder to avoid process spawning overhead
     let recorder_arc = audio::RecChild::get_or_spawn()?;
     let mut frame_buf = [0u8; FRAME_BYTES];
-    let mut speech_samples = Vec::new();
+    // Pre-allocate ~4 seconds of audio (16000 Hz * 4s = 64000 samples) to avoid Vec growth
+    let mut speech_samples: Vec<i16> = Vec::with_capacity(64_000);
     let mut consecutive_silence = 0usize;
     let mut consecutive_speech = 0usize;
     let mut in_speech = false;
@@ -51,6 +84,14 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
         0
     };
 
+    // Reusable per-frame sample buffer (stack allocated, no heap allocation per frame)
+    let mut sample_buf = [0i16; FRAME_SAMPLES];
+
+    // Speculation state (Option B): kicked off at tentative silence, may be
+    // discarded if speech resumes before final silence.
+    let speculation_slot: SpeculationSlot = Arc::new(Mutex::new(None));
+    let mut speculation_pending = false;
+
     loop {
         let read = {
             let mut recorder = recorder_arc.lock().unwrap();
@@ -65,14 +106,31 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
             break;
         }
 
-        let samples: Vec<i16> = frame_buf
-            .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect();
+        for (i, chunk) in frame_buf.chunks_exact(2).enumerate() {
+            sample_buf[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
+        }
+        let samples = &sample_buf[..];
 
-        let is_speech = vad.is_voice_segment(&samples).unwrap_or(false);
+        vad_accum.extend_from_slice(samples);
+        if vad_accum.len() >= 512 {
+            let chunk: Vec<i16> = vad_accum.drain(..512).collect();
+            last_prob = vad.predict(chunk);
+        }
+        // Hysteresis: while already in speech, only exit on the lower threshold;
+        // while not yet in speech, require the higher threshold to enter.
+        let is_speech = if in_speech {
+            last_prob >= silence_threshold
+        } else {
+            last_prob >= speech_threshold
+        };
 
         if is_speech {
+            // Speech resumed: discard any pending speculation (its audio snapshot
+            // is now stale because more speech will be appended).
+            if speculation_pending {
+                speculation_pending = false;
+                *speculation_slot.lock().unwrap() = None;
+            }
             consecutive_speech += 1;
             consecutive_silence = 0;
             if consecutive_speech >= min_speech_frames {
@@ -106,13 +164,31 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
             consecutive_silence += 1;
             consecutive_speech = 0;
             speech_samples.extend_from_slice(&samples);
+
+            // At tentative silence, kick off speculative transcription in the
+            // background so the result is ready (or nearly so) by the time we
+            // hit final silence. If the user resumes, we discard it above.
+            if !speculation_pending && consecutive_silence >= tentative_silence_frames {
+                speculation_pending = true;
+                let audio_snapshot = speech_samples.clone();
+                let api_key = cfg.groq_stt_api_key.clone();
+                let slot = Arc::clone(&speculation_slot);
+                std::thread::spawn(move || {
+                    let outcome = (|| -> Result<crate::stt::TranscriptionResult> {
+                        let wav = audio::create_wav_bytes_i16_mono_16k(&audio_snapshot)?;
+                        crate::stt::transcribe_from_bytes(wav, &api_key)
+                    })();
+                    *slot.lock().unwrap() = Some(outcome);
+                });
+            }
+
             if consecutive_silence >= silence_frames {
                 break;
             }
         } else {
             consecutive_speech = 0;
             // Maintain pre-buffer: add new frame, drop oldest if full
-            pre_buffer.push_back(samples.clone());
+            pre_buffer.push_back(samples.to_vec());
             if pre_buffer.len() > pre_buffer_frames {
                 pre_buffer.pop_front();
             }
@@ -160,32 +236,58 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     // Send transcribing started event
     event::global_broadcaster().transcribing_started();
 
-    // Create WAV data in memory instead of writing to disk
-    let wav_data = match audio::create_wav_bytes_i16_mono_16k(&speech_samples) {
-        Ok(data) => data,
-        Err(err) => {
+    // Try to use the speculative transcription if it was kicked off and
+    // wasn't invalidated by a speech resume. Wait briefly if it's still in
+    // flight — it has been running for up to (silence_secs - tentative) seconds
+    // already, so it's likely complete or close to it.
+    let speculation = if speculation_pending {
+        let started_wait = std::time::Instant::now();
+        let max_wait = std::time::Duration::from_secs(10);
+        let mut taken: Option<Result<crate::stt::TranscriptionResult>> = None;
+        loop {
+            if let Some(r) = speculation_slot.lock().unwrap().take() {
+                taken = Some(r);
+                break;
+            }
+            if started_wait.elapsed() >= max_wait {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        taken
+    } else {
+        None
+    };
+
+    let result = match speculation {
+        Some(Ok(r)) => {
             event::global_broadcaster().transcribing_stopped();
-            return Err(err).context("failed to create WAV data in memory");
+            r
+        }
+        _ => {
+            // No speculation, speculation errored, or timeout — do a fresh
+            // transcription with the full audio (including any trailing silence).
+            let wav_data = match audio::create_wav_bytes_i16_mono_16k(&speech_samples) {
+                Ok(data) => data,
+                Err(err) => {
+                    event::global_broadcaster().transcribing_stopped();
+                    return Err(err).context("failed to create WAV data in memory");
+                }
+            };
+            match crate::stt::transcribe_from_bytes(wav_data, &cfg.groq_stt_api_key) {
+                Ok(result) => {
+                    event::global_broadcaster().transcribing_stopped();
+                    result
+                }
+                Err(err) => {
+                    event::global_broadcaster().transcribing_stopped();
+                    return Err(err).context("failed to transcribe utterance");
+                }
+            }
         }
     };
 
-    let raw = match crate::stt::transcribe_from_bytes(
-        wav_data,
-        Some(&cfg.lang),
-        &cfg.groq_stt_api_key,
-        "whisper-large-v3",
-    ) {
-        Ok(raw) => {
-            // Send transcribing stopped event on success
-            event::global_broadcaster().transcribing_stopped();
-            raw
-        }
-        Err(err) => {
-            // Send transcribing stopped event on error
-            event::global_broadcaster().transcribing_stopped();
-            return Err(err).context("failed to transcribe utterance");
-        }
-    };
+    let raw = result.text.clone();
 
     if raw.is_empty() {
         return Ok(RecordResult::DroppedNoise { raw });
@@ -194,6 +296,7 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     Ok(RecordResult::Speech {
         text: raw,
         energy: speech_energy,
+        transcription: result,
     })
 }
 

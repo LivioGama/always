@@ -1,6 +1,6 @@
-use std::env;
-use always::always::ai_filter::{AiFilter, create_ai_filter};
 use always::always::AlwaysConfig;
+use always::always::ai_filter::{AiFilter, create_ai_filter};
+use std::env;
 
 #[tokio::main]
 async fn main() {
@@ -11,13 +11,6 @@ async fn main() {
         println!("       {} --interactive  (for interactive mode)", args[0]);
         println!("       {} --batch <file>  (test lines from file)", args[0]);
         std::process::exit(1);
-    }
-
-    // Check for API key
-    if std::env::var("GROQ_API_KEY").is_err() {
-        println!("⚠️  WARNING: GROQ_API_KEY not set. Using fallback rules only.");
-        println!("   Set GROQ_API_KEY to test full AI filtering capabilities with Groq/Llama.");
-        println!();
     }
 
     if args[1] == "--interactive" {
@@ -35,12 +28,13 @@ async fn test_single_text(text: &str) {
     println!("Testing: \"{}\"", text);
     println!("{}", "─".repeat(60));
 
-    let config = AlwaysConfig::from_cli(
-        "en".to_string(),
-        30,
-        0.5,
-        false
-    ).expect("Failed to create config");
+    let config =
+        AlwaysConfig::from_cli("en".to_string(), 30, 0.5, false).expect("Failed to create config");
+
+    if std::env::var("GROQ_API_KEY").is_err() {
+        println!("ℹ️  GROQ_API_KEY not set in environment; using configured key if available.");
+        println!();
+    }
 
     if let Some(ai_filter) = create_ai_filter(&config) {
         match ai_filter.evaluate_transcription(text, &config).await {
@@ -48,8 +42,12 @@ async fn test_single_text(text: &str) {
                 println!("✨ AI EVALUATION RESULT:");
                 println!("📝 Corrected Text: \"{}\"", result.corrected_text);
                 println!("🎯 Confidence: {:.1}%", result.confidence_score * 100.0);
-                println!("📊 Category: {:?}", result.filter_category.unwrap_or_else(||
-                    always::always::ai_filter::FilterCategory::NaturalConversation));
+                println!(
+                    "📊 Category: {:?}",
+                    result.filter_category.unwrap_or_else(|| {
+                        always::always::ai_filter::FilterCategory::NaturalConversation
+                    })
+                );
                 println!("💭 Reasoning: {}", result.reason);
                 println!("{}", "─".repeat(60));
 
@@ -182,13 +180,21 @@ async fn run_test_cases() {
         ("Yes", "should accept valid word"),
         ("open file", "should accept command"),
         ("git status", "should accept command"),
-        ("How do I configure React?", "should accept technical question"),
+        (
+            "How do I configure React?",
+            "should accept technical question",
+        ),
         ("set variable to five", "should accept instruction"),
-
         // Should be REJECTED
         ("Zaaaayyyyyyy", "should reject gibberish"),
-        ("stubbornin費이 visit. distortedalgorithm", "should reject mixed gibberish"),
-        ("Subtitles by the Amara.org community", "should reject video artifact"),
+        (
+            "stubbornin費이 visit. distortedalgorithm",
+            "should reject mixed gibberish",
+        ),
+        (
+            "Subtitles by the Amara.org community",
+            "should reject video artifact",
+        ),
         ("thank you for watching", "should reject video ending"),
         ("mmm", "should reject sound"),
         ("uh", "should reject filler"),

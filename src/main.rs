@@ -3,7 +3,9 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 
 use always::db;
-use always::always::pause;
+
+mod cli;
+use cli::LogsCommand;
 
 #[derive(Parser)]
 #[command(name = "always", version, about = "Always-on voice activation daemon — Groq STT with intelligent transcription")]
@@ -23,7 +25,7 @@ enum Commands {
         #[arg(short = 't', long, default_value = "30")]
         timeout: u32,
         /// Seconds of silence before considering phrase complete
-        #[arg(short = 's', long, default_value = "0.4")]
+        #[arg(short = 's', long, default_value = "0.8")]
         silence: f64,
         /// Press Enter automatically after pasting transcript
         #[arg(long, default_value_t = false)]
@@ -45,7 +47,7 @@ enum Commands {
         #[arg(short = 't', long, default_value = "30")]
         timeout: u32,
         /// Seconds of silence before considering phrase complete
-        #[arg(short = 's', long, default_value = "0.4")]
+        #[arg(short = 's', long, default_value = "0.8")]
         silence: f64,
         /// Press Enter automatically after pasting transcript
         #[arg(long, default_value_t = false)]
@@ -62,6 +64,11 @@ enum Commands {
         action: VocabAction,
     },
     /// Toggle pause/resume state
+    /// View and manage Always logs
+    Logs {
+        #[command(flatten)]
+        args: LogsCommand,
+    },
     TogglePause,
     /// Toggle auto-enter state
     ToggleAutoEnter,
@@ -90,6 +97,11 @@ enum ConfigAction {
         /// Preference value
         value: String,
     },
+    /// Delete an API key from keychain
+    DeleteKey {
+        /// Key name (groq_api_key or deepgram_api_key)
+        key: String,
+    },
     /// Reset all preferences to defaults
     Reset,
 }
@@ -117,6 +129,7 @@ fn main() -> Result<()> {
         Some(Commands::Vocab { action }) => handle_vocab(action),
         Some(Commands::TogglePause) => handle_toggle_pause(),
         Some(Commands::ToggleAutoEnter) => handle_toggle_auto_enter(),
+        Some(Commands::Logs { args }) => cli::handle_logs(args),
         None => {
             eprintln!("always: always-on voice activation daemon");
             eprintln!("Usage: always <COMMAND>");
@@ -130,6 +143,7 @@ fn main() -> Result<()> {
             eprintln!("  vocab             Manage vocabulary and corrections");
             eprintln!("  toggle-pause      Toggle pause/resume state");
             eprintln!("  toggle-auto-enter Toggle auto-enter state");
+            eprintln!("  logs              View and manage Always logs");
             eprintln!();
             eprintln!("Use 'always <COMMAND> --help' for more information on a command.");
             Ok(())
@@ -143,13 +157,24 @@ fn handle_config(action: ConfigAction) -> Result<()> {
     match action {
         ConfigAction::Show => {
             let prefs = db::get_preferences(&conn)?;
+            
+            // Check keychain for API keys
+            let groq_in_keychain = always::always::keyring::get_groq_api_key()
+                .unwrap_or(None)
+                .is_some();
+            let deepgram_in_keychain = always::always::keyring::get_deepgram_api_key()
+                .unwrap_or(None)
+                .is_some();
+
             println!(
                 "deepgram_api_key: {}",
-                prefs
-                    .deepgram_api_key
-                    .as_deref()
-                    .map(|k| format!("{}...", &k[..k.len().min(12)]))
-                    .unwrap_or("(not set)".to_string())
+                if deepgram_in_keychain {
+                    "*** (in keychain)".to_string()
+                } else if prefs.deepgram_api_key.is_some() {
+                    "*** (in database)".to_string()
+                } else {
+                    "(not set)".to_string()
+                }
             );
             println!(
                 "stt_energy_threshold: {}",
@@ -192,16 +217,50 @@ fn handle_config(action: ConfigAction) -> Result<()> {
             );
             println!(
                 "groq_api_key: {}",
+                if groq_in_keychain {
+                    "*** (in keychain)".to_string()
+                } else if prefs.groq_api_key.is_some() {
+                    "*** (in database)".to_string()
+                } else {
+                    "(not set)".to_string()
+                }
+            );
+            println!(
+                "silero_threshold: {}",
                 prefs
-                    .groq_api_key
-                    .as_deref()
-                    .map(|k| format!("{}...", &k[..k.len().min(12)]))
-                    .unwrap_or_else(|| "(not set)".to_string())
+                    .silero_threshold
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "0.5".to_string())
             );
         }
         ConfigAction::Set { key, value } => {
-            db::set_preference(&conn, &key, &value)?;
-            println!("{key} = {value}");
+            // Handle API keys specially - store in keychain
+            if key == "groq_api_key" {
+                always::always::keyring::set_groq_api_key(&value)?;
+                println!("groq_api_key = *** (stored in keychain)");
+            } else if key == "deepgram_api_key" {
+                always::always::keyring::set_deepgram_api_key(&value)?;
+                println!("deepgram_api_key = *** (stored in keychain)");
+            } else {
+                db::set_preference(&conn, &key, &value)?;
+                println!("{key} = {value}");
+            }
+        }
+        ConfigAction::DeleteKey { key } => {
+            match key.as_str() {
+                "groq_api_key" => {
+                    always::always::keyring::delete_groq_api_key()?;
+                    println!("groq_api_key deleted from keychain");
+                }
+                "deepgram_api_key" => {
+                    always::always::keyring::delete_deepgram_api_key()?;
+                    println!("deepgram_api_key deleted from keychain");
+                }
+                _ => {
+                    eprintln!("Unknown key: {key}. Valid keys: groq_api_key, deepgram_api_key");
+                    std::process::exit(1);
+                }
+            }
         }
         ConfigAction::Reset => {
             db::reset_preferences(&conn)?;
@@ -235,42 +294,28 @@ fn handle_vocab(action: VocabAction) -> Result<()> {
 
 fn handle_toggle_pause() -> Result<()> {
     let new_state = always::always::pause::toggle_pause();
-    
-    // Send distributed notification via Swift script
-    let notification_name = if new_state { "com.always.pause" } else { "com.always.resume" };
-    std::process::Command::new("swift")
-        .arg("scripts/send_notification.swift")
-        .arg(notification_name)
-        .output()?;
-    
-    // Broadcast event via UDS
+
+    // Broadcast event via UDS (Swift app receives this and shows overlay)
     if new_state {
         always::always::event::global_broadcaster().paused();
     } else {
         always::always::event::global_broadcaster().resumed();
     }
-    
+
     println!("Pause state: {}", if new_state { "paused" } else { "resumed" });
     Ok(())
 }
 
 fn handle_toggle_auto_enter() -> Result<()> {
     let new_state = always::always::pause::toggle_auto_enter();
-    
-    // Send distributed notification via Swift script
-    let notification_name = if new_state { "com.always.autoEnterEnabled" } else { "com.always.autoEnterDisabled" };
-    std::process::Command::new("swift")
-        .arg("scripts/send_notification.swift")
-        .arg(notification_name)
-        .output()?;
-    
-    // Broadcast event via UDS
+
+    // Broadcast event via UDS (Swift app receives this and shows overlay)
     if new_state {
         always::always::event::global_broadcaster().auto_enter_enabled();
     } else {
         always::always::event::global_broadcaster().auto_enter_disabled();
     }
-    
+
     println!("Auto-enter state: {}", if new_state { "enabled" } else { "disabled" });
     Ok(())
 }
