@@ -264,22 +264,22 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .unwrap_or_else(|| "0.002".to_string())
             );
             println!(
-                "stt_cooldown_ms: {}",
+                "stt_cooldown_secs: {}",
                 prefs
                     .stt_cooldown_ms
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "1500".to_string())
+                    .map(|v| format!("{:.3}", v as f64 / 1000.0))
+                    .unwrap_or_else(|| "0.150".to_string())
             );
             println!(
                 "always_log_path: {}",
                 prefs.always_log_path.as_deref().unwrap_or("(default)")
             );
             println!(
-                "stt_silence: {}",
+                "stt_silence_secs: {}",
                 prefs
                     .stt_silence
-                    .map(|v| format!("{v}s"))
-                    .unwrap_or_else(|| "2.0s".to_string())
+                    .map(|v| format!("{v}"))
+                    .unwrap_or_else(|| "2.0".to_string())
             );
             println!(
                 "stt_auto_enter: {}",
@@ -289,11 +289,11 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .unwrap_or_else(|| "false".to_string())
             );
             println!(
-                "stt_auto_enter_delay_secs: {}",
+                "auto_enter_delay_secs: {}",
                 prefs
                     .auto_enter_delay_ms
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "2000".to_string())
+                    .map(|v| format!("{:.3}", v as f64 / 1000.0))
+                    .unwrap_or_else(|| "2.0".to_string())
             );
             println!(
                 "groq_api_key: {}",
@@ -361,6 +361,20 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .per_app_settings_json
                     .as_deref()
                     .unwrap_or("{}")
+            );
+            println!(
+                "idle_pause_secs: {}",
+                prefs
+                    .idle_pause_secs
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "120".to_string())
+            );
+            println!(
+                "idle_pause_action: {}",
+                prefs
+                    .idle_pause_action
+                    .as_deref()
+                    .unwrap_or("pause")
             );
         }
         ConfigAction::Set { key, value } => {

@@ -27,6 +27,10 @@ struct Config: Codable {
     var shortcutCorrectionDialog: String
     var postprocessEnabled: Bool
     var perAppSettingsJson: String?
+    /// Seconds of no voice before daemon auto-pauses. 0 = disabled.
+    var idlePauseSecs: Int
+    /// Action on idle timeout: "pause" or "pause_and_mute".
+    var idlePauseAction: String
 
     // Defaults match `SensitivityPreset::Normal` and the Rust
     // `AlwaysConfig::default()` values.
@@ -34,7 +38,7 @@ struct Config: Codable {
         sttEnergyThreshold: 0.012,
         hearEnergyThreshold: 0.001,
         sttCooldownMs: 150,
-        sttSilence: 1.5,
+        sttSilence: 2.0,
         sttAutoEnter: true,
         sttAutoEnterDelaySecs: 4,
         groqApiKey: nil,
@@ -44,7 +48,9 @@ struct Config: Codable {
         shortcutForcePaste: "ctrl+alt+v",
         shortcutCorrectionDialog: "ctrl+alt+w",
         postprocessEnabled: true,
-        perAppSettingsJson: nil
+        perAppSettingsJson: nil,
+        idlePauseSecs: 120,
+        idlePauseAction: "pause"
     )
 
     static func fromCLI(output: String) -> Config? {
@@ -102,6 +108,12 @@ struct Config: Codable {
                     config.postprocessEnabled = (value == "true" || value == "1")
                 case "per_app_settings_json":
                     config.perAppSettingsJson = value == "{}" ? nil : value
+                case "idle_pause_secs":
+                    config.idlePauseSecs = Int(value) ?? defaultConfig.idlePauseSecs
+                case "idle_pause_action":
+                    if value == "pause" || value == "pause_and_mute" {
+                        config.idlePauseAction = value
+                    }
                 default:
                     break
                 }

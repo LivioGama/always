@@ -244,7 +244,7 @@ class StateMonitor: ObservableObject {
             case .idleAutoPaused:
                 let secs = Int(event.idleAutoPaused?.seconds ?? 0)
                 self.isPaused = true
-                StatusOverlayController.shared.flash(state: .idleAutoPaused(seconds: secs), duration: 2.0)
+                StatusOverlayController.shared.showIdleTimeoutAnimation(seconds: secs)
             case .idleAutoResumed:
                 self.isPaused = false
                 StatusOverlayController.shared.flash(state: .resumed)

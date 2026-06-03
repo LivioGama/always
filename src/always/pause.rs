@@ -40,6 +40,33 @@ impl Default for PauseState {
     }
 }
 
+/// Shared mute state that can be toggled from anywhere
+pub struct MuteState {
+    muted: AtomicBool,
+}
+
+impl MuteState {
+    pub fn new() -> Self {
+        Self {
+            muted: AtomicBool::new(false),
+        }
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.muted.load(Ordering::Relaxed)
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Relaxed);
+    }
+}
+
+impl Default for MuteState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Shared auto-enter state that can be toggled from anywhere
 pub struct AutoEnterState {
     auto_enter: AtomicBool,
@@ -72,6 +99,10 @@ impl AutoEnterState {
 static PAUSE_STATE: std::sync::LazyLock<Arc<PauseState>> =
     std::sync::LazyLock::new(|| Arc::new(PauseState::new()));
 
+/// Global mute state instance
+static MUTE_STATE: std::sync::LazyLock<Arc<MuteState>> =
+    std::sync::LazyLock::new(|| Arc::new(MuteState::new()));
+
 /// Global auto-enter state instance
 static AUTO_ENTER_STATE: std::sync::LazyLock<Arc<AutoEnterState>> =
     std::sync::LazyLock::new(|| Arc::new(AutoEnterState::new(false)));
@@ -84,6 +115,11 @@ pub fn init_auto_enter(initial_value: bool) {
 /// Get the global pause state
 pub fn global_pause_state() -> Arc<PauseState> {
     Arc::clone(&PAUSE_STATE)
+}
+
+/// Get the global mute state
+pub fn global_mute_state() -> Arc<MuteState> {
+    Arc::clone(&MUTE_STATE)
 }
 
 /// Get the global auto-enter state
@@ -104,6 +140,16 @@ pub fn toggle_pause() -> bool {
 /// Set the pause state
 pub fn set_paused(paused: bool) {
     PAUSE_STATE.set_paused(paused);
+}
+
+/// Check if the system is currently muted
+pub fn is_muted() -> bool {
+    MUTE_STATE.is_muted()
+}
+
+/// Set the mute state
+pub fn set_muted(muted: bool) {
+    MUTE_STATE.set_muted(muted);
 }
 
 /// Check if auto-enter is currently enabled

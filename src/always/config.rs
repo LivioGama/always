@@ -1,8 +1,10 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 
 use super::context_vocab::ContextVocabulary;
 use super::postprocess::PostProcessor;
@@ -13,6 +15,41 @@ use crate::db::Preferences;
 // Default configuration values
 const DEFAULT_AUTO_ENTER_DELAY_MS: u32 = 4000;
 const DEFAULT_IDLE_PAUSE_SECS: u32 = 120;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub enum IdlePauseAction {
+    #[serde(rename = "pause")]
+    Pause,
+    #[serde(rename = "pause_and_mute")]
+    PauseAndMute,
+}
+
+impl Default for IdlePauseAction {
+    fn default() -> Self {
+        Self::Pause
+    }
+}
+
+impl FromStr for IdlePauseAction {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "pause" => Ok(Self::Pause),
+            "pause_and_mute" => Ok(Self::PauseAndMute),
+            _ => anyhow::bail!("invalid idle pause action: {s}, must be 'pause' or 'pause_and_mute'"),
+        }
+    }
+}
+
+impl std::fmt::Display for IdlePauseAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pause => write!(f, "pause"),
+            Self::PauseAndMute => write!(f, "pause_and_mute"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub enum VadMode {
@@ -188,6 +225,8 @@ pub struct AlwaysConfig {
     /// Auto-pause the daemon after this many seconds with no voice
     /// activity. `0` = disabled. Default 120 (matches requirement).
     pub idle_pause_secs: u32,
+    /// What action to take when idle timeout occurs: pause only, or pause+mute.
+    pub idle_pause_action: IdlePauseAction,
 }
 
 #[derive(Debug, Clone)]
@@ -337,6 +376,11 @@ impl AlwaysConfig {
             postprocess_config: effective_postprocess,
             auto_enter_delay_ms: prefs.auto_enter_delay_ms.unwrap_or(DEFAULT_AUTO_ENTER_DELAY_MS),
             idle_pause_secs: prefs.idle_pause_secs.unwrap_or(DEFAULT_IDLE_PAUSE_SECS),
+            idle_pause_action: prefs
+                .idle_pause_action
+                .as_ref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_default(),
         };
 
         Ok(config)
@@ -353,11 +397,12 @@ impl Default for AlwaysConfig {
             timeout_secs: 30,
             // Defaults aligned with `SensitivityPreset::Normal` and the
             // Mic Sensitivity / Speaking Style picker in the GUI.
-            // 1.5s — snappier than 2.0 / 2.5 while still tolerating
-            // typical mid-sentence pauses. Speculative transcription
-            // kicks off at 75% of this (≈1.1s) so end-to-end paste
-            // latency rarely exceeds ~1.5s after the user stops talking.
-            silence_secs: 1.5,
+            // 2.0s — gives natural prose dictation room to breathe
+            // (1.5s cut off "modular" sentences with brief thinking
+            // pauses). Speculative transcription kicks off at 85% of
+            // this (≈1.7s) so end-to-end paste latency rarely exceeds
+            // ~2.0s after the user truly stops talking.
+            silence_secs: 2.0,
             auto_enter: true,
             auto_enter_delay_secs: 4,
             filter_enabled: true,
@@ -377,6 +422,7 @@ impl Default for AlwaysConfig {
             postprocess_config,
             auto_enter_delay_ms: DEFAULT_AUTO_ENTER_DELAY_MS,
             idle_pause_secs: DEFAULT_IDLE_PAUSE_SECS,
+            idle_pause_action: IdlePauseAction::default(),
         }
     }
 }
