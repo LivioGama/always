@@ -10,25 +10,83 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use parking_lot::{Condvar, Mutex};
 
 use crate::always::AlwaysConfig;
 use crate::managers::model_registry::ModelRegistry;
 use crate::stt::{GroqTranscriber, SttError, Transcriber, TranscriptionResult};
 
-/// Placeholder transcriber so the UDS server can bind before heavy model load.
-pub struct NotReadyTranscriber;
+/// Placeholder installed at daemon boot so the UDS server can bind before
+/// the (potentially seconds-long) model load completes. Unlike a plain
+/// "always errors" stub, this one **blocks** the calling thread until the
+/// real transcriber is installed via [`ReadySignal::set`]. That way the
+/// first utterance after launch waits for init instead of being dropped
+/// with a "still initializing" error — which the user would experience as
+/// "I spoke and nothing happened."
+pub struct PendingTranscriber {
+    slot: ReadySlot,
+    timeout: Duration,
+}
 
-impl Transcriber for NotReadyTranscriber {
-    fn transcribe_from_bytes(&self, _audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
-        Err(SttError::Other(anyhow::anyhow!("transcriber still initializing")))
+type ReadySlot = Arc<(Mutex<Option<Arc<dyn Transcriber>>>, Condvar)>;
+
+/// Handle used by the background init thread to install the real
+/// transcriber and wake any callers blocked in [`PendingTranscriber::transcribe_from_bytes`].
+pub struct ReadySignal {
+    slot: ReadySlot,
+}
+
+impl ReadySignal {
+    pub fn set(&self, transcriber: Arc<dyn Transcriber>) {
+        let (lock, cv) = &*self.slot;
+        *lock.lock() = Some(transcriber);
+        cv.notify_all();
     }
 }
 
-/// Shared placeholder installed at daemon boot; swapped when [`build_transcriber`] completes.
-pub fn not_ready_transcriber() -> Arc<dyn Transcriber> {
-    Arc::new(NotReadyTranscriber)
+impl PendingTranscriber {
+    /// Build a placeholder + signal pair. The placeholder is what callers
+    /// see via the shared `ActiveTranscriber` slot; the signal is held by
+    /// the init thread that builds the real backend.
+    pub fn new() -> (Arc<Self>, ReadySignal) {
+        let slot: ReadySlot = Arc::new((Mutex::new(None), Condvar::new()));
+        let placeholder = Arc::new(Self {
+            slot: Arc::clone(&slot),
+            // Local model loads are the slow case — 3–10s for Parakeet/Canary/
+            // Whisper cold load. 30s is generous; a longer wait means something
+            // is wrong upstream (disk I/O, missing files) and we should surface
+            // the error rather than hang forever.
+            timeout: Duration::from_secs(30),
+        });
+        (placeholder, ReadySignal { slot })
+    }
+
+    fn wait_for_ready(&self) -> Option<Arc<dyn Transcriber>> {
+        let (lock, cv) = &*self.slot;
+        let mut guard = lock.lock();
+        if let Some(t) = guard.clone() {
+            return Some(t);
+        }
+        let result = cv.wait_for(&mut guard, self.timeout);
+        if result.timed_out() && guard.is_none() {
+            return None;
+        }
+        guard.clone()
+    }
+}
+
+impl Transcriber for PendingTranscriber {
+    fn transcribe_from_bytes(&self, audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
+        match self.wait_for_ready() {
+            Some(real) => real.transcribe_from_bytes(audio),
+            None => Err(SttError::Other(anyhow::anyhow!(
+                "transcriber still initializing after timeout — model load may have failed"
+            ))),
+        }
+    }
 }
 
 /// User's transcription backend pick. Serialises to a single TEXT

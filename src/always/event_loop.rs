@@ -16,7 +16,7 @@ use crate::always::{
 };
 use crate::managers::model_registry::ModelRegistry;
 use crate::stt::Transcriber;
-use crate::stt_dispatch::{build_transcriber, not_ready_transcriber};
+use crate::stt_dispatch::{PendingTranscriber, build_transcriber};
 
 /// Active [`Transcriber`] shared between the main loop, the UDS server
 /// (which swaps it when the user picks a different model in Settings),
@@ -52,7 +52,11 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     // can connect while the real backend loads in the background.
     let cfg_for_uds = Arc::clone(&active_cfg);
     let registry_placeholder = ModelRegistry::new().context("init model registry")?;
-    let active_placeholder: ActiveTranscriber = Arc::new(RwLock::new(not_ready_transcriber()));
+    // Pending placeholder blocks transcribe() until the real backend swaps in,
+    // so the first utterance after launch waits for init instead of being
+    // dropped with a "still initializing" error.
+    let (pending, ready_signal) = PendingTranscriber::new();
+    let active_placeholder: ActiveTranscriber = Arc::new(RwLock::new(pending));
     let registry_for_uds = registry_placeholder.clone();
     let active_for_uds = Arc::clone(&active_placeholder);
     let _uds_handle = rt.spawn(async move {
@@ -77,15 +81,21 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     let cfg_for_build = cfg.clone();
     let registry_for_build = registry_placeholder.clone();
     let active_for_build = Arc::clone(&active_placeholder);
-    std::thread::spawn(move || {
-        match build_transcriber(&cfg_for_build, &registry_for_build) {
-            Ok(transcriber) => {
-                *active_for_build.write() = transcriber;
-                tracing::info!("transcriber_ready");
+    std::thread::Builder::new()
+        .name("transcriber-init".into())
+        .spawn(move || {
+            match build_transcriber(&cfg_for_build, &registry_for_build) {
+                Ok(transcriber) => {
+                    *active_for_build.write() = Arc::clone(&transcriber);
+                    // Wake any utterance threads that are blocked in the
+                    // PendingTranscriber waiting for init to finish.
+                    ready_signal.set(transcriber);
+                    tracing::info!("transcriber_ready");
+                }
+                Err(e) => tracing::error!(error = %e, "transcriber_init_failed"),
             }
-            Err(e) => tracing::error!(error = %e, "transcriber_init_failed"),
-        }
-    });
+        })
+        .expect("spawn transcriber-init thread");
 
     // Now do the expensive operations after UDS is accepting connections
     let active = active_placeholder;

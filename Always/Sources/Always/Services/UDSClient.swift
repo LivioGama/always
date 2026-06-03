@@ -633,6 +633,12 @@ class UDSClient: ObservableObject {
         watchdogTimer = nil
     }
     
+    /// Accumulates bytes across multiple `recv()` calls. A single daemon
+    /// event (e.g. `ModelsList` with ~16 models) easily exceeds a single
+    /// kernel-buffer chunk, so JSON arrives split. We hold everything up
+    /// to the last `\n` we've seen and parse only complete lines.
+    private var receiveBuffer = Data()
+
     private func startReceiving() {
         guard socketFD >= 0 else {
             log("startReceiving() called but socketFD invalid")
@@ -640,6 +646,7 @@ class UDSClient: ObservableObject {
         }
         log("startReceiving() called with fd=\(socketFD)")
         logger.debug("startReceiving() called")
+        receiveBuffer.removeAll(keepingCapacity: true)
 
         let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
         source.setEventHandler { [weak self] in
@@ -667,12 +674,8 @@ class UDSClient: ObservableObject {
                 return
             }
 
-            let data = Data(bytes: buffer, count: bytesRead)
-            if let jsonString = String(data: data, encoding: .utf8) {
-                self.log("Received data: \(jsonString)")
-                self.logger.debug("Received data: \(jsonString, privacy: .public)")
-                self.processMessage(jsonString)
-            }
+            self.receiveBuffer.append(buffer, count: bytesRead)
+            self.drainCompletedLines()
         }
 
         source.setCancelHandler { [weak self] in
@@ -682,7 +685,20 @@ class UDSClient: ObservableObject {
         receiveSource = source
         source.resume()
     }
-    
+
+    /// Pull complete `\n`-terminated lines out of `receiveBuffer` and
+    /// dispatch each one. Anything after the last `\n` stays in the
+    /// buffer for the next `recv()`.
+    private func drainCompletedLines() {
+        let newline: UInt8 = 0x0A
+        guard let lastNewline = receiveBuffer.lastIndex(of: newline) else { return }
+        let complete = receiveBuffer.subdata(in: receiveBuffer.startIndex..<(lastNewline + 1))
+        receiveBuffer.removeSubrange(receiveBuffer.startIndex...lastNewline)
+        if let jsonString = String(data: complete, encoding: .utf8) {
+            processMessage(jsonString)
+        }
+    }
+
     private func processMessage(_ jsonString: String) {
         // Handle multiple JSON lines in one message.
         let lines = jsonString.components(separatedBy: "\n").filter { !$0.isEmpty }
