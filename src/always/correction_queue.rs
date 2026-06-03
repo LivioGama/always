@@ -200,8 +200,18 @@ impl CorrectionQueue {
                 return;
             }
         };
-        if let Err(e) = std::fs::write(&inner.persistence_path, json) {
+        // Atomic replace: write to a sibling temp file then rename over the
+        // target. A crash/OOM-kill/power-loss between truncate and full
+        // write would otherwise leave a partial/empty file that fails to
+        // parse on next start, silently dropping the entire review queue.
+        let tmp = inner.persistence_path.with_extension("json.tmp");
+        if let Err(e) = std::fs::write(&tmp, &json) {
+            tracing::error!(error = %e, path = %tmp.display(), "correction_queue_persist_failed");
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &inner.persistence_path) {
             tracing::error!(error = %e, path = %inner.persistence_path.display(), "correction_queue_persist_failed");
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 }

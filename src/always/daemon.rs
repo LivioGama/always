@@ -303,12 +303,8 @@ pub struct PidGuard {
 
 impl PidGuard {
     pub fn install() -> Result<Self> {
-        // Refuse-to-start guard: if another daemon already owns a live UDS
-        // socket, bail BEFORE killing anything. Murdering a healthy daemon
-        // and replacing it briefly puts two processes on the mic and the
-        // user gets a double transcript. The flock alone is not enough —
-        // we used to kill orphans first, then take the lock, which is
-        // exactly the race we're closing.
+        // Refuse-to-start short-circuit: if a peer is already up and
+        // accepting on the UDS socket, bail without touching anything.
         if let Some(sock) = socket_path()
             && socket_is_live(&sock)
         {
@@ -321,42 +317,82 @@ impl PidGuard {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
-        if !skip_orphan_kill {
-            kill_orphan_daemon_processes();
-            if !wait_until_no_daemon_processes(Duration::from_secs(5)) {
-                kill_orphan_daemon_processes();
-                let _ = wait_until_no_daemon_processes(Duration::from_secs(2));
-            }
-        }
-        remove_stale_pid();
-        remove_stale_socket();
-
+        // Acquire the flock BEFORE touching other daemons. Previous order
+        // (kill orphans → take flock) had a fatal race: if daemon1 was
+        // mid-startup (loading a multi-second local model and not yet
+        // bound to the socket), daemon2's "socket isn't live" check
+        // passed, the orphan kill murdered daemon1, and daemon2 stole the
+        // role. Now: whoever holds the flock IS the daemon; anyone
+        // arriving second sees the lock and bails. Only then do we
+        // consider sweeping zombies (which by definition no longer hold
+        // the lock).
         let path = pid_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-
+        // Open WITHOUT truncating: zeroing the file before we own the lock
+        // would make a live daemon's PID briefly read as empty (read_pid →
+        // None → "looks dead"). We truncate + write our PID only after the
+        // flock is held AND every post-lock recheck has passed (below).
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .open(&path)
             .context("failed to open always PID file")?;
         acquire_exclusive_lock(&file)
             .context("Always-on daemon already running (pid lock held)")?;
 
-        // Post-lock recheck: between the early socket probe and the flock
-        // acquire, another daemon may have raced ahead and bound the
-        // socket. If so, abort without touching anything.
+        // Post-lock recheck: if a peer beat us to binding the socket
+        // between our short-circuit probe and the flock acquire (it
+        // would have had to crash with the lock held — flock would block
+        // us otherwise), bail rather than racing the bind. We have not
+        // written our PID yet, but `open` with create(true) may have
+        // created a fresh 0-byte file; dropping `file` only closes the fd
+        // and does NOT unlink it, so remove it explicitly to avoid leaking
+        // an empty PID file that the next `start` would read as "no daemon".
         if let Some(sock) = socket_path()
             && socket_is_live(&sock)
         {
+            let _ = std::fs::remove_file(&path);
             anyhow::bail!(
                 "Another always daemon bound the UDS socket during startup — refusing to double-bind"
             );
         }
 
-        write!(file, "{}", std::process::id())?;
+        // Now that we own the lock, it's safe to sweep zombies — any
+        // process listed here CANNOT be the canonical daemon (we hold
+        // its flock) so killing it can't murder a live peer.
+        if !skip_orphan_kill {
+            let others: Vec<u32> = list_daemon_pids()
+                .into_iter()
+                .filter(|pid| *pid != std::process::id())
+                .collect();
+            if !others.is_empty() {
+                tracing::warn!(
+                    pids = ?others,
+                    "reaping daemon processes that don't hold the PID lock"
+                );
+                kill_orphan_daemon_processes_except(std::process::id());
+                let _ = wait_until_no_daemon_processes(Duration::from_secs(5));
+            }
+        }
+        remove_stale_socket();
+
+        // We hold the lock and no live daemon exists, so this file is ours.
+        // Truncate any stale contents now (we deliberately did NOT truncate at
+        // open time) and write our PID. If any step fails partway, unlink the
+        // file rather than leak a 0-byte / partial PID that the next `start`
+        // would parse as "no daemon" and duplicate the mic.
+        use std::io::{Seek, SeekFrom};
+        let write_result = file
+            .set_len(0)
+            .and_then(|()| file.seek(SeekFrom::Start(0)).map(|_| ()))
+            .and_then(|()| write!(file, "{}", std::process::id()));
+        if let Err(e) = write_result {
+            let _ = std::fs::remove_file(&path);
+            return Err(e).context("failed to write always PID file");
+        }
         let count = list_daemon_pids();
         if count.len() > 1 {
             tracing::error!(

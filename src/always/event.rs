@@ -8,8 +8,7 @@ use tokio::sync::broadcast;
 /// Minimum gap between low-mic overlay hints so a quiet room doesn't
 /// spam the HUD on every utterance.
 const LOW_MIC_OVERLAY_COOLDOWN: Duration = Duration::from_secs(45);
-static LAST_LOW_MIC_OVERLAY: LazyLock<Mutex<Option<Instant>>> =
-    LazyLock::new(|| Mutex::new(None));
+static LAST_LOW_MIC_OVERLAY: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(|| Mutex::new(None));
 
 /// Wire-format protocol version. Bump on any breaking change to
 /// [`DaemonEvent`] or [`DaemonCommand`]. The daemon sends a `Hello` event
@@ -219,11 +218,87 @@ pub enum DaemonEvent {
     },
 }
 
+/// Upper bound (in chars) on any single user-/network-supplied string
+/// field before it is serialized for broadcast. A pathologically long
+/// transcript, error string, or model catalog entry would otherwise
+/// balloon the line buffer of *every* connected client. Truncating here
+/// keeps a single oversized event from degrading the whole UDS fan-out.
+const MAX_EVENT_FIELD_CHARS: usize = 8192;
+
+/// Marker appended to a field that was truncated, so a reader can tell
+/// the value was elided rather than legitimately ending mid-word.
+const ELISION_MARKER: &str = "…[truncated]";
+
+/// Truncate `s` to at most [`MAX_EVENT_FIELD_CHARS`] characters on a char
+/// boundary, appending [`ELISION_MARKER`] when truncation occurred.
+/// Returns `None` when `s` is already within bounds so callers can skip
+/// the allocation for the common case.
+fn cap_field(s: &str) -> Option<String> {
+    // `chars().count()` is O(n) but only paid for strings that are
+    // suspiciously long (the rare case we care about); short strings hit
+    // the cheap `len()` early-out below.
+    if s.len() <= MAX_EVENT_FIELD_CHARS {
+        // `len()` (bytes) <= cap (chars) implies char count <= cap, since
+        // each char is >= 1 byte. Cheap, always-correct fast path.
+        return None;
+    }
+    if s.chars().count() <= MAX_EVENT_FIELD_CHARS {
+        return None;
+    }
+    let mut out: String = s.chars().take(MAX_EVENT_FIELD_CHARS).collect();
+    out.push_str(ELISION_MARKER);
+    Some(out)
+}
+
 impl DaemonEvent {
-    /// Convert event to JSON line
+    /// Convert event to JSON line.
+    ///
+    /// Over-long string fields are capped to [`MAX_EVENT_FIELD_CHARS`]
+    /// before serialization so one giant transcript / error / catalog
+    /// entry cannot balloon every connected client's line buffer. The
+    /// public enum shape and the serialization format for normal-size
+    /// events are unchanged.
     pub fn to_json_line(&self) -> Result<String, serde_json::Error> {
-        let json = serde_json::to_string(self)?;
+        let json = match self.capped() {
+            Some(capped) => serde_json::to_string(&capped)?,
+            None => serde_json::to_string(self)?,
+        };
         Ok(json + "\n")
+    }
+
+    /// Return a size-capped clone of `self` when any oversized string
+    /// field needs truncation, or `None` when the event is already within
+    /// bounds (the overwhelming common case — no clone, no allocation).
+    fn capped(&self) -> Option<DaemonEvent> {
+        match self {
+            DaemonEvent::TranscriptChunk { text } => {
+                cap_field(text).map(|text| DaemonEvent::TranscriptChunk { text })
+            }
+            DaemonEvent::TranscriptFinal { text } => {
+                cap_field(text).map(|text| DaemonEvent::TranscriptFinal { text })
+            }
+            DaemonEvent::TranscriptionFiltered { reason } => {
+                cap_field(reason).map(|reason| DaemonEvent::TranscriptionFiltered { reason })
+            }
+            DaemonEvent::CorrectionDialogRequested { last_transcript } => {
+                cap_field(last_transcript).map(|last_transcript| {
+                    DaemonEvent::CorrectionDialogRequested { last_transcript }
+                })
+            }
+            DaemonEvent::ModelDownloadFailed { model_id, error } => {
+                cap_field(error).map(|error| DaemonEvent::ModelDownloadFailed {
+                    model_id: model_id.clone(),
+                    error,
+                })
+            }
+            DaemonEvent::ModelExtractionFailed { model_id, error } => {
+                cap_field(error).map(|error| DaemonEvent::ModelExtractionFailed {
+                    model_id: model_id.clone(),
+                    error,
+                })
+            }
+            _ => None,
+        }
     }
 
     /// Parse event from JSON line

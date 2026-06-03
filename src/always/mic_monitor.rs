@@ -117,25 +117,66 @@ impl MicrophoneMonitor {
 
     /// Run a single `lsof` command to find non-Always processes using CoreAudio.
     /// Returns the filtered output (empty string = no other app is using the mic).
+    ///
+    /// Parsing is done in Rust (no `grep`/`head` pipeline): we look at the
+    /// COMMAND and PID columns only, exclude our own PID and the exact helper
+    /// command names (always, rec, sox, coreaudiod), and filter BEFORE bounding
+    /// the count. This avoids substring false-negatives on the whole lsof line
+    /// (e.g. a third-party app whose path contains "always"/"sox") and avoids
+    /// `head -5` dropping a real device holder that sorts after the first lines.
     fn run_mic_lsof(&self) -> Result<String> {
         use std::process::Command;
 
-        // Single subprocess: lsof for CoreAudio file descriptors,
-        // excluding our own processes (always, rec, sox, coreaudiod itself).
-        let output = Command::new("sh")
-            .args([
-                "-c",
-                "lsof -c /coreaudio/i 2>/dev/null | grep -iv -e always -e '\\brec\\b' -e sox -e coreaudiod | head -5",
-            ])
-            .output();
+        // Single subprocess: lsof for CoreAudio file descriptors. No shell
+        // pipeline — all filtering happens in Rust below.
+        let output = Command::new("lsof").args(["-c", "/coreaudio/i"]).output();
 
-        match output {
-            Ok(result) => {
-                let stdout = String::from_utf8_lossy(&result.stdout);
-                Ok(stdout.trim().to_string())
+        let result = match output {
+            Ok(result) => result,
+            Err(_) => return Ok(String::new()),
+        };
+
+        let stdout = String::from_utf8_lossy(&result.stdout);
+
+        // Our own pid and the helper command names we never count as "other apps".
+        let own_pid = std::process::id().to_string();
+        const HELPER_COMMANDS: &[&str] = &["always", "rec", "sox", "coreaudiod"];
+
+        // lsof header: COMMAND  PID  USER  FD  TYPE  DEVICE ... — column 0 is the
+        // (possibly truncated) command, column 1 is the pid. Match on those
+        // columns only, by exact command name and exact pid.
+        let mut matched = Vec::new();
+        for line in stdout.lines() {
+            let mut cols = line.split_whitespace();
+            let Some(command) = cols.next() else {
+                continue;
+            };
+            // Skip the lsof header row.
+            if command == "COMMAND" {
+                continue;
             }
-            Err(_) => Ok(String::new()),
+            let Some(pid) = cols.next() else {
+                continue;
+            };
+
+            // Exclude our own process and the exact helper command names.
+            if pid == own_pid {
+                continue;
+            }
+            let command_lower = command.to_lowercase();
+            if HELPER_COMMANDS.contains(&command_lower.as_str()) {
+                continue;
+            }
+
+            // A real third-party process holds the audio device.
+            matched.push(line.trim().to_string());
+            // Bound the count AFTER filtering so real holders are never dropped.
+            if matched.len() >= 5 {
+                break;
+            }
         }
+
+        Ok(matched.join("\n"))
     }
 }
 

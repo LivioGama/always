@@ -370,9 +370,14 @@ impl AlwaysConfig {
             // here, which silently undid an explicit CLI override.
             auto_enter,
             filter_enabled: true, // Always enabled - filter is always on
-            energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.012),
+            // Defense-in-depth: clamp values read back from the DB to the
+            // same bounds `set_preference` enforces on write. A corrupted /
+            // manually-edited / schema-skewed row must not be trusted just
+            // because the write path validated — an out-of-range threshold
+            // silently breaks the VAD (never or always triggers).
+            energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.012).clamp(0.0, 1.0),
             onset_ms: 30,
-            cooldown_ms: prefs.stt_cooldown_ms.unwrap_or(800),
+            cooldown_ms: prefs.stt_cooldown_ms.unwrap_or(800).min(5000),
             log_path: log_path_from_preferences(&prefs),
             post_processor,
             project_root,
@@ -380,13 +385,26 @@ impl AlwaysConfig {
             groq_stt_api_key,
             transcriber_backend,
             vad_mode,
-            silero_threshold: prefs.silero_threshold.unwrap_or(0.5) as f32,
+            silero_threshold: {
+                // Reject non-finite first: f32::clamp returns NaN for a NaN
+                // input, which would make every VAD comparison silently false.
+                let v = prefs.silero_threshold.unwrap_or(0.5);
+                if v.is_finite() {
+                    v.clamp(0.1, 0.9) as f32
+                } else {
+                    0.5
+                }
+            },
             vocab_config,
             postprocess_config: effective_postprocess,
             auto_enter_delay_ms: prefs
                 .auto_enter_delay_ms
-                .unwrap_or(DEFAULT_AUTO_ENTER_DELAY_MS),
-            idle_pause_secs: prefs.idle_pause_secs.unwrap_or(DEFAULT_IDLE_PAUSE_SECS),
+                .unwrap_or(DEFAULT_AUTO_ENTER_DELAY_MS)
+                .min(60_000),
+            idle_pause_secs: prefs
+                .idle_pause_secs
+                .unwrap_or(DEFAULT_IDLE_PAUSE_SECS)
+                .min(86_400),
             idle_pause_action: prefs
                 .idle_pause_action
                 .as_ref()

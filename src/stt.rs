@@ -7,15 +7,15 @@
 //! * Other 4xx responses fail immediately — they indicate caller error
 //!   (auth, payload) and are not transient.
 //! * A circuit breaker opens for 60 s after 3 consecutive transcription
-//!   failures and short-circuits further calls with [`SttError::Unavailable`]
-//!   so the daemon can fall back to local heuristics instead of stalling
-//!   the user on an outage.
+//!   failures and short-circuits further calls with [`SttError::Unavailable`].
+//!   This turns slow, repeated failures into a fast failure for the duration
+//!   of the cool-down — it does not itself perform any fallback. Callers can
+//!   opt into a local strategy via [`SttError::should_fall_back`]; the breaker
+//!   only spares the user from stalling on each call while Groq is down.
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::Context;
 use rand::Rng;
 use reqwest::StatusCode;
 use reqwest::blocking::multipart as blocking_multipart;
@@ -29,8 +29,6 @@ const MAX_ATTEMPTS: u32 = 3;
 const BASE_BACKOFF_MS: u64 = 200;
 const CIRCUIT_OPEN_FAILURES: u32 = 3;
 const CIRCUIT_OPEN_DURATION: Duration = Duration::from_secs(60);
-
-static AUTH_HEADER: OnceLock<String> = OnceLock::new();
 
 /// Process-wide guard for tests that mutate `ALWAYS_GROQ_BASE_URL`.
 /// Environment variables are global, so unit and integration tests must
@@ -48,8 +46,10 @@ static CIRCUIT_OPEN_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
 ///
 /// `RateLimited` and `ServerError` are *transient* — they may succeed on
 /// retry and ultimately bubble up only after the retry budget is exhausted.
-/// `Unavailable` indicates the circuit breaker is open and the caller
-/// should fall back to a local strategy without waiting.
+/// `Unavailable` indicates the circuit breaker is open: the call fails fast
+/// for the remainder of the cool-down instead of stalling. It does not by
+/// itself switch to any local strategy — callers may opt into one by checking
+/// [`SttError::should_fall_back`].
 #[derive(Debug, Error)]
 pub enum SttError {
     #[error("Groq rate-limited the request after {attempts} attempts")]
@@ -83,8 +83,11 @@ impl SttError {
     }
 }
 
-fn auth_header(api_key: &str) -> &'static str {
-    AUTH_HEADER.get_or_init(|| format!("Bearer {}", api_key))
+fn auth_header(api_key: &str) -> String {
+    // Derive the header per call from the key passed in. Previously memoized
+    // in a process-wide OnceLock that silently ignored the argument after the
+    // first call — a latent wrong-key bug once a runtime key-update lands.
+    format!("Bearer {}", api_key)
 }
 
 /// Resolve the Groq transcription endpoint URL.
@@ -225,6 +228,7 @@ pub fn transcribe_from_bytes(
 
     let mut last_status: Option<StatusCode> = None;
     let mut last_network_err: Option<reqwest::Error> = None;
+    let mut last_parse_err: Option<reqwest::Error> = None;
 
     for attempt in 0..MAX_ATTEMPTS {
         // Multipart bodies cannot be cheaply replayed, so rebuild per attempt.
@@ -238,7 +242,7 @@ pub fn transcribe_from_bytes(
 
         let response = client
             .post(&url)
-            .header("Authorization", auth)
+            .header("Authorization", auth.clone())
             .multipart(form)
             .send();
 
@@ -246,12 +250,29 @@ pub fn transcribe_from_bytes(
             Ok(resp) => {
                 let status = resp.status();
                 if status.is_success() {
-                    let mut result: TranscriptionResult = resp
-                        .json()
-                        .context("failed to parse Groq Whisper response")?;
-                    result.text = result.text.trim().to_string();
-                    record_success();
-                    return Ok(result);
+                    match resp.json::<TranscriptionResult>() {
+                        Ok(mut result) => {
+                            result.text = result.text.trim().to_string();
+                            record_success();
+                            return Ok(result);
+                        }
+                        // A 2xx with an unparseable body (truncated / mid-stream
+                        // drop, or an HTML error page returned as 200 by a
+                        // proxy) is transient — retry like a network error
+                        // instead of failing the utterance permanently.
+                        Err(e) => {
+                            tracing::warn!(
+                                attempt = attempt + 1,
+                                error = %e,
+                                "Groq STT 2xx with unparseable body; will retry"
+                            );
+                            last_parse_err = Some(e);
+                            if attempt + 1 < MAX_ATTEMPTS {
+                                std::thread::sleep(backoff_with_jitter(attempt));
+                            }
+                            continue;
+                        }
+                    }
                 }
 
                 last_status = Some(status);
@@ -307,6 +328,12 @@ pub fn transcribe_from_bytes(
             attempts: MAX_ATTEMPTS,
             source,
         });
+    }
+
+    if let Some(source) = last_parse_err {
+        return Err(SttError::Other(anyhow::anyhow!(
+            "failed to parse Groq Whisper response: {source}"
+        )));
     }
 
     Err(SttError::Other(anyhow::anyhow!(

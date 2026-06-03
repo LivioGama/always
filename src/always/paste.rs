@@ -57,13 +57,20 @@ pub fn copy_to_clipboard(text: String) -> Result<()> {
         .stdin(Stdio::piped())
         .spawn()
         .context("Failed to run pbcopy")?;
-    pbcopy
-        .stdin
-        .as_mut()
-        .context("Failed to open pbcopy stdin")?
-        .write_all(text.as_bytes())
-        .context("Failed to write transcript to clipboard")?;
+    let write_res: Result<()> = (|| {
+        pbcopy
+            .stdin
+            .as_mut()
+            .context("Failed to open pbcopy stdin")?
+            .write_all(text.as_bytes())
+            .context("Failed to write transcript to clipboard")?;
+        Ok(())
+    })();
+    // Always reap the child even when the write failed. `wait()` closes our
+    // stdin handle first (so pbcopy sees EOF and exits); skipping it on the
+    // error path would leak a zombie process on this always-on daemon.
     let status = pbcopy.wait().context("Failed waiting for pbcopy")?;
+    write_res?;
     if !status.success() {
         anyhow::bail!("pbcopy failed");
     }
@@ -180,6 +187,56 @@ pub fn paste(text: &str, auto_enter: bool) -> Result<()> {
     copy_to_clipboard(text.to_string())?;
     paste_text(auto_enter)?;
     Ok(())
+}
+
+/// Read the current clipboard text via `pbpaste`.
+///
+/// Mirrors `correction::read_clipboard` (the Cmd+C capture path already
+/// uses this exact pattern). Used to snapshot the user's clipboard before
+/// we overwrite it with a transcript so it can be restored afterwards.
+///
+/// NOTE: this preserves only the **string** flavor of the pasteboard.
+/// Non-text flavors (images, RTF, file URLs) on the prior clipboard are
+/// not captured and therefore not restored — plain-text round-trip is the
+/// high-value case for an always-on dictation daemon.
+pub fn read_clipboard_text() -> Result<String> {
+    let output = std::process::Command::new("pbpaste")
+        .output()
+        .context("spawn pbpaste")?;
+    if !output.status.success() {
+        anyhow::bail!("pbpaste exited with status {}", output.status);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Restore a previously-snapshotted clipboard string, but only if the
+/// current clipboard still holds exactly what we wrote (`just_wrote`).
+///
+/// This is the guard against clobbering a *fresh* user copy: after the
+/// synthetic Cmd+V has been consumed we re-read the clipboard; if it no
+/// longer equals the transcript we put there, then the user (or another
+/// app, or the passive watcher) copied something new in the meantime —
+/// so we leave their clipboard alone. Only when the clipboard is still
+/// our own transcript do we put `prev` back.
+///
+/// Caller is responsible for sleeping long enough that the target app has
+/// consumed the paste before invoking this. Best-effort: a failed restore
+/// is logged by the caller, never propagated — losing the user's prior
+/// clipboard is a worse outcome than skipping the restore, but a failed
+/// re-read here should likewise not abort the caller.
+///
+/// As with [`read_clipboard_text`], only the string flavor is restored;
+/// non-text flavors that were on the clipboard before are not preserved.
+pub fn restore_clipboard_if_unchanged(prev: &str, just_wrote: &str) -> Result<()> {
+    // If the clipboard no longer matches the transcript we wrote, a fresh
+    // copy happened during the paste window — don't clobber it.
+    match read_clipboard_text() {
+        Ok(current) if current == just_wrote => copy_to_clipboard(prev.to_string()),
+        Ok(_) => Ok(()), // user/app copied something new — leave it.
+        // Re-read failed: be conservative and skip the restore rather than
+        // risk overwriting an unknown clipboard state.
+        Err(e) => Err(e),
+    }
 }
 
 /// Synthesize a single Return keypress in the focused app. Used to

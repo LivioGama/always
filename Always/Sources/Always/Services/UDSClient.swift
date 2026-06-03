@@ -396,6 +396,10 @@ class UDSClient: ObservableObject {
     private var queue: DispatchQueue
     private var reconnectScheduled = false
     private var reconnectAttempts: Int = 0
+    /// Latch so `onDaemonNeedsRespawn` fires exactly ONCE per outage
+    /// instead of on every reconnect past the threshold (3,4,5,…). Reset
+    /// only on a successful connect.
+    private var respawnRequested = false
     private var receiveSource: DispatchSourceRead?
     private var watchdogTimer: DispatchSourceTimer?
     private var lastEventTime: Date = Date()
@@ -463,11 +467,40 @@ class UDSClient: ObservableObject {
     }
     
     deinit {
-        disconnect()
+        // Synchronous teardown — can't `queue.async { self }` during
+        // dealloc (the weak self would already be nil and leak the fd).
+        // We're the sole owner at this point, so touching the fd directly
+        // is race-free. Cancelling the source runs its cancel handler,
+        // which closes the fd; otherwise close the bare fd ourselves.
+        if let source = receiveSource {
+            source.cancel()
+            receiveSource = nil
+            socketFD = -1
+        } else if socketFD >= 0 {
+            close(socketFD)
+            socketFD = -1
+        }
+        watchdogTimer?.cancel()
+        watchdogTimer = nil
     }
     
+    /// Public entrypoint. The socket fd and its read source are owned
+    /// exclusively by the private `queue`, so hop onto it before touching
+    /// any of that lifecycle state. Callers may invoke this from any
+    /// thread (main, the read source, the watchdog).
     func connect() {
-        guard !isConnected else { return }
+        queue.async { [weak self] in self?.connectOnQueue() }
+    }
+
+    /// Runs ONLY on `queue`. All `socketFD` / `receiveSource` /
+    /// `receiveBuffer` / `lastEventTime` access is confined here so there
+    /// is never concurrent fd mutation across the main queue and the read
+    /// queue (the "overlay silently breaks after daemon restart" race).
+    private func connectOnQueue() {
+        // Queue-confined connection-state gate. `isConnected` is a UI-only
+        // `@Published` flag updated async on main, so it can lag the real
+        // socket state — use the fd as the source of truth here.
+        guard socketFD < 0 else { return }
 
         log("Attempting to connect to \(self.socketPath)")
 
@@ -514,10 +547,16 @@ class UDSClient: ObservableObject {
         }
 
         self.socketFD = sock
-        self.reconnectAttempts = 0
+        // `lastEventTime` is queue-confined (set here, updated in
+        // `handleEvent`, read in the watchdog — all on `queue`).
         self.lastEventTime = Date()
         log("Connected to daemon via Unix socket fd=\(sock)")
         DispatchQueue.main.async {
+            // `reconnectAttempts` / `respawnRequested` are written & read
+            // by `scheduleReconnect` on main, so reset them there too to
+            // keep that backoff/respawn state single-queue.
+            self.reconnectAttempts = 0
+            self.respawnRequested = false
             self.isConnected = true
             self.isDegraded = false
             self.connectionError = nil
@@ -527,14 +566,29 @@ class UDSClient: ObservableObject {
         startReceiving()
         startWatchdog()
     }
-    
+
+    /// Public entrypoint. Hops onto `queue` so the fd teardown never races
+    /// a concurrent `connect`/`recv`/`send` on another thread.
     func disconnect() {
-        if socketFD >= 0 {
+        queue.async { [weak self] in self?.disconnectOnQueue() }
+    }
+
+    /// Runs ONLY on `queue`. Cancels the read source FIRST and lets its
+    /// cancel handler `close()` the exact fd it owns — GCD requires the fd
+    /// stay open until the cancel handler runs, so we never `close()` here
+    /// directly. We just drop our reference and reset the fd to -1.
+    private func disconnectOnQueue() {
+        if receiveSource != nil {
+            // The source's cancel handler owns `close(fd)`.
+            receiveSource?.cancel()
+            receiveSource = nil
+            socketFD = -1
+        } else if socketFD >= 0 {
+            // No live read source (connect failed before startReceiving, or
+            // we never started it) — close the bare fd ourselves.
             close(socketFD)
             socketFD = -1
         }
-        receiveSource?.cancel()
-        receiveSource = nil
         stopWatchdog()
 
         DispatchQueue.main.async {
@@ -591,9 +645,16 @@ class UDSClient: ObservableObject {
             self.log("Scheduling reconnect attempt #\(self.reconnectAttempts) in \(delay)s")
 
             // During bootstrap the AppDelegate task owns daemon spawn — do
-            // not kill/restart a daemon that is still coming up.
+            // not kill/restart a daemon that is still coming up. Latch on
+            // `respawnRequested` so we ask for a respawn exactly ONCE per
+            // outage instead of on every reconnect cycle past the
+            // threshold (which spammed `restartDaemon()` every backoff
+            // tick for as long as the daemon stayed down). The latch is
+            // cleared only on a successful connect (`connectOnQueue`).
             if self.reconnectAttempts >= self.maxReconnectAttemptsBeforeRespawn,
-               !self.isBootstrapping {
+               !self.isBootstrapping,
+               !self.respawnRequested {
+                self.respawnRequested = true
                 self.log("Reconnect attempts exhausted — requesting daemon respawn")
                 self.onDaemonNeedsRespawn?()
             }
@@ -639,21 +700,30 @@ class UDSClient: ObservableObject {
     /// to the last `\n` we've seen and parse only complete lines.
     private var receiveBuffer = Data()
 
+    /// Runs ONLY on `queue` (called from `connectOnQueue`). Creates the
+    /// read source over the live fd. The fd is captured in a local so the
+    /// source's cancel handler closes EXACTLY the fd it owns — GCD requires
+    /// the fd stay open until the cancel handler runs, which is why
+    /// `disconnectOnQueue` cancels the source instead of `close()`-ing
+    /// directly.
     private func startReceiving() {
         guard socketFD >= 0 else {
             log("startReceiving() called but socketFD invalid")
             return
         }
-        log("startReceiving() called with fd=\(socketFD)")
+        let fd = socketFD
+        log("startReceiving() called with fd=\(fd)")
         logger.debug("startReceiving() called")
         receiveBuffer.removeAll(keepingCapacity: true)
 
-        let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
+        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         source.setEventHandler { [weak self] in
             guard let self = self else { return }
 
             var buffer = [UInt8](repeating: 0, count: 65536)
-            let bytesRead = recv(self.socketFD, &buffer, buffer.count, 0)
+            // Read from the fd this source owns, not `self.socketFD` (which
+            // may already be reset to -1 by a disconnect in flight).
+            let bytesRead = recv(fd, &buffer, buffer.count, 0)
             self.log("recv() returned \(bytesRead) bytes")
 
             if bytesRead < 0 {
@@ -679,7 +749,11 @@ class UDSClient: ObservableObject {
         }
 
         source.setCancelHandler { [weak self] in
-            self?.logger.debug("Receive source cancelled")
+            // Close the exact fd this source owned — never any reassigned
+            // value of `socketFD`. This is the single place the read fd is
+            // closed.
+            close(fd)
+            self?.logger.debug("Receive source cancelled (fd=\(fd) closed)")
         }
 
         receiveSource = source
@@ -767,7 +841,10 @@ class UDSClient: ObservableObject {
     /// The daemon executes it in-process and broadcasts the resulting
     /// DaemonEvent back to all connected subscribers.
     func sendCommand(_ commandType: String) {
-        guard socketFD >= 0, isConnected else {
+        // `isConnected` is the UI-facing connection flag; the real fd
+        // validity is re-checked on `queue` inside `writeLine` (the fd is
+        // queue-confined and must not be read from the caller's thread).
+        guard isConnected else {
             self.logger.warning("sendCommand(\(commandType)) skipped — not connected")
             return
         }
@@ -786,7 +863,9 @@ class UDSClient: ObservableObject {
     /// the socket-write/error path so all command-emit paths log
     /// identically and respect the same connection guard.
     func sendCommandWithData<T: Encodable>(_ commandType: String, _ payload: T) {
-        guard socketFD >= 0, isConnected else {
+        // See `sendCommand`: fd validity is re-checked on `queue` in
+        // `writeLine`; here we only gate on the UI connection flag.
+        guard isConnected else {
             self.logger.warning("sendCommandWithData(\(commandType)) skipped — not connected")
             return
         }
@@ -810,19 +889,29 @@ class UDSClient: ObservableObject {
 
     /// Single funnel for socket writes. Logs success/failure consistently
     /// so misrouted commands are easy to spot in the daemon side-channel
-    /// log.
+    /// log. Hops onto `queue` so the fd is read/written only there — never
+    /// concurrently with a connect/disconnect on another thread.
     private func writeLine(_ line: String, commandType: String) {
         guard let data = line.data(using: .utf8) else { return }
 
-        let bytesWritten = data.withUnsafeBytes { buffer in
-            send(socketFD, buffer.baseAddress!, buffer.count, 0)
-        }
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            let fd = self.socketFD
+            guard fd >= 0 else {
+                self.logger.warning("send(\(commandType)) skipped — fd invalid")
+                return
+            }
 
-        if bytesWritten < 0 {
-            let err = errno
-            logger.error("send(\(commandType)) failed: \(String(cString: strerror(err)))")
-        } else {
-            logger.debug("Sent command: \(commandType)")
+            let bytesWritten = data.withUnsafeBytes { buffer in
+                send(fd, buffer.baseAddress!, buffer.count, 0)
+            }
+
+            if bytesWritten < 0 {
+                let err = errno
+                self.logger.error("send(\(commandType)) failed: \(String(cString: strerror(err)))")
+            } else {
+                self.logger.debug("Sent command: \(commandType)")
+            }
         }
     }
 }

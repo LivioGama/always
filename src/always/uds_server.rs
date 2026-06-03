@@ -29,6 +29,13 @@ struct ModelCommandCtx {
 const MAX_COMMAND_LINE_LENGTH: usize = 1024; // 1KB max command size
 const COMMANDS_PER_SECOND_LIMIT: u32 = 10; // Max 10 commands per second per client
 
+/// Upper bound on a single write to a client. A client that connects but
+/// never reads (full socket buffer, crashed mid-handshake, or a
+/// connect-and-drop liveness probe) would otherwise block the handler
+/// task forever, holding a `ClientGuard` that keeps `CONNECTED_CLIENTS > 0`
+/// and defeats the orphan watchdog.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// How long the daemon stays alive after the last UDS client disconnects.
 /// Prevents stale daemons surviving indefinitely when the Mac app quits.
 const ORPHAN_TIMEOUT_SECS: u64 = 120;
@@ -347,14 +354,24 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     }
 
     if !initial_payload.is_empty() {
-        if let Err(e) = writer.write_all(initial_payload.as_bytes()).await {
-            tracing::error!(error = %e, "uds_send_initial_state_failed");
-            return Ok(());
-        }
-
-        if let Err(e) = writer.flush().await {
-            tracing::error!(error = %e, "uds_flush_initial_state_failed");
-            return Ok(());
+        // Bound the initial burst by a timeout: a client that connects but
+        // never reads would otherwise wedge this task forever and keep
+        // CONNECTED_CLIENTS > 0, defeating the orphan watchdog.
+        match tokio::time::timeout(WRITE_TIMEOUT, async {
+            writer.write_all(initial_payload.as_bytes()).await?;
+            writer.flush().await
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "uds_send_initial_state_failed");
+                return Ok(());
+            }
+            Err(_elapsed) => {
+                tracing::warn!("uds_send_initial_state_timeout: dropping unresponsive client");
+                return Ok(());
+            }
         }
     }
 
@@ -542,6 +559,11 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
             // the previous and new bundle; broadcast on change so the
             // status bar icon and overlay follow the user's focus.
             let (effective, changed) = pause::set_current_app_and_recompute(bundle_id.clone());
+            // Persist the now-current bundle so a daemon restart can
+            // restore per-app pause state via
+            // `focus_state::restore_on_startup` without waiting for the
+            // next focus-change event from the Mac app.
+            crate::always::focus_state::save(bundle_id.as_deref());
             global_broadcaster().focused_app_changed(bundle_id.clone());
             if changed {
                 if effective {

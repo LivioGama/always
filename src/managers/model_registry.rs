@@ -28,7 +28,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
@@ -152,6 +152,11 @@ impl Drop for DownloadCleanup<'_> {
     }
 }
 
+/// SHA256 verification verdict cache: `(path, file_len, mtime) -> matched`.
+/// Aliased to keep the `ModelRegistry` field readable and satisfy
+/// `clippy::type_complexity` (the CI gate runs `clippy -D warnings`).
+type VerifyCache = Arc<Mutex<HashMap<(PathBuf, u64, SystemTime), bool>>>;
+
 /// Registry of all known local STT models. Constructed once at daemon
 /// startup; cloning is cheap (only `Arc`s).
 #[derive(Clone)]
@@ -161,6 +166,12 @@ pub struct ModelRegistry {
     cancel_flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     extracting_models: Arc<Mutex<HashSet<String>>>,
     events_tx: broadcast::Sender<ModelEvent>,
+    /// Memoized SHA256 verdicts for single-file `.bin` models, keyed by
+    /// `(path, file_len, mtime)`. Re-hashing a 1.6 GB checkpoint on every
+    /// `refresh_disk_status` would be unacceptable, so we cache the
+    /// outcome and only re-hash when the file's size or mtime changes.
+    /// `true` = hash matched the catalog SHA, `false` = mismatch/error.
+    verify_cache: VerifyCache,
 }
 
 impl ModelRegistry {
@@ -191,6 +202,7 @@ impl ModelRegistry {
             cancel_flags: Arc::new(Mutex::new(HashMap::new())),
             extracting_models: Arc::new(Mutex::new(HashSet::new())),
             events_tx,
+            verify_cache: Arc::new(Mutex::new(HashMap::new())),
         };
 
         registry.refresh_disk_status()?;
@@ -213,21 +225,124 @@ impl ModelRegistry {
         self.available_models.lock().get(model_id).cloned()
     }
 
-    /// On-disk path of a (possibly not-yet-downloaded) model.
+    /// On-disk path of a (possibly not-yet-downloaded) model. Prefers
+    /// always's own models directory; falls back to Handy's cache if the
+    /// same filename exists there. Returning `None` from
+    /// `models_dir.join(filename)` is impossible — the caller wants to
+    /// know "is there a usable file" rather than "what would the path
+    /// be", so we encode that distinction here.
+    ///
+    /// Integrity is enforced before a pre-existing file is offered as
+    /// usable, mirroring `refresh_disk_status`: single-file `.bin`
+    /// catalog models must re-hash to the catalog SHA256 (cached by
+    /// size+mtime); directory models are trusted only when we extracted
+    /// them ourselves (a `<filename>.verified` marker is present in our
+    /// own dir) — Handy's extracted directories are outside our trust
+    /// boundary and are never returned for directory models.
     pub fn model_path(&self, model_id: &str) -> Option<PathBuf> {
         let m = self.get(model_id)?;
-        Some(self.models_dir.join(m.filename))
+        let own = self.models_dir.join(&m.filename);
+
+        if m.is_directory {
+            // Trust only our own, marker-verified extraction.
+            if path_matches_kind(&own, true) && self.dir_verified(&m.filename) {
+                return Some(own);
+            }
+        } else {
+            // Prefer our own copy, then Handy's, but only if the bytes
+            // verify against the catalog SHA (or there's no catalog SHA,
+            // i.e. a user-supplied custom `.bin`).
+            if path_matches_kind(&own, false) && self.bin_verified(&own, m.sha256.as_deref()) {
+                return Some(own);
+            }
+            if let Some(handy) = handy_models_dir() {
+                let candidate = handy.join(&m.filename);
+                if path_matches_kind(&candidate, false)
+                    && self.bin_verified(&candidate, m.sha256.as_deref())
+                {
+                    return Some(candidate);
+                }
+            }
+        }
+
+        // Nothing usable yet — return the canonical "would-be" path so
+        // callers that just want to compute the install location keep
+        // working. Callers that need "is this usable" should consult
+        // `ModelInfo::is_downloaded`.
+        Some(own)
     }
 
-    /// Root directory holding all downloaded model files.
+    /// Root directory holding all downloaded model files (always's own
+    /// downloads, not Handy's cache).
     pub fn models_dir(&self) -> &Path {
         &self.models_dir
     }
 
+    /// Path of the `<filename>.verified` marker we drop in our own
+    /// models dir after a successful download+verify+extract of a
+    /// directory model. Its presence is the *only* evidence we accept
+    /// that an extracted directory is trustworthy.
+    fn verified_marker(&self, filename: &str) -> PathBuf {
+        self.models_dir.join(format!("{filename}.verified"))
+    }
+
+    /// True when a directory model in OUR models dir carries the
+    /// `.verified` marker (i.e. always itself extracted and SHA-verified
+    /// the source archive). Never consulted for Handy's cache — those
+    /// directories are outside our trust boundary.
+    fn dir_verified(&self, filename: &str) -> bool {
+        self.verified_marker(filename).is_file()
+    }
+
+    /// True when a single-file `.bin` at `path` is safe to treat as
+    /// downloaded. When `expected` is `Some`, the on-disk bytes must
+    /// hash to the catalog SHA256; the verdict is memoized by
+    /// `(path, len, mtime)` so a multi-GB checkpoint isn't re-hashed on
+    /// every refresh. When `expected` is `None` (user-supplied custom
+    /// `.bin`), we keep the legacy existence-only trust.
+    fn bin_verified(&self, path: &Path, expected: Option<&str>) -> bool {
+        let Some(expected) = expected else {
+            // No catalog hash to check against (custom model). Preserve
+            // the historical behavior of trusting its presence.
+            return true;
+        };
+        // Key the cache on the identity the filesystem can cheaply
+        // report. If we can't stat the file, treat it as unusable.
+        let Ok(meta) = path.metadata() else {
+            return false;
+        };
+        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let key = (path.to_path_buf(), meta.len(), mtime);
+
+        if let Some(&verdict) = self.verify_cache.lock().get(&key) {
+            return verdict;
+        }
+
+        let verdict = match compute_sha256(path) {
+            Ok(actual) => actual == expected,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "model_bin_hash_failed");
+                false
+            }
+        };
+        if !verdict {
+            tracing::warn!(
+                path = %path.display(),
+                "model_bin_sha256_mismatch_refusing_to_trust"
+            );
+        }
+        self.verify_cache.lock().insert(key, verdict);
+        verdict
+    }
+
     /// Re-scan the models directory and update `is_downloaded` flags +
     /// partial sizes. Cheap — called once at startup and again after
-    /// every download / delete.
+    /// every download / delete. Also consults Handy's cache directory:
+    /// if `~/Library/Application Support/com.pais.handy/models/<filename>`
+    /// exists with the right kind, the model is treated as downloaded
+    /// even when we haven't fetched it ourselves.
     pub fn refresh_disk_status(&self) -> Result<()> {
+        let handy = handy_models_dir();
         let mut models = self.available_models.lock();
         for model in models.values_mut() {
             let model_path = self.models_dir.join(&model.filename);
@@ -245,11 +360,36 @@ impl ModelRegistry {
                 let _ = fs::remove_dir_all(&extracting_path);
             }
 
-            if model.is_directory {
-                model.is_downloaded = model_path.exists() && model_path.is_dir();
+            // Integrity gate: a file only counts as "downloaded" once we
+            // can vouch for it. We never blindly trust existence alone —
+            // see the per-kind rules below.
+            let downloaded = if model.is_directory {
+                // tar.gz models extract to a directory whose contents the
+                // catalog SHA (over the *archive*) can't re-verify. Trust
+                // only a directory WE extracted+verified, marked by a
+                // sibling `<filename>.verified` file in our own dir. Handy's
+                // extracted dirs live outside our trust boundary and are
+                // deliberately ignored here (the user re-downloads once).
+                path_matches_kind(&model_path, true) && self.dir_verified(&model.filename)
             } else {
-                model.is_downloaded = model_path.exists() && model_path.is_file();
-            }
+                // Single-file `.bin`: re-hash against the catalog SHA
+                // (cached by size+mtime). Own dir wins, then Handy's. A
+                // custom `.bin` (sha256 == None) keeps the legacy
+                // existence-only behavior.
+                let own_ok = path_matches_kind(&model_path, false)
+                    && self.bin_verified(&model_path, model.sha256.as_deref());
+                let handy_ok = !own_ok
+                    && handy
+                        .as_ref()
+                        .map(|h| {
+                            let candidate = h.join(&model.filename);
+                            path_matches_kind(&candidate, false)
+                                && self.bin_verified(&candidate, model.sha256.as_deref())
+                        })
+                        .unwrap_or(false);
+                own_ok || handy_ok
+            };
+            model.is_downloaded = downloaded;
             model.is_downloading = false;
             model.partial_size = partial_path.metadata().map(|m| m.len()).unwrap_or(0);
         }
@@ -282,6 +422,13 @@ impl ModelRegistry {
         if partial.exists() {
             fs::remove_file(&partial).ok();
         }
+        // Drop the directory-model trust marker so a re-download is
+        // forced to re-verify rather than inheriting a stale "verified"
+        // verdict from the deleted copy.
+        let marker = self.verified_marker(&info.filename);
+        if marker.exists() {
+            fs::remove_file(&marker).ok();
+        }
         self.refresh_disk_status()?;
         let _ = self
             .events_tx
@@ -311,8 +458,17 @@ impl ModelRegistry {
             .models_dir
             .join(format!("{}.partial", &model_info.filename));
 
-        // Already present — nothing to do; clean up any leftover .partial.
-        if model_path.exists() {
+        // Already present and trustworthy — nothing to do; clean up any
+        // leftover .partial. For directory models "present" alone is not
+        // enough: without our `.verified` marker the on-disk dir can't be
+        // trusted (it may be a stale/unmarked or Handy-cached extraction),
+        // so we fall through and perform a real verified download.
+        let already_usable = if model_info.is_directory {
+            path_matches_kind(&model_path, true) && self.dir_verified(&model_info.filename)
+        } else {
+            model_path.exists()
+        };
+        if already_usable {
             if partial_path.exists() {
                 let _ = fs::remove_file(&partial_path);
             }
@@ -519,6 +675,22 @@ impl ModelRegistry {
             }
 
             self.extracting_models.lock().remove(model_id);
+
+            // Drop the trust marker: we just downloaded the archive,
+            // SHA-verified it against the catalog, and extracted it into
+            // our own dir. `refresh_disk_status` / `model_path` treat a
+            // directory model as usable only when this marker is present,
+            // so an unmarked (e.g. Handy-cached) directory is never
+            // loaded without a fresh verified download.
+            let marker = self.verified_marker(&model_info.filename);
+            if let Err(e) = fs::write(&marker, b"") {
+                tracing::warn!(
+                    model = %model_id,
+                    error = %e,
+                    "model_verified_marker_write_failed"
+                );
+            }
+
             let _ = self.events_tx.send(ModelEvent::ExtractionCompleted {
                 model_id: model_id.to_string(),
             });
@@ -575,6 +747,37 @@ fn default_models_dir() -> Result<PathBuf> {
         .join("always")
         .join("models");
     Ok(base)
+}
+
+/// Handy's models directory, when present. The user may have already
+/// downloaded our overlapping model set via Handy
+/// (`github.com/cjpais/handy`) — both apps pull from the same
+/// `blob.handy.computer` CDN with identical filenames, so we can reuse
+/// the file directly instead of forcing a second download.
+///
+/// Returns `None` outside macOS or when the directory doesn't exist —
+/// we never auto-create it (it belongs to Handy, not us).
+fn handy_models_dir() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let dir = dirs::data_dir()?.join("com.pais.handy").join("models");
+    if dir.is_dir() { Some(dir) } else { None }
+}
+
+/// True when `path` exists and matches the expected kind (directory for
+/// tar.gz-extracted engines like Parakeet/Canary, regular file for
+/// `.bin` Whisper checkpoints). Mirrors the check that both
+/// `refresh_disk_status` and `model_path` previously inlined.
+fn path_matches_kind(path: &Path, expect_dir: bool) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    if expect_dir {
+        path.is_dir()
+    } else {
+        path.is_file()
+    }
 }
 
 fn verify_sha256(path: &Path, expected: Option<&str>, model_id: &str) -> Result<()> {
