@@ -207,8 +207,22 @@ pub struct PostprocessConfig {
 impl Default for PostprocessConfig {
     fn default() -> Self {
         Self {
-            groq_model: "llama-3.1-8b-instant".to_string(),
+            // Tested empirically against the user's failure set:
+            //   8b-instant: invents (`Mo`→`Monday`, `struts`→`structures`,
+            //               `5050`→`5.050`), ignores glossary
+            //   70b-versatile: catches glossary but still expands
+            //               (`repo`→`repository`, `pack mine`→`pack of mine`,
+            //               `cloud.md`→`cloud code`)
+            //   gpt-oss-120b: clean across the board — applies glossary,
+            //               preserves abbreviations, doesn't invent.
+            // Override at runtime via `ALWAYS_GROQ_MODEL=<id>`.
+            groq_model: "openai/gpt-oss-120b".to_string(),
             learning_history_limit: 1000,
+            // Default ON. The LLM postprocess pass is the single
+            // glossary-aware cleanup layer in the pipeline. Quality
+            // hinges entirely on the system prompt in
+            // `glossary::build_postprocess_prompt` — that's the
+            // surface to iterate on when transcripts are wrong.
             grammar_correction_enabled: true,
             cache_ttl_seconds: 300,
         }
@@ -242,16 +256,46 @@ impl AlwaysConfig {
             )))
         });
 
-        let post_processor = if let (Some(vocab), Some(context_vocab)) = (&vocab, &context_vocab) {
-            let groq_api_key = std::env::var("GROQ_API_KEY").ok();
+        // Honor user pref for LLM postprocess: DB > env > default true.
+        let postprocess_enabled = prefs
+            .postprocess_enabled
+            .unwrap_or(postprocess_config.grammar_correction_enabled);
+        let mut effective_postprocess = postprocess_config.clone();
+        effective_postprocess.grammar_correction_enabled = postprocess_enabled;
+
+        // Construct the post-processor whenever grammar_correction is
+        // enabled. The previous gate required BOTH a loaded
+        // vocabulary.json AND a detected project root (`.git`
+        // ancestor of cwd) — but the daemon is launched by the Mac
+        // app from /Applications, where cwd has no `.git` ancestor,
+        // so the post_processor was permanently None and the LLM
+        // cleanup never fired regardless of the user's pref. We now
+        // build it with sensible empty defaults so the prompt-driven
+        // glossary cleanup always runs when enabled.
+        let post_processor = {
+            let groq_api_key = std::env::var("GROQ_API_KEY").ok().or_else(|| {
+                if groq_stt_api_key.is_empty() {
+                    None
+                } else {
+                    Some(groq_stt_api_key.clone())
+                }
+            });
+            let vocab_for_pp = vocab.clone().unwrap_or_else(Vocabulary::default_patterns);
+            let context_vocab_for_pp = context_vocab
+                .clone()
+                .unwrap_or_else(|| Arc::new(Mutex::new(ContextVocabulary::new(None))));
+            tracing::info!(
+                grammar_correction_enabled = effective_postprocess.grammar_correction_enabled,
+                has_api_key = groq_api_key.is_some(),
+                project_root = project_root.is_some(),
+                "post_processor_init"
+            );
             Some(Arc::new(PostProcessor::new_with_config(
-                vocab.clone(),
-                Arc::clone(context_vocab),
-                postprocess_config.clone(),
+                vocab_for_pp,
+                context_vocab_for_pp,
+                effective_postprocess.clone(),
                 groq_api_key,
             )))
-        } else {
-            None
         };
 
         let config = Self {
@@ -273,7 +317,7 @@ impl AlwaysConfig {
             vad_mode,
             silero_threshold: prefs.silero_threshold.unwrap_or(0.5) as f32,
             vocab_config,
-            postprocess_config,
+            postprocess_config: effective_postprocess,
         };
 
         Ok(config)
@@ -290,7 +334,11 @@ impl Default for AlwaysConfig {
             timeout_secs: 30,
             // Defaults aligned with `SensitivityPreset::Normal` and the
             // Mic Sensitivity / Speaking Style picker in the GUI.
-            silence_secs: 2.0,
+            // 1.5s — snappier than 2.0 / 2.5 while still tolerating
+            // typical mid-sentence pauses. Speculative transcription
+            // kicks off at 75% of this (≈1.1s) so end-to-end paste
+            // latency rarely exceeds ~1.5s after the user stops talking.
+            silence_secs: 1.5,
             auto_enter: false,
             filter_enabled: true,
             energy_threshold: 0.012,
@@ -409,9 +457,9 @@ fn log_path_from_preferences(prefs: &Preferences) -> PathBuf {
 }
 
 fn default_log_path() -> PathBuf {
-    // Tracing-appender rotates daily and suffixes with the current date,
-    // so the actual file is `always.YYYY-MM-DD`, not `always.log`.
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    // tracing-appender rotates daily on UTC and suffixes with the UTC date,
+    // so the actual file is `always.YYYY-MM-DD` in UTC, not local time.
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
     crate::always::telemetry::get_log_directory().join(format!("always.{date}"))
 }
 

@@ -46,7 +46,8 @@ const HALLUCINATION_PHRASES: &[&str] = &[
     "goodbye",
     "amen",
     "peace",
-    // Filler sounds
+    // Filler sounds (real noise — hesitation markers Whisper invents
+    // from silence or breathing).
     "uh",
     "um",
     "ah",
@@ -60,29 +61,25 @@ const HALLUCINATION_PHRASES: &[&str] = &[
     "uh huh",
     "mm-hmm",
     "uh-huh",
-    "oh",
-    "okay",
-    "ok",
-    "yeah",
-    "yes",
-    "no",
-    "yep",
-    "nope",
     "huh",
-    "you",
-    "what",
-    "as",
-    "the",
-    "and",
     "ugh",
     "sigh",
     "boo",
     "blah",
-    "hey",
-    "hi",
-    "hello",
-    "oh my god",
-    "wow",
+    // Function-word hallucinations — Whisper sometimes emits one of
+    // these alone from silence. They're never meaningful as a single
+    // word in dictation context.
+    "the",
+    "and",
+    "as",
+    // NOTE: explicit affirmatives / negatives / greetings that earlier
+    // versions of this list rejected (`yes`, `no`, `yeah`, `yep`,
+    // `nope`, `ok`, `okay`, `oh`, `hey`, `hi`, `hello`, `wow`,
+    // `oh my god`, `you`, `what`) have been removed. They are valid
+    // single-word commands and the user is the authority on whether
+    // they meant to say them. Hallucination detection still catches
+    // these via the segment-level no_speech_prob + avg_logprob layers
+    // when the audio was actually silent.
     // Subtitle/caption credits (also covered by substring list)
     "subtitles by the amara.org community",
     "captions by the amara.org community",
@@ -187,13 +184,17 @@ pub fn is_hallucination(result: &TranscriptionResult) -> Option<&'static str> {
     }
 
     // ---- Layer C: length sanity ----
+    // Real human fast speech tops around 30-35 chars/sec. Whisper hallucinations
+    // typically exceed 50+ cps because the model fills silence with dense filler.
+    // 25 was too tight — natural fast speakers tripped it. 40 separates fast
+    // speech from clear hallucinations.
     if result.duration > 0.0 {
         let chars_per_sec = text.chars().count() as f64 / result.duration;
-        if chars_per_sec > 25.0 {
+        if chars_per_sec > 40.0 {
             return Some("too many chars per second");
         }
         let word_count = text.split_whitespace().count();
-        if result.duration < 1.0 && word_count > 4 {
+        if result.duration < 1.0 && word_count > 5 {
             return Some("too many words for short clip");
         }
     }
@@ -483,6 +484,21 @@ mod tests {
         let r = make_with_duration("abcdefghij abcdefghij abcdefghi", 0.5);
         // But 0.5s with > 4 words also trips Layer C; either reason is fine.
         assert!(is_hallucination(&r).is_some());
+    }
+
+    #[test]
+    fn accepts_one_word_affirmatives_and_negatives() {
+        // Regression: earlier versions of the phrase list rejected
+        // every short affirmative ("yes", "no", "yeah", "ok",
+        // "okay", "yep", "nope"). Users dictating one-word answers
+        // expect them to land. `ok`/`no` still trip the 3-char floor
+        // (length < 3) — that gate is intentional and unchanged.
+        for word in ["yes", "yeah", "okay", "yep", "nope", "hello", "hey", "wow"] {
+            assert!(
+                is_hallucination(&make(word)).is_none(),
+                "single-word affirmative `{word}` should not be filtered"
+            );
+        }
     }
 
     #[test]

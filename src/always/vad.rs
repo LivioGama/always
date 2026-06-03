@@ -44,13 +44,17 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     // - At final, if speculation is still valid (no resume), use its result —
     //   transcription has been running in parallel during the silence wait, so
     //   the user gets snappy paste with no extra latency cost.
-    // Tentative at 75% of final window (not 50%) to allow user to finish thought before speculation.
-    // If model returns early on partial audio, we still wait for final silence before accepting result.
-    let tentative_silence_secs = (cfg.silence_secs * 0.75).clamp(0.6, 2.0);
+    // Tentative at 85% of final window. Earlier values (50%, 75%) caused mid-utterance
+    // speculation kickoff that returned partial transcripts when user resumed after a
+    // breath. With smoothing, the silence count itself is more accurate, so we can
+    // trust it closer to the final cutoff.
+    let tentative_silence_secs = (cfg.silence_secs * 0.85).clamp(0.7, 2.5);
     let tentative_silence_frames =
         ((tentative_silence_secs * 1000.0) / FRAME_MS as f64).ceil() as usize;
-    // Pre-buffer: keep 50ms of audio before speech detection to catch first words
-    let pre_buffer_frames = (50 / FRAME_MS as usize).max(1);
+    // Pre-buffer: keep 200ms of audio before speech detection to catch first words.
+    // 50ms was too short — first syllable of "Run the program" was dropped. 200ms
+    // gives enough headroom for VAD onset latency without bloating speech_samples.
+    let pre_buffer_frames = (200 / FRAME_MS as usize).max(1);
     let mut vad = VoiceActivityDetector::builder()
         .sample_rate(16000_i64)
         .chunk_size(512_usize)
@@ -66,6 +70,13 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     let silence_threshold: f32 = speech_threshold * 0.75;
     let mut vad_accum: Vec<i16> = Vec::with_capacity(1024);
     let mut last_prob: f32 = 0.0;
+    // Probability smoothing window. Silero outputs per-512-sample (32ms) chunks;
+    // single-frame dips during voiceless consonants (s/f/th/h) or breaths can
+    // briefly drop prob below threshold without genuine end-of-utterance.
+    // We track the last 8 readings (~256ms) and use the running max while in
+    // speech — the prob must stay low for the FULL window to count as silence.
+    let smoothing_window: usize = 8;
+    let mut prob_history: VecDeque<f32> = VecDeque::with_capacity(smoothing_window);
 
     // Use persistent recorder to avoid process spawning overhead
     let recorder_arc = audio::RecChild::get_or_spawn()?;
@@ -122,11 +133,25 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
         if vad_accum.len() >= 512 {
             let chunk: Vec<i16> = vad_accum.drain(..512).collect();
             last_prob = vad.predict(chunk);
+            if prob_history.len() >= smoothing_window {
+                prob_history.pop_front();
+            }
+            prob_history.push_back(last_prob);
         }
-        // Hysteresis: while already in speech, only exit on the lower threshold;
-        // while not yet in speech, require the higher threshold to enter.
+        // Smoothed probability for end-of-speech check: use the MAX of recent
+        // window so a single-frame dip does not register as silence. Brief
+        // consonant gaps (s/f/th/h, ~30-100ms) leave the window max above
+        // silence_threshold, preventing premature cutoff.
+        let smoothed_max = prob_history
+            .iter()
+            .copied()
+            .fold(0.0f32, f32::max)
+            .max(last_prob);
+        // Hysteresis: while already in speech, only exit on the smoothed lower
+        // threshold; while not yet in speech, require the raw higher threshold
+        // to enter (faster onset detection).
         let is_speech = if in_speech {
-            last_prob >= silence_threshold
+            smoothed_max >= silence_threshold
         } else {
             last_prob >= speech_threshold
         };

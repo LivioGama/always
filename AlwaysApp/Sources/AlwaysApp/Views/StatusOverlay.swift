@@ -9,6 +9,8 @@ enum OverlayState: Equatable, Hashable {
     case processing
     case voiceActivity
     case filtered(reason: String)
+    case correctionSaved(wrong: String, right: String)
+    case correctionEmpty(reason: String)
 
     var rawValue: String {
         switch self {
@@ -20,6 +22,8 @@ enum OverlayState: Equatable, Hashable {
         case .processing: return "Processing"
         case .voiceActivity: return "Listening"
         case .filtered(let reason): return reason.isEmpty ? "Filtered" : "Filtered · \(reason)"
+        case .correctionSaved(let wrong, let right): return "Saved: \(wrong) → \(right)"
+        case .correctionEmpty(let reason): return reason.isEmpty ? "Nothing to fix" : reason
         }
     }
 
@@ -33,6 +37,8 @@ enum OverlayState: Equatable, Hashable {
         case .processing: return "waveform.circle"
         case .voiceActivity: return "waveform"
         case .filtered: return "xmark.octagon.fill"
+        case .correctionSaved: return "checkmark.seal.fill"
+        case .correctionEmpty: return "questionmark.circle"
         }
     }
 
@@ -46,6 +52,8 @@ enum OverlayState: Equatable, Hashable {
         case .processing: return .systemBlue
         case .voiceActivity: return .systemRed
         case .filtered: return .systemPink
+        case .correctionSaved: return .systemGreen
+        case .correctionEmpty: return .systemGray
         }
     }
 }
@@ -322,7 +330,7 @@ class StatusOverlayWindow: NSWindow {
         self.hasShadow = true
         self.isReleasedWhenClosed = false
 
-        positionAtBottomMiddle()
+        positionOnMouseScreen()
     }
 
     required init?(coder: NSCoder) {
@@ -340,8 +348,8 @@ class StatusOverlayWindow: NSWindow {
                                    height: StatusOverlayWindow.overlayHeight)
                 self.overlayView = StatusOverlayView(frame: frame)
                 self.contentView = self.overlayView
-                self.positionAtBottomMiddle()
             }
+            self.positionOnMouseScreen()
 
             // Update state on the existing view so consecutive flashes
             // (e.g. pause then auto-enter) reuse the same window instead
@@ -391,8 +399,11 @@ class StatusOverlayWindow: NSWindow {
         }
     }
 
-    private func positionAtBottomMiddle() {
-        guard let screen = NSScreen.main else { return }
+    private func positionOnMouseScreen() {
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) })
+            ?? NSScreen.main
+        guard let screen = screen else { return }
 
         // Place where the system volume HUD appears: horizontally centered,
         // ~140pt above the bottom of the visible frame.

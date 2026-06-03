@@ -314,6 +314,84 @@ fn execute_command(cmd: DaemonCommand) {
             }
             tracing::info!(new_state, "uds_toggle_auto_enter");
         }
+        DaemonCommand::ApproveCorrection { id } => handle_approve_correction(&id),
+        DaemonCommand::RejectCorrection { id } => handle_reject_correction(&id),
+        DaemonCommand::CaptureCorrection => handle_capture_correction(),
+    }
+}
+
+/// Handler for `ApproveCorrection`. Looks the entry up by UUID, applies
+/// it to the glossary, and broadcasts `CorrectionLogged` so connected
+/// clients can flash a confirmation toast and refresh their pending
+/// counter.
+fn handle_approve_correction(id_str: &str) {
+    let queue = match crate::always::correction_queue::global_queue() {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, "uds_approve_correction_queue_unavailable");
+            return;
+        }
+    };
+    let id = match uuid::Uuid::parse_str(id_str) {
+        Ok(u) => u,
+        Err(_) => {
+            tracing::warn!(id = %id_str, "uds_approve_correction_invalid_id");
+            return;
+        }
+    };
+    let Some(entry) = queue.take(id) else {
+        tracing::warn!(id = %id_str, "uds_approve_correction_unknown_id");
+        return;
+    };
+    match crate::always::correction::apply_pairs_to_glossary(std::slice::from_ref(&entry.pair)) {
+        Ok(_) => {
+            global_broadcaster().correction_logged(&entry.pair.wrong, &entry.pair.right);
+            tracing::info!(
+                wrong = %entry.pair.wrong,
+                right = %entry.pair.right,
+                "uds_approve_correction_applied"
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "uds_approve_correction_apply_failed");
+        }
+    }
+}
+
+fn handle_reject_correction(id_str: &str) {
+    let queue = match crate::always::correction_queue::global_queue() {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, "uds_reject_correction_queue_unavailable");
+            return;
+        }
+    };
+    let id = match uuid::Uuid::parse_str(id_str) {
+        Ok(u) => u,
+        Err(_) => {
+            tracing::warn!(id = %id_str, "uds_reject_correction_invalid_id");
+            return;
+        }
+    };
+    if queue.take(id).is_some() {
+        tracing::info!(id = %id_str, "uds_reject_correction_dropped");
+    }
+}
+
+fn handle_capture_correction() {
+    use crate::always::correction;
+    let outcome =
+        match correction::capture_via_hotkey(crate::always::clipboard_watcher::PASTE_WINDOW) {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::error!(error = %e, "uds_capture_correction_failed");
+                return;
+            }
+        };
+    if let correction::CaptureOutcome::Applied { pairs, applied: _ } = outcome {
+        for p in pairs {
+            global_broadcaster().correction_logged(&p.wrong, &p.right);
+        }
     }
 }
 

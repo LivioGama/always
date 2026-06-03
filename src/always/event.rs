@@ -46,6 +46,28 @@ pub enum DaemonEvent {
     /// Transcription was rejected by the filter or hallucination detector.
     /// Carries a short, human-readable reason so the GUI can display it.
     TranscriptionFiltered { reason: String },
+    /// A `(wrong → right)` correction pair was just applied to
+    /// `~/.always/glossary.json` (typically by the user pressing the
+    /// correction-capture hotkey or approving a queued candidate).
+    /// The GUI uses this to flash a brief toast.
+    CorrectionLogged { wrong: String, right: String },
+    /// A passive clipboard re-copy looked like a correction but was
+    /// not auto-applied — it sits in the pending-corrections queue
+    /// awaiting user approval. Carries the queue entry's UUID as a
+    /// string so the GUI can later send `ApproveCorrection`/`RejectCorrection`.
+    CorrectionPending {
+        id: String,
+        wrong: String,
+        right: String,
+    },
+    /// Outcome of an active manual-correction capture (⌃⌥X). Lets
+    /// the GUI flash a status-bar overlay confirming what happened —
+    /// `applied`, `no_recent_paste`, `no_change`, `no_correction_pairs`,
+    /// or `error`. Per-pair detail flows separately via
+    /// [`DaemonEvent::CorrectionLogged`].
+    CorrectionCaptureResult {
+        outcome: String,
+    },
     /// Heartbeat for connection health
     Heartbeat,
 }
@@ -67,10 +89,23 @@ impl DaemonEvent {
 /// over the UDS socket. Executing them inside the daemon process is what
 /// allows the resulting events to reach all subscribers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", content = "data")]
 pub enum DaemonCommand {
     TogglePause,
     ToggleAutoEnter,
+    /// Approve a pending correction in the queue and apply it to the
+    /// glossary. The daemon emits `CorrectionLogged` on success.
+    ApproveCorrection {
+        id: String,
+    },
+    /// Drop a pending correction without applying.
+    RejectCorrection {
+        id: String,
+    },
+    /// Manually trigger the active capture path (read user's selection,
+    /// diff vs `last_pasted`, apply). Useful for clients without the
+    /// global hotkey installed.
+    CaptureCorrection,
 }
 
 impl DaemonCommand {
@@ -179,6 +214,38 @@ impl EventBroadcaster {
     pub fn hello(&self) {
         self.send(DaemonEvent::Hello {
             version: PROTOCOL_VERSION,
+        });
+    }
+
+    /// Send `CorrectionLogged` event (typically from the hotkey-driven
+    /// capture path or after an approval).
+    pub fn correction_logged(&self, wrong: impl Into<String>, right: impl Into<String>) {
+        self.send(DaemonEvent::CorrectionLogged {
+            wrong: wrong.into(),
+            right: right.into(),
+        });
+    }
+
+    /// Send `CorrectionPending` event (from passive watcher).
+    pub fn correction_pending(
+        &self,
+        id: impl Into<String>,
+        wrong: impl Into<String>,
+        right: impl Into<String>,
+    ) {
+        self.send(DaemonEvent::CorrectionPending {
+            id: id.into(),
+            wrong: wrong.into(),
+            right: right.into(),
+        });
+    }
+
+    /// Broadcast the outcome of an active correction-capture press
+    /// (⌃⌥X). `outcome` is one of: `applied`, `no_recent_paste`,
+    /// `no_change`, `no_correction_pairs`, `error`.
+    pub fn correction_capture_result(&self, outcome: impl Into<String>) {
+        self.send(DaemonEvent::CorrectionCaptureResult {
+            outcome: outcome.into(),
         });
     }
 }

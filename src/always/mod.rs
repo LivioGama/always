@@ -2,8 +2,11 @@
 
 pub mod ai_filter;
 pub mod audio;
+pub mod clipboard_watcher;
 pub mod config;
 pub mod context_vocab;
+pub mod correction;
+pub mod correction_queue;
 pub mod daemon;
 pub mod event;
 pub mod event_loop;

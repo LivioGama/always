@@ -61,6 +61,10 @@ that flashes for ~200 ms, paste lands, you keep working.
   Re-runs **merge** with the existing glossary, never overwrite — your
   hand-tuned entries always survive. See
   [`docs/advanced_settings.md#vocabulary-auto-import--what-actually-works`](docs/advanced_settings.md).
+* **Self-improving glossary.** Hit `⌃⌥X` after correcting a botched
+  transcript and the daemon adds the `(wrong → right)` pair to your
+  glossary automatically. Optional passive mode watches the clipboard
+  for re-copies and queues candidate corrections for review.
 * **Native menubar app.** Status overlay, settings window, "Check for
   Updates…" via Sparkle, "Open today's log" via Terminal — all native
   SwiftUI, code-signed, notarized, sandboxed.
@@ -219,6 +223,19 @@ always vocab import         # Pull macOS Text Replacements + SuperWhisper + MacW
 always vocab extract        # Extract from current project (planned)
 ```
 
+### Corrections
+
+```bash
+always corrections list                # Pending entries awaiting review
+always corrections approve <UUID>      # Apply one to ~/.always/glossary.json
+always corrections reject <UUID>       # Drop one
+always corrections clear               # Drop everything
+always corrections capture             # Manually run the active capture flow (no hotkey needed)
+```
+
+See [`docs/advanced_settings.md#manual-correction-capture`](docs/advanced_settings.md) for the
+hotkey workflow and the opt-in passive watcher.
+
 ### Daemon arguments
 
 | Flag | Default | Description |
@@ -249,6 +266,8 @@ always start --silence 1.5 --auto-enter
 | `stt_silence` | `2.0 s` | Long enough to tolerate natural mid-sentence pauses |
 | `stt_cooldown_ms` | `150 ms` | Debounces noisy VAD edges without slowing rapid commands |
 | `silero_threshold` | `0.5` | Canonical Silero VAD default |
+| `shortcut_log_correction` | `ctrl+alt+x` | Hotkey to capture a manual correction |
+| `passive_correction_capture` | `false` | Opt-in clipboard watcher for re-copies |
 
 ---
 

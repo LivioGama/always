@@ -1,7 +1,12 @@
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use serde_json::json;
+use uuid::Uuid;
 
+use always::always::correction::{self, CaptureOutcome};
+use always::always::correction_queue::{PendingCorrection, global_queue};
 use always::db;
 
 mod cli;
@@ -39,7 +44,7 @@ enum Commands {
         #[arg(short = 't', long, default_value = "30")]
         timeout: u32,
         /// Seconds of silence before considering phrase complete
-        #[arg(short = 's', long, default_value = "2.0")]
+        #[arg(short = 's', long, default_value = "1.5")]
         silence: f64,
         /// Press Enter automatically after pasting transcript
         #[arg(long, default_value_t = false)]
@@ -61,7 +66,7 @@ enum Commands {
         #[arg(short = 't', long, default_value = "30")]
         timeout: u32,
         /// Seconds of silence before considering phrase complete
-        #[arg(short = 's', long, default_value = "2.0")]
+        #[arg(short = 's', long, default_value = "1.5")]
         silence: f64,
         /// Press Enter automatically after pasting transcript
         #[arg(long, default_value_t = false)]
@@ -77,6 +82,11 @@ enum Commands {
         #[command(subcommand)]
         action: VocabAction,
     },
+    /// Review/apply manual corrections (list, approve, reject, clear, capture)
+    Corrections {
+        #[command(subcommand)]
+        action: CorrectionsAction,
+    },
     /// View and manage Always logs
     Logs {
         #[command(flatten)]
@@ -85,6 +95,29 @@ enum Commands {
     TogglePause,
     /// Toggle auto-enter state
     ToggleAutoEnter,
+}
+
+#[derive(Subcommand)]
+enum CorrectionsAction {
+    /// List pending corrections awaiting review.
+    List,
+    /// Approve a queued correction by ID — applies the (wrong → right)
+    /// pair to ~/.always/glossary.json and removes it from the queue.
+    Approve {
+        /// Pending-correction UUID (see `corrections list`).
+        id: String,
+    },
+    /// Drop a queued correction without applying.
+    Reject {
+        /// Pending-correction UUID (see `corrections list`).
+        id: String,
+    },
+    /// Drop every entry in the queue.
+    Clear,
+    /// Manually trigger capture-from-selection (same flow as the
+    /// ⌃⌥X hotkey). Reads the user's current text selection via Cmd+C
+    /// and diffs against the most recently pasted transcript.
+    Capture,
 }
 
 #[derive(Subcommand)]
@@ -163,6 +196,7 @@ fn main() -> Result<()> {
         }) => always::always::run(&always_config(lang, timeout, silence, auto_enter)?),
         Some(Commands::Config { action }) => handle_config(action),
         Some(Commands::Vocab { action }) => handle_vocab(action),
+        Some(Commands::Corrections { action }) => handle_corrections(action),
         Some(Commands::TogglePause) => handle_toggle_pause(),
         Some(Commands::ToggleAutoEnter) => handle_toggle_auto_enter(),
         Some(Commands::Logs { args }) => cli::handle_logs(args),
@@ -176,6 +210,9 @@ fn main() -> Result<()> {
             eprintln!("  status            Show always-on daemon status");
             eprintln!("  run               Run always-on in foreground (for debugging)");
             eprintln!("  config            Manage preferences");
+            eprintln!(
+                "  corrections       Review/apply manual corrections (list, approve, reject, clear, capture)"
+            );
             eprintln!("  vocab             Manage vocabulary and corrections");
             eprintln!("  toggle-pause      Toggle pause/resume state");
             eprintln!("  toggle-auto-enter Toggle auto-enter state");
@@ -283,6 +320,27 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .as_deref()
                     .unwrap_or("ctrl+alt+v")
             );
+            println!(
+                "shortcut_log_correction: {}",
+                prefs
+                    .shortcut_log_correction
+                    .as_deref()
+                    .unwrap_or("ctrl+alt+x")
+            );
+            println!(
+                "passive_correction_capture: {}",
+                prefs
+                    .passive_correction_capture
+                    .map(|v| if v { "true" } else { "false" })
+                    .unwrap_or("false")
+            );
+            println!(
+                "postprocess_enabled: {}",
+                prefs
+                    .postprocess_enabled
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "true".to_string())
+            );
         }
         ConfigAction::Set { key, value } => {
             // Handle API keys specially - store in keychain
@@ -364,6 +422,133 @@ fn handle_vocab(action: VocabAction) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn handle_corrections(action: CorrectionsAction) -> Result<()> {
+    // The queue is a singleton mirrored to ~/.always/pending_corrections.json,
+    // so every CLI invocation sees the same state the daemon does.
+    let queue = global_queue()?;
+
+    match action {
+        CorrectionsAction::List => {
+            let mut entries = queue.list();
+            if entries.is_empty() {
+                println!("No pending corrections.");
+                return Ok(());
+            }
+
+            // Stable display order: oldest first so users review FIFO.
+            entries.sort_by_key(|e| e.queued_at_unix_ms);
+
+            // Full UUID is printed (no truncation) so the value can be
+            // copy-pasted into `approve`/`reject` without ambiguity.
+            // Header row — width specifiers keep columns aligned with
+            // the data rows below.
+            let header = format!(
+                "{:<38} {:<10} {:<14} Wrong → Right",
+                "ID", "Source", "Queued"
+            );
+            println!("{header}");
+            for entry in &entries {
+                println!(
+                    "{:<38} {:<10} {:<14} {} → {}",
+                    entry.id,
+                    source_label(entry),
+                    relative_queued(entry.queued_at_unix_ms),
+                    entry.pair.wrong,
+                    entry.pair.right,
+                );
+            }
+        }
+        CorrectionsAction::Approve { id } => {
+            // Validate the UUID before touching the queue so a typo can't
+            // be silently mistaken for "not found".
+            let uuid = Uuid::parse_str(&id)
+                .map_err(|e| anyhow::anyhow!("invalid correction id '{id}': {e}"))?;
+            let Some(entry) = queue.take(uuid) else {
+                // Exit 1 on unknown ID so shell scripts can detect a stale
+                // reference (e.g. ID already approved/rejected concurrently).
+                eprintln!("unknown correction id: {id}");
+                std::process::exit(1);
+            };
+            correction::apply_pairs_to_glossary(std::slice::from_ref(&entry.pair))?;
+            println!("Applied: {} → {}", entry.pair.wrong, entry.pair.right);
+        }
+        CorrectionsAction::Reject { id } => {
+            let uuid = Uuid::parse_str(&id)
+                .map_err(|e| anyhow::anyhow!("invalid correction id '{id}': {e}"))?;
+            let Some(entry) = queue.take(uuid) else {
+                eprintln!("unknown correction id: {id}");
+                std::process::exit(1);
+            };
+            println!("Dropped: {} → {}", entry.pair.wrong, entry.pair.right);
+        }
+        CorrectionsAction::Clear => {
+            // Print the count *before* clearing so users see what they
+            // just discarded — `clear` is destructive and irreversible.
+            let n = queue.len();
+            println!("Removing {n} pending correction(s).");
+            queue.clear()?;
+            println!("Cleared.");
+        }
+        CorrectionsAction::Capture => {
+            // 60s window matches the default hotkey behaviour: a paste
+            // older than that is almost certainly unrelated to whatever
+            // the user has selected now.
+            match correction::capture_via_hotkey(Duration::from_secs(60))? {
+                CaptureOutcome::NoRecentPaste => {
+                    eprintln!("No recent paste to diff against.");
+                    std::process::exit(1);
+                }
+                CaptureOutcome::NoChange => {
+                    println!("Selection matches the last paste — nothing to record.");
+                }
+                CaptureOutcome::NoCorrectionPairs => {
+                    println!("Selection differs but no word pairs cleared the similarity gate.");
+                }
+                CaptureOutcome::Applied { pairs, applied } => {
+                    for pair in &pairs {
+                        println!("Recorded: {} → {}", pair.wrong, pair.right);
+                    }
+                    println!("Wrote {applied} new mistranscription(s) to ~/.always/glossary.json");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn source_label(entry: &PendingCorrection) -> &'static str {
+    use always::always::correction_queue::CorrectionSource;
+    match entry.source {
+        CorrectionSource::Hotkey => "hotkey",
+        CorrectionSource::Passive => "passive",
+    }
+}
+
+/// Format a unix-millis timestamp as "N units ago" relative to now.
+/// Uses humantime over a `Duration` rounded to seconds so the output
+/// is stable ("2min ago", "5s ago"); humantime emits a verbose
+/// multi-unit form, so we pull just the leading component for a
+/// compact list display.
+fn relative_queued(queued_at_unix_ms: u64) -> String {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if queued_at_unix_ms == 0 || queued_at_unix_ms > now_ms {
+        return "just now".to_string();
+    }
+    let secs = (now_ms - queued_at_unix_ms) / 1000;
+    if secs == 0 {
+        return "just now".to_string();
+    }
+    let formatted = humantime::format_duration(Duration::from_secs(secs)).to_string();
+    // humantime returns e.g. "2m 13s 400ms" — keep only the most
+    // significant chunk so the table column stays narrow.
+    let head = formatted.split_whitespace().next().unwrap_or(&formatted);
+    format!("{head} ago")
 }
 
 fn handle_toggle_pause() -> Result<()> {

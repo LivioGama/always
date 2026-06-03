@@ -72,17 +72,54 @@ pub fn handle_logs(cmd: LogsCommand) -> Result<()> {
 }
 
 fn resolve_log_file(log_dir: &Path, date: Option<&str>) -> Result<PathBuf> {
-    let date = date
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
-    let path = log_dir.join(format!("always.{date}"));
-    if !path.exists() {
-        anyhow::bail!(
-            "log file not found: {}. Available files: see `always logs --path`",
-            path.display()
-        );
+    if let Some(d) = date {
+        let path = log_dir.join(format!("always.{d}"));
+        if !path.exists() {
+            anyhow::bail!(
+                "log file not found: {}. Available files: see `always logs --path`",
+                path.display()
+            );
+        }
+        return Ok(path);
     }
-    Ok(path)
+
+    // tracing-appender rotates on UTC, but users think in local time. Try
+    // local date first, then UTC date, then fall back to the newest
+    // `always.*` file in the log dir.
+    let local = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let utc = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    for d in [&local, &utc] {
+        let path = log_dir.join(format!("always.{d}"));
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    if let Some(newest) = newest_log_file(log_dir) {
+        return Ok(newest);
+    }
+
+    anyhow::bail!(
+        "no log files found in {}. Run the daemon first.",
+        log_dir.display()
+    );
+}
+
+fn newest_log_file(log_dir: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(log_dir).ok()?;
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name()?.to_str()?;
+        if !name.starts_with("always.") {
+            continue;
+        }
+        let mtime = entry.metadata().ok()?.modified().ok()?;
+        if best.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
+            best = Some((mtime, path));
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 fn tail_pretty(path: &Path, level_filter: Option<&str>) -> Result<()> {

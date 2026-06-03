@@ -22,7 +22,6 @@ use reqwest::blocking::multipart as blocking_multipart;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::glossary;
 
 const GROQ_TRANSCRIPTIONS_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 const WHISPER_MODEL: &str = "whisper-large-v3-turbo";
@@ -57,7 +56,7 @@ pub enum SttError {
         #[source]
         source: reqwest::Error,
     },
-    #[error("Groq returned an unrecoverable error (HTTP {status}): {body}")]
+    #[error("STT provider returned an unrecoverable error (HTTP {status}): {body}")]
     ClientError { status: u16, body: String },
     #[error(
         "Groq transcription circuit breaker is open (cool-down {remaining_ms} ms remaining); \
@@ -178,7 +177,12 @@ fn backoff_with_jitter(attempt: u32) -> Duration {
 }
 
 fn build_form(audio_data: Vec<u8>) -> Result<blocking_multipart::Form, anyhow::Error> {
-    let mut form = blocking_multipart::Form::new()
+    // Whisper's `prompt` field is intentionally NOT used. It was tried
+    // historically and produced "I have an idea" → "I have an IntelliJ
+    // IDEA" because the bias listed every app on disk. Voice-to-text
+    // delivers what was said. Glossary corrections happen downstream
+    // in the optional LLM postprocess pass (`postprocess_enabled`).
+    let form = blocking_multipart::Form::new()
         .part(
             "file",
             blocking_multipart::Part::bytes(audio_data)
@@ -188,9 +192,6 @@ fn build_form(audio_data: Vec<u8>) -> Result<blocking_multipart::Form, anyhow::E
         .text("model", WHISPER_MODEL)
         .text("response_format", "verbose_json")
         .text("language", "en");
-    if let Some(prompt) = glossary::whisper_bias_prompt() {
-        form = form.text("prompt", prompt.clone());
-    }
     Ok(form)
 }
 

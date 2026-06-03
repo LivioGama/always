@@ -41,6 +41,7 @@ strsim = "0.11"
 parking_lot = "0.12"
 thiserror = "1"
 rand = "0.8"
+uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 tracing-appender = "0.2"

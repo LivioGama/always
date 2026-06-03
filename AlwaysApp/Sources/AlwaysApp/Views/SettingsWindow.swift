@@ -294,6 +294,7 @@ struct SettingsWindow: View {
         .onChange(of: config.sttSilence) { _, _ in saveConfig() }
         .onChange(of: config.sttCooldownMs) { _, _ in saveConfig() }
         .onChange(of: config.sileroThreshold) { _, _ in saveConfig() }
+        .onChange(of: config.postprocessEnabled) { _, _ in saveConfig() }
     }
 
     // MARK: Sections
@@ -327,15 +328,24 @@ struct SettingsWindow: View {
     }
 
     private var behaviorRow: some View {
-        HStack {
-            Toggle(
-                "Auto-Enter After Paste",
-                isOn: Binding(
-                    get: { stateMonitor.isAutoEnter },
-                    set: { _ in stateMonitor.toggleAutoEnter() }
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Toggle(
+                    "Auto-Enter After Paste",
+                    isOn: Binding(
+                        get: { stateMonitor.isAutoEnter },
+                        set: { _ in stateMonitor.toggleAutoEnter() }
+                    )
                 )
-            )
-            Spacer()
+                Spacer()
+            }
+            HStack {
+                Toggle(
+                    "Smart Postprocess (LLM grammar + glossary fixes)",
+                    isOn: $config.postprocessEnabled
+                )
+                Spacer()
+            }
         }
     }
 
@@ -481,7 +491,7 @@ struct SettingsWindow: View {
                         unit: "s",
                         formatter: Self.secondsFormatter,
                         value: $config.sttSilence,
-                        defaultValue: 2.0,
+                        defaultValue: 1.5,
                         range: 0.1...10
                     )
 
@@ -613,6 +623,7 @@ struct SettingsWindow: View {
                 _ = try await cliService.setConfig(key: "stt_cooldown_ms", value: String(config.sttCooldownMs))
                 _ = try await cliService.setConfig(key: "stt_auto_enter", value: String(config.sttAutoEnter))
                 _ = try await cliService.setConfig(key: "silero_threshold", value: String(config.sileroThreshold))
+                _ = try await cliService.setConfig(key: "postprocess_enabled", value: String(config.postprocessEnabled))
                 // Only save API key if it's not masked (doesn't contain only dots)
                 if shouldPersistApiKey(apiKey) {
                     _ = try await cliService.setConfig(key: "groq_api_key", value: apiKey.isEmpty ? "" : apiKey)

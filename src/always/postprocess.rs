@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -14,7 +13,14 @@ use crate::always::text::Vocabulary;
 /// Smart post-processing with auto-learning and grammar correction
 #[derive(Debug, Clone)]
 pub struct PostProcessor {
+    /// Carried for API stability (constructors accept it) but no
+    /// longer read after the pipeline-simplification pass — the LLM
+    /// `correct_grammar` path is the only remaining transformation.
+    /// Will be dropped from the constructor signature in a follow-up
+    /// once all call sites stop passing it.
+    #[allow(dead_code)]
     base_vocab: Vocabulary,
+    #[allow(dead_code)]
     context_vocab: Arc<Mutex<ContextVocabulary>>,
     learning_enabled: bool,
     groq_api_key: Option<String>,
@@ -64,61 +70,29 @@ impl PostProcessor {
         }
     }
 
-    pub async fn process(&self, text: &str, context: Option<&str>) -> Result<String> {
-        let mut result = text.to_string();
-
-        // Step 1: Apply base vocabulary corrections
-        result = self.base_vocab.apply(&result);
-
-        // Step 2: Apply context-aware corrections
-        {
-            let context_vocab = self.context_vocab.lock();
-            let context_corrections = context_vocab.get_context_corrections();
-            for (wrong, correct) in context_corrections {
-                result = result.replace(&wrong, &correct);
-            }
+    /// Single optional cleanup pass.
+    ///
+    /// Pre-simplification this method ran four steps (base vocab regex,
+    /// context vocab substring replace, route/root disambiguation, LLM
+    /// grammar). Each was added bug-by-bug; together they produced
+    /// non-debuggable interactions (e.g. `idea` being rewritten to
+    /// `IntelliJ IDEA` even after the LLM step was disabled).
+    ///
+    /// Now this is just the LLM call when `grammar_correction_enabled`
+    /// is true; otherwise raw passthrough. Strict prompt rules in
+    /// `glossary::build_postprocess_prompt` keep the LLM from inventing
+    /// substitutions. Voice-to-text delivers what was said by default.
+    pub async fn process(&self, text: &str, _context: Option<&str>) -> Result<String> {
+        if !self.config.grammar_correction_enabled {
+            return Ok(text.to_string());
         }
-
-        // Step 3: Context-aware disambiguation
-        result = self.disambiguate_context(&result, context);
-
-        // Step 4: Grammar correction with Groq Llama 3 (if API key available and enabled)
-        if self.config.grammar_correction_enabled
-            && let Some(ref api_key) = self.groq_api_key
-        {
-            result = self
-                .correct_grammar(&result, api_key)
-                .await
-                .unwrap_or(result);
-        }
-
-        Ok(result)
-    }
-
-    fn disambiguate_context(&self, text: &str, context: Option<&str>) -> String {
-        let mut result = text.to_string();
-
-        if let Some(ctx) = context {
-            // Filesystem context: "route" -> "root"
-            if ctx.contains("/") || ctx.contains("file") || ctx.contains("path") {
-                result = result.replace("route", "root");
-                result = result.replace("rute", "root");
-                result = result.replace("rowt", "root");
-            }
-
-            // Git context: "branch" -> "branch" (no change)
-            // "checkout" -> "checkout"
-
-            // Code context: "break" -> "break" (no change in code)
-            if ctx.contains("code") || ctx.contains("function") || ctx.contains("loop") {
-                // Keep "break" as is in code context
-            } else {
-                // In natural language, "brake" -> "break"
-                result = result.replace("brake", "break");
-            }
-        }
-
-        result
+        let Some(ref api_key) = self.groq_api_key else {
+            return Ok(text.to_string());
+        };
+        Ok(self
+            .correct_grammar(text, api_key)
+            .await
+            .unwrap_or_else(|_| text.to_string()))
     }
 
     async fn correct_grammar(&self, text: &str, api_key: &str) -> Result<String> {
@@ -141,7 +115,7 @@ impl PostProcessor {
                     },
                     {
                         "role": "user",
-                        "content": text
+                        "content": format!("<transcript>{}</transcript>", text)
                     }
                 ],
                 "temperature": 0.1,
@@ -246,85 +220,49 @@ impl PostProcessor {
         Ok(())
     }
 
-    pub fn apply_learned_corrections(&self, text: &str) -> String {
-        let mut result = text.to_string();
-
-        let Some(home) = dirs::home_dir() else {
-            tracing::warn!("home directory unavailable; skipping learned corrections");
-            return result;
-        };
-        let vocab_path = home.join(".always").join("learning.json");
-
-        if vocab_path.exists()
-            && let Ok(content) = std::fs::read_to_string(&vocab_path)
-            && let Ok(learning) = serde_json::from_str::<Vec<CorrectionEntry>>(&content)
-        {
-            for entry in learning {
-                result = result.replace(&entry.original, &entry.corrected);
-            }
-        }
-
-        result
-    }
-
-    pub fn code_aware_pattern_match(&self, text: &str) -> String {
-        let mut result = text.to_string();
-
-        // Code-specific patterns
-        let patterns = vec![
-            (r"\bimport\s+(\w+)\s+from", "import $1 from"),
-            (r"\bconst\s+(\w+)\s*=", "const $1 ="),
-            (r"\blet\s+(\w+)\s*=", "let $1 ="),
-            (r"\bfunction\s+(\w+)\s*\(", "function $1("),
-            (r"\bclass\s+(\w+)\s*{", "class $1 {"),
-            (r"\bif\s*\(([^)]+)\)\s*{", "if ($1) {"),
-            (r"\bfor\s*\(([^)]+)\)\s*{", "for ($1) {"),
-            (r"\bwhile\s*\(([^)]+)\)\s*{", "while ($1) {"),
-            (r"\breturn\s+([^;]+);", "return $1;"),
-            (r"\bconsole\.log\(([^)]+)\)", "console.log($1)"),
-        ];
-
-        for (pattern, replacement) in patterns {
-            if let Ok(regex) = Regex::new(pattern) {
-                result = regex.replace_all(&result, replacement).to_string();
-            }
-        }
-
-        result
-    }
+    // `apply_learned_corrections` and `code_aware_pattern_match` were
+    // removed in the pipeline-simplification pass. Both were called
+    // unconditionally from `event_loop::apply_vocabulary` and produced
+    // unpredictable interactions with the other rewriters. The single
+    // remaining cleanup path is the optional LLM `correct_grammar`
+    // call (gated on `postprocess_enabled`). See `docs/ARCHITECTURE.md`
+    // and the `pre-pipeline-simplification` git tag for the historical
+    // design.
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn disambiguates_route_to_root_in_filesystem_context() {
+    /// `process` returns the input verbatim when grammar correction
+    /// is disabled — voice-to-text default is "deliver what was said".
+    #[tokio::test]
+    async fn process_passthrough_when_disabled() {
         let processor = PostProcessor::new(
             Vocabulary::default_patterns(),
             Arc::new(Mutex::new(ContextVocabulary::new(None))),
-            false,
+            false, // grammar_correction_enabled = false
             None,
         );
-
-        assert_eq!(
-            processor.disambiguate_context("go to route", Some("file path")),
-            "go to root"
-        );
+        let out = processor
+            .process("I have an idea about Kubernetes.", None)
+            .await
+            .unwrap();
+        assert_eq!(out, "I have an idea about Kubernetes.");
     }
 
-    #[test]
-    fn applies_learned_corrections() {
+    /// Even with grammar correction enabled, missing API key falls
+    /// through to passthrough (we don't make the daemon hang on a
+    /// configuration error).
+    #[tokio::test]
+    async fn process_passthrough_when_enabled_but_no_api_key() {
         let processor = PostProcessor::new(
             Vocabulary::default_patterns(),
             Arc::new(Mutex::new(ContextVocabulary::new(None))),
-            false,
-            None,
+            true, // grammar_correction_enabled = true
+            None, // groq_api_key = None
         );
-
-        assert_eq!(
-            processor.apply_learned_corrections("test text"),
-            "test text"
-        );
+        let out = processor.process("hello world", None).await.unwrap();
+        assert_eq!(out, "hello world");
     }
 }
