@@ -23,7 +23,8 @@ use serde::Deserialize;
 use thiserror::Error;
 
 const GROQ_TRANSCRIPTIONS_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
-const WHISPER_MODEL: &str = "whisper-large-v3-turbo";
+pub const GROQ_MODEL_NAME: &str = "whisper-large-v3-turbo";
+const WHISPER_MODEL: &str = GROQ_MODEL_NAME;
 
 const MAX_ATTEMPTS: u32 = 3;
 const BASE_BACKOFF_MS: u64 = 200;

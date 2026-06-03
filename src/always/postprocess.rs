@@ -12,6 +12,28 @@ use super::config::PostprocessConfig;
 /// response cap (~500 chars) so 1 000 entries ~= 1 MB upper bound.
 const CACHE_MAX_ENTRIES: usize = 1_000;
 
+/// Rule-based punctuation fix for offline use (no Groq API key).
+/// Capitalises the first character and appends a period when the text
+/// ends without sentence-terminating punctuation.
+fn rule_based_correct(text: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() {
+        return String::new();
+    }
+    let mut chars = text.chars();
+    let first_upper: String = chars
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_default();
+    let rest: String = chars.collect();
+    let body = format!("{first_upper}{rest}");
+    if body.ends_with(['.', '!', '?', ';', ':']) {
+        body
+    } else {
+        format!("{body}.")
+    }
+}
+
 /// Optional LLM cleanup pass for the transcript.
 ///
 /// Single transformation: send the transcript to the Groq LLM with a
@@ -52,20 +74,21 @@ impl PostProcessor {
     /// otherwise raw passthrough. Strict prompt rules in
     /// `glossary::build_postprocess_prompt` keep the LLM from inventing
     /// substitutions. Voice-to-text delivers what was said by default.
-    pub async fn process(&self, text: &str, _context: Option<&str>) -> Result<String> {
+    pub async fn process(&self, text: &str, context: Option<&str>) -> Result<String> {
         if !self.config.grammar_correction_enabled {
             return Ok(text.to_string());
         }
         let Some(ref api_key) = self.groq_api_key else {
-            return Ok(text.to_string());
+            // No API key — apply rule-based punctuation as offline fallback.
+            return Ok(rule_based_correct(text));
         };
         Ok(self
-            .correct_grammar(text, api_key)
+            .correct_grammar(text, api_key, context)
             .await
             .unwrap_or_else(|_| text.to_string()))
     }
 
-    async fn correct_grammar(&self, text: &str, api_key: &str) -> Result<String> {
+    async fn correct_grammar(&self, text: &str, api_key: &str, context: Option<&str>) -> Result<String> {
         // Check cache first
         if let Some(cached) = self.cache.lock().get(text) {
             return Ok(cached.clone());
@@ -85,7 +108,13 @@ impl PostProcessor {
                     },
                     {
                         "role": "user",
-                        "content": format!("<transcript>{}</transcript>", text)
+                        "content": match context {
+                            Some(ctx) => format!(
+                                "<context_before>{}</context_before>\n<transcript>{}</transcript>",
+                                ctx, text
+                            ),
+                            None => format!("<transcript>{}</transcript>", text),
+                        }
                     }
                 ],
                 "temperature": 0.1,

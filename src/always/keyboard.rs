@@ -17,8 +17,6 @@
 //!   without registering anything. Voice activation still works; users
 //!   must toggle pause/auto-enter via the CLI for now.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
 #[cfg(feature = "macos")]
 use std::sync::mpsc;
 #[cfg(feature = "macos")]
@@ -31,17 +29,38 @@ use anyhow::Result;
 #[cfg(feature = "macos")]
 use super::{clipboard_watcher, config as always_config, correction, event, log, paste, pause};
 
-static CMD_HELD: std::sync::LazyLock<AtomicBool> =
-    std::sync::LazyLock::new(|| AtomicBool::new(false));
-
+/// True when the user is physically holding ⌘ right now.
+///
+/// Queries the live hardware modifier state from CoreGraphics instead of
+/// trusting the rdev-tracked `CMD_HELD` flag. That flag sticks at `true`
+/// forever if a single Meta key-release event is ever missed (which happens
+/// routinely during ⌘-Tab, Spotlight, or focus changes that steal the event
+/// stream) — and a stuck flag makes the daemon drop EVERY paste with a bogus
+/// "Command key held", which is exactly the "live streaming says I'm holding
+/// command" symptom. The OS state can't get stuck.
+#[cfg(feature = "macos")]
 pub fn is_cmd_held() -> bool {
-    CMD_HELD.load(Ordering::Relaxed)
+    // `CGEventSourceFlagsState(HIDSystemState)` reflects real keyboard
+    // hardware, ignoring the synthetic ⌘V / ⌘Z events we post ourselves.
+    unsafe extern "C" {
+        fn CGEventSourceFlagsState(state_id: i32) -> u64;
+    }
+    const HID_SYSTEM_STATE: i32 = 1;
+    const CG_EVENT_FLAG_COMMAND: u64 = 0x0010_0000;
+    let flags = unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) };
+    flags & CG_EVENT_FLAG_COMMAND != 0
+}
+
+#[cfg(not(feature = "macos"))]
+pub fn is_cmd_held() -> bool {
+    false
 }
 
 /// A parsed keyboard combo: modifier flags + a single character key.
 #[allow(dead_code)] // fields are unused on non-macos until Linux/Windows listeners land
 #[derive(Clone, Debug)]
 struct Combo {
+    cmd: bool,
     ctrl: bool,
     shift: bool,
     alt: bool,
@@ -50,9 +69,10 @@ struct Combo {
 
 #[allow(dead_code)] // listener body uses these on macOS only
 impl Combo {
-    /// Parse `"ctrl+alt+p"` (case-insensitive, any modifier order).
+    /// Parse `"ctrl+alt+p"` or `"cmd+alt+v"` (case-insensitive, any modifier order).
     /// Requires at least one modifier and exactly one key character.
     fn from_str(s: &str) -> Option<Self> {
+        let mut cmd = false;
         let mut ctrl = false;
         let mut shift = false;
         let mut alt = false;
@@ -60,17 +80,17 @@ impl Combo {
 
         for part in s.to_lowercase().split('+') {
             match part.trim() {
+                "meta" | "cmd" | "command" => cmd = true,
                 "ctrl" | "control" => ctrl = true,
                 "shift" => shift = true,
                 "alt" | "option" => alt = true,
-                "meta" | "cmd" | "command" => {}
                 c if !c.is_empty() => key_char = Some(c.to_string()),
                 _ => {}
             }
         }
 
         let key_char = key_char?;
-        if !ctrl && !shift && !alt {
+        if !cmd && !ctrl && !shift && !alt {
             return None;
         }
         if key_char.len() != 1 && key_char != "space" {
@@ -78,6 +98,7 @@ impl Combo {
         }
 
         Some(Combo {
+            cmd,
             ctrl,
             shift,
             alt,
@@ -87,8 +108,12 @@ impl Combo {
 
     /// Match a fired event by its modifier state + the key's portable
     /// shortcut name (e.g. `"p"`, `"space"`, `"a"`).
-    fn matches_name(&self, ctrl: bool, shift: bool, alt: bool, key_name: &str) -> bool {
-        self.ctrl == ctrl && self.shift == shift && self.alt == alt && self.key_char == key_name
+    fn matches_name(&self, cmd: bool, ctrl: bool, shift: bool, alt: bool, key_name: &str) -> bool {
+        self.cmd == cmd
+            && self.ctrl == ctrl
+            && self.shift == shift
+            && self.alt == alt
+            && self.key_char == key_name
     }
 }
 
@@ -312,11 +337,11 @@ pub fn start_keyboard_listener() -> Result<()> {
             EventType::KeyRelease(Key::Alt) | EventType::KeyRelease(Key::AltGr) => {
                 alt_pressed = false;
             }
-            EventType::KeyPress(Key::MetaLeft) | EventType::KeyPress(Key::MetaRight) => {
-                CMD_HELD.store(true, Ordering::Relaxed);
-            }
+            // ⌘ state is read live from the OS in `is_cmd_held` — we only
+            // need to swallow Meta key events here so they don't fall through
+            // to the general key handler and cancel the auto-enter countdown.
+            EventType::KeyPress(Key::MetaLeft) | EventType::KeyPress(Key::MetaRight) => {}
             EventType::KeyRelease(Key::MetaLeft) | EventType::KeyRelease(Key::MetaRight) => {
-                CMD_HELD.store(false, Ordering::Relaxed);
             }
             EventType::KeyPress(ref key) => {
                 let Some(name) = key_to_shortcut_name(key) else {
@@ -339,7 +364,11 @@ pub fn start_keyboard_listener() -> Result<()> {
                     pause::countdown_request_cancel();
                     pause::dictation_buffer_clear();
                 }
-                if pause_combo.matches_name(ctrl_pressed, shift_pressed, alt_pressed, name) {
+                // Real hardware ⌘ state, not the tracked flag — see
+                // `is_cmd_held`. A stuck flag would otherwise break every
+                // ctrl+alt shortcut (they require ⌘ released).
+                let cmd_pressed = is_cmd_held();
+                if pause_combo.matches_name(cmd_pressed, ctrl_pressed, shift_pressed, alt_pressed, name) {
                     // Context-aware pause hotkey:
                     //   1. Master pause is set (idle/audio/mic watchdog
                     //      or explicit "Pause everything") → clear
@@ -365,6 +394,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                         }
                     }
                 } else if auto_enter_combo.matches_name(
+                    cmd_pressed,
                     ctrl_pressed,
                     shift_pressed,
                     alt_pressed,
@@ -382,6 +412,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                         logger.write(log::Event::AutoEnterToggled { enabled: new_state });
                     }
                 } else if force_paste_combo.matches_name(
+                    cmd_pressed,
                     ctrl_pressed,
                     shift_pressed,
                     alt_pressed,
@@ -406,6 +437,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                         tracing::debug!("force_paste_no_text");
                     }
                 } else if log_correction_combo.matches_name(
+                    cmd_pressed,
                     ctrl_pressed,
                     shift_pressed,
                     alt_pressed,
@@ -448,6 +480,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                         }
                     }
                 } else if correction_dialog_combo.matches_name(
+                    cmd_pressed,
                     ctrl_pressed,
                     shift_pressed,
                     alt_pressed,
@@ -567,9 +600,9 @@ mod tests {
     #[test]
     fn parses_shortcut_with_modifiers_and_key() {
         let combo = Combo::from_str("ctrl+alt+p").expect("valid shortcut");
-        assert!(combo.matches_name(true, false, true, "p"));
-        assert!(!combo.matches_name(true, true, true, "p"));
-        assert!(!combo.matches_name(true, false, true, "a"));
+        assert!(combo.matches_name(false, true, false, true, "p"));
+        assert!(!combo.matches_name(false, true, true, true, "p"));
+        assert!(!combo.matches_name(false, true, false, true, "a"));
     }
 
     #[test]
@@ -582,8 +615,8 @@ mod tests {
     #[test]
     fn matches_supported_key_names() {
         let combo = Combo::from_str("ctrl+alt+space").unwrap();
-        assert!(combo.matches_name(true, false, true, "space"));
-        assert!(!combo.matches_name(true, false, true, "p"));
+        assert!(combo.matches_name(false, true, false, true, "space"));
+        assert!(!combo.matches_name(false, true, false, true, "p"));
     }
 
     #[test]
@@ -602,11 +635,11 @@ mod tests {
                 Some("not a combo"),
                 Some(""),
             );
-        assert!(pause.matches_name(true, false, true, "p"));
-        assert!(auto_enter.matches_name(true, false, true, "a"));
-        assert!(force_paste.matches_name(true, false, true, "v"));
-        assert!(log_correction.matches_name(true, false, true, "x"));
-        assert!(correction_dialog.matches_name(true, false, true, "w"));
+        assert!(pause.matches_name(false, true, false, true, "p"));
+        assert!(auto_enter.matches_name(false, true, false, true, "a"));
+        assert!(force_paste.matches_name(false, true, false, true, "v"));
+        assert!(log_correction.matches_name(false, true, false, true, "x"));
+        assert!(correction_dialog.matches_name(false, true, false, true, "w"));
     }
 
     #[cfg(feature = "macos")]
@@ -620,11 +653,11 @@ mod tests {
                 Some("ctrl+alt+l"),
                 Some("ctrl+alt+m"),
             );
-        assert!(pause.matches_name(false, true, false, "x"));
-        assert!(auto_enter.matches_name(true, false, false, "space"));
-        assert!(force_paste.matches_name(true, true, false, "v"));
-        assert!(log_correction.matches_name(true, false, true, "l"));
-        assert!(correction_dialog.matches_name(true, false, true, "m"));
+        assert!(pause.matches_name(false, false, true, false, "x"));
+        assert!(auto_enter.matches_name(false, true, false, false, "space"));
+        assert!(force_paste.matches_name(false, true, true, false, "v"));
+        assert!(log_correction.matches_name(false, true, false, true, "l"));
+        assert!(correction_dialog.matches_name(false, true, false, true, "m"));
     }
 
     #[cfg(feature = "macos")]
@@ -632,10 +665,28 @@ mod tests {
     fn log_correction_default_is_ctrl_alt_x() {
         let (pause, auto_enter, force_paste, log_correction, correction_dialog) =
             super::resolve_shortcuts(None, None, None, None, None);
-        assert!(pause.matches_name(true, false, true, "p"));
-        assert!(auto_enter.matches_name(true, false, true, "a"));
-        assert!(force_paste.matches_name(true, false, true, "v"));
-        assert!(log_correction.matches_name(true, false, true, "x"));
-        assert!(correction_dialog.matches_name(true, false, true, "w"));
+        assert!(pause.matches_name(false, true, false, true, "p"));
+        assert!(auto_enter.matches_name(false, true, false, true, "a"));
+        assert!(force_paste.matches_name(false, true, false, true, "v"));
+        assert!(log_correction.matches_name(false, true, false, true, "x"));
+        assert!(correction_dialog.matches_name(false, true, false, true, "w"));
+    }
+
+    #[test]
+    fn cmd_modifier_parsed_and_matched() {
+        let combo = Combo::from_str("cmd+alt+v").expect("cmd+alt+v is valid");
+        // cmd=true, ctrl=false, shift=false, alt=true, key="v"
+        assert!(combo.matches_name(true, false, false, true, "v"));
+        // Cmd held but ctrl also pressed — should NOT match (ctrl mismatch)
+        assert!(!combo.matches_name(true, true, false, true, "v"));
+        // Cmd not held — must NOT fire (prevents accidental alt+v trigger)
+        assert!(!combo.matches_name(false, false, false, true, "v"));
+    }
+
+    #[test]
+    fn cmd_only_combo_is_valid() {
+        let combo = Combo::from_str("cmd+v").expect("cmd+v is valid");
+        assert!(combo.matches_name(true, false, false, false, "v"));
+        assert!(!combo.matches_name(false, false, false, false, "v"));
     }
 }

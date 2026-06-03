@@ -109,6 +109,8 @@ enum OverlayState: Equatable, Hashable {
     case idleAutoPaused(seconds: Int)
     /// Microphone volume warning - energy level is too low for reliable detection.
     case lowMicrophoneVolume(energy: Double)
+    /// Async grammar correction silently replaced the pasted text.
+    case grammarCorrected
 
     /// Persistent HUD states that should appear instantly (no fade-in).
     var isInstantShow: Bool {
@@ -135,6 +137,7 @@ enum OverlayState: Equatable, Hashable {
         case .autoEnterCountdown(let s): return "Auto-Enter in \(s)s · any key cancels"
         case .idleAutoPaused(let s): return "Idle for \(s)s · paused"
         case .lowMicrophoneVolume(let energy): return String(format: "Low mic volume · energy %.3f", energy)
+        case .grammarCorrected: return "✓ Grammar corrected"
         }
     }
 
@@ -153,6 +156,7 @@ enum OverlayState: Equatable, Hashable {
         case .autoEnterCountdown: return "return"
         case .idleAutoPaused: return "moon.zzz.fill"
         case .lowMicrophoneVolume: return "speaker.slash.fill"
+        case .grammarCorrected: return "sparkles"
         }
     }
 
@@ -171,6 +175,7 @@ enum OverlayState: Equatable, Hashable {
         case .autoEnterCountdown: return .systemYellow
         case .idleAutoPaused: return .systemOrange
         case .lowMicrophoneVolume: return .systemRed
+        case .grammarCorrected: return .systemTeal
         }
     }
 }

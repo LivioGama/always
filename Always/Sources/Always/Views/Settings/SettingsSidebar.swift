@@ -2,19 +2,21 @@ import SwiftUI
 
 enum SettingsPanel: String, CaseIterable {
     case general = "General"
+    case models = "Models"
     case behavior = "Behavior"
     case shortcuts = "Shortcuts"
     case vocabulary = "Vocabulary"
-    case models = "Models"
+    case history = "History"
     case about = "About"
 
     var symbol: String {
         switch self {
         case .general:    return "app.badge.checkmark"
+        case .models:     return "cpu"
         case .behavior:   return "slider.horizontal.3"
         case .shortcuts:  return "command"
         case .vocabulary: return "character.book.closed"
-        case .models:     return "cpu"
+        case .history:    return "clock.fill"
         case .about:      return "info.circle"
         }
     }

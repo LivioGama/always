@@ -60,8 +60,9 @@ enum LoadedEngine {
 pub struct LocalTranscriber {
     engine: Mutex<LoadedEngine>,
     /// Optional ISO 639-1 language hint passed to multi-lingual engines.
-    /// `None` means "let the engine auto-detect" (Whisper / Canary) or
-    /// "engine is monolingual" (Parakeet V2 / Moonshine / GigaAM).
+    /// `None` means "auto" — let the engine auto-detect (Whisper /
+    /// SenseVoice) or, for engines that bake the language into the decode
+    /// prompt (Canary / Cohere), fall back to the engine's own default.
     language: Option<String>,
 }
 
@@ -150,15 +151,22 @@ impl Transcriber for LocalTranscriber {
             .lock()
             .map_err(|_| SttError::Other(anyhow::anyhow!("local engine mutex poisoned")))?;
 
-        let lang_hint = self.language.clone();
+        // Audio duration is what the hallucination filter needs — NOT processing
+        // time. Processing time (how fast the engine ran) is logged separately.
+        let audio_duration_secs = samples.len() as f64 / 16_000.0;
         let started = std::time::Instant::now();
-        let text = run_engine(&mut engine, &samples, lang_hint).map_err(SttError::Other)?;
-        let duration = started.elapsed().as_secs_f64();
-        tracing::debug!(elapsed_ms = (duration * 1000.0) as u64, "local_stt_done");
+        let text = run_engine(&mut engine, &samples, self.language.clone())
+            .map_err(SttError::Other)?;
+        let elapsed = started.elapsed().as_secs_f64();
+        tracing::debug!(
+            elapsed_ms = (elapsed * 1000.0) as u64,
+            audio_secs = audio_duration_secs,
+            "local_stt_done"
+        );
 
         Ok(TranscriptionResult {
             text: text.trim().to_string(),
-            duration,
+            duration: audio_duration_secs,
             language: self.language.clone().unwrap_or_default(),
             segments: vec![],
         })

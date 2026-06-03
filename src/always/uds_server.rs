@@ -320,6 +320,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     let is_master_paused = pause::is_master_paused();
     let is_auto_enter = pause::is_auto_enter_enabled();
     let resumed_bundles = crate::always::per_app::resumed_apps();
+    let active_backend = ctx.cfg.read().transcriber_backend.to_string();
 
     // The Hello frame MUST be first so version-mismatched clients can
     // disconnect before reading state they may not understand.
@@ -343,6 +344,11 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
             DaemonEvent::AutoEnterEnabled
         } else {
             DaemonEvent::AutoEnterDisabled
+        },
+        // Tell the client which transcriber backend is active so the UI
+        // shows the correct model selection after reconnect.
+        DaemonEvent::ActiveTranscriberChanged {
+            backend: active_backend,
         },
     ];
 
@@ -655,6 +661,15 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
         DaemonCommand::ListModels => {
             let models = ctx.registry.list();
             global_broadcaster().send(DaemonEvent::ModelsList { models });
+            // Always re-announce the active backend alongside the catalog.
+            // The Models panel's client is a lazy singleton that may not have
+            // existed when the connection-time ActiveTranscriberChanged was
+            // broadcast — so without this, the panel never learns which model
+            // is active after relaunch and shows the wrong selection.
+            let active_backend = ctx.cfg.read().transcriber_backend.to_string();
+            global_broadcaster().send(DaemonEvent::ActiveTranscriberChanged {
+                backend: active_backend,
+            });
         }
         DaemonCommand::DownloadModel { model_id } => {
             let registry = ctx.registry.clone();
@@ -699,6 +714,35 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
             }
             Err(e) => tracing::error!(error = %e, backend, "uds_set_active_invalid"),
         },
+        DaemonCommand::SetLanguage { lang } => {
+            set_language(ctx, &lang);
+        }
+    }
+}
+
+/// Update the transcription language live: write `cfg.lang`, persist to the
+/// prefs DB, and rebuild the active transcriber so engines that bake the
+/// language into their decode (Canary, Cohere, SenseVoice) pick it up
+/// without a daemon restart.
+fn set_language(ctx: &ModelCommandCtx, lang: &str) {
+    {
+        let mut cfg = ctx.cfg.write();
+        cfg.lang = lang.to_string();
+    }
+    // Persist for the next daemon start.
+    if let Ok(conn) = crate::db::open() {
+        if let Err(e) = crate::db::set_preference(&conn, "lang", lang) {
+            tracing::warn!(error = %e, lang, "persist_lang_failed");
+        }
+    }
+    // Rebuild the active transcriber with the new language hint.
+    let cfg_snapshot = ctx.cfg.read().clone();
+    match build_transcriber(&cfg_snapshot, &ctx.registry) {
+        Ok(transcriber) => {
+            *ctx.active.write() = transcriber;
+            tracing::info!(lang, "uds_set_language_rebuilt");
+        }
+        Err(e) => tracing::error!(error = %e, lang, "uds_set_language_rebuild_failed"),
     }
 }
 

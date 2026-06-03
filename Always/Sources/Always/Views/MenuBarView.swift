@@ -10,47 +10,6 @@ struct MenuBarView: View {
     @ObservedObject private var focusedApp = FocusedAppMonitor.shared
     @Environment(\.openWindow) private var openWindow
 
-    /// Top-line status text. When effectively paused, surface the
-    /// focused app so the user can answer "why am I paused?" without
-    /// opening Settings.
-    private var statusText: String {
-        if !stateMonitor.isDaemonConnected {
-            return stateMonitor.isDaemonDegraded ? "Reconnecting…" : "Connecting…"
-        }
-        if stateMonitor.isPaused {
-            if stateMonitor.isMasterPaused {
-                return "Paused everywhere"
-            }
-            if stateMonitor.isIdleAutoPaused {
-                return "Idle pause (speak or switch app)"
-            }
-            if let name = focusedApp.currentAppName, !name.isEmpty {
-                return "Paused for \(name)"
-            }
-            return "Paused"
-        }
-        if stateMonitor.isTranscribing { return "Transcribing" }
-        if let name = focusedApp.currentAppName, !name.isEmpty {
-            return "Active in \(name)"
-        }
-        return "Listening"
-    }
-
-    private var statusColor: Color {
-        if !stateMonitor.isDaemonConnected { return .orange }
-        if stateMonitor.isPaused { return .gray }
-        if stateMonitor.isTranscribing { return .blue }
-        return .green
-    }
-
-    private var statusIcon: String {
-        StatusIconResolver.symbolName(
-            isConnected: stateMonitor.isDaemonConnected,
-            isDegraded: stateMonitor.isDaemonDegraded,
-            isPaused: stateMonitor.isPaused,
-            isTranscribing: stateMonitor.isTranscribing
-        )
-    }
 
     /// Whether the focused app is on the user's resumed allowlist
     /// (override has `paused: false`).
@@ -75,19 +34,55 @@ struct MenuBarView: View {
         focusedAppIsResumed ? "minus.circle" : "checkmark.circle"
     }
 
+    /// Top-line status text. When effectively paused, surface the
+    /// focused app so the user can answer "why am I paused?".
+    private var statusText: String {
+        if !stateMonitor.isDaemonConnected {
+            return stateMonitor.isDaemonDegraded ? "Reconnecting…" : "Connecting…"
+        }
+        if stateMonitor.isPaused {
+            if stateMonitor.isMasterPaused { return "Paused everywhere" }
+            if stateMonitor.isIdleAutoPaused { return "Idle pause (speak or switch app)" }
+            if let name = focusedApp.currentAppName, !name.isEmpty { return "Paused for \(name)" }
+            return "Paused"
+        }
+        if stateMonitor.isTranscribing { return "Transcribing" }
+        if let name = focusedApp.currentAppName, !name.isEmpty { return "Active in \(name)" }
+        return "Listening"
+    }
+
+    private var statusColor: Color {
+        if !stateMonitor.isDaemonConnected { return .orange }
+        if stateMonitor.isPaused { return .gray }
+        if stateMonitor.isTranscribing { return .blue }
+        return .green
+    }
+
+    private var statusIcon: String {
+        StatusIconResolver.symbolName(
+            isConnected: stateMonitor.isDaemonConnected,
+            isDegraded: stateMonitor.isDaemonDegraded,
+            isPaused: stateMonitor.isPaused,
+            isTranscribing: stateMonitor.isTranscribing
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // Status line — a normal, non-interactive menu entry. Same icon
+            // width + padding as MenuRow so it reads as part of the menu.
             HStack(spacing: 8) {
                 Image(systemName: statusIcon)
+                    .frame(width: 16, alignment: .center)
                     .foregroundColor(statusColor)
                 Text(statusText)
-                    .font(.headline)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.vertical, 6)
+            .foregroundColor(.secondary)
 
             Divider()
 

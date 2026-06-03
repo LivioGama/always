@@ -551,6 +551,10 @@ fn handle_speech(
                 return Err(err);
             }
             let pasted_at = Instant::now();
+            // Snapshot the focused app at paste time. If the user switches
+            // apps (or submits the message) before the grammar patch fires,
+            // Cmd+Z would land in the wrong window and create a double paste.
+            let pasted_to_app = pause::current_app();
 
             if grammar_patch_async {
                 // TODO(clipboard-restore): the async-grammar path ends with
@@ -563,7 +567,7 @@ fn handle_speech(
                 // intricate than the synchronous case, so the clipboard
                 // restore for the async-grammar path is deliberately
                 // deferred. The synchronous + no-grammar path below restores.
-                spawn_grammar_patch(rt, cfg, final_text.clone(), pasted_at);
+                spawn_grammar_patch(rt, cfg, final_text.clone(), pasted_at, pasted_to_app);
             } else {
                 pause::end_paste();
                 // Synchronous / no-grammar path: this was the last clipboard
@@ -747,6 +751,7 @@ fn spawn_grammar_patch(
     cfg: &AlwaysConfig,
     acoustic_pasted: String,
     pasted_at: Instant,
+    pasted_to_app: Option<String>,
 ) {
     let Some(pp) = cfg.post_processor.clone() else {
         return;
@@ -804,6 +809,30 @@ fn spawn_grammar_patch(
             return;
         }
 
+        // Abort if the focused app changed since the paste. The most common
+        // case: user pressed Enter to submit the message before the LLM
+        // corrected it. Cmd+Z would land in the wrong window (e.g., a code
+        // editor) and the subsequent Cmd+V would create a duplicate paste.
+        let current_app = pause::current_app();
+        if current_app != pasted_to_app {
+            tracing::info!(
+                pasted_to = ?pasted_to_app,
+                current = ?current_app,
+                "grammar_patch_aborted_app_switched"
+            );
+            return;
+        }
+
+        // Abort when auto-enter is enabled and the dictation buffer was
+        // cleared — auto_enter_countdown clears it the moment Return fires.
+        // If the buffer is gone, the message was already submitted: Cmd+Z
+        // would do nothing (empty input) and Cmd+V would ghost-paste the
+        // corrected text as a new message — the "double transcript" bug.
+        if pause::is_auto_enter_enabled() && pause::dictation_buffer_text().is_none() {
+            tracing::info!("grammar_patch_aborted_message_submitted");
+            return;
+        }
+
         let clipboard = format!("{cleaned} ");
         if let Err(err) = paste::replace_via_undo(&clipboard) {
             tracing::warn!(
@@ -821,6 +850,8 @@ fn spawn_grammar_patch(
             "async grammar correction applied"
         );
         pause::set_last_pasted(cleaned.clone());
+        // Notify the UI that grammar correction silently mutated the text.
+        event::global_broadcaster().grammar_corrected(acoustic_pasted.clone(), cleaned.clone());
         event::global_broadcaster().transcript_final(cleaned);
     });
 }

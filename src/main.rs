@@ -37,8 +37,8 @@ struct Cli {
 enum Commands {
     /// Start always-on daemon in background
     Start {
-        /// Language code for transcription
-        #[arg(short = 'l', long, default_value = "en")]
+        /// Language code for transcription (ISO 639-1, or "auto" to let the engine detect)
+        #[arg(short = 'l', long, default_value = "auto")]
         lang: String,
         /// Maximum recording duration per phrase in seconds
         #[arg(short = 't', long, default_value = "30")]
@@ -64,8 +64,8 @@ enum Commands {
     /// Run always-on in foreground (for debugging)
     #[command(name = "run")]
     RunForeground {
-        /// Language code for transcription
-        #[arg(short = 'l', long, default_value = "en")]
+        /// Language code for transcription (ISO 639-1, or "auto" to let the engine detect)
+        #[arg(short = 'l', long, default_value = "auto")]
         lang: String,
         /// Maximum recording duration per phrase in seconds
         #[arg(short = 't', long, default_value = "30")]
@@ -263,6 +263,10 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                 .unwrap_or(None)
                 .is_some();
 
+            println!(
+                "lang: {}",
+                prefs.lang.as_deref().unwrap_or("auto")
+            );
             println!(
                 "deepgram_api_key: {}",
                 if deepgram_in_keychain {

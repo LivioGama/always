@@ -133,6 +133,8 @@ struct SettingsWindow: View {
             ShortcutsPanel(cliService: cliService, config: $config)
         case .vocabulary:
             VocabularyPanel()
+        case .history:
+            HistoryPanel()
         case .models:
             ModelsPanel(
                 config: $config,

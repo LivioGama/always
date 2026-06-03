@@ -28,8 +28,17 @@ final class ModelManagerClient: ObservableObject {
     /// Ids currently being verified (SHA256) or extracted (tar.gz).
     @Published var verifying: Set<String> = []
     @Published var extracting: Set<String> = []
+    /// Ids that finished extraction and are waiting for the ModelsList
+    /// snapshot to confirm `is_downloaded = true`. Bridges the gap between
+    /// extraction completing and the catalog refresh arriving.
+    @Published var installing: Set<String> = []
     /// Active backend in canonical wire form — `groq` or `local:<id>`.
     @Published var activeBackend: String = "groq"
+    /// Backend the user asked to switch to but the daemon hasn't confirmed
+    /// yet. Set optimistically on `setActive`; cleared when
+    /// `ActiveTranscriberChanged` arrives. Drives the "Loading…" spinner
+    /// in the Use button.
+    @Published var loadingBackend: String? = nil
     /// Per-id terminal error message. Surfaced in the row until the
     /// user retries or dismisses.
     @Published var errors: [String: String] = [:]
@@ -128,7 +137,10 @@ final class ModelManagerClient: ObservableObject {
 
     /// Switch the active backend. Pass `"groq"` for the remote API,
     /// `"local:<model_id>"` for a downloaded engine.
+    /// Sets `loadingBackend` optimistically so the UI can show a spinner
+    /// immediately — cleared when `ActiveTranscriberChanged` confirms.
     func setActive(backend: String) {
+        loadingBackend = backend
         StateMonitor.shared.sendCommandWithData("SetActiveTranscriber", ["backend": backend])
     }
 
@@ -139,59 +151,99 @@ final class ModelManagerClient: ObservableObject {
         case .modelsList:
             if let list = event.modelsList {
                 models = list.models
+                // A model that's now confirmed on disk is fully done —
+                // clear ALL in-progress state so the row settles into the
+                // Downloaded section with a Use button.
+                for m in list.models where m.is_downloaded {
+                    installing.remove(m.id)
+                    verifying.remove(m.id)
+                    extracting.remove(m.id)
+                    downloadProgress.removeValue(forKey: m.id)
+                    downloadBytes.removeValue(forKey: m.id)
+                }
             }
         case .modelDownloadProgress:
             if let p = event.modelDownloadProgress {
-                downloadProgress[p.model_id] = p.percentage
-                downloadBytes[p.model_id] = (p.downloaded, p.total)
+                if p.percentage >= 100.0 {
+                    // Bytes done. Drop the progress bar and enter the persistent
+                    // `installing` floor state immediately — the daemon still has
+                    // to verify + extract, and those events may lag. `installing`
+                    // holds the row "in progress" with no gap until ModelsList
+                    // confirms is_downloaded, so it never flickers back to the
+                    // Download button between phases.
+                    downloadProgress.removeValue(forKey: p.model_id)
+                    downloadBytes.removeValue(forKey: p.model_id)
+                    installing.insert(p.model_id)
+                } else {
+                    downloadProgress[p.model_id] = p.percentage
+                    downloadBytes[p.model_id] = (p.downloaded, p.total)
+                }
             }
         case .modelDownloadComplete:
             if let id = event.modelId?.model_id {
                 downloadProgress.removeValue(forKey: id)
                 downloadBytes.removeValue(forKey: id)
                 errors.removeValue(forKey: id)
-                // Refresh the snapshot to pick up `is_downloaded = true`
-                // and the cleared `partial_size`. The daemon also sends
-                // a fresh `ModelsList`, but requesting one here makes
-                // the UI snappy when reconnecting mid-download.
+                // DownloadComplete fires LAST (after verify + extract). Keep the
+                // `installing` floor set until ModelsList confirms is_downloaded.
+                installing.insert(id)
                 requestModelsList()
             }
         case .modelDownloadCancelled:
             if let id = event.modelId?.model_id {
                 downloadProgress.removeValue(forKey: id)
                 downloadBytes.removeValue(forKey: id)
+                installing.remove(id)
+                verifying.remove(id)
+                extracting.remove(id)
             }
         case .modelDownloadFailed:
             if let err = event.modelError {
                 downloadProgress.removeValue(forKey: err.model_id)
                 downloadBytes.removeValue(forKey: err.model_id)
+                installing.remove(err.model_id)
+                verifying.remove(err.model_id)
+                extracting.remove(err.model_id)
                 errors[err.model_id] = err.error
                 logger.error("download failed for \(err.model_id, privacy: .public): \(err.error, privacy: .public)")
             }
         case .modelVerificationStarted:
             if let id = event.modelId?.model_id {
                 verifying.insert(id)
+                installing.insert(id)   // floor — survives VerificationCompleted
             }
         case .modelVerificationCompleted:
             if let id = event.modelId?.model_id {
+                // Only drop the specific "Verifying…" label. `installing` floor
+                // remains, so there's no gap before ExtractionStarted (directory
+                // models) or DownloadComplete (single-file models).
                 verifying.remove(id)
             }
         case .modelExtractionStarted:
             if let id = event.modelId?.model_id {
                 extracting.insert(id)
+                installing.insert(id)   // floor
             }
         case .modelExtractionCompleted:
             if let id = event.modelId?.model_id {
+                // Drop the "Extracting…" label; installing floor remains until
+                // ModelsList confirms is_downloaded.
                 extracting.remove(id)
+                requestModelsList()
             }
         case .modelExtractionFailed:
             if let err = event.modelError {
                 extracting.remove(err.model_id)
+                installing.remove(err.model_id)
+                verifying.remove(err.model_id)
                 errors[err.model_id] = err.error
             }
         case .activeTranscriberChanged:
             if let payload = event.activeTranscriber {
                 activeBackend = payload.backend
+                // Daemon confirmed the switch — clear the optimistic loading
+                // indicator regardless of which backend became active.
+                loadingBackend = nil
             }
         default:
             break
