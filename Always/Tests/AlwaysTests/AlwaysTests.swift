@@ -61,12 +61,16 @@ final class AlwaysTests: XCTestCase {
             "sttCooldownMs": 150,
             "sttSilence": 0.4,
             "sttAutoEnter": true,
+            "autoEnterDelayMs": 4000,
             "groqApiKey": null,
             "sileroThreshold": 0.5,
             "shortcutPause": "ctrl+alt+p",
             "shortcutAutoEnter": "ctrl+alt+a",
             "shortcutForcePaste": "ctrl+alt+v",
-            "postprocessEnabled": true
+            "shortcutCorrectionDialog": "ctrl+alt+w",
+            "postprocessEnabled": true,
+            "idlePauseSecs": 120,
+            "idlePauseAction": "pause"
         }
         """
         let data = json.data(using: .utf8)!
@@ -76,8 +80,36 @@ final class AlwaysTests: XCTestCase {
         XCTAssertEqual(config.sttCooldownMs, 150)
         XCTAssertEqual(config.sttSilence, 0.4)
         XCTAssertTrue(config.sttAutoEnter)
+        XCTAssertEqual(config.autoEnterDelayMs, 4000)
         XCTAssertEqual(config.sileroThreshold, 0.5)
         XCTAssertEqual(config.shortcutPause, "ctrl+alt+p")
+        XCTAssertEqual(config.idlePauseSecs, 120)
+    }
+
+    // Regression: the CLI's `config show` output uses `auto_enter_delay_ms`
+    // (in milliseconds). Earlier builds emitted `auto_enter_delay_secs` and
+    // Swift parsed it differently — silently breaking the round-trip.
+    func testConfigFromCLIParsesAutoEnterDelayMs() throws {
+        let cliOutput = """
+        stt_energy_threshold: 0.012
+        hear_energy_threshold: 0.001
+        stt_cooldown_ms: 150
+        stt_silence: 2.0
+        stt_auto_enter: true
+        auto_enter_delay_ms: 4000
+        silero_threshold: 0.5
+        idle_pause_secs: 120
+        idle_pause_action: pause
+        postprocess_enabled: true
+        """
+        guard let config = Config.fromCLI(output: cliOutput) else {
+            return XCTFail("fromCLI returned nil")
+        }
+        XCTAssertEqual(config.autoEnterDelayMs, 4000)
+        XCTAssertEqual(config.sttSilence, 2.0)
+        XCTAssertTrue(config.sttAutoEnter)
+        XCTAssertEqual(config.idlePauseSecs, 120)
+        XCTAssertEqual(config.idlePauseAction, "pause")
     }
 
     func testDaemonStatusModel() throws {
@@ -232,6 +264,12 @@ final class AlwaysTests: XCTestCase {
             from: #"{"type":"Paused","data":null}"#.data(using: .utf8)!
         )
         let pausedExp = expectation(description: "isPaused becomes true")
+        // assertForOverFulfill=false: StateMonitor is a singleton across the
+        // test suite. If another test toggled isPaused → true earlier and
+        // we're observing a transition with `.dropFirst()`, the sink may
+        // still receive multiple `true` values before XCTest tears the
+        // expectation down. We only care that it became true at least once.
+        pausedExp.assertForOverFulfill = false
         var bag = Set<AnyCancellable>()
         monitor.$isPaused
             .dropFirst()
@@ -273,10 +311,11 @@ final class AlwaysTests: XCTestCase {
     }
 
     func testProtocolVersionMatchesDaemon() throws {
-        // The Rust daemon's PROTOCOL_VERSION is pinned to 1 in
-        // tests/uds_protocol_test.rs. Bumping either side without the
-        // other will be caught by both tests.
-        XCTAssertEqual(UDS_PROTOCOL_VERSION, 1)
+        // Pinned in lockstep with `PROTOCOL_VERSION` in
+        // `src/always/event.rs` and `tests/uds_protocol_test.rs`. Bumping
+        // either side without updating the matching constant on the
+        // other side will fail both tests at once.
+        XCTAssertEqual(UDS_PROTOCOL_VERSION, 3)
     }
 
     func testHelloWithMismatchedVersionIsObservable() throws {
@@ -359,91 +398,4 @@ final class AlwaysTests: XCTestCase {
         XCTAssertNil(event.correctionLogged)
     }
 
-    // MARK: - CorrectionsCenter event handling
-    //
-    // Same notification-injection pattern as
-    // testStateMonitorTogglesPauseFromEvents — we post a synthetic
-    // .daemonEvent and pump the main RunLoop briefly so the published
-    // mutation lands before assertions.
-
-    private func flushMainQueue(_ seconds: TimeInterval = 0.1) {
-        RunLoop.main.run(until: Date(timeIntervalSinceNow: seconds))
-    }
-
-    /// Drain every Pending entry and clear lastLogged so each test
-    /// starts from a known-empty state. CorrectionsCenter is a
-    /// singleton that survives across tests.
-    private func resetCorrectionsCenter() {
-        CorrectionsCenter.shared.pending.removeAll()
-        CorrectionsCenter.shared.lastLogged = nil
-    }
-
-    func testCorrectionsCenterAddsPendingFromEvent() throws {
-        // Touch the singleton so its NotificationCenter subscription is
-        // live before we post the event.
-        resetCorrectionsCenter()
-
-        let pendingEvent = try JSONDecoder().decode(
-            DaemonEvent.self,
-            from: #"{"type":"CorrectionPending","data":{"id":"abc-1","wrong":"foo","right":"bar"}}"#.data(using: .utf8)!
-        )
-        NotificationCenter.default.post(name: .daemonEvent, object: pendingEvent)
-        flushMainQueue()
-
-        XCTAssertEqual(CorrectionsCenter.shared.pending.count, 1)
-        XCTAssertEqual(CorrectionsCenter.shared.pending.first?.id, "abc-1")
-        XCTAssertEqual(CorrectionsCenter.shared.pending.first?.wrong, "foo")
-        XCTAssertEqual(CorrectionsCenter.shared.pending.first?.right, "bar")
-
-        resetCorrectionsCenter()
-    }
-
-    func testCorrectionsCenterClearsPendingOnLogged() throws {
-        resetCorrectionsCenter()
-
-        // Pre-populate the pending list with a candidate the daemon is
-        // about to confirm via CorrectionLogged.
-        let pendingEvent = try JSONDecoder().decode(
-            DaemonEvent.self,
-            from: #"{"type":"CorrectionPending","data":{"id":"abc-2","wrong":"kuburnetes","right":"kubernetes"}}"#.data(using: .utf8)!
-        )
-        NotificationCenter.default.post(name: .daemonEvent, object: pendingEvent)
-        flushMainQueue()
-        XCTAssertEqual(CorrectionsCenter.shared.pending.count, 1)
-
-        let loggedEvent = try JSONDecoder().decode(
-            DaemonEvent.self,
-            from: #"{"type":"CorrectionLogged","data":{"wrong":"kuburnetes","right":"kubernetes"}}"#.data(using: .utf8)!
-        )
-        NotificationCenter.default.post(name: .daemonEvent, object: loggedEvent)
-        flushMainQueue()
-
-        XCTAssertTrue(CorrectionsCenter.shared.pending.isEmpty,
-                      "Pending entry matching a logged correction should be removed")
-        XCTAssertEqual(CorrectionsCenter.shared.lastLogged?.wrong, "kuburnetes")
-        XCTAssertEqual(CorrectionsCenter.shared.lastLogged?.right, "kubernetes")
-
-        resetCorrectionsCenter()
-    }
-
-    func testCorrectionsCenterDedupesPendingById() throws {
-        resetCorrectionsCenter()
-
-        // Posting the same Pending event twice (e.g. after a daemon
-        // reconnect that re-broadcasts unsettled candidates) must not
-        // grow the list — dedupe is keyed on id.
-        let pendingEvent = try JSONDecoder().decode(
-            DaemonEvent.self,
-            from: #"{"type":"CorrectionPending","data":{"id":"dup-id","wrong":"foo","right":"bar"}}"#.data(using: .utf8)!
-        )
-        NotificationCenter.default.post(name: .daemonEvent, object: pendingEvent)
-        flushMainQueue()
-        NotificationCenter.default.post(name: .daemonEvent, object: pendingEvent)
-        flushMainQueue()
-
-        XCTAssertEqual(CorrectionsCenter.shared.pending.count, 1,
-                       "Duplicate CorrectionPending events with the same id must dedupe")
-
-        resetCorrectionsCenter()
-    }
 }

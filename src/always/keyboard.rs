@@ -204,6 +204,75 @@ fn key_to_shortcut_name(key: &rdev::Key) -> Option<&'static str> {
     }
 }
 
+/// Toggle the per-app allowlist for `bundle`. Adds the bundle as
+/// resumed (override `paused: false`) when it's not yet listed;
+/// removes the override otherwise. Recomputes the effective state and
+/// broadcasts the appropriate UDS events so every connected GUI
+/// surface updates immediately.
+fn handle_per_app_pause_hotkey(bundle: &str) {
+    use crate::always::per_app;
+    let was_resumed = per_app::is_app_resumed(bundle);
+    let new_paused: Option<bool> = if was_resumed { None } else { Some(false) };
+    if let Err(e) = per_app::set_app_paused_override(bundle, new_paused) {
+        tracing::error!(error = %e, bundle, "hotkey_set_app_paused_failed");
+        return;
+    }
+    let (effective, changed) = pause::recompute_effective();
+    if changed {
+        if effective {
+            pause::dictation_buffer_clear();
+            event::global_broadcaster().paused();
+        } else {
+            pause::mark_voice_seen();
+            event::global_broadcaster().resumed();
+        }
+    }
+    event::global_broadcaster().resumed_apps_changed(per_app::resumed_apps());
+    if let Ok(log_path) = always_config::configured_log_path()
+        && let Ok(mut logger) = log::Logger::open(&log_path)
+    {
+        // Reuse the existing PauseToggled event so log scrapers don't
+        // need a new variant — `paused` reflects the new effective
+        // state for the focused app.
+        logger.write(log::Event::PauseToggled { paused: effective });
+    }
+    tracing::info!(
+        bundle,
+        was_resumed,
+        new_resumed = !was_resumed,
+        effective,
+        "hotkey_per_app_toggled"
+    );
+}
+
+/// Original behaviour of ctrl+option+P: flip the master pause flag.
+/// Used as a fallback when no focused app is reported (or it's
+/// Always itself), so a globally-paused user can still un-master-pause
+/// with the same chord they're used to.
+fn handle_master_pause_hotkey() {
+    let (effective, changed) = pause::toggle_pause();
+    let master = pause::is_master_paused();
+    if !master {
+        pause::set_idle_auto_paused(false);
+        pause::mark_voice_seen();
+    }
+    event::global_broadcaster().master_pause_changed(master);
+    if changed {
+        if effective {
+            pause::dictation_buffer_clear();
+            event::global_broadcaster().paused();
+        } else {
+            event::global_broadcaster().resumed();
+        }
+    }
+    if let Ok(log_path) = always_config::configured_log_path()
+        && let Ok(mut logger) = log::Logger::open(&log_path)
+    {
+        logger.write(log::Event::PauseToggled { paused: effective });
+    }
+    tracing::info!(master, effective, changed, "hotkey_master_toggled");
+}
+
 #[cfg(feature = "macos")]
 pub fn start_keyboard_listener() -> Result<()> {
     use rdev::{EventType, Key, listen};
@@ -255,6 +324,9 @@ pub fn start_keyboard_listener() -> Result<()> {
                     // auto-Return.
                     if pause::countdown_active() {
                         pause::countdown_request_cancel();
+                        // User typed: drop dictation merge buffer — they've
+                        // taken control of the field.
+                        pause::dictation_buffer_clear();
                     }
                     return;
                 };
@@ -263,18 +335,33 @@ pub fn start_keyboard_listener() -> Result<()> {
                     // the active auto-enter countdown. The user is
                     // typing — they don't want the synthesized Return.
                     pause::countdown_request_cancel();
+                    pause::dictation_buffer_clear();
                 }
                 if pause_combo.matches_name(ctrl_pressed, shift_pressed, alt_pressed, name) {
-                    let new_state = pause::toggle_pause();
-                    if new_state {
-                        event::global_broadcaster().paused();
+                    // Context-aware pause hotkey:
+                    //   1. Master pause is set (idle/audio/mic watchdog
+                    //      or explicit "Pause everything") → clear
+                    //      master, leave per-app entries alone.
+                    //   2. A non-Always app is focused → toggle that
+                    //      app's place on the resumed-allowlist.
+                    //   3. No focused app (or it's Always) → flip
+                    //      master so the user can still globally
+                    //      pause with the same chord.
+                    if pause::is_master_paused() {
+                        handle_master_pause_hotkey();
                     } else {
-                        event::global_broadcaster().resumed();
-                    }
-                    if let Ok(log_path) = always_config::configured_log_path()
-                        && let Ok(mut logger) = log::Logger::open(&log_path)
-                    {
-                        logger.write(log::Event::PauseToggled { paused: new_state });
+                        let current = pause::current_app();
+                        match current.as_deref() {
+                            Some(bundle)
+                                if bundle
+                                    != crate::always::per_app::ALWAYS_OWN_BUNDLE_ID =>
+                            {
+                                handle_per_app_pause_hotkey(bundle);
+                            }
+                            _ => {
+                                handle_master_pause_hotkey();
+                            }
+                        }
                     }
                 } else if auto_enter_combo.matches_name(
                     ctrl_pressed,
@@ -387,6 +474,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                 // not a quiescent "let auto-enter run" state.
                 if pause::countdown_active() && matches!(event.event_type, EventType::ButtonPress(_)) {
                     pause::countdown_request_cancel();
+                    pause::dictation_buffer_clear();
                 }
             }
         }) {

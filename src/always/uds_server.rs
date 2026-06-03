@@ -140,6 +140,11 @@ pub async fn start_server() -> Result<()> {
     // Orphan watchdog: if no UDS client is connected for ORPHAN_TIMEOUT_SECS,
     // the Mac app is gone (quit/crashed/force-killed). Exit so we don't leave
     // a stale daemon that the next app launch can't communicate with.
+    //
+    // Before exiting we remove the pid + socket files explicitly because
+    // `std::process::exit` does NOT run Drop, so `PidGuard::Drop` would
+    // be skipped and the next launch would have to wait for
+    // `remove_stale_pid` / `remove_stale_socket` to detect a dead PID.
     tokio::spawn(async {
         let mut last_had_clients = Instant::now();
         loop {
@@ -152,6 +157,18 @@ pub async fn start_server() -> Result<()> {
                     timeout_secs = ORPHAN_TIMEOUT_SECS,
                     "orphan_daemon_exit: no UDS clients for too long"
                 );
+                // Mirror PidGuard::Drop's cleanup so the next daemon
+                // launch sees a clean slate without needing to detect
+                // a dead pid.
+                if let Ok(log_path) = crate::always::config::configured_log_path()
+                    && let Ok(mut log) = crate::always::log::Logger::open(&log_path)
+                {
+                    log.write(crate::always::log::Event::Stop);
+                }
+                let _ = std::fs::remove_file(crate::always::daemon::pid_path());
+                if let Some(sock) = crate::always::daemon::socket_path() {
+                    let _ = std::fs::remove_file(sock);
+                }
                 std::process::exit(0);
             }
         }
@@ -188,7 +205,9 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
 
     // Send current state on connection
     let is_paused = pause::is_paused();
+    let is_master_paused = pause::is_master_paused();
     let is_auto_enter = pause::is_auto_enter_enabled();
+    let resumed_bundles = crate::always::per_app::resumed_apps();
 
     // The Hello frame MUST be first so version-mismatched clients can
     // disconnect before reading state they may not understand.
@@ -200,6 +219,12 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
             DaemonEvent::Paused
         } else {
             DaemonEvent::Resumed
+        },
+        DaemonEvent::MasterPauseChanged {
+            master_paused: is_master_paused,
+        },
+        DaemonEvent::ResumedAppsChanged {
+            bundles: resumed_bundles,
         },
         if is_auto_enter {
             DaemonEvent::AutoEnterEnabled
@@ -297,13 +322,30 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
 fn execute_command(cmd: DaemonCommand) {
     match cmd {
         DaemonCommand::TogglePause => {
-            let new_state = pause::toggle_pause();
-            if new_state {
-                global_broadcaster().paused();
-            } else {
-                global_broadcaster().resumed();
+            // toggle_pause flips MASTER and returns (effective, changed).
+            // We always reset idle/voice bookkeeping on a master flip,
+            // even when effective didn't change — the user clearly wants
+            // a "fresh start" timing-wise. Broadcasting is gated on
+            // `changed` so we don't spam UDS subscribers when the
+            // per-app rule kept effective the same as before the flip.
+            let (effective, changed) = pause::toggle_pause();
+            let master = pause::is_master_paused();
+            if !master {
+                pause::set_idle_auto_paused(false);
+                pause::mark_voice_seen();
             }
-            tracing::info!(new_state, "uds_toggle_pause");
+            // Master always changed (we just toggled it) — broadcast so
+            // the UI can label the global toggle correctly.
+            global_broadcaster().master_pause_changed(master);
+            if changed {
+                if effective {
+                    pause::dictation_buffer_clear();
+                    global_broadcaster().paused();
+                } else {
+                    global_broadcaster().resumed();
+                }
+            }
+            tracing::info!(master, effective, changed, "uds_toggle_pause");
         }
         DaemonCommand::ToggleAutoEnter => {
             let new_state = pause::toggle_auto_enter();
@@ -318,41 +360,46 @@ fn execute_command(cmd: DaemonCommand) {
         DaemonCommand::RejectCorrection { id } => handle_reject_correction(&id),
         DaemonCommand::CaptureCorrection => handle_capture_correction(),
         DaemonCommand::SetPaused { paused, reason } => {
-            let was_paused = pause::is_paused();
-            if was_paused != paused {
-                pause::set_paused(paused);
-                if !paused {
-                    pause::set_idle_auto_paused(false);
-                    pause::mark_voice_seen();
-                }
-                if paused {
+            let (effective, changed) = pause::set_paused(paused);
+            if !paused {
+                pause::set_idle_auto_paused(false);
+                pause::mark_voice_seen();
+            }
+            global_broadcaster().master_pause_changed(paused);
+            if changed {
+                if effective {
+                    pause::dictation_buffer_clear();
                     global_broadcaster().paused();
                 } else {
                     global_broadcaster().resumed();
                 }
             }
-            tracing::info!(paused, reason = reason.as_deref().unwrap_or(""), "uds_set_paused");
+            tracing::info!(
+                master = paused,
+                effective,
+                changed,
+                reason = reason.as_deref().unwrap_or(""),
+                "uds_set_paused"
+            );
         }
         DaemonCommand::CancelAutoEnterCountdown => {
             if pause::countdown_active() {
                 pause::countdown_request_cancel();
+                pause::dictation_buffer_clear();
                 tracing::info!("uds_cancel_auto_enter_countdown");
             }
         }
         DaemonCommand::NotifyFocusedAppChanged { bundle_id } => {
-            pause::set_current_app(bundle_id.clone());
+            // Update focused app + recompute effective in one step.
+            // Effective may flip because per-app rules differ between
+            // the previous and new bundle; broadcast on change so the
+            // status bar icon and overlay follow the user's focus.
+            let (effective, changed) =
+                pause::set_current_app_and_recompute(bundle_id.clone());
             global_broadcaster().focused_app_changed(bundle_id.clone());
-            // Apply per-app paused override on focus change. We compute
-            // the effective paused state from the override table (if
-            // any) and the *current* global flag, then sync the global
-            // flag to it. Without this push, an app that wants
-            // "always paused" would still record while focused unless
-            // the user manually toggles.
-            let global = pause::is_paused();
-            let effective = crate::always::per_app::effective_paused(global);
-            if effective != global {
-                pause::set_paused(effective);
+            if changed {
                 if effective {
+                    pause::dictation_buffer_clear();
                     global_broadcaster().paused();
                 } else {
                     pause::mark_voice_seen();
@@ -360,25 +407,73 @@ fn execute_command(cmd: DaemonCommand) {
                 }
                 tracing::info!(effective, "per_app_paused_applied");
             }
-            tracing::info!(bundle = ?bundle_id, "uds_focused_app_changed");
+            tracing::info!(bundle = ?bundle_id, effective, "uds_focused_app_changed");
         }
         DaemonCommand::NotifySystemAudioState { playing } => {
-            // Audio output started → pause. Audio output stopped → if
-            // we were paused for audio, resume. Distinguish from
-            // idle-auto-pause via the dedicated flag.
+            // Audio output started → master-pause everything (force
+            // overrides). Audio output stopped → clear master if we
+            // weren't in idle-pause, then let per-app rules decide.
             if playing {
-                if !pause::is_paused() {
-                    pause::set_paused(true);
-                    global_broadcaster().paused();
-                    tracing::info!("audio_output_auto_paused");
+                let was_master = pause::is_master_paused();
+                let (effective, changed) = pause::set_paused(true);
+                if !was_master {
+                    global_broadcaster().master_pause_changed(true);
                 }
-            } else {
-                // Only auto-resume if we weren't already in idle-pause.
-                if pause::is_paused() && !pause::is_idle_auto_paused() {
-                    pause::set_paused(false);
-                    pause::mark_voice_seen();
-                    global_broadcaster().resumed();
-                    tracing::info!("audio_output_auto_resumed");
+                if changed {
+                    pause::dictation_buffer_clear();
+                    global_broadcaster().paused();
+                    tracing::info!(effective, "audio_output_auto_paused");
+                }
+            } else if !pause::is_idle_auto_paused() {
+                let was_master = pause::is_master_paused();
+                let (effective, changed) = pause::set_paused(false);
+                pause::mark_voice_seen();
+                if was_master {
+                    global_broadcaster().master_pause_changed(false);
+                }
+                if changed {
+                    if effective {
+                        global_broadcaster().paused();
+                    } else {
+                        global_broadcaster().resumed();
+                    }
+                    tracing::info!(effective, "audio_output_auto_resumed");
+                }
+            }
+        }
+        DaemonCommand::SetAppPaused { bundle_id, paused } => {
+            // Write the override for `bundle_id` and recompute the
+            // effective state. Broadcasting is gated on `changed` so
+            // setting an override for a non-focused app doesn't spam
+            // the UDS bus.
+            match crate::always::per_app::set_app_paused_override(&bundle_id, paused) {
+                Ok(()) => {
+                    let (effective, changed) = pause::recompute_effective();
+                    if changed {
+                        if effective {
+                            pause::dictation_buffer_clear();
+                            global_broadcaster().paused();
+                        } else {
+                            pause::mark_voice_seen();
+                            global_broadcaster().resumed();
+                        }
+                    }
+                    // Always broadcast the updated allowlist so every
+                    // connected client (Settings UI, menu bar) sees
+                    // the same snapshot without round-tripping
+                    // through the CLI `config show` path.
+                    global_broadcaster()
+                        .resumed_apps_changed(crate::always::per_app::resumed_apps());
+                    tracing::info!(
+                        bundle = %bundle_id,
+                        paused = ?paused,
+                        effective,
+                        changed,
+                        "uds_set_app_paused"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, bundle = %bundle_id, "uds_set_app_paused_failed");
                 }
             }
         }
@@ -524,6 +619,11 @@ fn handle_log_correction(intended: &str) {
 
 /// Return the token in `haystack` with the smallest case-insensitive
 /// Levenshtein distance to `needle`, paired with that distance.
+///
+/// Uses `strsim::levenshtein` (same dep `text_match.rs` already pulls in)
+/// — earlier this module had its own hand-rolled implementation, which
+/// was a maintenance hazard and drifted from the canonical one used in
+/// acoustic matching.
 fn best_token_match(haystack: &str, needle: &str) -> Option<(String, usize)> {
     let needle_lc = needle.to_lowercase();
     let mut best: Option<(String, usize)> = None;
@@ -531,39 +631,13 @@ fn best_token_match(haystack: &str, needle: &str) -> Option<(String, usize)> {
         if tok.is_empty() {
             continue;
         }
-        let d = levenshtein(&tok.to_lowercase(), &needle_lc);
+        let d = strsim::levenshtein(&tok.to_lowercase(), &needle_lc);
         match &best {
             Some((_, prev)) if *prev <= d => {}
             _ => best = Some((tok.to_string(), d)),
         }
     }
     best
-}
-
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let m = a.len();
-    let n = b.len();
-    if m == 0 {
-        return n;
-    }
-    if n == 0 {
-        return m;
-    }
-    let mut prev: Vec<usize> = (0..=n).collect();
-    let mut curr: Vec<usize> = vec![0; n + 1];
-    for i in 1..=m {
-        curr[0] = i;
-        for j in 1..=n {
-            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)
-                .min(curr[j - 1] + 1)
-                .min(prev[j - 1] + cost);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-    prev[n]
 }
 
 /// Send an event to all connected clients

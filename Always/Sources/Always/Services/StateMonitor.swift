@@ -6,12 +6,25 @@ class StateMonitor: ObservableObject {
     static let shared = StateMonitor()
 
     @Published var isPaused: Bool = false
+    /// User-explicit global pause (the master kill switch). True iff the
+    /// last Pause event arrived from a manual toggle, idle auto-pause,
+    /// audio output auto-pause, or mic conflict — distinguishable from
+    /// an `isPaused` that's just the per-app default for an unlisted
+    /// bundle. The UI uses this to label the global toggle ("Resume
+    /// globally" vs "Pause globally") and to choose whether the "for
+    /// this app" allowlist control makes sense.
+    @Published var isMasterPaused: Bool = false
     @Published var isAutoEnter: Bool = false
     @Published var isTranscribing: Bool = false
     @Published var isVoiceActivity: Bool = false
     /// Connection state to daemon. UI can show "Reconnecting…" if degraded.
     @Published var isDaemonConnected: Bool = false
     @Published var isDaemonDegraded: Bool = false
+    /// Bundle ids whose per-app override sets `paused: false` — i.e.
+    /// the user's resumed-app allowlist. Pulled from
+    /// `per_app_settings_json` and refreshed whenever the daemon
+    /// acknowledges a `SetAppPaused` write.
+    @Published var resumedBundleIds: Set<String> = []
 
     private var cancellables = Set<AnyCancellable>()
     private var udsClient: UDSClient
@@ -19,8 +32,11 @@ class StateMonitor: ObservableObject {
     private let logger = Logger(subsystem: "com.always.app", category: "state-monitor")
     private var respawnInFlight = false
 
+    /// Diagnostic logger — goes only to `os.Logger`. The previous
+    /// implementation also wrote `/tmp/statemonitor.log`; that file
+    /// is now gone, see UDSClient's `log()` comment for rationale.
     private func log(_ message: String) {
-        logger.debug("\(message)")
+        logger.debug("\(message, privacy: .public)")
     }
 
     private init() {
@@ -36,9 +52,6 @@ class StateMonitor: ObservableObject {
         udsClient.onDaemonNeedsRespawn = { [weak self] in
             self?.respawnDaemonIfNeeded()
         }
-
-        // Clean up old log file on launch
-        try? FileManager.default.removeItem(atPath: "/tmp/statemonitor.log")
     }
 
     /// Mirror UDSClient connection state into @Published props for the UI.
@@ -76,7 +89,11 @@ class StateMonitor: ObservableObject {
     }
     
     deinit {
-        cancellables.forEach { $0.cancel() }
+        // `removeAll` cancels and drops every subscription atomically.
+        // Using `forEach { $0.cancel() }` left the array populated, so a
+        // late publisher emit could still reach a stale sink during
+        // teardown.
+        cancellables.removeAll()
     }
 
     /// Tell the daemon (in-process) to toggle pause. The daemon mutates its
@@ -95,15 +112,26 @@ class StateMonitor: ObservableObject {
     }
 
     /// Same as togglePause, for auto-enter.
+    ///
+    /// Also persists the new value to the daemon's DB so it survives a
+    /// daemon restart. The UDS `ToggleAutoEnter` command only mutates
+    /// in-memory state — without the `setConfig` round-trip the
+    /// preference would reset to the CLI default on every launch.
     func toggleAutoEnter() {
         let newValue = !isAutoEnter
         isAutoEnter = newValue
         StatusOverlayController.shared.flash(state: newValue ? .autoEnterOn : .autoEnterOff)
         udsClient.sendCommand("ToggleAutoEnter")
+        Task { [cliService] in
+            _ = try? await cliService.setConfig(
+                key: "stt_auto_enter",
+                value: newValue ? "true" : "false"
+            )
+        }
     }
 
-    /// Send a parameterless command to the daemon (e.g. `CaptureCorrection`).
-    /// Exposed so `CorrectionsCenter` doesn't need its own UDSClient instance —
+    /// Send a parameterless command to the daemon.
+    /// Exposed so other services don't need their own UDSClient instance —
     /// only one connection should exist per app process.
     func sendCommand(_ name: String) {
         udsClient.sendCommand(name)
@@ -113,6 +141,25 @@ class StateMonitor: ObservableObject {
     /// approve/reject correction flows that carry a UUID.
     func sendCommandWithData<T: Encodable>(_ name: String, _ payload: T) {
         udsClient.sendCommandWithData(name, payload)
+    }
+
+    /// Write a `paused` override for the given bundle id. `nil` clears
+    /// the override (the app reverts to the default-paused fallback).
+    ///
+    /// This is how the per-app allowlist is edited from the UI:
+    /// "Resume for this app" sends `paused: false`, "Pause for this app"
+    /// sends `paused: true` (force-pause this specific app even if the
+    /// default were ever flipped), and "Remove from allowlist" sends
+    /// `paused: nil`.
+    func setAppPaused(bundleId: String, paused: Bool?) {
+        struct Payload: Encodable {
+            let bundle_id: String
+            let paused: Bool?
+        }
+        udsClient.sendCommandWithData(
+            "SetAppPaused",
+            Payload(bundle_id: bundleId, paused: paused)
+        )
     }
     
     /// Track whether the daemon's most recent ongoing state still
@@ -261,6 +308,14 @@ class StateMonitor: ObservableObject {
                 // bundle id push. No UI action needed; logged in
                 // statemonitor.log for debugging.
                 self.log("daemon acknowledged focused app: \(event.focusedApp?.bundle_id ?? "nil")")
+            case .masterPauseChanged:
+                if let v = event.masterPause?.master_paused {
+                    self.isMasterPaused = v
+                }
+            case .resumedAppsChanged:
+                if let bundles = event.resumedApps?.bundles {
+                    self.resumedBundleIds = Set(bundles)
+                }
             default:
                 break
             }

@@ -1,5 +1,7 @@
 import SwiftUI
 import AppKit
+import ApplicationServices
+import AVFoundation
 import Combine
 import os.log
 
@@ -9,12 +11,13 @@ struct Always: App {
     @StateObject private var onboardingState = OnboardingState()
 
     var body: some Scene {
-        // WindowGroup (not Window) so SwiftUI auto-opens the
-        // primary window on launch for `.regular` activation
-        // policy. Single-window UX is enforced by `.commandsRemoved`
-        // (no File→New) and the menubar control having no
-        // "New Settings Window" item.
-        WindowGroup("Always Settings", id: "settings") {
+        // `Window` (not `WindowGroup`) — singleton settings scene.
+        // WindowGroup allows multiple instances, which let the user
+        // end up with two Settings panels open at once via Cmd+N,
+        // repeated `openWindow(id:)` calls from the menu, or Dock
+        // re-open paths. Switching to `Window` makes SwiftUI focus
+        // the existing instance instead of creating a new one.
+        Window("Always Settings", id: "settings") {
             SettingsWindow(cliService: CLIService())
         }
         // `.contentSize` makes the window grow to exactly fit its SwiftUI
@@ -44,10 +47,12 @@ struct Always: App {
         ProcessInfo.processInfo.disableSuddenTermination()
         ProcessInfo.processInfo.disableAutomaticTermination("Always must keep its status bar item alive")
 
-        // Inject onboarding state into appDelegate after initialization
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [self] in
-            appDelegate.setOnboardingState(onboardingState)
-        }
+        // Inject onboarding state into AppDelegate. SwiftUI guarantees that
+        // by the time `init()` runs, `@NSApplicationDelegateAdaptor` has
+        // already produced the delegate instance, so we can wire it
+        // synchronously instead of leaning on a 100ms timer that could
+        // miss its window if `applicationDidFinishLaunching` fires first.
+        appDelegate.setOnboardingState(onboardingState)
     }
 }
 
@@ -121,15 +126,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // still gets an undeniable visible window on launch.
         installStatusItem()
 
-        // Check if onboarding is needed
+        // Onboarding gating: if no Groq API key is in the keychain,
+        // surface the onboarding window. The scene id "onboarding"
+        // must match the `Window(id:)` registration in App.body.
         onboardingState?.checkAndShowOnboardingIfNeeded()
-
-        // Show onboarding window if needed
-        if onboardingState?.showOnboarding == true {
-            if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "AlwaysOnboarding" }) {
-                window.makeKeyAndOrderFront(nil)
-            }
+        if onboardingState?.showOnboarding == true,
+           let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "onboarding" }) {
+            window.makeKeyAndOrderFront(nil)
         }
+
+        // Permission flow lives in `PermissionsManager`. It seeds the
+        // current status (silent — no prompts) and triggers the system
+        // dialog for `notDetermined` cases. The Settings UI hosts a
+        // banner that surfaces "denied" / "not trusted" states and
+        // links the user to System Settings. We deliberately do NOT
+        // open modal alerts at launch — the user just sees the banner
+        // and can act when convenient.
+        let perms = PermissionsManager.shared
+        perms.requestMicrophoneIfNeeded()
+        perms.requestAccessibilityIfNeeded()
 
         // Kill any stale daemon from a previous session (crash, force-quit, etc.)
         // before starting fresh. This prevents the broken-pipe bug where a new
@@ -174,23 +189,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// app activation path.
     private func openSettingsWindow() {
         NSApp.activate(ignoringOtherApps: true)
-        // Bring any matching window forward.
+        // Bring any matching window forward. With the scene declared
+        // as `Window` (singleton), SwiftUI keeps a single instance
+        // alive across the app's lifetime — focusing it is enough; no
+        // need to synthesise a "new window" action (which used to
+        // spawn duplicates under WindowGroup).
         if let existing = NSApp.windows.first(where: {
             $0.title == "Always Settings" || $0.identifier?.rawValue == "settings"
         }) {
             existing.makeKeyAndOrderFront(nil)
-            return
-        }
-        // No window yet — synthesise the standard "show new window"
-        // action AppKit binds to Cmd+N. SwiftUI's Window scene
-        // intercepts this and creates the first instance.
-        NSApp.sendAction(#selector(NSApplication.newWindowForTab(_:)), to: nil, from: nil)
-        // Retry the lookup after a frame so the window is in
-        // NSApp.windows by the time we activate it.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            NSApp.windows.first(where: {
-                $0.title == "Always Settings" || $0.identifier?.rawValue == "settings"
-            })?.makeKeyAndOrderFront(nil)
+            existing.orderFrontRegardless()
         }
     }
 
@@ -253,14 +261,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Discord, Zoom) use the bare-bones recipe below and stay visible
     /// reliably when a third-party menu bar manager is not hiding them.
     private func installStatusItem() {
-        NSLog("Always.installStatusItem: called")
         // variableLength per the Tahoe 26 research: fixed lengths
         // (60, squareLength) are more frequently dropped by ControlCenter
         // on 26.x — Stats devs flagged the same issue.
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        NSLog("Always.installStatusItem: item length=\(item.length) visible=\(item.isVisible)")
         if let button = item.button {
-            let symbol = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Always")
+            // Initial icon is the listening/armed default; the Combine
+            // subscription in setupStatusBarIconUpdates() will swap it
+            // to the correct state-aware symbol once StateMonitor emits.
+            let symbol = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Always")
             symbol?.isTemplate = true
             button.image = symbol
             button.imagePosition = .imageOnly
@@ -269,11 +278,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.target = self
             button.action = #selector(statusItemClicked(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-            NSLog("Always.installStatusItem: button frame=\(button.frame) image=\(button.image != nil) title='\(button.title)'")
         }
         item.isVisible = true
         statusItem = item
-        NSLog("Always.installStatusItem: done visible=\(item.isVisible) length=\(item.length)")
+        os_log("status item installed (length=%{public}d visible=%{public}@)",
+               log: logger, type: .info, item.length, String(describing: item.isVisible))
 
         // Pre-build the popover. NSHostingController hosts SwiftUI content.
         let popover = NSPopover()
@@ -294,99 +303,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// rendering correctly while Always didn't.
     private func setupStatusBarIconUpdates() {
         guard let monitor = stateMonitor else { return }
-        Publishers.CombineLatest3(monitor.$isDaemonConnected, monitor.$isPaused, monitor.$isDaemonDegraded)
-            .removeDuplicates { lhs, rhs in lhs == rhs }
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] isConnected, isPaused, isDegraded in
-                self?.updateStatusBarIcon(isConnected: isConnected, isPaused: isPaused, isDegraded: isDegraded)
-            }
-            .store(in: &cancellables)
+        // Fold all four state inputs into the SF Symbol name and dedupe on
+        // that. Critical for the Tahoe 26 slot-churn fix — we MUST NOT
+        // touch button.image unless the resolved icon actually changed.
+        // Mapping many bool transitions to a single string and applying
+        // `removeDuplicates` collapses redundant signals (e.g. transcribing
+        // ticks while paused still resolves to "pause.circle.fill") into a
+        // single assignment.
+        Publishers.CombineLatest4(
+            monitor.$isDaemonConnected,
+            monitor.$isPaused,
+            monitor.$isDaemonDegraded,
+            monitor.$isTranscribing
+        )
+        .map { isConnected, isPaused, isDegraded, isTranscribing in
+            StatusIconResolver.symbolName(
+                isConnected: isConnected,
+                isDegraded: isDegraded,
+                isPaused: isPaused,
+                isTranscribing: isTranscribing
+            )
+        }
+        .removeDuplicates()
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] iconName in
+            self?.applyStatusBarIcon(named: iconName)
+        }
+        .store(in: &cancellables)
     }
 
-    /// Nuclear option: completely remove and recreate the status item
-    private func recreateStatusItem() {
-        guard let monitor = stateMonitor else { return }
-
-        // Remove old status item
-        if let oldItem = statusItem {
-            NSStatusBar.system.removeStatusItem(oldItem)
-            os_log("Removed old status item", log: logger, type: .info)
-        }
-
-        // Create new status item with unique autosave name to force macOS to treat it as new
-        let timestamp = Int(Date().timeIntervalSince1970)
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.autosaveName = "Always-\(timestamp)"
-        os_log("Created new status item with autosave name", log: logger, type: .info)
-
-        // Create new status item
-        let iconName: String
-        if monitor.isDaemonDegraded {
-            iconName = "exclamationmark.triangle.fill"
-        } else if !monitor.isDaemonConnected {
-            iconName = "exclamationmark.triangle"
-        } else if monitor.isPaused {
-            iconName = "pause.circle.fill"
-        } else {
-            iconName = "mic.fill"
-        }
-
-        os_log("Setting icon to '%{public}@'", log: logger, type: .info, iconName)
-
-        if let button = item.button {
-            // Try using a custom view instead of just an image
-            let config = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
-            let symbol = NSImage(systemSymbolName: iconName, accessibilityDescription: "Always")?
-                .withSymbolConfiguration(config)
-            symbol?.isTemplate = true
-
-            button.image = symbol
-            button.imagePosition = .imageOnly  // Remove title, show only icon
-            button.imageScaling = .scaleProportionallyUpOrDown
-            button.toolTip = "Always — voice activation"
-            button.target = self
-            button.action = #selector(statusItemClicked(_:))
-            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-
-            // Force button to update
-            button.needsDisplay = true
-            button.layout()
-
-            // Force CALayer
-            button.wantsLayer = true
-            button.layer?.setNeedsDisplay()
-        }
-
-        item.isVisible = true
-        statusItem = item
-
-        // Recreate popover
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.contentSize = NSSize(width: 240, height: 320)
-        popover.contentViewController = NSHostingController(rootView: MenuBarView())
-        menuPopover = popover
-
-        os_log("Recreated status item and popover", log: logger, type: .info)
-    }
-
-    /// Update the status bar icon — strictly minimal, matching the
-    /// MeetingBar / TahoeMenuDemo / HelloStatus pattern. Just assign
-    /// the image. Don't touch `isVisible`, `needsDisplay`, `layout()`,
-    /// `window.update()` — Tahoe 26 treats each as a state change and
-    /// re-runs slot allocation which never settles.
-    private func updateStatusBarIcon(isConnected: Bool, isPaused: Bool, isDegraded: Bool) {
+    /// Apply a resolved SF Symbol name to the status bar button. Strictly
+    /// minimal, matching the MeetingBar / TahoeMenuDemo / HelloStatus
+    /// pattern: just assign the image. Don't touch `isVisible`,
+    /// `needsDisplay`, `layout()`, `window.update()` — Tahoe 26 treats
+    /// each as a state change and re-runs slot allocation which never
+    /// settles. Dedup is enforced upstream in `setupStatusBarIconUpdates`
+    /// (Combine `removeDuplicates` on the resolved name), so by the time
+    /// we land here the icon really has changed.
+    private func applyStatusBarIcon(named iconName: String) {
         guard let button = statusItem?.button else { return }
-        let iconName: String
-        if isDegraded {
-            iconName = "exclamationmark.triangle.fill"
-        } else if !isConnected {
-            iconName = "exclamationmark.triangle"
-        } else if isPaused {
-            iconName = "pause.circle.fill"
-        } else {
-            iconName = "mic.fill"
-        }
         let image = NSImage(systemSymbolName: iconName, accessibilityDescription: "Always")
         image?.isTemplate = true
         button.image = image
@@ -418,28 +373,52 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Read the daemon PID file and send SIGTERM. Synchronous so it works
     /// in applicationWillTerminate (no time for async). Also removes the
     /// PID file so the next launch sees a clean slate.
+    ///
+    /// Belt-and-suspenders: after the PID-file-based kill, also sweep
+    /// any process whose argv matches the daemon path in the app bundle
+    /// ("MacOS/always run"). This catches orphans whose pid file was
+    /// deleted (e.g. user manually rm'd it) but whose process is still
+    /// alive holding the mic + UDS socket. The path-anchored pattern
+    /// avoids matching unrelated commands that happen to contain
+    /// "always run" in their argv.
     static func killStaleDaemon() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let pidPath = home
             .appendingPathComponent("Library/Application Support/always/always.pid")
             .path
 
-        guard let pidString = try? String(contentsOfFile: pidPath, encoding: .utf8)
+        if let pidString = try? String(contentsOfFile: pidPath, encoding: .utf8)
                 .trimmingCharacters(in: .whitespacesAndNewlines),
-              let pid = pid_t(pidString) else { return }
-
-        // Check if the process is actually running before killing
-        if kill(pid, 0) == 0 {
+           let pid = pid_t(pidString),
+           kill(pid, 0) == 0 {
             kill(pid, SIGTERM)
-            // Give it a moment to clean up, then force-kill if still alive
-            usleep(200_000) // 200ms
+            // Give it up to 2s to clean up, polling every 50ms. The
+            // daemon's signal handler removes pid + socket files
+            // before exiting, so we want to wait for that — yanking
+            // it with SIGKILL too fast leaves stale files.
+            for _ in 0..<40 {
+                usleep(50_000) // 50ms
+                if kill(pid, 0) != 0 { break }
+            }
             if kill(pid, 0) == 0 {
                 kill(pid, SIGKILL)
+                usleep(100_000)
             }
         }
 
         // Remove PID file regardless — it's stale either way
         try? FileManager.default.removeItem(atPath: pidPath)
+
+        // Belt-and-suspenders pkill in case pid file was missing or
+        // stale-but-the-process-is-actually-elsewhere.
+        let pkill = Process()
+        pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        pkill.arguments = ["-TERM", "-f", "MacOS/always run"]
+        pkill.standardOutput = FileHandle.nullDevice
+        pkill.standardError = FileHandle.nullDevice
+        try? pkill.run()
+        pkill.waitUntilExit()
+        usleep(200_000)
 
         // Remove socket file so daemon starts with clean socket
         let sockPath = home

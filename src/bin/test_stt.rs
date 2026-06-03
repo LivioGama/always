@@ -15,7 +15,6 @@ use always::stt::{Transcriber, GroqTranscriber};
 ///   # Record 5 seconds and test
 ///   ffmpeg -f avfoundation -i ':0' -t 5 test.wav
 ///   cargo run --bin test_stt -- test.wav
-
 fn main() -> Result<()> {
     // Setup tracing for visible logs
     tracing_subscriber::fmt()

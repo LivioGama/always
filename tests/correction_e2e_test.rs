@@ -215,43 +215,7 @@ fn correction_queue_persists_across_drops() {
     assert_eq!(docker.source, CorrectionSource::Passive);
 }
 
-// ---------------------------------------------------------------------------
-// (e) Vocabulary regression — `Zed` must not rewrite `analyzed`
-// ---------------------------------------------------------------------------
-
-#[test]
-fn vocabulary_apply_does_not_substring_match() {
-    use always::always::text::Vocabulary;
-
-    let _g = home_lock();
-    // `Vocabulary::from_raw` is private; the supported public path is to
-    // load from `~/.always/vocabulary.json`. Override HOME to point at a
-    // temp dir we control, write a vocabulary with the offending
-    // correction `zed → Zed`, then verify the apply.
-    let tmp = tempdir_under_target("vocab");
-    // SAFETY: see top of file.
-    unsafe { std::env::set_var("HOME", &tmp) };
-
-    let vocab_path = tmp.join(".always/vocabulary.json");
-    std::fs::create_dir_all(vocab_path.parent().unwrap()).unwrap();
-    std::fs::write(
-        &vocab_path,
-        r#"{
-            "corrections": { "zed": "Zed" },
-            "patterns": []
-        }"#,
-    )
-    .unwrap();
-
-    let vocab = Vocabulary::load().expect("vocabulary.json should load from temp HOME");
-
-    // The bug: substring `String::replace` rewrote `analyzed` →
-    // `analyZed`. With the new `whole_word_replace`, the `zed` inside
-    // `analyzed` must be left alone, and the standalone `Zed` token
-    // must remain `Zed` (case-insensitive match, canonical replacement).
-    let out = vocab.apply("I analyzed the Zed editor");
-    assert_eq!(
-        out, "I analyzed the Zed editor",
-        "`zed` glossary term must not match inside `analyzed`"
-    );
-}
+// Vocabulary apply regression test was removed when `text::Vocabulary`
+// was deleted in the pipeline-simplification pass. The acoustic glossary
+// match is now `text_match::apply_custom_words` (Soundex + Levenshtein
+// over `glossary::user_glossary_terms`), tested in `text_match.rs`.

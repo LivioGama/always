@@ -1,4 +1,7 @@
 import AppKit
+import os.log
+
+private let overlayLogger = Logger(subsystem: "com.always.app", category: "status-overlay")
 
 enum OverlayState: Equatable, Hashable {
     case paused
@@ -616,7 +619,7 @@ class StatusOverlayController {
 
     private func ensureWindow() {
         if window == nil {
-            NSLog("StatusOverlayController: Creating window on first use")
+            overlayLogger.info("creating overlay window on first use")
             window = StatusOverlayWindow()
         }
     }
@@ -692,7 +695,7 @@ class StatusOverlayController {
     /// Show the persistent corner widget for manual resume during idle timeout.
     private func showIdleResumeWidget() {
         if idleResumeWindow == nil {
-            NSLog("StatusOverlayController: Creating idle resume widget")
+            overlayLogger.info("creating idle resume widget")
             idleResumeWindow = IdleResumeWindow()
         }
 
@@ -703,10 +706,17 @@ class StatusOverlayController {
 
     /// Called when user clicks the play button in the idle resume widget.
     private func handleIdleResumeClicked() {
-        // Send toggle-pause command to resume (unpause) the daemon
+        // Send toggle-pause command to resume (unpause) the daemon. The
+        // bundled daemon is `always-daemon` (not `always`) — the GUI is
+        // `Always`, and on case-insensitive APFS a binary named `always`
+        // would collide with the GUI binary, so build.sh writes the
+        // daemon to `always-daemon`. Resolve via Bundle.main so we don't
+        // hardcode the install location either.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let daemonURL = Bundle.main.bundleURL
+                .appendingPathComponent("Contents/MacOS/always-daemon")
             let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/Applications/Always.app/Contents/MacOS/always")
+            task.executableURL = daemonURL
             task.arguments = ["toggle-pause"]
             do {
                 try task.run()
@@ -717,7 +727,7 @@ class StatusOverlayController {
                     self?.idleResumeWindow?.hide()
                 }
             } catch {
-                NSLog("Error sending toggle-pause command: \(error)")
+                overlayLogger.error("toggle-pause command failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }

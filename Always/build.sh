@@ -53,13 +53,24 @@ case "${ALWAYS_BUILD_PROFILE:-}" in
 esac
 
 if [ -f "$DAEMON_PATH" ]; then
-    echo "Copying daemon binary to app bundle ($DAEMON_PATH)..."
+    # CRITICAL: target name MUST differ from the GUI binary in case-insensitive
+    # ways. macOS APFS defaults to case-insensitive, so `MacOS/Always` (GUI) and
+    # `MacOS/always` (daemon) resolve to the same inode and the second `cp`
+    # silently overwrites the first. That is exactly what broke the daemon
+    # spawn after the c55cc4a merge — the bundled "Always" binary was actually
+    # the daemon (or vice-versa) and the Mac app could not start it. Use a
+    # distinct file name and read it back through CLIService accordingly.
+    echo "Copying daemon binary to app bundle ($DAEMON_PATH → MacOS/always-daemon)..."
     mkdir -p Always.app/Contents/MacOS
-    cp "$DAEMON_PATH" Always.app/Contents/MacOS/always
+    cp "$DAEMON_PATH" Always.app/Contents/MacOS/always-daemon
     echo "✓ Daemon binary copied"
 else
-    echo "⚠️  Warning: Daemon binary not found at $DAEMON_PATH"
-    echo "   Build the daemon first: cd .. && cargo build --bin always (or --release)"
+    # Bundle without the daemon is unshippable — the GUI cannot spawn it.
+    # Previously we warned and continued, which deployed a broken bundle
+    # to /Applications. Fail loudly instead.
+    echo "✗ Daemon binary not found at $DAEMON_PATH"
+    echo "  Build the daemon first: cd .. && cargo build --bin always (or --release)"
+    exit 1
 fi
 
 # Bundle Sparkle.framework. Swift Package Manager downloads it as part of
@@ -99,43 +110,91 @@ fi
 echo "Using signing identity: ${SIGN_IDENTITY}"
 codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "com.always" --entitlements Always.entitlements Always.app
 
-# Notarization (only if using proper Apple Developer identity, not ad-hoc)
-if [ "$SIGN_IDENTITY" != "-" ] && [ -n "$ALWAYS_NOTARIZE_TEAM_ID" ]; then
+# Notarization (only if using a proper Apple Developer identity, not ad-hoc).
+# All three env vars are required to authenticate notarytool:
+#   ALWAYS_NOTARIZE_TEAM_ID — Apple Team ID (e.g. ZV4JCJ669Y).
+#   ALWAYS_NOTARIZE_APPLE_ID — developer Apple ID email.
+#   ALWAYS_NOTARIZE_APP_PWD — app-specific password (NOT the AppleID pwd).
+# The previous version hardcoded --apple-id "com.always" (the bundle ID,
+# not an Apple ID) and never read the app-specific password, so the
+# notarytool call would silently fail with an authentication error and
+# the script would still report "success" thanks to a `|| echo ""` on
+# the JSON parse. Catch that explicitly now.
+if [ "$SIGN_IDENTITY" != "-" ] \
+        && [ -n "${ALWAYS_NOTARIZE_TEAM_ID:-}" ] \
+        && [ -n "${ALWAYS_NOTARIZE_APPLE_ID:-}" ] \
+        && [ -n "${ALWAYS_NOTARIZE_APP_PWD:-}" ]; then
     echo "Notarizing app..."
-    
-    # Create a zip file for notarization
+
+    # Pre-flight: Info.plist must not still carry the Sparkle EdDSA
+    # placeholder. Shipping a release with the placeholder bricks
+    # auto-update (Sparkle silently refuses to verify the appcast).
+    if /usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" \
+            Always.app/Contents/Info.plist 2>/dev/null \
+            | grep -q "REPLACE_WITH_BASE64_EDDSA_PUBLIC_KEY"; then
+        echo "✗ Info.plist still contains the Sparkle SUPublicEDKey placeholder."
+        echo "  Replace with the real EdDSA public key before publishing — see docs/RELEASE.md."
+        exit 1
+    fi
+
     ZIP_PATH="Always.zip"
     ditto -c -k --keepParent "Always.app" "$ZIP_PATH"
-    
-    # Submit for notarization
+
+    # Submit for notarization. `--wait --timeout 30m` blocks until Apple's
+    # service reports a terminal state instead of hanging indefinitely.
     NOTARIZATION_OUTPUT=$(xcrun notarytool submit "$ZIP_PATH" \
         --team-id "$ALWAYS_NOTARIZE_TEAM_ID" \
-        --apple-id "com.always" \
+        --apple-id "$ALWAYS_NOTARIZE_APPLE_ID" \
+        --password "$ALWAYS_NOTARIZE_APP_PWD" \
         --wait \
+        --timeout 30m \
         --output-format json)
-    
-    # Extract notarization ID
-    NOTARIZATION_ID=$(echo "$NOTARIZATION_OUTPUT" | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])" 2>/dev/null || echo "")
-    
-    if [ -n "$NOTARIZATION_ID" ]; then
-        echo "✓ Notarization submitted (ID: $NOTARIZATION_ID)"
-        
-        # Staple the notarization ticket
-        xcrun stapler staple "Always.app"
-        echo "✓ Notarization ticket stapled"
-        
-        # Verify notarization
-        xcrun stapler validate "Always.app"
-        echo "✓ Notarization validated"
-    else
-        echo "⚠️  Notarization failed or skipped"
+
+    # Parse the submission JSON. python3's json.load with check ensures
+    # we hard-fail on a malformed/empty response — previously a `|| echo ""`
+    # let the script continue with an empty ID and skip stapling silently.
+    NOTARIZATION_ID=$(printf '%s' "$NOTARIZATION_OUTPUT" \
+        | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
+    NOTARIZATION_STATUS=$(printf '%s' "$NOTARIZATION_OUTPUT" \
+        | python3 -c "import sys, json; print(json.load(sys.stdin).get('status', 'unknown'))")
+
+    if [ "$NOTARIZATION_STATUS" != "Accepted" ]; then
+        echo "✗ Notarization failed: status=$NOTARIZATION_STATUS id=$NOTARIZATION_ID"
+        echo "  Fetch the log: xcrun notarytool log $NOTARIZATION_ID --team-id $ALWAYS_NOTARIZE_TEAM_ID --apple-id $ALWAYS_NOTARIZE_APPLE_ID --password '<app-pwd>'"
+        rm -f "$ZIP_PATH"
+        exit 1
     fi
-    
-    # Clean up zip file
+
+    echo "✓ Notarization accepted (ID: $NOTARIZATION_ID)"
+    xcrun stapler staple "Always.app"
+    xcrun stapler validate "Always.app"
+    echo "✓ Notarization ticket stapled + validated"
+
     rm -f "$ZIP_PATH"
 else
-    echo "⚠️  Skipping notarization (requires ALWAYS_NOTARIZE_TEAM_ID and proper signing identity)"
+    echo "⚠️  Skipping notarization (requires ALWAYS_NOTARIZE_TEAM_ID + ALWAYS_NOTARIZE_APPLE_ID + ALWAYS_NOTARIZE_APP_PWD + a real signing identity)"
 fi
+
+# Sanity-check before deploy: the bundle must contain BOTH the GUI and the
+# daemon binary as distinct files. macOS APFS is case-insensitive by
+# default and the previous layout (`MacOS/Always` + `MacOS/always`) silently
+# collapsed to a single file, which broke daemon spawn. Fail the build
+# loudly rather than ship a half-bundle.
+GUI_BIN="Always.app/Contents/MacOS/Always"
+DAEMON_BIN_IN_BUNDLE="Always.app/Contents/MacOS/always-daemon"
+if [ ! -f "$GUI_BIN" ] || [ ! -f "$DAEMON_BIN_IN_BUNDLE" ]; then
+    echo "✗ Bundle integrity check failed:"
+    [ ! -f "$GUI_BIN" ] && echo "   missing GUI binary: $GUI_BIN"
+    [ ! -f "$DAEMON_BIN_IN_BUNDLE" ] && echo "   missing daemon binary: $DAEMON_BIN_IN_BUNDLE"
+    exit 1
+fi
+gui_size=$(stat -f%z "$GUI_BIN")
+daemon_size=$(stat -f%z "$DAEMON_BIN_IN_BUNDLE")
+if [ "$gui_size" = "$daemon_size" ]; then
+    echo "✗ Bundle integrity check failed: GUI and daemon binaries are the same size ($gui_size). Likely a case-insensitive cp collision."
+    exit 1
+fi
+echo "✓ Bundle integrity: GUI=${gui_size}B, daemon=${daemon_size}B"
 
 echo "Deploying to /Applications..."
 rm -rf /Applications/Always.app

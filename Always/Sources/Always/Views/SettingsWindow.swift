@@ -1,215 +1,21 @@
 import SwiftUI
 import AppKit
+import os.log
 
-// MARK: - Shortcut formatting helpers
+// Helpers (KeyCaptureButton, NumericSettingRow, SensitivityPreset,
+// formatShortcut) live in `Views/Settings/` so this file holds only the
+// composition root and section bodies. Add new sections by extracting
+// another file in `Views/Settings/`, not by growing this struct.
 
-/// Format `"ctrl+alt+p"` → `"⌃⌥P"` for display.
-func formatShortcut(_ s: String) -> String {
-    let symbolMap: [String: String] = [
-        "ctrl": "⌃", "control": "⌃",
-        "alt": "⌥", "option": "⌥",
-        "shift": "⇧",
-        "meta": "⌘", "cmd": "⌘", "command": "⌘"
-    ]
-    let parts = s.lowercased().split(separator: "+").map(String.init)
-    return parts.map { symbolMap[$0] ?? $0.uppercased() }.joined()
-}
-
-// MARK: - Key capture button
-
-struct KeyCaptureButton: View {
-    let label: String
-    @Binding var shortcut: String
-    let onSave: (String) async -> Void
-
-    @State private var isRecording = false
-    @State private var monitor: Any?
-
-    var body: some View {
-        HStack {
-            Text(label)
-            Spacer()
-            Button(action: toggleRecording) {
-                Text(isRecording ? "Press keys…" : formatShortcut(shortcut))
-                    .monospacedDigit()
-                    .foregroundColor(isRecording ? .orange : .secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(isRecording ? Color.orange.opacity(0.08) : Color.clear)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 5)
-                            .stroke(
-                                isRecording ? Color.orange : Color.secondary.opacity(0.35),
-                                lineWidth: 1
-                            )
-                    )
-                    .cornerRadius(5)
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
-    private func toggleRecording() {
-        if isRecording { stopRecording(); return }
-        isRecording = true
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            let mods = event.modifierFlags
-            var parts: [String] = []
-            if mods.contains(.control) { parts.append("ctrl") }
-            if mods.contains(.option)  { parts.append("alt") }
-            if mods.contains(.shift)   { parts.append("shift") }
-            if mods.contains(.command) { parts.append("meta") }
-
-            let keyChar = event.charactersIgnoringModifiers?.lowercased() ?? ""
-            // require at least one modifier + a single printable key
-            if !keyChar.isEmpty, keyChar.count == 1, !parts.isEmpty {
-                let newShortcut = (parts + [keyChar]).joined(separator: "+")
-                shortcut = newShortcut
-                Task { await onSave(newShortcut) }
-            }
-            stopRecording()
-            return nil
-        }
-    }
-
-    private func stopRecording() {
-        isRecording = false
-        if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
-    }
-}
-
-// MARK: - Sensitivity preset
-//
-// Mirrors `SensitivityPreset` in `src/always/config.rs`. The threshold
-// pairs MUST stay in sync — both sides write the same daemon
-// preferences. Adding a new variant requires updating both files.
-
-enum SensitivityPreset: String, CaseIterable, Identifiable {
-    case high
-    case normal
-    case low
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .high:   return "High"
-        case .normal: return "Normal"
-        case .low:    return "Low"
-        }
-    }
-
-    /// `(stt_energy_threshold, hear_energy_threshold)`.
-    var thresholds: (stt: Double, hear: Double) {
-        switch self {
-        case .high:   return (0.005, 0.0005)
-        case .normal: return (0.012, 0.001)
-        case .low:    return (0.025, 0.002)
-        }
-    }
-
-    /// Reverse-lookup: which preset (if any) corresponds to the given
-    /// raw thresholds. Returns `nil` for custom values so the picker
-    /// can fall through to "Custom".
-    static func from(stt: Double, hear: Double) -> SensitivityPreset? {
-        for p in SensitivityPreset.allCases {
-            let (s, h) = p.thresholds
-            if abs(s - stt) < 1e-6 && abs(h - hear) < 1e-6 {
-                return p
-            }
-        }
-        return nil
-    }
-}
-
-// MARK: - Numeric setting row
-
-/// One sensitivity setting laid out as a single row:
-///   Label                                  [Number ⊕]  Default: x.xxxx  ⤺
-///
-/// Replaces the old slider style with a typed number input plus a reset
-/// button. The recommended default is shown alongside so users know what
-/// the safe value is. `recommended` is the value users should prefer
-/// (== `default` here, but kept separate so a future PR can recommend a
-/// per-environment override without touching the type-level default).
-struct NumericSettingRow<T: Numeric & LosslessStringConvertible>: View where T: Comparable {
-    let title: String
-    let help: String
-    let unit: String
-    let formatter: NumberFormatter
-    @Binding var value: T
-    let defaultValue: T
-    let range: ClosedRange<T>?
-
-    init(
-        title: String,
-        help: String = "",
-        unit: String = "",
-        formatter: NumberFormatter,
-        value: Binding<T>,
-        defaultValue: T,
-        range: ClosedRange<T>? = nil
-    ) {
-        self.title = title
-        self.help = help
-        self.unit = unit
-        self.formatter = formatter
-        self._value = value
-        self.defaultValue = defaultValue
-        self.range = range
-    }
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                    .font(.body)
-                if !help.isEmpty {
-                    Text(help)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-            }
-            Spacer(minLength: 8)
-            HStack(spacing: 4) {
-                TextField("", value: $value, formatter: formatter)
-                    .textFieldStyle(.roundedBorder)
-                    .multilineTextAlignment(.trailing)
-                    .frame(width: 80)
-                    .onChange(of: value) { _, new in
-                        if let range, !range.contains(new) {
-                            value = min(max(new, range.lowerBound), range.upperBound)
-                        }
-                    }
-                if !unit.isEmpty {
-                    Text(unit)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .frame(width: 22, alignment: .leading)
-                }
-            }
-            Text("Default: \(formatter.string(for: defaultValue) ?? "")\(unit.isEmpty ? "" : " \(unit)")")
-                .font(.caption2)
-                .foregroundColor(.secondary)
-                .frame(width: 100, alignment: .trailing)
-            Button {
-                value = defaultValue
-            } label: {
-                Image(systemName: "arrow.counterclockwise")
-            }
-            .buttonStyle(.borderless)
-            .help("Reset to recommended default")
-        }
-    }
-}
+private let settingsLogger = Logger(subsystem: "com.always.app", category: "settings")
 
 // MARK: - Settings window
 
 struct SettingsWindow: View {
     @ObservedObject var cliService: CLIService
     @ObservedObject private var stateMonitor: StateMonitor = .shared
+    @ObservedObject private var focusedApp: FocusedAppMonitor = .shared
     @State private var config: Config = Config.defaultConfig
-    @State private var status: DaemonStatus?
     @State private var isLoading = false
     @State private var apiKey: String = ""
     @State private var showApiKey = false
@@ -274,11 +80,18 @@ struct SettingsWindow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            // Banner only renders when one or more permissions are
+            // missing — invisible afterwards.
+            PermissionsBanner()
+            // Connection status stays on top — it's the at-a-glance
+            // health indicator. Allowlist sits directly below as the
+            // single section that mutates most often, before the
+            // static settings (behavior, API, vocabulary, …).
             statusAndPauseRow
             Divider()
-            behaviorRow
-            Divider()
             perAppSection
+            Divider()
+            behaviorRow
             Divider()
             apiSection
             Divider()
@@ -299,14 +112,13 @@ struct SettingsWindow: View {
             refreshVocabularyInfo()
             Task {
                 await loadConfig()
-                await refreshStatus()
             }
         }
         .onChange(of: config.sttEnergyThreshold) { _, _ in saveConfig() }
         .onChange(of: config.hearEnergyThreshold) { _, _ in saveConfig() }
         .onChange(of: config.sttSilence) { _, _ in saveConfig() }
         .onChange(of: config.sttCooldownMs) { _, _ in saveConfig() }
-        .onChange(of: config.sttAutoEnterDelaySecs) { _, _ in saveConfig() }
+        .onChange(of: config.autoEnterDelayMs) { _, _ in saveConfig() }
         .onChange(of: config.sileroThreshold) { _, _ in saveConfig() }
         .onChange(of: config.postprocessEnabled) { _, _ in saveConfig() }
         .onChange(of: config.idlePauseSecs) { _, _ in saveConfig() }
@@ -316,30 +128,42 @@ struct SettingsWindow: View {
     // MARK: Sections
 
     private var statusAndPauseRow: some View {
-        HStack(spacing: 12) {
-            Image(
-                systemName: status?.isRunning == true
-                    ? "checkmark.circle.fill"
-                    : "exclamationmark.triangle.fill"
-            )
-            .foregroundColor(status?.isRunning == true ? .green : .orange)
-            Text(status?.isRunning == true ? "Running" : "Reconnecting…")
+        // Bind to `stateMonitor` — the live UDS connection signal — instead
+        // of a one-shot `cliService.getStatus()` snapshot. The old version
+        // only ran on `.onAppear`, so the row stayed at "Reconnecting…" for
+        // the rest of the session if the daemon wasn't ready in that first
+        // second. `isDaemonConnected` flips via `UDSClient.$isConnected` and
+        // the watchdog `isDaemonDegraded` flag.
+        let isRunning = stateMonitor.isDaemonConnected
+        let isDegraded = stateMonitor.isDaemonDegraded
+        let displayLabel: String
+        let displayColor: Color
+        let symbol: String
+        if isRunning && !isDegraded {
+            displayLabel = "Running"
+            displayColor = .green
+            symbol = "checkmark.circle.fill"
+        } else if isDegraded {
+            displayLabel = "Reconnecting…"
+            displayColor = .orange
+            symbol = "arrow.triangle.2.circlepath"
+        } else {
+            displayLabel = "Disconnected"
+            displayColor = .orange
+            symbol = "exclamationmark.triangle.fill"
+        }
+        // The master pause/resume toggle now lives at the top of the
+        // Voice Typing Allowlist section — the allowlist model makes
+        // it more an "emergency stop / lift the freeze" affordance
+        // than a primary control, so this row is just a connection
+        // status indicator now.
+        return HStack(spacing: 12) {
+            Image(systemName: symbol)
+                .foregroundColor(displayColor)
+            Text(displayLabel)
                 .font(.headline)
-                .foregroundColor(status?.isRunning == true ? .green : .orange)
+                .foregroundColor(displayColor)
             Spacer()
-            Button {
-                stateMonitor.togglePause()
-            } label: {
-                Label(
-                    stateMonitor.isPaused ? "Resume" : "Pause",
-                    systemImage: stateMonitor.isPaused
-                        ? "play.circle.fill"
-                        : "pause.circle.fill"
-                )
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(status?.isRunning != true)
         }
     }
 
@@ -360,9 +184,12 @@ struct SettingsWindow: View {
                 help: "Seconds before auto-enter. Set to 0 to disable.",
                 unit: "s",
                 formatter: Self.intFormatter,
-                value: $config.sttAutoEnterDelaySecs,
-                defaultValue: 2,
-                range: 0...86_400
+                value: Binding(
+                    get: { config.autoEnterDelayMs / 1000 },
+                    set: { config.autoEnterDelayMs = $0 * 1000 }
+                ),
+                defaultValue: 4,
+                range: 0...60
             )
             .padding(.top, 4)
             HStack {
@@ -405,75 +232,164 @@ struct SettingsWindow: View {
         }
     }
 
+    /// Pause is now off-by-default per app. The Settings section
+    /// surfaces:
+    ///   1. The currently-focused app + a one-click toggle to add or
+    ///      remove it from the resumed-apps allowlist.
+    ///   2. The full allowlist (every app the user has explicitly
+    ///      resumed) with a "Remove" button per row.
+    /// Everything else is implicit ("any app not on the list is paused").
     private var perAppSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Per-App Settings").font(.headline)
-            if let jsonStr = config.perAppSettingsJson, !jsonStr.isEmpty, jsonStr != "{}" {
-                if let data = jsonStr.data(using: .utf8),
-                   let overrides = try? JSONDecoder().decode([String: AppOverride].self, from: data) {
-                    if overrides.isEmpty {
-                        Text("No per-app overrides")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    } else {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(Array(overrides.sorted { $0.key < $1.key }), id: \.key) { bundleId, override in
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(appNameForBundle(bundleId))
-                                        .font(.caption)
-                                        .fontWeight(.semibold)
-                                        .foregroundColor(.secondary)
-
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        if let paused = override.paused {
-                                            HStack(spacing: 4) {
-                                                Image(systemName: paused ? "pause.circle.fill" : "play.circle.fill")
-                                                    .font(.caption2)
-                                                Text(paused ? "Paused" : "Active")
-                                                    .font(.caption2)
-                                            }
-                                            .foregroundColor(paused ? .orange : .green)
-                                        }
-
-                                        if let autoEnter = override.autoEnter {
-                                            HStack(spacing: 4) {
-                                                Image(systemName: autoEnter ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                                    .font(.caption2)
-                                                Text("Auto-Enter: \(autoEnter ? "On" : "Off")")
-                                                    .font(.caption2)
-                                            }
-                                            .foregroundColor(autoEnter ? .green : .gray)
-                                        }
-
-                                        if let delay = override.autoEnterDelayMs {
-                                            HStack(spacing: 4) {
-                                                Image(systemName: "timer")
-                                                    .font(.caption2)
-                                                Text("Delay: \(delay)ms")
-                                                    .font(.caption2)
-                                            }
-                                            .foregroundColor(.secondary)
-                                        }
-                                    }
-                                }
-                                .padding(.vertical, 6)
-                                .padding(.horizontal, 8)
-                                .background(Color.secondary.opacity(0.1))
-                                .cornerRadius(4)
-                            }
-                        }
-                    }
-                } else {
-                    Text("No per-app overrides")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            } else {
-                Text("No per-app overrides")
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Voice Typing Allowlist").font(.headline)
+                Spacer()
+                Text("\(stateMonitor.resumedBundleIds.count) app\(stateMonitor.resumedBundleIds.count == 1 ? "" : "s") resumed")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+            Text("Always is paused by default. Add an app here to resume voice typing while you're in it.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            masterPauseControl
+            focusedAppCard
+
+            if !stateMonitor.resumedBundleIds.isEmpty {
+                Divider().padding(.vertical, 2)
+                Text("Resumed apps")
+                    .font(.subheadline.bold())
+                    .foregroundColor(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(
+                        stateMonitor.resumedBundleIds.sorted(),
+                        id: \.self
+                    ) { bundleId in
+                        resumedAppRow(bundleId: bundleId)
+                    }
+                }
+            }
         }
+    }
+
+    /// Master pause kill switch — pauses every resumed app at once
+    /// (and unpauses back to per-app rules when toggled off). The
+    /// allowlist makes this an exceptional control rather than a
+    /// primary one, so it sits at the top of the section instead of
+    /// next to the connection-status row.
+    @ViewBuilder
+    private var masterPauseControl: some View {
+        let masterPaused = stateMonitor.isMasterPaused
+        HStack(spacing: 10) {
+            Image(systemName: masterPaused ? "exclamationmark.octagon.fill" : "checkmark.shield.fill")
+                .font(.title3)
+                .foregroundColor(masterPaused ? .orange : .accentColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(masterPaused ? "Paused everywhere" : "Allowlist active")
+                    .font(.subheadline.bold())
+                Text(
+                    masterPaused
+                        ? "Master kill switch is on — every resumed app is force-paused."
+                        : "Resumed apps below are listening; everything else is paused."
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button {
+                stateMonitor.togglePause()
+            } label: {
+                Text(masterPaused ? "Lift pause" : "Pause everything")
+            }
+            .controlSize(.small)
+            .disabled(!stateMonitor.isDaemonConnected)
+        }
+        .padding(10)
+        .background(
+            (masterPaused ? Color.orange : Color.accentColor).opacity(0.08)
+        )
+        .cornerRadius(6)
+    }
+
+    /// Header card that surfaces the currently-focused app and a
+    /// one-click toggle to add/remove it from the allowlist. This is
+    /// the answer to "what app am I paused for right now?".
+    @ViewBuilder
+    private var focusedAppCard: some View {
+        let bundleId = focusedApp.currentBundleId
+        let name = focusedApp.currentAppName ?? bundleId ?? "—"
+        let isResumed = bundleId.map { stateMonitor.resumedBundleIds.contains($0) } ?? false
+        let isPaused = stateMonitor.isPaused
+        HStack(spacing: 10) {
+            Image(systemName: isResumed ? "checkmark.circle.fill" : "pause.circle.fill")
+                .font(.title3)
+                .foregroundColor(isResumed && !isPaused ? .green : .orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(bundleId == nil ? "No focused app" : "Currently focused")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text(name)
+                    .font(.subheadline.bold())
+                Text(currentAppStateText(isResumed: isResumed, isPaused: isPaused))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            if let bundle = bundleId {
+                Button(action: {
+                    let newPaused: Bool? = isResumed ? nil : false
+                    stateMonitor.setAppPaused(bundleId: bundle, paused: newPaused)
+                }) {
+                    Text(isResumed ? "Remove from allowlist" : "Resume for this app")
+                }
+                .controlSize(.small)
+            }
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.08))
+        .cornerRadius(6)
+    }
+
+    private func currentAppStateText(isResumed: Bool, isPaused: Bool) -> String {
+        if stateMonitor.isMasterPaused {
+            return "Globally paused — toggle “Pause globally” to lift the master switch."
+        }
+        if isResumed && isPaused {
+            return "On the allowlist but paused for another reason."
+        }
+        if isResumed { return "Voice typing is active here." }
+        return "Paused (not on the allowlist)."
+    }
+
+    @ViewBuilder
+    private func resumedAppRow(bundleId: String) -> some View {
+        let isFocused = focusedApp.currentBundleId == bundleId
+        HStack(spacing: 8) {
+            Image(systemName: isFocused ? "arrowtriangle.right.fill" : "checkmark.circle")
+                .font(.caption)
+                .foregroundColor(isFocused ? .accentColor : .green)
+                .frame(width: 14)
+            Text(appNameForBundle(bundleId))
+                .font(.callout)
+            Spacer()
+            Button(role: .destructive) {
+                stateMonitor.setAppPaused(bundleId: bundleId, paused: nil)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.plain)
+            .help("Remove from allowlist (this app will be paused again)")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            isFocused
+                ? Color.accentColor.opacity(0.10)
+                : Color.clear
+        )
+        .cornerRadius(4)
     }
 
     private func appNameForBundle(_ bundleId: String) -> String {
@@ -736,18 +652,9 @@ struct SettingsWindow: View {
                 apiKey = ""
             }
         } catch {
-            print("Error loading config: \(error)")
+            settingsLogger.error("loadConfig failed: \(error.localizedDescription, privacy: .public)")
         }
         isLoading = false
-    }
-
-    private func refreshStatus() async {
-        do {
-            status = try await cliService.getStatus()
-        } catch {
-            print("Error refreshing status: \(error)")
-            status = DaemonStatus(isRunning: false, pid: nil, logPath: nil)
-        }
     }
 
     private func saveApiKey() {
@@ -761,7 +668,7 @@ struct SettingsWindow: View {
                 // Add a small delay to make the loader visible for testing
                 try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
             } catch {
-                print("Error saving API key: \(error)")
+                settingsLogger.error("saveApiKey failed: \(error.localizedDescription, privacy: .public)")
             }
             isSavingApiKey = false
         }
@@ -775,7 +682,7 @@ struct SettingsWindow: View {
                 _ = try await cliService.setConfig(key: "stt_silence", value: String(config.sttSilence))
                 _ = try await cliService.setConfig(key: "stt_cooldown_ms", value: String(config.sttCooldownMs))
                 _ = try await cliService.setConfig(key: "stt_auto_enter", value: String(config.sttAutoEnter))
-                _ = try await cliService.setConfig(key: "auto_enter_delay_ms", value: String(config.sttAutoEnterDelaySecs * 1000))
+                _ = try await cliService.setConfig(key: "auto_enter_delay_ms", value: String(config.autoEnterDelayMs))
                 _ = try await cliService.setConfig(key: "silero_threshold", value: String(config.sileroThreshold))
                 _ = try await cliService.setConfig(key: "postprocess_enabled", value: String(config.postprocessEnabled))
                 _ = try await cliService.setConfig(key: "idle_pause_secs", value: String(config.idlePauseSecs))
@@ -785,7 +692,7 @@ struct SettingsWindow: View {
                     _ = try await cliService.setConfig(key: "groq_api_key", value: apiKey.isEmpty ? "" : apiKey)
                 }
             } catch {
-                print("Error saving config: \(error)")
+                settingsLogger.error("saveConfig failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }

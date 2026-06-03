@@ -3,12 +3,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use super::context_vocab::ContextVocabulary;
 use super::postprocess::PostProcessor;
-use super::text::Vocabulary;
 use crate::db;
 use crate::db::Preferences;
 
@@ -16,18 +13,13 @@ use crate::db::Preferences;
 const DEFAULT_AUTO_ENTER_DELAY_MS: u32 = 4000;
 const DEFAULT_IDLE_PAUSE_SECS: u32 = 120;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub enum IdlePauseAction {
+    #[default]
     #[serde(rename = "pause")]
     Pause,
     #[serde(rename = "pause_and_mute")]
     PauseAndMute,
-}
-
-impl Default for IdlePauseAction {
-    fn default() -> Self {
-        Self::Pause
-    }
 }
 
 impl FromStr for IdlePauseAction {
@@ -201,14 +193,11 @@ pub struct AlwaysConfig {
     pub timeout_secs: u32,
     pub silence_secs: f64,
     pub auto_enter: bool,
-    pub auto_enter_delay_secs: u64,
     pub filter_enabled: bool,
     pub energy_threshold: f64,
     pub onset_ms: u32,
     pub cooldown_ms: u32,
     pub log_path: PathBuf,
-    pub vocab: Option<Vocabulary>,
-    pub context_vocab: Option<Arc<Mutex<ContextVocabulary>>>,
     pub post_processor: Option<Arc<PostProcessor>>,
     pub project_root: Option<PathBuf>,
     pub learning_enabled: bool,
@@ -286,7 +275,7 @@ impl AlwaysConfig {
         lang: String,
         timeout_secs: u32,
         silence_secs: f64,
-        auto_enter: bool,
+        auto_enter: Option<bool>,
     ) -> Result<Self> {
         let groq_stt_api_key = get_groq_stt_api_key()?;
         let vad_mode = std::env::var("ALWAYS_VAD_MODE")
@@ -294,19 +283,20 @@ impl AlwaysConfig {
             .and_then(|s| s.parse().ok())
             .unwrap_or_default();
         let prefs = load_preferences()?;
-        let vocab = Vocabulary::load();
+        // CLI flag wins when explicitly set; otherwise read the user's
+        // saved pref; final fallback to the canonical default (true).
+        // This is the single auto-enter source-of-truth resolution —
+        // the previous code always took the CLI value, so a user-saved
+        // `stt_auto_enter = false` was silently ignored when the daemon
+        // was relaunched without an explicit override.
+        let auto_enter = auto_enter
+            .or(prefs.stt_auto_enter)
+            .unwrap_or(true);
 
         let vocab_config = load_vocab_config();
         let postprocess_config = load_postprocess_config();
 
         let project_root = detect_project_root();
-
-        let context_vocab = project_root.as_ref().map(|root| {
-            Arc::new(Mutex::new(ContextVocabulary::new_with_config(
-                Some(root.clone()),
-                vocab_config.clone(),
-            )))
-        });
 
         // Honor user pref for LLM postprocess: DB > env > default true.
         let postprocess_enabled = prefs
@@ -332,10 +322,6 @@ impl AlwaysConfig {
                     Some(groq_stt_api_key.clone())
                 }
             });
-            let vocab_for_pp = vocab.clone().unwrap_or_else(Vocabulary::default_patterns);
-            let context_vocab_for_pp = context_vocab
-                .clone()
-                .unwrap_or_else(|| Arc::new(Mutex::new(ContextVocabulary::new(None))));
             tracing::info!(
                 grammar_correction_enabled = effective_postprocess.grammar_correction_enabled,
                 has_api_key = groq_api_key.is_some(),
@@ -343,8 +329,6 @@ impl AlwaysConfig {
                 "post_processor_init"
             );
             Some(Arc::new(PostProcessor::new_with_config(
-                vocab_for_pp,
-                context_vocab_for_pp,
                 effective_postprocess.clone(),
                 groq_api_key,
             )))
@@ -354,18 +338,15 @@ impl AlwaysConfig {
             lang,
             timeout_secs,
             silence_secs: prefs.stt_silence.unwrap_or(silence_secs),
+            // `auto_enter` was already resolved above: CLI flag → DB pref →
+            // canonical default. The previous code re-read `prefs.stt_auto_enter`
+            // here, which silently undid an explicit CLI override.
             auto_enter,
-            auto_enter_delay_secs: prefs
-                .auto_enter_delay_ms
-                .map(|ms| (ms as u64 + 999) / 1000) // Convert ms to seconds, round up
-                .unwrap_or(2),
             filter_enabled: true, // Always enabled - filter is always on
             energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.012),
             onset_ms: 30,
             cooldown_ms: prefs.stt_cooldown_ms.unwrap_or(150),
             log_path: log_path_from_preferences(&prefs),
-            vocab,
-            context_vocab,
             post_processor,
             project_root,
             learning_enabled: postprocess_config.learning_history_limit > 0,
@@ -404,14 +385,11 @@ impl Default for AlwaysConfig {
             // ~2.0s after the user truly stops talking.
             silence_secs: 2.0,
             auto_enter: true,
-            auto_enter_delay_secs: 4,
             filter_enabled: true,
             energy_threshold: 0.012,
             onset_ms: 30,
             cooldown_ms: 150,
             log_path: default_log_path(),
-            vocab: Vocabulary::load(),
-            context_vocab: None,
             post_processor: None,
             project_root: detect_project_root(),
             learning_enabled: postprocess_config.learning_history_limit > 0,
@@ -449,22 +427,32 @@ fn load_vocab_config() -> VocabConfig {
 }
 
 fn load_postprocess_config() -> PostprocessConfig {
-    PostprocessConfig {
-        groq_model: std::env::var("ALWAYS_GROQ_MODEL")
-            .unwrap_or_else(|_| "llama-3.1-8b-instant".to_string()),
-        learning_history_limit: std::env::var("ALWAYS_LEARNING_LIMIT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1000),
-        grammar_correction_enabled: std::env::var("ALWAYS_GRAMMAR_CORRECTION")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(true),
-        cache_ttl_seconds: std::env::var("ALWAYS_CACHE_TTL")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(300),
+    // Build from the canonical Default, then override each field only if
+    // the corresponding env var is set. Keeping `PostprocessConfig::default`
+    // as the single source of truth prevents drift like the earlier
+    // `gpt-oss-120b` (Default) vs `llama-3.1-8b-instant` (loader) split,
+    // where the 8b model silently took over in production and degraded
+    // transcript quality (documented as inventing words / ignoring glossary).
+    let mut cfg = PostprocessConfig::default();
+    if let Ok(model) = std::env::var("ALWAYS_GROQ_MODEL") {
+        cfg.groq_model = model;
     }
+    if let Ok(limit) = std::env::var("ALWAYS_LEARNING_LIMIT")
+        && let Ok(parsed) = limit.parse()
+    {
+        cfg.learning_history_limit = parsed;
+    }
+    if let Ok(enabled) = std::env::var("ALWAYS_GRAMMAR_CORRECTION")
+        && let Ok(parsed) = enabled.parse()
+    {
+        cfg.grammar_correction_enabled = parsed;
+    }
+    if let Ok(ttl) = std::env::var("ALWAYS_CACHE_TTL")
+        && let Ok(parsed) = ttl.parse()
+    {
+        cfg.cache_ttl_seconds = parsed;
+    }
+    cfg
 }
 
 fn default_vocab_patterns() -> Vec<String> {

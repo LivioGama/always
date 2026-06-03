@@ -1,4 +1,18 @@
 import Foundation
+import os.log
+
+private let configLogger = Logger(subsystem: "com.always.app", category: "config-parse")
+
+/// Keys the CLI's `config show` output emits today but the Swift Config
+/// struct intentionally doesn't bind. Filter these out of the
+/// "unknown_key" warning so we only surface genuinely-unknown drift.
+private let knownButUnboundCliKeys: Set<String> = [
+    "deepgram_api_key",
+    "deepgram_model",
+    "always_log_path",
+    "shortcut_log_correction",
+    "passive_correction_capture",
+]
 
 struct AppOverride: Codable {
     var autoEnter: Bool?
@@ -18,7 +32,10 @@ struct Config: Codable {
     var sttCooldownMs: Int
     var sttSilence: Double
     var sttAutoEnter: Bool
-    var sttAutoEnterDelaySecs: Int
+    /// Auto-enter delay in milliseconds. Single source of truth — UI
+    /// displays as seconds via `Double(autoEnterDelayMs) / 1000` but the
+    /// wire and DB columns are always ms.
+    var autoEnterDelayMs: Int
     var groqApiKey: String?
     var sileroThreshold: Float
     var shortcutPause: String
@@ -40,7 +57,7 @@ struct Config: Codable {
         sttCooldownMs: 150,
         sttSilence: 2.0,
         sttAutoEnter: true,
-        sttAutoEnterDelaySecs: 4,
+        autoEnterDelayMs: 4000,
         groqApiKey: nil,
         sileroThreshold: 0.5,
         shortcutPause: "ctrl+alt+p",
@@ -70,18 +87,25 @@ struct Config: Codable {
                     config.hearEnergyThreshold = Double(value) ?? defaultConfig.hearEnergyThreshold
                 case "stt_cooldown_ms":
                     config.sttCooldownMs = Int(value) ?? defaultConfig.sttCooldownMs
-                case "stt_silence":
+                case "stt_cooldown_secs":
+                    // Daemon `config show` prints seconds; convert back to ms.
+                    if let secs = Double(value) {
+                        config.sttCooldownMs = Int((secs * 1000).rounded())
+                    }
+                case "stt_silence", "stt_silence_secs":
                     config.sttSilence = Double(value.replacingOccurrences(of: "s", with: "")) ?? defaultConfig.sttSilence
                 case "stt_auto_enter":
-                    config.sttAutoEnter = value == "true"
+                    config.sttAutoEnter = (value == "true" || value == "1")
                 case "auto_enter_delay_ms":
-                    if let ms = Int(value) {
-                        config.sttAutoEnterDelaySecs = ms / 1000
-                    } else {
-                        config.sttAutoEnterDelaySecs = defaultConfig.sttAutoEnterDelaySecs
+                    config.autoEnterDelayMs = Int(value) ?? defaultConfig.autoEnterDelayMs
+                case "auto_enter_delay_secs", "stt_auto_enter_delay_secs":
+                    // Legacy daemon emitted fractional seconds (e.g. "4.000")
+                    // under these keys. The canonical key is `auto_enter_delay_ms`
+                    // and the field is ms-typed; convert on read so older
+                    // daemon builds still feed the GUI correctly.
+                    if let secs = Double(value) {
+                        config.autoEnterDelayMs = Int((secs * 1000).rounded())
                     }
-                case "stt_auto_enter_delay_secs":
-                    config.sttAutoEnterDelaySecs = Int(value) ?? defaultConfig.sttAutoEnterDelaySecs
                 case "groq_api_key":
                     if !value.contains("(not set)") {
                         config.groqApiKey = value
@@ -115,7 +139,15 @@ struct Config: Codable {
                         config.idlePauseAction = value
                     }
                 default:
-                    break
+                    // Surface drift: if the CLI emits a new key the GUI
+                    // doesn't bind, log it once per parse so a daemon
+                    // update doesn't silently lose a setting. Skip
+                    // intentionally-unbound keys (deepgram, log path,
+                    // passive correction etc.) to keep the signal:noise
+                    // ratio useful.
+                    if !knownButUnboundCliKeys.contains(key) {
+                        configLogger.warning("unknown_cli_key: \(key, privacy: .public) = \(value, privacy: .public)")
+                    }
                 }
             }
         }

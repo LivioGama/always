@@ -5,7 +5,12 @@ use tokio::sync::broadcast;
 /// [`DaemonEvent`] or [`DaemonCommand`]. The daemon sends a `Hello` event
 /// as the first frame of every UDS connection so GUI clients can refuse
 /// to talk to a daemon they were not built against.
-pub const PROTOCOL_VERSION: u32 = 2;
+///
+/// **v3 (2026-05-17):** Pause/Resume now mean "effective" pause (master
+/// OR per-app rule). Added [`DaemonEvent::MasterPauseChanged`] and
+/// [`DaemonEvent::ResumedAppsChanged`] so the UI can render the
+/// allowlist + master kill switch separately.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Event types for daemon-to-GUI communication
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +90,16 @@ pub enum DaemonEvent {
     IdleAutoResumed,
     /// Focused application changed (macOS only).
     FocusedAppChanged { bundle_id: Option<String> },
+    /// Master pause flag flipped — the user (or the audio/idle/mic
+    /// watchdogs) explicitly toggled the global force-pause switch.
+    /// `Paused`/`Resumed` continue to track *effective* state; this
+    /// event is what the UI uses to label the global pause toggle
+    /// ("Pause globally" vs "Resume globally").
+    MasterPauseChanged { master_paused: bool },
+    /// Snapshot of the resumed-app allowlist (bundle ids whose
+    /// `paused` override is set to `false`). Sent on connect and
+    /// whenever a `SetAppPaused` command mutates the list.
+    ResumedAppsChanged { bundles: Vec<String> },
     /// Daemon wants the GUI to open the correction dialog. Carries the
     /// most recently-pasted transcript so the dialog can offer a
     /// best-guess match for the wrong word once the user types the
@@ -142,6 +157,16 @@ pub enum DaemonCommand {
     /// closest wrong-word match, and updates the glossary (add entry,
     /// remove over-fired entry, or bump weight).
     LogCorrection { intended: String },
+    /// Set (or clear) the per-app `paused` override for `bundle_id`.
+    /// `paused = Some(false)` → app is on the resumed-allowlist.
+    /// `paused = Some(true)` → app is force-paused even though it
+    /// would otherwise inherit the (paused-by-default) global rule.
+    /// `paused = None` → remove the override entirely; the app reverts
+    /// to the default (paused).
+    SetAppPaused {
+        bundle_id: String,
+        paused: Option<bool>,
+    },
 }
 
 impl DaemonCommand {
@@ -314,6 +339,14 @@ impl EventBroadcaster {
 
     pub fn focused_app_changed(&self, bundle_id: Option<String>) {
         self.send(DaemonEvent::FocusedAppChanged { bundle_id });
+    }
+
+    pub fn master_pause_changed(&self, master_paused: bool) {
+        self.send(DaemonEvent::MasterPauseChanged { master_paused });
+    }
+
+    pub fn resumed_apps_changed(&self, bundles: Vec<String>) {
+        self.send(DaemonEvent::ResumedAppsChanged { bundles });
     }
 
     pub fn correction_dialog_requested(&self, last_transcript: impl Into<String>) {

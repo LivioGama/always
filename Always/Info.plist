@@ -45,6 +45,17 @@
     <key>NSAppleEventsUsageDescription</key>
     <string>Always needs accessibility access to position the voice indicator near your active text field.</string>
     <!--
+      REQUIRED for microphone capture. macOS TCC silently denies mic
+      access to any binary whose responsible bundle does not declare
+      this usage description. The daemon (bundled as
+      `Contents/MacOS/always-daemon`) is attributed to Always.app for
+      TCC purposes; without this key the SoX `rec` subprocess receives
+      a stream of zeros and the voice activity detector never triggers
+      — exactly the "I speak but the overlay never appears" symptom.
+    -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Always needs microphone access to detect when you speak and transcribe your voice into text.</string>
+    <!--
       Sparkle auto-update settings.
 
       `SUFeedURL`         — appcast XML emitted by .github/workflows/release.yml.

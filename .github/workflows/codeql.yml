@@ -44,7 +44,7 @@ jobs:
       - name: Build Swift app
         if: matrix.language == 'swift'
         run: |
-          cd AlwaysApp
+          cd Always
           swift build
 
       - name: Perform analysis

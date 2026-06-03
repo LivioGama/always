@@ -34,21 +34,19 @@ pub fn record_utterance(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordRe
 }
 
 /// Speech shorter than this is treated as a "short utterance" and gets
-/// the aggressive silence cutoff below. Tuned so single-word commands
-/// ("yes", "no", "done", "stop", "next") trip the fast path while
-/// normal phrases ("open the pull request") do not.
-const SHORT_SPEECH_MS: u32 = 600;
+/// the aggressive silence cutoff below. Tuned tight — only TRULY tiny
+/// single-word commands ("yes", "no", "done", "stop", "next") should
+/// trip the fast path. Earlier values (600ms) let normal opener phrases
+/// like "So, ..." or "And, ..." into the short bucket and got cut off
+/// mid-thought.
+const SHORT_SPEECH_MS: u32 = 400;
 /// Silence-after-speech window for short utterances. Standard window
 /// is `cfg.silence_secs` (1.5s default); for a short utterance we cut
-/// at 700ms so "yes" pastes in ~1s total. Cost: if the user pauses
-/// >700ms mid-thought after a short opener ("yes, … actually no"),
-/// we paste the opener and start a fresh utterance for the rest.
-///
-/// History: 400ms was too aggressive — users dictating prose with
-/// brief thinking pauses ("So, …", "And, …") would get cut off after
-/// the opener. 700ms still gives a snappy ~1s round-trip for single
-/// words while leaving headroom for natural mid-thought micropauses.
-const SHORT_SILENCE_MS: u32 = 700;
+/// at 900ms so single words still paste in ~1.2s but the user gets
+/// real headroom for natural mid-thought micropauses before the cut
+/// fires. 700ms was still too aggressive — users reported mid-sentence
+/// pastes during normal dictation.
+const SHORT_SILENCE_MS: u32 = 900;
 
 fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordResult> {
     let silence_frames = ((cfg.silence_secs * 1000.0) / FRAME_MS as f64).ceil() as usize;
@@ -100,9 +98,12 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
     // Probability smoothing window. Silero outputs per-512-sample (32ms) chunks;
     // single-frame dips during voiceless consonants (s/f/th/h) or breaths can
     // briefly drop prob below threshold without genuine end-of-utterance.
-    // We track the last 8 readings (~256ms) and use the running max while in
+    // We track the last 16 readings (~512ms) and use the running max while in
     // speech — the prob must stay low for the FULL window to count as silence.
-    let smoothing_window: usize = 8;
+    // 8 frames (~256ms) was too short — fricatives and brief inter-word stop
+    // closures could last 200-300ms in fluent speech and produce false
+    // end-of-utterance triggers mid-phrase.
+    let smoothing_window: usize = 16;
     let mut prob_history: VecDeque<f32> = VecDeque::with_capacity(smoothing_window);
 
     // Use persistent recorder to avoid process spawning overhead
@@ -209,11 +210,36 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
 
                         // Send voice activity detected event
                         event::global_broadcaster().voice_activity_detected();
-                        // Anchor the idle-pause watchdog: real voice
-                        // arrived right now, so any prior gap is reset.
-                        pause::mark_voice_seen();
+                        // Clear the idle-auto-paused flag the moment we
+                        // see voice. Upstream calls `mark_voice_seen()`
+                        // unconditionally below (every confirmed speech
+                        // frame), so we only need to drop the idle flag
+                        // here — that's the one piece upstream didn't
+                        // wire and that was leaving us stuck in idle-pause
+                        // after the audio-output auto-resume path.
+                        pause::set_idle_auto_paused(false);
+                        // Cancel any in-flight auto-enter countdown — the
+                        // user is clearly still speaking. The dictation
+                        // buffer is intentionally NOT cleared (cancel
+                        // path in auto_enter_countdown leaves it), so
+                        // when this fresh utterance finalises the
+                        // dictation-merge gate in `handle_speech` picks
+                        // up the previous text and appends. Without this
+                        // cancel, a Return would fire mid-sentence and
+                        // split the user's utterance in two.
+                        if pause::countdown_active() {
+                            pause::countdown_request_cancel();
+                            tracing::info!("countdown_cancel_on_voice_resume");
+                        }
                     }
                 }
+                // Anchor the idle-pause watchdog: refresh on EVERY confirmed
+                // speech frame so a long continuous utterance (>idle threshold)
+                // never trips a false idle-auto-pause. Earlier code called this
+                // exactly once per utterance start, so a user speaking
+                // continuously for >idle_pause_secs would get auto-paused
+                // mid-sentence even though there was no real silence gap.
+                pause::mark_voice_seen();
                 // Prepend pre-buffer to capture audio before VAD triggered
                 for buffered_samples in pre_buffer.drain(..) {
                     speech_samples.extend_from_slice(&buffered_samples);
@@ -221,6 +247,11 @@ fn record_with_local_vad(cfg: &AlwaysConfig, log: &mut Logger) -> Result<RecordR
             }
             if in_speech {
                 speech_samples.extend_from_slice(samples);
+                // Same anchor refresh for the case where we were already in
+                // speech (consecutive_speech overflows min_speech_frames
+                // immediately) — keep the watchdog clock pinned to "right
+                // now" for as long as audio is genuinely voice.
+                pause::mark_voice_seen();
             }
         } else if in_speech {
             consecutive_silence += 1;

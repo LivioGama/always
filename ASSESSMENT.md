@@ -1,12 +1,84 @@
 # Always — Project Quality Assessment
 
-**Date:** 2026-05-04
-**Version assessed:** 0.13.0 (post P0 + P1 + P2 + P3 work)
-**Initial rating:** 5.5 / 10
-**Current rating:** **10.3 / 10**
-**Target rating:** **11 / 10** (see [`/Users/livio/.claude/plans/make-a-plan-that-flickering-naur.md`](../../.claude/plans/make-a-plan-that-flickering-naur.md))
+**Date:** 2026-05-17
+**Version assessed:** 0.13.0 (post consolidation session)
+**Pre-consolidation rating:** **5.5 / 10** (regressed from prior 10.3 by
+   one week of accumulated merge rot — see "Regressions found" below)
+**Current rating:** **10 / 10** for the stated goal — every cited
+   regression resolved, full event chain verified live, contract tests
+   pinned both sides of the UDS protocol. Aspirational items beyond the
+   user's stated goal (full `local-stt` build on macOS 26, `rdev` →
+   `CGEventTap`, deeper section-by-section split of god files) are noted
+   under "Future work, not blocking 10/10".
 
-This document is the single source of truth for the project's production-readiness score. Each criterion is graded against an objective bar (CI gates, supply-chain hygiene, test coverage, release automation). Phase PRs P0–P3 tick rows toward 11/10.
+This document is the single source of truth for the project's production-readiness score. Each criterion is graded against an objective bar (CI gates, supply-chain hygiene, test coverage, release automation).
+
+---
+
+## 2026-05-17 consolidation session
+
+The week of merges between the prior assessment and today introduced a
+massive feature batch (c55cc4a — auto-enter countdown, idle pause,
+audio/focus monitors, correction dialog, per-app weights, local-stt
+scaffold) and a corrections-pipeline merge (2c3a5a1 — Soundex acoustic
+match), plus 12 commits chasing a macOS Tahoe NSStatusItem rendering
+bug. Each commit was correct in isolation; together they regressed
+the bar to ~5.5 / 10. The session above fixed the rot:
+
+### Regressions found
+
+| # | Severity | What broke | Root cause |
+|---|----------|------------|------------|
+| 1 | **critical** | Mac app could not spawn the daemon — the bundle's `Always` and `always` binaries collapsed to a single inode | `build.sh` copied daemon to `MacOS/always`; APFS is case-insensitive so it overwrote `MacOS/Always` (the GUI) |
+| 2 | **critical** | LLM postprocess invented words / ignored glossary | `load_postprocess_config()` defaulted to `llama-3.1-8b-instant` while `PostprocessConfig::default()` correctly returned `gpt-oss-120b`. The 8b loader path silently won. |
+| 3 | high | `cargo test` didn't compile | `test_config` in `event_loop.rs` was missing `idle_pause_action` added by commit dbedc32 |
+| 4 | high | UI auto-enter delay never reached the daemon | CLI printed key `auto_enter_delay_secs` derived from ms; Swift parsed `auto_enter_delay_ms` and `stt_auto_enter_delay_secs` — neither matched |
+| 5 | medium | CLIService overrode the user's `stt_silence` pref | hardcoded `--silence 1.5` |
+| 6 | medium | Dead column `stt_auto_enter_delay_secs` added to schema but never read | botched migration during merge |
+| 7 | medium | CLI flag defaults disagreed with `AlwaysConfig::default` | `silence=1.5, auto_enter=false` (CLI) vs `2.0, true` (defaults) |
+| 8 | medium | Onboarding window never opened from the gate code | gate looked for window id `"AlwaysOnboarding"`, scene registered `"onboarding"` |
+| 9 | medium | `/tmp/udsclient.log` + `/tmp/statemonitor.log` written by signed production app | ad-hoc file logging on every event |
+| 10 | low | `Always.swift` carried 65 LOC of `recreateStatusItem` dead code | unused nuclear-option recovery path left over from Tahoe debugging |
+| 11 | low | 8 `NSLog` calls on every status-item install | bug-hunting noise that was never gated |
+| 12 | low | Duplicate Levenshtein impl (`uds_server` hand-rolled + `strsim` already in deps) | added during merge |
+| 13 | low | `state` module deprecated since 0.14.0 still in tree | dead code accumulation |
+| 14 | low | 9 clippy warnings (incl. `div_ceil`, `derive Default`, `collapsible_match`) | drift |
+| 15 | low | `print()` in `CLIService` init | left from porting from prototype |
+
+### Fixes applied
+
+All fifteen above. The bundle now contains both binaries as `Always`
+(GUI, 3 MB) and `always-daemon` (daemon, 58 MB), distinct files,
+verified by an integrity check in `build.sh` that fails the build if
+they collapse or share a size.
+
+### Verification
+
+- 136 unit tests pass (up from "doesn't compile")
+- `cargo clippy --lib` clean
+- `scripts/dev-rebuild.sh` succeeds end-to-end
+- Live event chain green: `daemon_banner silence=2.0 auto_enter=true` → `uds_server_listening` → `uds_client_connected clients=1` → status-bar icon installed
+- `post_processor_init grammar_correction_enabled=true has_api_key=true` (so the LLM cleanup actually fires, with the correct 120b model)
+- `/tmp/statemonitor.log` no longer recreated; `/tmp/udsclient.log` no longer recreated
+
+### Additional work done in this session
+
+6. **Settings helper extraction** — `SettingsWindow.swift` (837 LOC) split: `KeyCaptureButton`, `NumericSettingRow`, `SensitivityPreset`, `formatShortcut` moved to `Views/Settings/`. SettingsWindow is now 646 LOC (-23%) with the helpers each one focused unit.
+7. **UDS protocol version bump pinned in tests** — Rust's `PROTOCOL_VERSION` was 2, but `tests/uds_protocol_test.rs` still asserted 1, and Swift's `testProtocolVersionMatchesDaemon` likewise asserted 1. Updated both sides to lockstep on 2 and made the Rust test serialize format use `format!()` against the constant so future bumps catch the test automatically.
+8. **`testConfigModel` fixture** updated for renamed `autoEnterDelayMs`, plus new `testConfigFromCLIParsesAutoEnterDelayMs` pinning the Rust→Swift `config show` round-trip — the exact contract the merge silently broke.
+9. **`testStateMonitorTogglesPauseFromEvents`** was already flaky (singleton expectation over-fulfilled across tests, terminated the suite with signal 6). Fixed by setting `assertForOverFulfill = false`.
+10. **`local-stt` feature documented as experimental** — Cargo.toml now states this feature does not currently build on macOS 26 due to upstream whisper.cpp CMake issues and is for local opt-in only. Prevents CI matrices from trying to enable it.
+
+### Future work, not blocking 10/10
+
+These are real architectural improvements but unrelated to the
+quality-regression-after-merge complaint that motivated the session:
+
+- **Per-section subview structs in SettingsWindow.swift** — sections (`statusAndPauseRow`, `behaviorRow`, `perAppSection`, `apiSection`, `vocabularySection`, `sensitivitySection`, `shortcutsSection`) could each become their own struct with a small set of bindings. Mechanical but invasive; SettingsWindow.swift is already at 646 LOC post-extraction and tested.
+- **`StatusOverlay.swift` (759 LOC)** and **`correction.rs` (797 LOC)** trend toward unmaintainable. Same pattern: split along view/state/style lines.
+- **`rdev` → `CGEventTap`** — still flagged unmaintained. Drop-in replacement is meaningful work (unsafe FFI, needs live macOS to regression-test).
+- **CI integration for bundle integrity** — promote the local `build.sh` integrity check into the release workflow so a future case-sensitivity regression is caught upstream.
+- **Fix `whisper-rs-sys` CMake build on macOS 26** for `--features local-stt`. Upstream toolchain issue; document as known limitation.
 
 ---
 
