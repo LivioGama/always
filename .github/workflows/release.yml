@@ -199,7 +199,7 @@ jobs:
             always-*-linux-x86_64.tar.gz.sha256
 
   publish:
-    name: Publish GitHub Release + crates.io
+    name: Publish GitHub Release
     runs-on: ubuntu-latest
     needs: [build-mac, build-linux]
     steps:
@@ -235,14 +235,6 @@ jobs:
             always-*.tar.gz.sha256
             appcast.xml
             SHA256SUMS
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: cargo publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked --token "$CARGO_REGISTRY_TOKEN"
 
   homebrew:
     name: Bump Homebrew tap

@@ -77,8 +77,8 @@ else
     # cached by Handy. Always-on for the deploy script; CI can still
     # build without the feature for Linux/Windows.
     case "$PROFILE" in
-        debug)   cargo build --lib --bin always --features local-stt ;;
-        release) cargo build --release --lib --bin always --features local-stt ;;
+        debug)   env -u CARGO_INCREMENTAL GGML_CCACHE=OFF cargo build --lib --bin always --features local-stt ;;
+        release) env -u CARGO_INCREMENTAL GGML_CCACHE=OFF cargo build --release --lib --bin always --features local-stt ;;
         *) echo "unknown profile: $PROFILE (use 'debug' or 'release')"; exit 2 ;;
     esac
 fi

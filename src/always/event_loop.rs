@@ -396,11 +396,20 @@ fn handle_speech(
         }
         SpeechAction::Paste { text: transformed } => {
             // Log the raw Whisper transcript for debugging STT quality issues
-            tracing::info!(
-                stage = "whisper_raw",
-                transcript = %text,
-                "speech-to-text output"
-            );
+            // Privacy: gate transcript text behind `should_log_transcripts`
+            if crate::always::telemetry::should_log_transcripts() {
+                tracing::info!(
+                    stage = "whisper_raw",
+                    transcript = %text,
+                    "speech-to-text output"
+                );
+            } else {
+                tracing::info!(
+                    chars = text.chars().count(),
+                    stage = "whisper_raw",
+                    "speech-to-text output"
+                );
+            }
 
             // Resume-merge must use the full blocking pipeline — async
             // grammar patch only replaces the last paste via Cmd+Z, which
@@ -419,28 +428,34 @@ fn handle_speech(
                 );
                 (transformed.clone(), false)
             } else {
+                // Single-paste policy: correct synchronously, then paste the
+                // final text exactly ONCE. The old "paste acoustic now, patch
+                // via Cmd+Z + repaste when the LLM returns" path surfaced text
+                // a few hundred ms sooner but produced a DOUBLE transcript
+                // whenever the undo failed to land — user pressed Enter first,
+                // the app has non-standard undo (Slack, terminals, web
+                // contenteditable), or focus shifted. One clean paste of the
+                // corrected text is worth the small extra latency.
                 let acoustic = apply_acoustic_corrections(&transformed);
-                let async_grammar = cfg.postprocess_config.grammar_correction_enabled
-                    && cfg.post_processor.is_some()
-                    && !merge_active;
-                if async_grammar {
-                    tracing::debug!(
-                        stage = "paste_first",
-                        text = %acoustic,
-                        "pasting acoustic result; grammar patch will follow async"
-                    );
-                    (acoustic, true)
-                } else {
-                    (apply_grammar_blocking(&acoustic, cfg, rt), false)
-                }
+                (apply_grammar_blocking(&acoustic, cfg, rt), false)
             };
 
-            tracing::info!(
-                stage = "final_result",
-                text = %final_text,
-                energy = energy,
-                "transcript ready for pasting"
-            );
+            // Privacy: gate transcript text behind `should_log_transcripts`
+            if crate::always::telemetry::should_log_transcripts() {
+                tracing::info!(
+                    stage = "final_result",
+                    text = %final_text,
+                    energy = energy,
+                    "transcript ready for pasting"
+                );
+            } else {
+                tracing::info!(
+                    stage = "final_result",
+                    chars = final_text.chars().count(),
+                    energy = energy,
+                    "transcript ready for pasting"
+                );
+            }
             log.write(Event::Pasting {
                 raw: text,
                 processed: &final_text,
@@ -594,6 +609,11 @@ fn handle_speech(
             // Cmd+Z would land in the wrong window and create a double paste.
             let pasted_to_app = pause::current_app();
 
+            // Add a small delay after paste to prevent double-paste when
+            // the user makes a break mid-utterance. This gives the system
+            // time to settle before releasing the paste-in-flight lock.
+            std::thread::sleep(Duration::from_millis(200));
+
             if grammar_patch_async {
                 // TODO(clipboard-restore): the async-grammar path ends with
                 // `replace_via_undo` INSIDE `spawn_grammar_patch` (undo +
@@ -626,7 +646,7 @@ fn handle_speech(
 
             let auto_enter_effective =
                 per_app::effective_auto_enter(pause::is_auto_enter_enabled());
-            if auto_enter_effective {
+            if auto_enter_effective && should_auto_enter_for_text(&buffer_text) {
                 // Hold the merged buffer so the NEXT utterance can
                 // append again if it arrives before the countdown
                 // fires. Set BEFORE schedule() so even a 0-delay
@@ -635,9 +655,17 @@ fn handle_speech(
                 let delay = per_app::effective_auto_enter_delay_ms(cfg.auto_enter_delay_ms);
                 auto_enter_countdown::schedule(rt, delay);
             } else {
-                // No auto-enter — no merge window. Drop any stale buffer
-                // so the next utterance doesn't accidentally try to
-                // merge with text the user has long since committed.
+                if auto_enter_effective {
+                    tracing::info!(
+                        text = %buffer_text,
+                        words = word_count(&buffer_text),
+                        "auto_enter_suppressed_short_transcript"
+                    );
+                }
+                // No auto-enter, or transcript too short to submit — no
+                // merge window. Drop any stale buffer so the next utterance
+                // doesn't accidentally try to merge with text the user has
+                // long since committed.
                 pause::dictation_buffer_clear();
             }
 
@@ -653,6 +681,12 @@ fn handle_speech(
             // For merge: store the full joined text so correction tools
             // diff against what's actually on screen.
             pause::set_last_pasted(buffer_text);
+            // Explicit voice-activity-ended after a successful paste so the
+            // Swift overlay clears cleanly. Without this, the next VAD loop
+            // iteration can pick up residual mic energy and fire a new
+            // VoiceActivityDetected before the overlay from this utterance
+            // has hidden — causing the "listening appears again" flash.
+            event::global_broadcaster().voice_activity_ended();
             Ok(())
         }
     }
@@ -676,9 +710,19 @@ pub fn is_short_utterance(text: &str) -> bool {
     if trimmed.is_empty() {
         return true;
     }
-    let words = trimmed.split_whitespace().count();
+    let words = word_count(trimmed);
     let chars = trimmed.chars().count();
     words <= SHORT_UTTERANCE_MAX_WORDS || chars <= SHORT_UTTERANCE_MAX_CHARS
+}
+
+const AUTO_ENTER_MIN_WORDS: usize = 3;
+
+fn should_auto_enter_for_text(text: &str) -> bool {
+    word_count(text) >= AUTO_ENTER_MIN_WORDS
+}
+
+fn word_count(text: &str) -> usize {
+    text.split_whitespace().count()
 }
 
 /// Stage 1 — acoustic glossary fix-up (Soundex + Levenshtein).
@@ -784,6 +828,12 @@ fn apply_grammar_blocking(text: &str, cfg: &AlwaysConfig, rt: &Handle) -> String
 }
 
 /// After paste-first, patch grammar via Cmd+Z + repaste when the LLM returns.
+///
+/// Retired by the single-paste policy (see the `apply_grammar_blocking` branch
+/// in the main loop) because the undo step doubled the transcript whenever it
+/// failed to land. Kept behind `dead_code` so the paste-first path can be
+/// restored if a select-and-replace correction (no Cmd+Z) is built later.
+#[allow(dead_code)]
 fn spawn_grammar_patch(
     rt: &Handle,
     cfg: &AlwaysConfig,
@@ -913,7 +963,10 @@ mod tests {
     // the functions they cover so daemon orchestration and pure
     // decision logic can be exercised in isolation.
 
-    use super::{SHORT_UTTERANCE_MAX_CHARS, SHORT_UTTERANCE_MAX_WORDS, is_short_utterance};
+    use super::{
+        AUTO_ENTER_MIN_WORDS, SHORT_UTTERANCE_MAX_CHARS, SHORT_UTTERANCE_MAX_WORDS,
+        is_short_utterance, should_auto_enter_for_text,
+    };
 
     #[test]
     fn short_utterance_bypass_matches_thresholds() {
@@ -957,5 +1010,19 @@ mod tests {
         // Sanity: thresholds are at the documented values.
         assert_eq!(SHORT_UTTERANCE_MAX_WORDS, 2);
         assert_eq!(SHORT_UTTERANCE_MAX_CHARS, 8);
+    }
+
+    #[test]
+    fn auto_enter_requires_three_or_more_words() {
+        assert!(!should_auto_enter_for_text(""));
+        assert!(!should_auto_enter_for_text("   "));
+        assert!(!should_auto_enter_for_text("hello"));
+        assert!(!should_auto_enter_for_text("hello there"));
+
+        assert!(should_auto_enter_for_text("hello over there"));
+        assert!(should_auto_enter_for_text("  hello over there  "));
+        assert!(should_auto_enter_for_text("one two three four"));
+
+        assert_eq!(AUTO_ENTER_MIN_WORDS, 3);
     }
 }

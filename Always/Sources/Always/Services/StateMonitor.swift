@@ -397,10 +397,10 @@ class StateMonitor: ObservableObject {
         case .voiceActivityDetected:
             isVoiceActivity = true
             showOngoingOverlayIfNeeded()
-            NSLog("Always: VoiceActivityDetected → overlay")
+            NSLog("Always: VoiceActivityDetected -> overlay")
         case .voiceActivityEnded:
             isVoiceActivity = false
-            NSLog("Always: VoiceActivityEnded → hide overlay")
+            NSLog("Always: VoiceActivityEnded -> hide overlay")
         case .transcriptionFiltered:
             // Transcription was rejected — clear ongoing state and flash
             // a brief "Filtered" overlay so the user knows the daemon

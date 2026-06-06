@@ -1,6 +1,6 @@
 [package]
 name = "always"
-version = "0.13.0"
+version = "0.0.1"
 edition = "2024"
 description = "Always-on voice activation daemon — Groq STT with intelligent transcription"
 license = "Apache-2.0"
@@ -47,10 +47,8 @@ chrono = { version = "0.4", features = ["clock"] }
 # feature (ebur128 + samplerate) that we don't need. The Silero ONNX
 # model file is bundled at `resources/models/silero_vad_v4.onnx` and
 # loaded via `include_bytes!` at runtime — see `always::vad_silero`.
-vad-rs = { git = "https://github.com/cjpais/vad-rs", default-features = false }
-toml = "0.8"
+vad-rs = { version = "0.1.6", git = "https://github.com/cjpais/vad-rs", default-features = false }
 regex = "1"
-base64 = "0.22"
 strsim = "0.11"
 parking_lot = "0.12"
 thiserror = "1"
@@ -62,10 +60,8 @@ tracing-appender = "0.2"
 keyring = "2.3"
 humantime = "2"
 libc = "0.2"
-# Local-model registry support (ports Handy's downloader). `once_cell`
-# for lazy statics, `sha2`/`tar`/`flate2` for verify+extract,
-# `futures-util` for streaming download bodies.
-once_cell = "1"
+# Local-model registry support (ports Handy's downloader). `sha2`/`tar`/`flate2`
+# for verify+extract, `futures-util` for streaming download bodies.
 sha2 = "0.10"
 tar = "0.4"
 flate2 = "1"

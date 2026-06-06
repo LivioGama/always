@@ -82,9 +82,7 @@ class CLIService: ObservableObject {
                 ? homebrewBin
                 : "\(homebrewBin):\(existingPath)"
         }
-        if let groqKey = ProcessInfo.processInfo.environment["GROQ_API_KEY"] {
-            env["GROQ_API_KEY"] = groqKey
-        }
+        env.removeValue(forKey: "GROQ_API_KEY")
         env["ALWAYS_SKIP_ORPHAN_KILL"] = "1"
     }
 

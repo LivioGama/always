@@ -71,27 +71,15 @@ class OnboardingState: ObservableObject {
     @Published var showOnboarding = false
     
     func checkAndShowOnboardingIfNeeded() {
-        let hasAPIKey = checkGroqAPIKey()
-        if !hasAPIKey {
-            showOnboarding = true
-            // Note: openWindow needs to be called from a View context
-            // We'll handle this differently
+        Task {
+            let config = try? await CLIService().getConfig()
+            let hasAPIKey = !(config?.groqApiKey?.isEmpty ?? true)
+            await MainActor.run {
+                if !hasAPIKey {
+                    showOnboarding = true
+                }
+            }
         }
-    }
-    
-    private func checkGroqAPIKey() -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.always.daemon",
-            kSecAttrAccount as String: "groq_api_key",
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        
-        return status == errSecSuccess && item != nil
     }
 }
 
@@ -127,7 +115,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         cliService = CLIService()
 
-        // Onboarding gating: if no Groq API key is in the keychain,
+        // Onboarding gating: if no saved Groq API key exists,
         // surface the onboarding window. The scene id "onboarding"
         // must match the `Window(id:)` registration in App.body.
         onboardingState?.checkAndShowOnboardingIfNeeded()

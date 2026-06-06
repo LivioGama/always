@@ -22,6 +22,14 @@ private enum OverlayScreenPlacement {
         NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) } ?? NSScreen.main
     }
 
+    /// The display the mouse cursor is currently on. Always resolves to a
+    /// screen (falls back to main), and — unlike the frontmost window — is
+    /// valid even over fullscreen Spaces, so it's a safe primary signal for
+    /// "put the HUD where the user is looking right now".
+    static func screenForMouse() -> NSScreen? {
+        screenContaining(point: NSEvent.mouseLocation)
+    }
+
     static func screenForFrontmostApp() -> NSScreen? {
         guard let frontApp = NSWorkspace.shared.frontmostApplication else {
             return screenContaining(point: NSEvent.mouseLocation)
@@ -441,6 +449,13 @@ class StatusOverlayView: NSView {
 class StatusOverlayWindow: NSPanel {
     private var overlayView: StatusOverlayView?
 
+    /// Repeating poll that lets the HUD follow the cursor across displays.
+    /// nil whenever the HUD is hidden.
+    private var mouseFollowTimer: Timer?
+    /// The display the HUD is currently parked on — lets the follow poll skip
+    /// redundant reposition work until the cursor actually changes screen.
+    private var currentScreen: NSScreen?
+
     static let overlayWidth: CGFloat = 230
     static let overlayHeight: CGFloat = 130
 
@@ -465,16 +480,16 @@ class StatusOverlayWindow: NSPanel {
         self.isFloatingPanel = true
         self.becomesKeyOnlyIfNeeded = true
 
-        positionOnFrontmostScreen()
+        positionOnActiveScreen()
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) not implemented")
     }
 
-    /// Reposition on the frontmost app's screen and re-front (fullscreen Spaces).
+    /// Reposition on the screen the cursor is on and re-front (fullscreen Spaces).
     func repositionAndFront() {
-        positionOnFrontmostScreen()
+        positionOnActiveScreen()
         orderFrontRegardless()
     }
 
@@ -490,7 +505,8 @@ class StatusOverlayWindow: NSPanel {
                 self.overlayView = StatusOverlayView(frame: frame)
                 self.contentView = self.overlayView
             }
-            self.positionOnFrontmostScreen()
+            self.positionOnActiveScreen()
+            self.startFollowingMouse()
 
             // Update state on the existing view so consecutive flashes
             // (e.g. pause then auto-enter) reuse the same window instead
@@ -536,15 +552,22 @@ class StatusOverlayWindow: NSPanel {
                 if self.alphaValue == 0.0 {
                     self.orderOut(nil)
                     self.alphaValue = 1.0
-                    // Stop any running CA animations once we're offscreen.
+                    // Stop following the cursor + any running CA animations
+                    // once we're offscreen.
+                    self.stopFollowingMouse()
                     self.overlayView?.stopAnimations()
                 }
             })
         }
     }
 
-    private func positionOnFrontmostScreen() {
-        guard let screen = OverlayScreenPlacement.screenForFrontmostApp() else { return }
+    /// Park the HUD on the screen the mouse cursor is currently on. The cursor
+    /// is the best proxy for "where the user is looking" and is always valid,
+    /// even over fullscreen Spaces. `startFollowingMouse` keeps this in sync as
+    /// the pointer moves between displays while the HUD is visible.
+    private func positionOnActiveScreen() {
+        guard let screen = OverlayScreenPlacement.screenForMouse() else { return }
+        currentScreen = screen
         let origin = OverlayScreenPlacement.volumeHudOrigin(
             on: screen,
             width: StatusOverlayWindow.overlayWidth,
@@ -559,6 +582,29 @@ class StatusOverlayWindow: NSPanel {
             ),
             display: true
         )
+    }
+
+    /// Begin polling the cursor so the HUD hops to whichever display the mouse
+    /// is on. Deliberately a lightweight ~6 Hz timer that only moves the window
+    /// when the cursor actually crosses to another screen (compared by frame,
+    /// not object identity, since `NSScreen.screens` can hand back fresh
+    /// instances). Only runs while the HUD is visible; torn down on hide.
+    func startFollowingMouse() {
+        stopFollowingMouse()
+        let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
+            guard let self = self, self.isVisible else { return }
+            guard let screen = OverlayScreenPlacement.screenForMouse() else { return }
+            if screen.frame != self.currentScreen?.frame {
+                self.positionOnActiveScreen()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        mouseFollowTimer = timer
+    }
+
+    func stopFollowingMouse() {
+        mouseFollowTimer?.invalidate()
+        mouseFollowTimer = nil
     }
 }
 

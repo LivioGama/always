@@ -1,13 +1,9 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **always** (3525 symbols, 8750 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **always** (3573 symbols, 9068 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
-
-## Always App Activation
-
-- **MUST use `scripts/dev-rebuild.sh` to reinstall/relaunch Always.app after code changes that need activation.** Do not manually copy binaries into `/Applications/Always.app`, hand-sign the bundle, or launch around the script. The script's sound cues are part of the user's verification loop and its cleanup/restart path prevents stale daemons, stale bundles, and missing audio feedback.
 
 ## Always Do
 

@@ -2,6 +2,7 @@
 set -e
 
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+CRATE_VERSION="$(grep '^version' "$APP_DIR/../Cargo.toml" | head -1 | cut -d'"' -f2)"
 
 echo "Building Always..."
 cd "$APP_DIR"
@@ -11,7 +12,6 @@ echo "Creating app bundle..."
 mkdir -p Always.app/Contents/MacOS
 mkdir -p Always.app/Contents/Resources
 
-# Debug: check if executable exists
 if [ -f .build/debug/Always ]; then
     echo "✓ Executable found at .build/debug/Always"
 else
@@ -22,15 +22,13 @@ else
     fi
 fi
 
-# Always update bundle contents
 cp Info.plist Always.app/Contents/
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $CRATE_VERSION" Always.app/Contents/Info.plist
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $CRATE_VERSION" Always.app/Contents/Info.plist
 cp .build/debug/Always Always.app/Contents/MacOS/
 cp Resources/AlwaysIcon.icns Always.app/Contents/Resources/
 
-# Copy daemon binary into app bundle.
-# Pick newest of release/debug so local dev (debug build) keeps showing
-# transcripts in logs (privacy gate is auto-on in debug builds).
-# Override with ALWAYS_BUILD_PROFILE=release|debug to pin a specific profile.
+# Daemon binary: ALWAYS_BUILD_PROFILE=release|debug, else pick newest build.
 RELEASE_BIN="../target/release/always"
 DEBUG_BIN="../target/debug/always"
 DAEMON_PATH=""
@@ -53,40 +51,24 @@ case "${ALWAYS_BUILD_PROFILE:-}" in
 esac
 
 if [ -f "$DAEMON_PATH" ]; then
-    # CRITICAL: target name MUST differ from the GUI binary in case-insensitive
-    # ways. macOS APFS defaults to case-insensitive, so `MacOS/Always` (GUI) and
-    # `MacOS/always` (daemon) resolve to the same inode and the second `cp`
-    # silently overwrites the first. That is exactly what broke the daemon
-    # spawn after the c55cc4a merge — the bundled "Always" binary was actually
-    # the daemon (or vice-versa) and the Mac app could not start it. Use a
-    # distinct file name and read it back through CLIService accordingly.
+    # Ship as always-daemon: APFS is case-insensitive; MacOS/always overwrites MacOS/Always.
     echo "Copying daemon binary to app bundle ($DAEMON_PATH → MacOS/always-daemon)..."
     mkdir -p Always.app/Contents/MacOS
     cp "$DAEMON_PATH" Always.app/Contents/MacOS/always-daemon
     echo "✓ Daemon binary copied"
 else
-    # Bundle without the daemon is unshippable — the GUI cannot spawn it.
-    # Previously we warned and continued, which deployed a broken bundle
-    # to /Applications. Fail loudly instead.
     echo "✗ Daemon binary not found at $DAEMON_PATH"
     echo "  Build the daemon first: cd .. && cargo build --bin always (or --release)"
     exit 1
 fi
 
-# Bundle Sparkle.framework. Swift Package Manager downloads it as part of
-# the Sparkle xcframework; we ship the macos-arm64_x86_64 slice. Without
-# this step the app crashes at launch with a dyld "Library not loaded:
-# @rpath/Sparkle.framework" error because @rpath resolves under
-# Contents/Frameworks/ in a real bundle.
+# Bundle Sparkle.framework and add @executable_path/../Frameworks rpath for dyld.
 SPARKLE_SRC=".build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 if [ -d "$SPARKLE_SRC" ]; then
     echo "Bundling Sparkle.framework..."
     mkdir -p Always.app/Contents/Frameworks
     rm -rf Always.app/Contents/Frameworks/Sparkle.framework
     cp -R "$SPARKLE_SRC" Always.app/Contents/Frameworks/Sparkle.framework
-    # `swift build` does NOT add @executable_path/../Frameworks to LC_RPATH.
-    # Without this the dyld lookup at launch fails because the framework
-    # only resolves at the standard bundle search path.
     if ! otool -l Always.app/Contents/MacOS/Always \
             | grep -A2 LC_RPATH | grep -q "@executable_path/../Frameworks"; then
         install_name_tool -add_rpath "@executable_path/../Frameworks" \
@@ -99,17 +81,10 @@ else
 fi
 
 echo "Code signing app..."
-# Use stable bundle identifier for permissions persistence
+# Prefer Apple Development identity so TCC grants survive debug rebuilds; else ad-hoc.
 SIGN_IDENTITY="${ALWAYS_CODESIGN_IDENTITY:-}"
 if [ -z "$SIGN_IDENTITY" ]; then
-    if [ "${ALWAYS_BUILD_PROFILE:-debug}" = "release" ]; then
-        SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)"
-    else
-        # Local dev rebuilds should not hit Keychain private-key prompts.
-        # Release builds can still use a real identity, and any build can
-        # override this with ALWAYS_CODESIGN_IDENTITY.
-        SIGN_IDENTITY="-"
-    fi
+    SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)"
 fi
 if [ -z "$SIGN_IDENTITY" ]; then
     SIGN_IDENTITY="-"
@@ -117,25 +92,13 @@ fi
 echo "Using signing identity: ${SIGN_IDENTITY}"
 codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "com.always.v2" --entitlements Always.entitlements Always.app
 
-# Notarization (only if using a proper Apple Developer identity, not ad-hoc).
-# All three env vars are required to authenticate notarytool:
-#   ALWAYS_NOTARIZE_TEAM_ID — Apple Team ID (e.g. ZV4JCJ669Y).
-#   ALWAYS_NOTARIZE_APPLE_ID — developer Apple ID email.
-#   ALWAYS_NOTARIZE_APP_PWD — app-specific password (NOT the AppleID pwd).
-# The previous version hardcoded --apple-id "com.always" (the bundle ID,
-# not an Apple ID) and never read the app-specific password, so the
-# notarytool call would silently fail with an authentication error and
-# the script would still report "success" thanks to a `|| echo ""` on
-# the JSON parse. Catch that explicitly now.
+# Notarize when ALWAYS_NOTARIZE_TEAM_ID, ALWAYS_NOTARIZE_APPLE_ID, and ALWAYS_NOTARIZE_APP_PWD are set.
 if [ "$SIGN_IDENTITY" != "-" ] \
         && [ -n "${ALWAYS_NOTARIZE_TEAM_ID:-}" ] \
         && [ -n "${ALWAYS_NOTARIZE_APPLE_ID:-}" ] \
         && [ -n "${ALWAYS_NOTARIZE_APP_PWD:-}" ]; then
     echo "Notarizing app..."
 
-    # Pre-flight: Info.plist must not still carry the Sparkle EdDSA
-    # placeholder. Shipping a release with the placeholder bricks
-    # auto-update (Sparkle silently refuses to verify the appcast).
     if /usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" \
             Always.app/Contents/Info.plist 2>/dev/null \
             | grep -q "REPLACE_WITH_BASE64_EDDSA_PUBLIC_KEY"; then
@@ -147,8 +110,6 @@ if [ "$SIGN_IDENTITY" != "-" ] \
     ZIP_PATH="Always.zip"
     ditto -c -k --keepParent "Always.app" "$ZIP_PATH"
 
-    # Submit for notarization. `--wait --timeout 30m` blocks until Apple's
-    # service reports a terminal state instead of hanging indefinitely.
     NOTARIZATION_OUTPUT=$(xcrun notarytool submit "$ZIP_PATH" \
         --team-id "$ALWAYS_NOTARIZE_TEAM_ID" \
         --apple-id "$ALWAYS_NOTARIZE_APPLE_ID" \
@@ -157,9 +118,6 @@ if [ "$SIGN_IDENTITY" != "-" ] \
         --timeout 30m \
         --output-format json)
 
-    # Parse the submission JSON. python3's json.load with check ensures
-    # we hard-fail on a malformed/empty response — previously a `|| echo ""`
-    # let the script continue with an empty ID and skip stapling silently.
     NOTARIZATION_ID=$(printf '%s' "$NOTARIZATION_OUTPUT" \
         | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
     NOTARIZATION_STATUS=$(printf '%s' "$NOTARIZATION_OUTPUT" \
@@ -182,11 +140,7 @@ else
     echo "⚠️  Skipping notarization (requires ALWAYS_NOTARIZE_TEAM_ID + ALWAYS_NOTARIZE_APPLE_ID + ALWAYS_NOTARIZE_APP_PWD + a real signing identity)"
 fi
 
-# Sanity-check before deploy: the bundle must contain BOTH the GUI and the
-# daemon binary as distinct files. macOS APFS is case-insensitive by
-# default and the previous layout (`MacOS/Always` + `MacOS/always`) silently
-# collapsed to a single file, which broke daemon spawn. Fail the build
-# loudly rather than ship a half-bundle.
+# Fail if GUI and always-daemon are missing or collapsed to the same file on APFS.
 GUI_BIN="Always.app/Contents/MacOS/Always"
 DAEMON_BIN_IN_BUNDLE="Always.app/Contents/MacOS/always-daemon"
 if [ ! -f "$GUI_BIN" ] || [ ! -f "$DAEMON_BIN_IN_BUNDLE" ]; then
@@ -212,9 +166,8 @@ if [ -d "$DEST_APP" ]; then
         echo "  After that, dev rebuilds update the app in place without sudo prompts."
         exit 1
     fi
-    rm -rf "$DEST_APP/Contents"
-    mkdir -p "$DEST_APP"
-    cp -R Always.app/Contents "$DEST_APP/"
+    # rsync in place (no rm -rf): preserves GUI inode + TCC grants across daemon-only rebuilds. Do not pass -X.
+    rsync -a --checksum --delete Always.app/Contents/ "$DEST_APP/Contents/"
 else
     if [ ! -w /Applications ]; then
         echo "✗ /Applications is not writable by $(id -un)."

@@ -499,4 +499,22 @@ mod tests {
         assert!(!eff);
         assert!(changed);
     }
+
+    #[test]
+    fn own_bundle_id_is_never_resumed() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        reset_pause_state_for_test();
+        per_app::set_cache_for_test(HashMap::from([(
+            per_app::ALWAYS_OWN_BUNDLE_ID.to_string(),
+            AppOverride {
+                paused: Some(false),
+                ..Default::default()
+            },
+        )]));
+
+        let (effective, _) =
+            set_current_app_and_recompute(Some(per_app::ALWAYS_OWN_BUNDLE_ID.to_string()));
+        assert!(effective);
+        assert!(is_paused());
+    }
 }

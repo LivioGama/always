@@ -12,14 +12,8 @@ const SERVICE_NAME: &str = "com.always.daemon";
 const GROQ_API_KEY_ACCOUNT: &str = "groq_api_key";
 const DEEPGRAM_API_KEY_ACCOUNT: &str = "deepgram_api_key";
 
-/// Get the Groq API key from keyring or environment variable
+/// Get the Groq API key from keyring.
 pub fn get_groq_api_key() -> Result<Option<String>> {
-    // Try environment variable first (highest priority)
-    if let Ok(key) = std::env::var("GROQ_API_KEY") {
-        return Ok(Some(key));
-    }
-
-    // Try keyring
     match get_secret(GROQ_API_KEY_ACCOUNT) {
         Ok(Some(key)) => Ok(Some(key)),
         Ok(None) => Ok(None),
@@ -67,6 +61,7 @@ fn get_secret(account: &str) -> Result<Option<String>> {
     let entry = Entry::new(SERVICE_NAME, account)?;
 
     match entry.get_password() {
+        Ok(password) if password.is_empty() => Ok(None),
         Ok(password) => Ok(Some(password)),
         Err(KeyringError::NoEntry) => Ok(None),
         Err(e) => Err(e).context("Failed to read secret from keyring"),

@@ -48,11 +48,21 @@
     "absolutely",
     "mm hmm",
     "uh huh",
+    "mwah",
+    "pff",
+    "pfff",
     "oh okay",
+    "oh ok",
     "bye",
     "goodbye",
+    "bye bye",
+    "i'm going to go",
+    "i am going to go",
+    "i'm gonna go",
+    "i gotta go",
     "hello",
-    "hi"
+    "hi",
+    "hey"
   ],
   "hard_filter_regex": [
     "^thank.*for.*watching$",

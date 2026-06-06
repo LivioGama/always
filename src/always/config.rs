@@ -13,7 +13,7 @@ use crate::stt_dispatch::TranscriberBackendChoice;
 
 // Default configuration values
 const DEFAULT_AUTO_ENTER_DELAY_MS: u32 = 4000;
-const DEFAULT_SILENCE_SECS: f64 = 0.7;
+const DEFAULT_SILENCE_SECS: f64 = 0.6;
 /// Ten minutes of no voice before idle auto-pause. Short values (e.g. 120s)
 /// felt like the daemon "randomly" paused during normal desk work.
 const DEFAULT_IDLE_PAUSE_SECS: u32 = 600;
@@ -138,7 +138,7 @@ impl std::fmt::Display for SensitivityPreset {
 
 #[cfg(test)]
 mod sensitivity_preset_tests {
-    use super::SensitivityPreset;
+    use super::{AlwaysConfig, SensitivityPreset};
     use std::str::FromStr;
 
     #[test]
@@ -189,8 +189,13 @@ mod sensitivity_preset_tests {
 
     #[test]
     fn normal_default_matches_alwaysconfig_default() {
-        let (s, _) = SensitivityPreset::Normal.thresholds();
+        let (s, h) = SensitivityPreset::Normal.thresholds();
         assert!((s - 0.012).abs() < 1e-9);
+        assert!((h - 0.001).abs() < 1e-9);
+        let cfg = AlwaysConfig::default();
+        assert!((cfg.energy_threshold - s).abs() < 1e-9);
+        assert!((cfg.hear_energy_threshold - h).abs() < 1e-9);
+        assert_eq!(cfg.onset_ms, 60);
     }
 }
 
@@ -202,6 +207,7 @@ pub struct AlwaysConfig {
     pub auto_enter: bool,
     pub filter_enabled: bool,
     pub energy_threshold: f64,
+    pub hear_energy_threshold: f64,
     pub onset_ms: u32,
     pub cooldown_ms: u32,
     pub log_path: PathBuf,
@@ -349,9 +355,9 @@ impl AlwaysConfig {
         // build it with sensible empty defaults so the prompt-driven
         // glossary cleanup always runs when enabled.
         let post_processor = {
-            let groq_api_key = std::env::var("GROQ_API_KEY")
-                .ok()
-                .or_else(|| groq_stt_api_key.clone());
+            let groq_api_key = groq_stt_api_key
+                .clone()
+                .or_else(|| std::env::var("GROQ_API_KEY").ok());
             tracing::info!(
                 grammar_correction_enabled = effective_postprocess.grammar_correction_enabled,
                 has_api_key = groq_api_key.is_some(),
@@ -383,7 +389,8 @@ impl AlwaysConfig {
             // because the write path validated — an out-of-range threshold
             // silently breaks the VAD (never or always triggers).
             energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.012).clamp(0.0, 1.0),
-            onset_ms: 30,
+            hear_energy_threshold: prefs.hear_energy_threshold.unwrap_or(0.001).clamp(0.0, 1.0),
+            onset_ms: 60,
             cooldown_ms: prefs.stt_cooldown_ms.unwrap_or(800).min(5000),
             log_path: log_path_from_preferences(&prefs),
             post_processor,
@@ -437,14 +444,15 @@ impl Default for AlwaysConfig {
             timeout_secs: 30,
             // Defaults aligned with `SensitivityPreset::Normal` and the
             // Mic Sensitivity / Speaking Style picker in the GUI.
-            // 0.7s keeps the default responsive. Speculative STT starts
+            // 0.6s keeps the default responsive. Speculative STT starts
             // before the final cutoff, and users who get mid-sentence
             // splits can raise this in Settings.
             silence_secs: DEFAULT_SILENCE_SECS,
             auto_enter: true,
             filter_enabled: true,
             energy_threshold: 0.012,
-            onset_ms: 30,
+            hear_energy_threshold: 0.001,
+            onset_ms: 60,
             cooldown_ms: 800,
             log_path: default_log_path(),
             post_processor: None,
@@ -638,30 +646,78 @@ mod tests {
 }
 
 fn get_groq_stt_api_key() -> Result<String> {
-    use crate::always::keyring;
+    let env_key = std::env::var("GROQ_API_KEY").ok();
+    let db_key = db::open()
+        .ok()
+        .and_then(|conn| db::get_preferences(&conn).ok())
+        .and_then(|prefs| prefs.groq_api_key);
 
-    // Try environment variable first (highest priority)
-    if let Ok(key) = std::env::var("GROQ_API_KEY") {
-        tracing::info!("Groq API key loaded from environment variable");
-        return Ok(key);
+    let Some((source, key)) = select_groq_key(db_key, env_key) else {
+        anyhow::bail!(
+            "GROQ_API_KEY environment variable not set and no saved Groq key found. Set it in Settings or with: always config set groq_api_key <your-key>"
+        )
+    };
+
+    match source {
+        GroqKeySource::Database => tracing::info!("Groq API key loaded from saved settings"),
+        GroqKeySource::Environment => {
+            tracing::info!("Groq API key loaded from environment variable")
+        }
     }
 
-    // Try keyring
-    if let Ok(Some(key)) = keyring::get_groq_api_key() {
-        tracing::info!("Groq API key loaded from keychain");
-        return Ok(key);
+    Ok(key)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroqKeySource {
+    Database,
+    Environment,
+}
+
+fn select_groq_key(
+    db_key: Option<String>,
+    env_key: Option<String>,
+) -> Option<(GroqKeySource, String)> {
+    if let Some(key) = db_key.filter(|key| !key.is_empty()) {
+        return Some((GroqKeySource::Database, key));
+    }
+    if let Some(key) = env_key.filter(|key| !key.is_empty()) {
+        return Some((GroqKeySource::Environment, key));
+    }
+    None
+}
+
+#[cfg(test)]
+mod groq_key_tests {
+    use super::{GroqKeySource, select_groq_key};
+
+    #[test]
+    fn saved_groq_key_wins_over_stale_environment() {
+        let selected = select_groq_key(Some("saved-key".to_string()), Some("env-key".to_string()));
+
+        assert_eq!(
+            selected,
+            Some((GroqKeySource::Database, "saved-key".to_string()))
+        );
     }
 
-    // Fallback to database preferences for migration purposes
-    if let Ok(conn) = db::open()
-        && let Ok(prefs) = db::get_preferences(&conn)
-        && let Some(key) = prefs.groq_api_key
-    {
-        tracing::warn!("Groq API key loaded from database (should migrate to keychain)");
-        return Ok(key);
+    #[test]
+    fn environment_groq_key_is_fallback_for_cli_only_setup() {
+        let selected = select_groq_key(None, Some("env-key".to_string()));
+
+        assert_eq!(
+            selected,
+            Some((GroqKeySource::Environment, "env-key".to_string()))
+        );
     }
 
-    anyhow::bail!(
-        "GROQ_API_KEY environment variable not set and no key found in keychain. Set it with: always config set groq_api_key <your-key>"
-    )
+    #[test]
+    fn empty_groq_key_values_are_ignored() {
+        let selected = select_groq_key(Some(String::new()), Some("env-key".to_string()));
+
+        assert_eq!(
+            selected,
+            Some((GroqKeySource::Environment, "env-key".to_string()))
+        );
+    }
 }

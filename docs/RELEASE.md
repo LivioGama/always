@@ -14,7 +14,6 @@ secrets.
 | `APPLE_ID` | Apple ID email for notarization. |
 | `APPLE_TEAM_ID` | Apple Developer Team ID (e.g. `ZV4JCJ669Y`). |
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password from appleid.apple.com. |
-| `CARGO_REGISTRY_TOKEN` | crates.io publish token (scoped to `always`). |
 | `HOMEBREW_TAP_TOKEN` | Fine-grained PAT with `contents:write` on `rtk-ai/homebrew-tap`. |
 | `CODECOV_TOKEN` | Codecov upload token (CI coverage). |
 
@@ -43,7 +42,6 @@ secrets.
    * Builds + tarballs the Linux CLI daemon.
    * Computes `SHA256SUMS`.
    * Drafts a GitHub Release with all artifacts.
-   * Publishes to crates.io.
    * Opens an auto-PR to `rtk-ai/homebrew-tap` to bump the formula.
    * Generates SLSA Level 3 provenance via the
      `slsa-framework/slsa-github-generator` reusable workflow.
@@ -118,6 +116,13 @@ If you need to retract a release after publication:
    users who already downloaded the DMG would otherwise still trust the
    matching cosign signature. Pre-releases are not picked up by Sparkle
    by default.
-2. `cargo yank --vers X.Y.Z` on crates.io.
-3. Open a CHANGELOG entry under `[Unreleased]` documenting the
+2. Open a CHANGELOG entry under `[Unreleased]` documenting the
    retraction.
+
+## crates.io status
+
+`cargo publish` is intentionally not part of the release workflow yet.
+The daemon depends on a `vad-rs` git revision that is newer than the
+latest compatible crates.io release, and crates.io packages cannot
+publish with git-only dependencies. Re-enable crates.io distribution only
+after `cargo package --locked` succeeds from a clean checkout.

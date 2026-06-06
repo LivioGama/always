@@ -74,8 +74,6 @@ class ListeningIndicatorWindow: NSPanel {
             defer: false
         )
 
-        print("ListeningIndicatorWindow: Initializing as NSPanel")
-
         self.backgroundColor = NSColor.clear
         self.isOpaque = false
         self.level = .statusBar  // NSPanel-specific level
@@ -88,9 +86,6 @@ class ListeningIndicatorWindow: NSPanel {
         // Create indicator view
         indicatorView = ListeningIndicatorAppKitView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
         self.contentView = indicatorView
-
-        print("ListeningIndicatorWindow: Initial frame: \(self.frame)")
-        print("ListeningIndicatorWindow: Window level: \(self.level.rawValue)")
 
         // Start position tracking
         startTrackingTextField()
@@ -117,14 +112,12 @@ class ListeningIndicatorWindow: NSPanel {
         let accessEnabled = AXIsProcessTrustedWithOptions(options)
         
         if !accessEnabled {
-            print("ListeningIndicator: No Accessibility permission - falling back to screen corner")
             fallbackToScreenCorner()
             return
         }
         
         // Get focused text field from frontmost app
         guard let frontApp = NSWorkspace.shared.frontmostApplication else {
-            print("ListeningIndicator: No frontmost application")
             fallbackToScreenCorner()
             return
         }
@@ -140,7 +133,6 @@ class ListeningIndicatorWindow: NSPanel {
         
         guard result == .success,
               let element = focusedUIElement else {
-            print("ListeningIndicator: No focused UI element - falling back to screen corner")
             fallbackToScreenCorner()
             return
         }
@@ -154,7 +146,6 @@ class ListeningIndicatorWindow: NSPanel {
         
         guard let positionValue = positionValue,
               let sizeValue = sizeValue else {
-            print("ListeningIndicator: Could not get position/size - falling back to screen corner")
             fallbackToScreenCorner()
             return
         }
@@ -164,8 +155,6 @@ class ListeningIndicatorWindow: NSPanel {
         
         AXValueGetValue(positionValue as! AXValue, .cgPoint, &position)
         AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
-        
-        print("ListeningIndicator: TextField position: (\(position.x), \(position.y)), size: (\(size.width) x \(size.height))")
         
         // Find which screen contains the text field
         let textFieldRect = CGRect(origin: position, size: size)
@@ -188,14 +177,11 @@ class ListeningIndicatorWindow: NSPanel {
         }
         
         let screenFrame = screen.visibleFrame
-        print("ListeningIndicator: Using screen with frame: \(screenFrame)")
         
         // Position indicator at bottom-right of screen (fixed position, easier to see)
         // macOS coordinates: origin at bottom-left, Y increases upward
         let targetX = screenFrame.maxX - 60  // 40px indicator + 20px padding from right
         let targetY = screenFrame.minY + 60  // 60px from bottom
-        
-        print("ListeningIndicator: Positioning at (\(targetX), \(targetY)) on screen")
         
         self.setFrameOrigin(NSPoint(x: targetX, y: targetY))
         self.orderFrontRegardless()

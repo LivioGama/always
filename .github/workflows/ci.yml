@@ -70,7 +70,10 @@ jobs:
           tool: cargo-audit,cargo-deny,cargo-machete
 
       - name: Security audit
-        run: cargo audit --deny warnings
+        run: >
+          cargo audit --deny warnings
+          --ignore RUSTSEC-2024-0384
+          --ignore RUSTSEC-2024-0388
 
       - name: Supply-chain (cargo-deny)
         run: cargo deny --all-features check

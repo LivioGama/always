@@ -13,13 +13,10 @@
     <key>CFBundleIconFile</key>
     <string>AlwaysIcon</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>0.0.1</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
-    <!--
-      Show Dock icon so Settings stay reachable when the menu-bar icon is
-      hidden by Control Center cache. Menu bar UI uses SwiftUI MenuBarExtra.
-    -->
+    <string>0.0.1</string>
+    <!-- Dock icon: Settings stay reachable when the menu-bar icon is hidden. -->
     <key>LSUIElement</key>
     <false/>
     <key>CFBundleURLTypes</key>
@@ -33,11 +30,7 @@
             </array>
         </dict>
     </array>
-    <!--
-      Even as a regular app, keep automatic/sudden termination disabled
-      so the background voice daemon survives idle periods and macOS
-      doesn't reap the GUI when no windows are open.
-    -->
+    <!-- Keep the GUI alive while the voice daemon runs in the background. -->
     <key>NSSupportsAutomaticTermination</key>
     <false/>
     <key>NSSupportsSuddenTermination</key>
@@ -46,28 +39,10 @@
     <string>Always needs accessibility access to position the voice indicator near your active text cursor.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Always needs accessibility access to position the voice indicator near your active text field.</string>
-    <!--
-      REQUIRED for microphone capture. macOS TCC silently denies mic
-      access to any binary whose responsible bundle does not declare
-      this usage description. The daemon (bundled as
-      `Contents/MacOS/always-daemon`) is attributed to Always.app for
-      TCC purposes; without this key the SoX `rec` subprocess receives
-      a stream of zeros and the voice activity detector never triggers
-      — exactly the "I speak but the overlay never appears" symptom.
-    -->
+    <!-- Required for mic TCC; bundled always-daemon inherits Always.app attribution. -->
     <key>NSMicrophoneUsageDescription</key>
     <string>Always needs microphone access to detect when you speak and transcribe your voice into text.</string>
-    <!--
-      Sparkle auto-update settings.
-
-      `SUFeedURL`         — appcast XML emitted by .github/workflows/release.yml.
-      `SUPublicEDKey`     — base64 EdDSA public key. Rotate per docs/RELEASE.md;
-                            replace with the matching public half each rotation.
-                            Placeholder must be replaced before the first
-                            signed release reaches users.
-      `SUEnableAutomaticChecks` — enabled; user can disable via Settings.
-      `SUScheduledCheckInterval` — 86400s = once per day.
-    -->
+    <!-- Sparkle: appcast from release.yml; rotate EdDSA keys per docs/RELEASE.md. -->
     <key>SUFeedURL</key>
     <string>https://github.com/rtk-ai/always/releases/latest/download/appcast.xml</string>
     <key>SUPublicEDKey</key>

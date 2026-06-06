@@ -110,7 +110,7 @@ struct Config: Codable {
                         config.autoEnterDelayMs = Int((secs * 1000).rounded())
                     }
                 case "groq_api_key":
-                    if !value.contains("(not set)") {
+                    if !value.contains("(not set)") && !isMaskedApiKeyPlaceholder(value) {
                         config.groqApiKey = value
                     }
                 case "silero_threshold":

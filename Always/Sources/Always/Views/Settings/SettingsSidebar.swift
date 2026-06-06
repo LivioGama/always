@@ -3,6 +3,7 @@ import SwiftUI
 enum SettingsPanel: String, CaseIterable {
     case general = "General"
     case models = "Models"
+    case permissions = "Permissions"
     case behavior = "Behavior"
     case shortcuts = "Shortcuts"
     case vocabulary = "Vocabulary"
@@ -13,6 +14,7 @@ enum SettingsPanel: String, CaseIterable {
         switch self {
         case .general:    return "app.badge.checkmark"
         case .models:     return "cpu"
+        case .permissions: return "checkmark.shield"
         case .behavior:   return "slider.horizontal.3"
         case .shortcuts:  return "command"
         case .vocabulary: return "character.book.closed"
@@ -42,31 +44,35 @@ struct SettingsSidebar: View {
 
     @ViewBuilder
     private func sidebarItem(for panel: SettingsPanel) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: panel.symbol)
-                .frame(width: 18)
-                .foregroundColor(selectedPanel == panel ? .white : .secondary)
-            Text(panel.rawValue)
-                .font(.body)
-                .foregroundColor(selectedPanel == panel ? .white : .primary)
-            Spacer()
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(
-            selectedPanel == panel
-                ? Color.accentColor
-                : Color.clear
-        )
-        .cornerRadius(6)
-        .padding(.horizontal, 8)
-        // `contentShape` makes the entire row hit-testable — without it
-        // SwiftUI only catches taps on the Image/Text glyphs, not the
-        // Spacer or padding area, which the user perceives as dead zones.
-        .contentShape(Rectangle())
-        .onTapGesture {
+        Button {
             selectedPanel = panel
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: panel.symbol)
+                    .frame(width: 18)
+                    .foregroundColor(selectedPanel == panel ? .white : .secondary)
+                Text(panel.rawValue)
+                    .font(.body)
+                    .foregroundColor(selectedPanel == panel ? .white : .primary)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(
+                selectedPanel == panel
+                    ? Color.accentColor
+                    : Color.clear
+            )
+            .cornerRadius(6)
+            // Make the ENTIRE row tappable, not just the text glyphs. A
+            // `.plain` Button only hit-tests its opaque content, so the
+            // Spacer + padding (the empty area right of the label) ignored
+            // clicks. An explicit rectangular content shape claims the full
+            // padded row as the hit target.
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
     }
 
     private var statusFooter: some View {

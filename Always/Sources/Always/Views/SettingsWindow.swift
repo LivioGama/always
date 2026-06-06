@@ -131,6 +131,8 @@ struct SettingsWindow: View {
             )
         case .shortcuts:
             ShortcutsPanel(cliService: cliService, config: $config)
+        case .permissions:
+            PermissionsPanel()
         case .vocabulary:
             VocabularyPanel()
         case .history:
@@ -155,12 +157,7 @@ struct SettingsWindow: View {
         isLoading = true
         do {
             config = try await cliService.getConfig()
-            // Mask the API key with stars
-            if let key = config.groqApiKey, !key.isEmpty {
-                apiKey = String(repeating: "•", count: key.count)
-            } else {
-                apiKey = ""
-            }
+            apiKey = config.groqApiKey ?? ""
         } catch {
             settingsLogger.error("loadConfig failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -171,9 +168,9 @@ struct SettingsWindow: View {
         isSavingApiKey = true
         Task {
             do {
-                // Only save API key if it's not masked (doesn't contain only dots)
-                if shouldPersistApiKey(apiKey) {
-                    _ = try await cliService.setConfig(key: "groq_api_key", value: apiKey.isEmpty ? "" : apiKey)
+                if apiKey.isEmpty || shouldPersistApiKey(apiKey) {
+                    _ = try await cliService.setConfig(key: "groq_api_key", value: apiKey)
+                    _ = try await cliService.restartDaemon()
                 }
                 // Add a small delay to make the loader visible for testing
                 try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
@@ -196,10 +193,6 @@ struct SettingsWindow: View {
                 _ = try await cliService.setConfig(key: "postprocess_enabled", value: String(config.postprocessEnabled))
                 _ = try await cliService.setConfig(key: "idle_pause_secs", value: String(config.idlePauseSecs))
                 _ = try await cliService.setConfig(key: "idle_pause_action", value: config.idlePauseAction)
-                // Only save API key if it's not masked (doesn't contain only dots)
-                if shouldPersistApiKey(apiKey) {
-                    _ = try await cliService.setConfig(key: "groq_api_key", value: apiKey.isEmpty ? "" : apiKey)
-                }
                 await MainActor.run {
                     stateMonitor.applyRuntimePreferences(from: config)
                 }

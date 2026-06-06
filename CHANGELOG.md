@@ -8,49 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Manual correction capture: ⌃⌥X hotkey + passive clipboard watcher feed glossary mistranscriptions automatically.
-- New CLI: `always corrections list/approve/reject/clear/capture`.
-- New prefs: `shortcut_log_correction` (default `ctrl+alt+x`), `passive_correction_capture` (default `false`).
-- Manual-correction capture: ⌃⌥X hotkey diffs the user's selection against the last-pasted transcript and writes the `(wrong → right)` pair into `~/.always/glossary.json`. Opt-in passive variant available via `passive_correction_capture` pref + `always config set passive_correction_capture true`.
-- `ASSESSMENT.md` at repo root — production-readiness scorecard with per-criterion ratings
-- `.github/dependabot.yml` — weekly Cargo, GitHub Actions, and Swift Package Manager updates
-- Concurrency control on CI workflow (auto-cancel superseded runs)
-- Swift Package Manager build cache in CI
+- Voice-to-text daemon (Groq Whisper STT) with Silero VAD, hallucination filter, and UDS event streaming to the Swift menu-bar app.
+- Manual correction capture: ⌃⌥X hotkey plus optional passive clipboard mode → `~/.always/glossary.json` (`always corrections list/approve/reject/clear/capture`).
+- Settings sidebar panels: General, Models, Permissions, Behavior, Shortcuts, Vocabulary, History, About.
+- Sparkle auto-update wiring, signed release pipeline (DMG, notarization, cosign, SLSA, Homebrew tap PR).
+- `.github/dependabot.yml`; CI concurrency control and SwiftPM cache.
 
 ### Changed
-- `cargo clippy` in CI now runs `--all-targets --all-features --locked -- -D warnings` (was `--release` only, hiding test/example lints)
-- `cargo audit` in CI is now blocking (was `continue-on-error: true`, allowing silent vulnerabilities)
-- CI runner pinned to `macos-14` (was `macos-latest`)
-- `SECURITY.md`: real disclosure email, supported-versions table, embargo timeline (48h ack, 30/60/90-day patch by severity)
-- Lint `clippy::print_stdout` / `clippy::print_stderr` warned at `lib.rs` root; allowed only on intentional CLI surfaces (`cli/logs.rs`, `daemon.rs`, `json_listener.rs`)
+- CI: `cargo clippy --all-targets --all-features --locked -D warnings`, blocking `cargo audit`, runner pinned to `macos-14`.
+- `SECURITY.md`: disclosure email, supported-versions table, embargo timeline.
+- `build.sh`: sync bundle version from `Cargo.toml`, bundle integrity checks, rsync deploy to preserve TCC grants.
 
 ### Fixed
-- Vocabulary substring bug — terms like `Zed` no longer rewrite `analyzed` to `analyZed`. `Vocabulary::apply` now uses regex word boundaries (`whole_word_replace` in `src/always/text.rs`).
-- 23 latent clippy warnings under `--all-targets` (mostly `&PathBuf` → `&Path`, needless `&[…]` borrow in `args(…)`, dead `total_rejected` in example)
-- Stray `eprintln!` in `smart_filter.rs` and `hud.rs` migrated to `tracing::{warn,info}`
+- Case-insensitive bundle collision (`Always` vs `always`) — daemon ships as `always-daemon`.
+- Vocabulary false positives (`Zed` in `analyzed`) via word-boundary replacement.
+- Paste-in-flight lock leak, atomic config/glossary writes, SQLite busy timeout, UDS client resilience.
+- STT language persistence, model UX, overlay visibility, and listening latency regressions.
 
-## [0.13.0] - 2026-04-16
+## [0.0.1] - 2026-06-06
 
-### Added
-- Silero VAD integration for improved voice activity detection
-- Hallucination detection module
-- UDS event streaming for real-time state communication
-- SwiftUI menu bar application with status overlay
-
-### Changed
-- Migrated from file-based state to UDS event streaming
-- Improved filtering and post-processing pipeline
-- Enhanced vocabulary biasing for Whisper transcription
-
-### Security
-- API keys now masked in config show command
-- Removed API key prefix logging from stderr
-
-## [0.12.0] - 2026-04-06
-
-### Added
-- Initial release
-- Voice activity detection
-- Groq Whisper API integration
-- Automatic paste functionality
-- Vocabulary biasing support
+First tagged build. No prior public releases.

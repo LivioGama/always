@@ -117,6 +117,16 @@ const HALLUCINATION_SUBSTRINGS: &[&str] = &[
 static PHRASE_SET: LazyLock<HashSet<&'static str>> =
     LazyLock::new(|| HALLUCINATION_PHRASES.iter().copied().collect());
 
+/// Short standalone fragments that are almost never useful pasted text in
+/// dictation mode, but commonly appear when STT tries to decode breath,
+/// room noise, or a clipped syllable.
+const CONTEXTLESS_SHORT_PHRASES: &[&str] = &[
+    "oh", "you", "but", "so", "well", "bleh", "meh", "heh", "ha", "haha",
+];
+
+static CONTEXTLESS_SHORT_SET: LazyLock<HashSet<&'static str>> =
+    LazyLock::new(|| CONTEXTLESS_SHORT_PHRASES.iter().copied().collect());
+
 /// Lowercase, trim, strip leading/trailing ASCII punctuation, and collapse runs
 /// of whitespace down to single spaces.
 fn normalize(text: &str) -> String {
@@ -204,6 +214,9 @@ pub fn is_hallucination(result: &TranscriptionResult) -> Option<&'static str> {
     if !normalized.is_empty() {
         if PHRASE_SET.contains(normalized.as_str()) {
             return Some("hallucination phrase (exact match)");
+        }
+        if CONTEXTLESS_SHORT_SET.contains(normalized.as_str()) {
+            return Some("contextless short utterance");
         }
         // Substring scan over the *lowercased* text (with original punctuation
         // intact so "amara.org" still matches).
@@ -433,6 +446,18 @@ mod tests {
     }
 
     #[test]
+    fn rejects_contextless_short_fragments() {
+        for text in [
+            "Oh.", "you", "But...", "so.", "Well,", "Bleh.", "meh", "haha",
+        ] {
+            assert!(
+                is_hallucination(&make(text)).is_some(),
+                "standalone fragment `{text}` should be filtered"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_segment_no_speech_with_low_confidence() {
         let mut r = make("Thank you for joining us today");
         r.segments.push(crate::stt::TranscriptionSegment {
@@ -520,6 +545,10 @@ mod tests {
         assert!(
             is_hallucination(&make("schedule a meeting for tomorrow at three pm")).is_none(),
             "should accept calendar request"
+        );
+        assert!(
+            is_hallucination(&make("open settings")).is_none(),
+            "should accept short command"
         );
     }
 

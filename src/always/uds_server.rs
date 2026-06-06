@@ -730,10 +730,10 @@ fn set_language(ctx: &ModelCommandCtx, lang: &str) {
         cfg.lang = lang.to_string();
     }
     // Persist for the next daemon start.
-    if let Ok(conn) = crate::db::open() {
-        if let Err(e) = crate::db::set_preference(&conn, "lang", lang) {
-            tracing::warn!(error = %e, lang, "persist_lang_failed");
-        }
+    if let Ok(conn) = crate::db::open()
+        && let Err(e) = crate::db::set_preference(&conn, "lang", lang)
+    {
+        tracing::warn!(error = %e, lang, "persist_lang_failed");
     }
     // Rebuild the active transcriber with the new language hint.
     let cfg_snapshot = ctx.cfg.read().clone();

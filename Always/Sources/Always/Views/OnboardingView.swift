@@ -1,5 +1,4 @@
 import SwiftUI
-import Security
 import AVFoundation
 import ApplicationServices
 import AppKit
@@ -22,8 +21,7 @@ struct OnboardingView: View {
 
     @Environment(\.dismiss) private var dismiss
 
-    private let service = "com.always.daemon"
-    private let account = "groq_api_key"
+    private let cliService = CLIService()
 
     private var allRequirementsMet: Bool {
         micStatus == .authorized
@@ -119,7 +117,7 @@ struct OnboardingView: View {
                     Spacer()
                 }
 
-                Text("Your key will be stored securely in the macOS Keychain")
+                Text("Your key is saved locally for Always and never shown in command output.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -282,23 +280,24 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: - Keychain
+    // MARK: - Saved key
 
     private func loadExistingKey() {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-
-        if status == errSecSuccess, let data = item as? Data,
-           let key = String(data: data, encoding: .utf8) {
-            apiKey = key
+        Task {
+            do {
+                let config = try await cliService.getConfig()
+                await MainActor.run {
+                    apiKey = config.groqApiKey ?? ""
+                    if !apiKey.isEmpty {
+                        keyValid = true
+                        lastValidatedKey = apiKey
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    saveError = "Could not load saved settings: \(error.localizedDescription)"
+                }
+            }
         }
     }
 
@@ -309,29 +308,18 @@ struct OnboardingView: View {
         isSaving = true
         saveError = nil
 
-        // Delete any existing key, then add the new one
-        let deleteQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-        SecItemDelete(deleteQuery as CFDictionary)
-
-        let addQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: apiKey.data(using: .utf8)!
-        ]
-
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            isSaving = false
-            if status == errSecSuccess {
-                dismiss()
-            } else {
-                saveError = "Failed to save API key: \(status.description)"
+        Task {
+            do {
+                _ = try await cliService.setConfig(key: "groq_api_key", value: apiKey)
+                await MainActor.run {
+                    isSaving = false
+                    dismiss()
+                }
+            } catch {
+                await MainActor.run {
+                    isSaving = false
+                    saveError = "Failed to save API key: \(error.localizedDescription)"
+                }
             }
         }
     }

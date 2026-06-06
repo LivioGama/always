@@ -122,28 +122,27 @@ brew install --cask rtk-ai/tap/always
 Requires **macOS 14 (Sonoma) or newer** on Apple Silicon. The bundle is
 ~30 MB. Sparkle auto-update keeps you on the latest version.
 
-### From source — `cargo install`
+### From source
 
 ```bash
-cargo install always               # macOS daemon (no GUI)
-cargo install always --no-default-features --features linux   # Linux CLI-only
+cargo install --git https://github.com/rtk-ai/always always
+cargo install --git https://github.com/rtk-ai/always always --no-default-features --features linux
 ```
 
-The crates.io release ships **only the `always` daemon binary**. The
-Mac menubar app + overlay live in the `Always.app` bundle — install
-the cask above to get them.
+The source install ships **only the `always` daemon binary**. The Mac
+menubar app + overlay live in the `Always.app` bundle — install the cask
+above to get them.
 
 ### Linux
 
 The daemon builds and runs on Linux with `--features linux`, but global
 keyboard shortcuts and clipboard paste are stubs (planned). Voice →
-Whisper → JSON output via `always run --json` works today, suitable for
-piping into your own automation.
+Whisper transcription works, suitable for piping into your own automation.
 
 ```bash
 docker compose up
 # or:
-cargo install always --no-default-features --features linux
+cargo install --git https://github.com/rtk-ai/always always --no-default-features --features linux
 ```
 
 See `Dockerfile` for the official image.
@@ -366,8 +365,8 @@ This is not a weekend hack — it's built like infrastructure.
   workflow, CycloneDX SBOM published with every release, license
   policy in `deny.toml`.
 * **Distribution.** Signed + notarized DMG, Homebrew cask, Sparkle
-  auto-update with EdDSA-signed appcast, `cargo install` from
-  crates.io.
+  auto-update with EdDSA-signed appcast, and source install via
+  `cargo install --git`.
 
 Full self-assessment: **[docs/ASSESSMENT.md](docs/ASSESSMENT.md)**.
 

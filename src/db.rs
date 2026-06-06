@@ -8,6 +8,8 @@ use rusqlite::Connection;
 
 use crate::config;
 
+const ENCODED_SECRET_PREFIX: &str = "hex:";
+
 #[derive(Debug, Clone, Default)]
 pub struct Preferences {
     pub lang: Option<String>,
@@ -210,6 +212,30 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN transcriber_backend TEXT;")?;
     }
 
+    encode_plaintext_groq_key(conn)?;
+
+    Ok(())
+}
+
+fn encode_plaintext_groq_key(conn: &Connection) -> Result<()> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT groq_api_key FROM preferences WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(None);
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.is_empty() || value.starts_with(ENCODED_SECRET_PREFIX) {
+        return Ok(());
+    }
+    let encoded = encode_secret(&value);
+    conn.execute(
+        "UPDATE preferences SET groq_api_key = ?1 WHERE id = 1",
+        [encoded.as_str()],
+    )?;
     Ok(())
 }
 
@@ -231,7 +257,7 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             stt_trim_silence: row.get::<_, Option<i64>>(7)?.map(|v| v != 0),
             stt_auto_enter: row.get::<_, Option<i64>>(8)?.map(|v| v != 0),
             deepgram_api_key: row.get(9)?,
-            groq_api_key: row.get(10)?,
+            groq_api_key: decode_secret(row.get(10)?),
             deepgram_model: row.get(11)?,
             silero_threshold: row.get(12)?,
             shortcut_pause: row.get(13)?,
@@ -411,19 +437,20 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
     )?;
     let sql = format!("UPDATE preferences SET {key} = ?1 WHERE id = 1");
     let normalized = match key {
+        "groq_api_key" => encode_secret(value),
         "stt_trim_silence"
         | "stt_auto_enter"
         | "postprocess_enabled"
         | "passive_correction_capture" => {
             if matches!(value, "true" | "1") {
-                "1"
+                "1".to_string()
             } else {
-                "0"
+                "0".to_string()
             }
         }
-        _ => value,
+        _ => value.to_string(),
     };
-    conn.execute(&sql, [normalized])?;
+    conn.execute(&sql, [normalized.as_str()])?;
 
     // Invalidate the in-memory per-app overrides cache when the JSON
     // blob changes — otherwise the daemon keeps applying the previous
@@ -449,4 +476,68 @@ pub fn get_silero_threshold(conn: &Connection) -> Result<Option<f64>> {
 
 pub fn set_silero_threshold(conn: &Connection, value: f64) -> Result<()> {
     set_preference(conn, "silero_threshold", &value.to_string())
+}
+
+fn encode_secret(value: &str) -> String {
+    if value.is_empty() {
+        return String::new();
+    }
+    let mut encoded = String::with_capacity(ENCODED_SECRET_PREFIX.len() + value.len() * 2);
+    encoded.push_str(ENCODED_SECRET_PREFIX);
+    for byte in value.as_bytes() {
+        encoded.push_str(&format!("{byte:02x}"));
+    }
+    encoded
+}
+
+fn decode_secret(value: Option<String>) -> Option<String> {
+    let value = value?;
+    let Some(hex) = value.strip_prefix(ENCODED_SECRET_PREFIX) else {
+        return if value.is_empty() { None } else { Some(value) };
+    };
+    if hex.len() % 2 != 0 {
+        return Some(value);
+    }
+
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for pair in hex.as_bytes().chunks_exact(2) {
+        let Ok(pair) = std::str::from_utf8(pair) else {
+            return Some(value);
+        };
+        let Ok(byte) = u8::from_str_radix(pair, 16) else {
+            return Some(value);
+        };
+        bytes.push(byte);
+    }
+    String::from_utf8(bytes).ok()
+}
+
+#[cfg(test)]
+mod secret_encoding_tests {
+    use super::{decode_secret, encode_secret};
+
+    #[test]
+    fn groq_secret_is_hex_encoded_and_decoded() {
+        let encoded = encode_secret("gsk_live_test");
+
+        assert_ne!(encoded, "gsk_live_test");
+        assert!(encoded.starts_with("hex:"));
+        assert_eq!(
+            decode_secret(Some(encoded)),
+            Some("gsk_live_test".to_string())
+        );
+    }
+
+    #[test]
+    fn legacy_plain_groq_secret_still_reads() {
+        assert_eq!(
+            decode_secret(Some("gsk_legacy".to_string())),
+            Some("gsk_legacy".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_groq_secret_reads_as_missing() {
+        assert_eq!(decode_secret(Some(String::new())), None);
+    }
 }

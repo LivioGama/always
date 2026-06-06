@@ -2,7 +2,9 @@ import SwiftUI
 import AppKit
 
 struct AboutPanel: View {
-    let appVersion = "0.13.0"
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+    }
     let repositoryURL = "https://github.com/rtk-ai/always"
     let license = "Apache-2.0"
 

@@ -115,11 +115,13 @@ impl PostProcessor {
             .json()
             .await
             .context("Failed to parse Groq response")?;
-        let corrected = json["choices"][0]["message"]["content"]
+        let raw_corrected = json["choices"][0]["message"]["content"]
             .as_str()
             .context("Invalid Groq response format")?
             .trim()
             .to_string();
+        let corrected = sanitize_corrected_text(text, &raw_corrected)
+            .unwrap_or_else(|| text.trim().to_string());
 
         self.insert_cached(text.to_string(), corrected.clone());
         Ok(corrected)
@@ -152,6 +154,90 @@ impl PostProcessor {
     }
 }
 
+fn sanitize_corrected_text(input: &str, output: &str) -> Option<String> {
+    let mut cleaned = output.trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    if let Some(inner) = extract_tagged(cleaned, "transcript") {
+        cleaned = inner.trim();
+    }
+
+    cleaned = strip_known_prefix(cleaned);
+    cleaned = strip_wrapping_quotes(cleaned).trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    let input_words = word_count(input);
+    let output_words = word_count(cleaned);
+    if input_words > 0 {
+        if output_words > input_words + 4 {
+            return None;
+        }
+        if input_words >= 4 && output_words * 3 < input_words * 2 {
+            return None;
+        }
+    }
+
+    Some(cleaned.to_string())
+}
+
+fn extract_tagged<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    Some(&text[start..end])
+}
+
+fn strip_known_prefix(mut text: &str) -> &str {
+    loop {
+        let lower = text.to_ascii_lowercase();
+        let Some(prefix) = [
+            "here is the cleaned transcript:",
+            "here's the cleaned transcript:",
+            "cleaned transcript:",
+            "the cleaned transcript:",
+            "the cleaned text:",
+            "output:",
+            "sure,",
+        ]
+        .iter()
+        .find(|prefix| lower.starts_with(**prefix)) else {
+            return text;
+        };
+        text = text[prefix.len()..].trim_start();
+    }
+}
+
+fn strip_wrapping_quotes(text: &str) -> &str {
+    let Some(first) = text.chars().next() else {
+        return text;
+    };
+    let Some(last) = text.chars().last() else {
+        return text;
+    };
+    if text.len() < 2 {
+        return text;
+    }
+    match (first, last) {
+        ('"', '"') | ('\'', '\'') | ('`', '`') => {
+            let start = first.len_utf8();
+            let end = text.len() - last.len_utf8();
+            &text[start..end]
+        }
+        _ => text,
+    }
+}
+
+fn word_count(text: &str) -> usize {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +266,32 @@ mod tests {
         let processor = PostProcessor::new(None);
         let out = processor.process("hello world", None).await.unwrap();
         assert_eq!(out, "hello world");
+    }
+
+    #[test]
+    fn sanitize_corrected_text_removes_model_wrappers() {
+        let out = sanitize_corrected_text(
+            "can you check this",
+            "Here is the cleaned transcript: \"Can you check this?\"",
+        )
+        .unwrap();
+        assert_eq!(out, "Can you check this?");
+    }
+
+    #[test]
+    fn sanitize_corrected_text_extracts_transcript_tag() {
+        let out =
+            sanitize_corrected_text("run the tests", "<transcript>Run the tests.</transcript>")
+                .unwrap();
+        assert_eq!(out, "Run the tests.");
+    }
+
+    #[test]
+    fn sanitize_corrected_text_rejects_divergent_answer() {
+        let out = sanitize_corrected_text(
+            "can you explain the logs",
+            "Sure, the issue is probably caused by your microphone, and here are several steps you can try.",
+        );
+        assert!(out.is_none());
     }
 }

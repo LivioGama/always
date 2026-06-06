@@ -133,16 +133,13 @@ fn filter_accepts_normal_speech() {
 
 #[test]
 fn filter_rejects_when_text_matches_blocklist_phrase() {
-    // Whatever the JSON config blocks today, "thank you" is the canonical
-    // example. If the config ever stops blocking it, this test will surface
-    // the regression — which is what we want.
     let cfg = AlwaysConfig::default();
-    let r = should_accept_with_reason("thank you", &cfg);
-    // Either FilterReason::HardPhrase or FilterReason::HardRegex is acceptable —
-    // we only care that the result is NOT FilterReason::None.
-    assert!(
-        !matches!(r, FilterReason::None),
-        "expected 'thank you' to be filtered, got {:?}",
-        r
-    );
+    for phrase in ["thank you", "Mwah!", "Pfff.", "I'm going to go."] {
+        let r = should_accept_with_reason(phrase, &cfg);
+        assert!(
+            !matches!(r, FilterReason::None),
+            "expected {phrase:?} to be filtered, got {:?}",
+            r
+        );
+    }
 }

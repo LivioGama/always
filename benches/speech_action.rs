@@ -29,6 +29,7 @@ fn bench_config() -> AlwaysConfig {
         auto_enter: false,
         filter_enabled: true,
         energy_threshold: 0.05,
+        hear_energy_threshold: 0.01,
         onset_ms: 50,
         cooldown_ms: 1500,
         log_path: std::path::PathBuf::from("always.log"),

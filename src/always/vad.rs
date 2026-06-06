@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use crate::always::audio::{self, FRAME_BYTES, FRAME_MS, FRAME_SAMPLES};
 use crate::always::config::AlwaysConfig;
 use crate::always::event;
+use crate::always::keyboard;
 use crate::always::log::{Event, Logger};
 use crate::always::pause;
 use crate::always::vad_silero::SileroVad;
@@ -96,7 +97,7 @@ pub fn poll_speech_energy(cfg: &AlwaysConfig) -> Result<bool> {
         sample_buf[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
     }
     let energy = normalized_energy(&sample_buf[..]);
-    Ok(energy >= cfg.energy_threshold * 0.5)
+    Ok(energy >= voice_activity_energy_threshold(cfg))
 }
 
 /// Speech shorter than this is treated as a "short utterance" and gets
@@ -107,18 +108,20 @@ pub fn poll_speech_energy(cfg: &AlwaysConfig) -> Result<bool> {
 /// mid-thought.
 const SHORT_SPEECH_MS: u32 = 400;
 /// Silence-after-speech window for short utterances. Standard window
-/// is `cfg.silence_secs`; for a short utterance we cut at 300ms so
-/// single words ("yes", "ok") do not sit behind the normal phrase window.
+/// is `cfg.silence_secs`; for a short utterance we cut at 200ms so
+/// single words ("yes", "ok") paste extremely fast.
 /// Mid-sentence safety is covered by the higher-level `silence_secs` which
 /// catches longer phrases once the utterance grows beyond `SHORT_SPEECH_MS`.
-const SHORT_SILENCE_MS: u32 = 300;
+const SHORT_SILENCE_MS: u32 = 200;
+const NORMAL_SILENCE_CAP_SECS: f64 = 0.50;
+const NORMAL_SILENCE_FLOOR_SECS: f64 = 0.30;
 
 fn record_with_local_vad(
     cfg: &AlwaysConfig,
     log: &mut Logger,
     transcriber: &Arc<dyn Transcriber>,
 ) -> Result<RecordResult> {
-    let silence_frames = ((cfg.silence_secs * 1000.0) / FRAME_MS as f64).ceil() as usize;
+    let silence_frames = normal_silence_frames(cfg);
     // Two distinct timeouts:
     // - `max_pre_voice_frames`: hard cap on the initial wait for voice
     //   onset. Uses `cfg.timeout_secs` (default 30s) so a stale recorder
@@ -130,6 +133,7 @@ fn record_with_local_vad(
     let max_pre_voice_frames = (cfg.timeout_secs as usize * 1000) / FRAME_MS as usize;
     let max_speech_frames = (300_usize * 1000) / FRAME_MS as usize;
     let min_speech_frames = (cfg.onset_ms / FRAME_MS).max(1) as usize;
+    let voice_activity_energy_threshold = voice_activity_energy_threshold(cfg);
     // Short-utterance cutoff. Computed once; activated per-iteration
     // when `speech_samples` duration is still under SHORT_SPEECH_MS.
     let short_silence_frames = ((SHORT_SILENCE_MS as f64) / FRAME_MS as f64).ceil() as usize;
@@ -150,9 +154,7 @@ fn record_with_local_vad(
     // full `silence_secs` of quiet before finalizing. Wrong guesses are
     // discarded if speech resumes. This only moves the preview/STT kickoff;
     // it does not shorten the hard final silence limit.
-    let tentative_silence_secs = (cfg.silence_secs * 0.20).clamp(0.15, 1.0);
-    let tentative_silence_frames =
-        ((tentative_silence_secs * 1000.0) / FRAME_MS as f64).ceil() as usize;
+    let tentative_silence_frames = tentative_silence_frames(silence_frames);
     // Pre-buffer: keep 200ms of audio before speech detection to catch first words.
     // 50ms was too short — first syllable of "Run the program" was dropped. 200ms
     // gives enough headroom for VAD onset latency without bloating speech_samples.
@@ -175,12 +177,13 @@ fn record_with_local_vad(
     // Probability smoothing window. Silero outputs per-512-sample (32ms) chunks;
     // single-frame dips during voiceless consonants (s/f/th/h) or breaths can
     // briefly drop prob below threshold without genuine end-of-utterance.
-    // We track the last 20 readings (~640ms) and use the running max while in
+    // We track the last 10 readings (~300ms) and use the running max while in
     // speech — the prob must stay low for the FULL window to count as silence.
     // History: 8 frames cut mid-phrase; 16 still split soft trails; 24 was
-    // safe but added ~240ms vs 16. 20 frames is the compromise: enough for
-    // fricatives/thinking dips without the full 2.5s-era penalty.
-    let smoothing_window: usize = 20;
+    // safe but slow. Option-held pause is now the explicit long-break control,
+    // so normal smoothing can stay tight without forcing every utterance to
+    // wait behind a long tail.
+    let smoothing_window: usize = 10;
     let mut prob_history: VecDeque<f32> = VecDeque::with_capacity(smoothing_window);
 
     // Use persistent recorder to avoid process spawning overhead
@@ -234,7 +237,7 @@ fn record_with_local_vad(
 
     // Optimization for very low energy thresholds (≤ 0.01): use fast energy check
     let use_fast_energy_check = cfg.energy_threshold <= 0.01;
-    let fast_energy_threshold = cfg.energy_threshold;
+    let fast_energy_threshold = voice_activity_energy_threshold;
 
     // For very low thresholds, we can use a simplified RMS calculation
     // that's much faster than the full normalized energy calculation
@@ -378,7 +381,7 @@ fn record_with_local_vad(
                         fast_energy_check(samples, fast_energy_threshold_sq)
                     } else {
                         let current_energy = normalized_energy(samples);
-                        current_energy >= cfg.energy_threshold * 0.5 // Use 50% of threshold for early check
+                        current_energy >= voice_activity_energy_threshold
                     };
 
                     if passes_energy_check {
@@ -444,6 +447,13 @@ fn record_with_local_vad(
                 pause::mark_voice_seen();
             }
         } else if in_speech {
+            if keyboard::is_option_held() {
+                consecutive_silence = 0;
+                consecutive_speech = 0;
+                speech_samples.extend_from_slice(samples);
+                pause::mark_voice_seen();
+                continue;
+            }
             consecutive_silence += 1;
             consecutive_speech = 0;
             speech_samples.extend_from_slice(samples);
@@ -470,7 +480,7 @@ fn record_with_local_vad(
             // At tentative silence, kick off speculative transcription in the
             // background so the result is ready (or nearly so) by the time we
             // hit final silence. If the user resumes, we discard it above.
-            if !speculation_pending && consecutive_silence >= eff_tentative_frames {
+            if voice_logged && !speculation_pending && consecutive_silence >= eff_tentative_frames {
                 speculation_pending = true;
                 speculation_slot.invalidate();
                 let captured_gen = speculation_slot.current_generation();
@@ -507,10 +517,10 @@ fn record_with_local_vad(
                     // overlay can show a streaming preview while we wait for
                     // final silence. If the user keeps talking, the final
                     // transcription will supersede this.
-                    if let Ok(ref r) = outcome {
-                        if !r.text.is_empty() {
-                            event::global_broadcaster().transcript_chunk(r.text.clone());
-                        }
+                    if let Ok(ref r) = outcome
+                        && !r.text.is_empty()
+                    {
+                        event::global_broadcaster().transcript_chunk(r.text.clone());
                     }
                     slot.store_if_current(captured_gen, outcome);
                 });
@@ -638,7 +648,30 @@ fn record_with_local_vad(
 
     let raw = result.text.clone();
 
+    // Enhanced noise detection: filter out empty, very short, or low-energy results
     if raw.is_empty() {
+        return Ok(RecordResult::DroppedNoise { raw });
+    }
+
+    // Filter very short results that are likely noise (less than 2 characters)
+    let raw_trimmed = raw.trim();
+    if raw_trimmed.len() < 2 {
+        // Privacy: gate transcript text even for filtered noise
+        if crate::always::telemetry::should_log_transcripts() {
+            tracing::debug!(text = %raw, "dropped_noise_too_short");
+        } else {
+            tracing::debug!(chars = raw.chars().count(), "dropped_noise_too_short");
+        }
+        return Ok(RecordResult::DroppedNoise { raw });
+    }
+
+    // Filter results with very low energy - likely background noise
+    if speech_energy < cfg.energy_threshold * 0.5 {
+        tracing::debug!(
+            energy = speech_energy,
+            threshold = cfg.energy_threshold,
+            "dropped_noise_low_energy"
+        );
         return Ok(RecordResult::DroppedNoise { raw });
     }
 
@@ -699,9 +732,28 @@ fn normalized_energy(samples: &[i16]) -> f64 {
     (sum_sq as f64 / samples.len() as f64).sqrt() / 32768.0
 }
 
+fn voice_activity_energy_threshold(cfg: &AlwaysConfig) -> f64 {
+    cfg.hear_energy_threshold.max(cfg.energy_threshold)
+}
+
+fn normal_silence_frames(cfg: &AlwaysConfig) -> usize {
+    let secs = cfg
+        .silence_secs
+        .clamp(NORMAL_SILENCE_FLOOR_SECS, NORMAL_SILENCE_CAP_SECS);
+    ((secs * 1000.0) / FRAME_MS as f64).ceil() as usize
+}
+
+fn tentative_silence_frames(final_silence_frames: usize) -> usize {
+    (final_silence_frames / 3).max(1)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{fast_energy_check, fast_normalized_energy, normalized_energy};
+    use super::{
+        fast_energy_check, fast_normalized_energy, normal_silence_frames, normalized_energy,
+        tentative_silence_frames, voice_activity_energy_threshold,
+    };
+    use crate::always::AlwaysConfig;
 
     #[test]
     fn normalized_energy_handles_empty_input() {
@@ -743,5 +795,49 @@ mod tests {
 
         // Fast method should be very close to standard method
         assert!((fast_energy - standard_energy).abs() < 0.001);
+    }
+
+    #[test]
+    fn voice_activity_confirmation_uses_stricter_energy_floor() {
+        let cfg = AlwaysConfig {
+            energy_threshold: 0.012,
+            hear_energy_threshold: 0.001,
+            ..Default::default()
+        };
+        assert_eq!(voice_activity_energy_threshold(&cfg), 0.012);
+
+        let cfg = AlwaysConfig {
+            energy_threshold: 0.012,
+            hear_energy_threshold: 0.02,
+            ..Default::default()
+        };
+        assert_eq!(voice_activity_energy_threshold(&cfg), 0.02);
+    }
+
+    #[test]
+    fn normal_silence_window_is_capped_for_responsive_finalize() {
+        let cfg = AlwaysConfig {
+            silence_secs: 2.0,
+            ..Default::default()
+        };
+        assert_eq!(normal_silence_frames(&cfg), 17);
+
+        let cfg = AlwaysConfig {
+            silence_secs: 0.1,
+            ..Default::default()
+        };
+        assert_eq!(normal_silence_frames(&cfg), 10);
+
+        let cfg = AlwaysConfig {
+            silence_secs: 0.45,
+            ..Default::default()
+        };
+        assert_eq!(normal_silence_frames(&cfg), 15);
+    }
+
+    #[test]
+    fn tentative_silence_starts_before_final_cutoff() {
+        assert_eq!(tentative_silence_frames(17), 5);
+        assert_eq!(tentative_silence_frames(1), 1);
     }
 }

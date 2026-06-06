@@ -2,7 +2,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use always::always::correction::{self, CaptureOutcome};
@@ -162,7 +162,7 @@ enum ConfigAction {
         /// Preference value
         value: String,
     },
-    /// Delete an API key from keychain
+    /// Delete a saved API key
     DeleteKey {
         /// Key name (groq_api_key or deepgram_api_key)
         key: String,
@@ -187,13 +187,6 @@ fn main() -> Result<()> {
     let _logging_guard = always::always::telemetry::init_logging(foreground)
         .map_err(|e| anyhow::anyhow!("Failed to initialize logging: {}", e))?;
 
-    // One-shot migration: move any plaintext API keys from SQLite to the OS Keychain.
-    // Non-fatal — if Keychain access fails (e.g., headless Linux without secret-service),
-    // existing config flow still works.
-    if let Err(e) = always::always::keyring::migrate_keys_from_db() {
-        tracing::warn!(error = %e, "key migration to keychain failed");
-    }
-
     match cli.command {
         Some(Commands::Start {
             lang,
@@ -203,10 +196,7 @@ fn main() -> Result<()> {
         }) => always::always::daemon::start(&always_config(lang, timeout, silence, auto_enter)?),
         Some(Commands::Stop) => always::always::daemon::stop(),
         Some(Commands::Status) => always::always::daemon::status(),
-        Some(Commands::GetState) => {
-            handle_get_state();
-            Ok(())
-        }
+        Some(Commands::GetState) => handle_get_state(),
         Some(Commands::RunForeground {
             lang,
             timeout,
@@ -254,20 +244,10 @@ fn handle_config(action: ConfigAction) -> Result<()> {
         ConfigAction::Show => {
             let prefs = db::get_preferences(&conn)?;
 
-            // Check keychain for API keys
-            let groq_in_keychain = always::always::keyring::get_groq_api_key()
-                .unwrap_or(None)
-                .is_some();
-            let deepgram_in_keychain = always::always::keyring::get_deepgram_api_key()
-                .unwrap_or(None)
-                .is_some();
-
             println!("lang: {}", prefs.lang.as_deref().unwrap_or("auto"));
             println!(
                 "deepgram_api_key: {}",
-                if deepgram_in_keychain {
-                    "*** (in keychain)".to_string()
-                } else if prefs.deepgram_api_key.is_some() {
+                if prefs.deepgram_api_key.is_some() {
                     "*** (in database)".to_string()
                 } else {
                     "(not set)".to_string()
@@ -331,10 +311,8 @@ fn handle_config(action: ConfigAction) -> Result<()> {
             );
             println!(
                 "groq_api_key: {}",
-                if groq_in_keychain {
-                    "*** (in keychain)".to_string()
-                } else if prefs.groq_api_key.is_some() {
-                    "*** (in database)".to_string()
+                if prefs.groq_api_key.is_some() {
+                    "*** (saved)".to_string()
                 } else {
                     "(not set)".to_string()
                 }
@@ -406,13 +384,15 @@ fn handle_config(action: ConfigAction) -> Result<()> {
             );
         }
         ConfigAction::Set { key, value } => {
-            // Handle API keys specially - store in keychain
+            // Store API keys in the preferences DB. Keychain access prompts
+            // are unacceptable in local rebuilds because debug signing changes
+            // the code requirement often enough for macOS to re-authorize.
             if key == "groq_api_key" {
-                always::always::keyring::set_groq_api_key(&value)?;
-                println!("groq_api_key = *** (stored in keychain)");
+                db::set_preference(&conn, &key, &value)?;
+                println!("groq_api_key = *** (saved)");
             } else if key == "deepgram_api_key" {
-                always::always::keyring::set_deepgram_api_key(&value)?;
-                println!("deepgram_api_key = *** (stored in keychain)");
+                db::set_preference(&conn, &key, &value)?;
+                println!("deepgram_api_key = *** (saved)");
             } else {
                 db::set_preference(&conn, &key, &value)?;
                 println!("{key} = {value}");
@@ -420,12 +400,12 @@ fn handle_config(action: ConfigAction) -> Result<()> {
         }
         ConfigAction::DeleteKey { key } => match key.as_str() {
             "groq_api_key" => {
-                always::always::keyring::delete_groq_api_key()?;
-                println!("groq_api_key deleted from keychain");
+                db::set_preference(&conn, "groq_api_key", "")?;
+                println!("groq_api_key deleted from saved settings");
             }
             "deepgram_api_key" => {
-                always::always::keyring::delete_deepgram_api_key()?;
-                println!("deepgram_api_key deleted from keychain");
+                db::set_preference(&conn, "deepgram_api_key", "")?;
+                println!("deepgram_api_key deleted from saved settings");
             }
             _ => {
                 eprintln!("Unknown key: {key}. Valid keys: groq_api_key, deepgram_api_key");
@@ -672,7 +652,13 @@ fn send_uds_command(json: &str) -> Result<()> {
     Ok(())
 }
 
-fn handle_get_state() {
+fn handle_get_state() -> Result<()> {
+    if always::always::daemon::is_running() {
+        let state = read_daemon_state()?;
+        println!("{}", state);
+        return Ok(());
+    }
+
     let is_paused = always::always::pause::is_paused();
     let is_auto_enter = always::always::pause::is_auto_enter_enabled();
     let state = json!({
@@ -680,6 +666,61 @@ fn handle_get_state() {
         "isAutoEnter": is_auto_enter
     });
     println!("{}", state);
+    Ok(())
+}
+
+fn read_daemon_state() -> Result<Value> {
+    use anyhow::Context as _;
+    use std::io::{BufRead as _, BufReader};
+    use std::os::unix::net::UnixStream;
+
+    let Some(sock_path) = always::always::daemon::socket_path() else {
+        anyhow::bail!("no UDS socket path available on this platform");
+    };
+
+    let stream = UnixStream::connect(&sock_path)
+        .with_context(|| format!("failed to connect to daemon at {}", sock_path.display()))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+
+    let mut reader = BufReader::new(stream);
+    let mut is_paused = None;
+    let mut is_auto_enter = None;
+
+    for _ in 0..16 {
+        let mut line = String::new();
+        let bytes = reader
+            .read_line(&mut line)
+            .context("failed to read daemon state")?;
+        if bytes == 0 {
+            break;
+        }
+
+        update_state_from_daemon_event(&line, &mut is_paused, &mut is_auto_enter)?;
+        if is_paused.is_some() && is_auto_enter.is_some() {
+            return Ok(json!({
+                "isPaused": is_paused.unwrap_or(false),
+                "isAutoEnter": is_auto_enter.unwrap_or(false)
+            }));
+        }
+    }
+
+    anyhow::bail!("daemon did not send complete state");
+}
+
+fn update_state_from_daemon_event(
+    line: &str,
+    is_paused: &mut Option<bool>,
+    is_auto_enter: &mut Option<bool>,
+) -> Result<()> {
+    let event: Value = serde_json::from_str(line.trim())?;
+    match event.get("type").and_then(Value::as_str) {
+        Some("Paused" | "PausedQuietly") => *is_paused = Some(true),
+        Some("Resumed" | "ResumedQuietly") => *is_paused = Some(false),
+        Some("AutoEnterEnabled") => *is_auto_enter = Some(true),
+        Some("AutoEnterDisabled") => *is_auto_enter = Some(false),
+        _ => {}
+    }
+    Ok(())
 }
 
 fn always_config(
@@ -689,4 +730,51 @@ fn always_config(
     auto_enter: Option<bool>,
 ) -> Result<always::always::AlwaysConfig> {
     always::always::AlwaysConfig::from_cli(lang, timeout, silence, auto_enter)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::update_state_from_daemon_event;
+
+    #[test]
+    fn daemon_state_parser_tracks_pause_and_auto_enter() {
+        let mut paused = None;
+        let mut auto_enter = None;
+
+        update_state_from_daemon_event(
+            r#"{"type":"Hello","data":{"version":1}}"#,
+            &mut paused,
+            &mut auto_enter,
+        )
+        .unwrap();
+        update_state_from_daemon_event(r#"{"type":"Resumed"}"#, &mut paused, &mut auto_enter)
+            .unwrap();
+        update_state_from_daemon_event(
+            r#"{"type":"AutoEnterEnabled"}"#,
+            &mut paused,
+            &mut auto_enter,
+        )
+        .unwrap();
+
+        assert_eq!(paused, Some(false));
+        assert_eq!(auto_enter, Some(true));
+    }
+
+    #[test]
+    fn daemon_state_parser_treats_quiet_pause_as_effective_pause() {
+        let mut paused = None;
+        let mut auto_enter = None;
+
+        update_state_from_daemon_event(r#"{"type":"PausedQuietly"}"#, &mut paused, &mut auto_enter)
+            .unwrap();
+        update_state_from_daemon_event(
+            r#"{"type":"AutoEnterDisabled"}"#,
+            &mut paused,
+            &mut auto_enter,
+        )
+        .unwrap();
+
+        assert_eq!(paused, Some(true));
+        assert_eq!(auto_enter, Some(false));
+    }
 }

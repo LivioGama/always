@@ -134,7 +134,20 @@ final class AlwaysTests: XCTestCase {
     func testMaskedApiKeyIsNotPersisted() throws {
         XCTAssertFalse(shouldPersistApiKey(""))
         XCTAssertFalse(shouldPersistApiKey("••••••••"))
+        XCTAssertFalse(shouldPersistApiKey("***"))
+        XCTAssertFalse(shouldPersistApiKey("*** (in keychain)"))
+        XCTAssertFalse(shouldPersistApiKey("●●●●"))
         XCTAssertTrue(shouldPersistApiKey("gsk_live_test"))
+    }
+
+    func testConfigFromCLIIgnoresMaskedGroqKeyPlaceholder() throws {
+        let cliOutput = """
+        groq_api_key: *** (in keychain)
+        """
+        guard let config = Config.fromCLI(output: cliOutput) else {
+            return XCTFail("fromCLI returned nil")
+        }
+        XCTAssertNil(config.groqApiKey)
     }
 
     func testGroqValidationStatusMapping() throws {
@@ -275,6 +288,31 @@ final class AlwaysTests: XCTestCase {
         XCTAssertTrue(monitor.isListeningActive)
         XCTAssertFalse(monitor.isVoiceActivity)
         XCTAssertFalse(isStatusOverlayVisible())
+    }
+
+    func testVoiceActivityDetectedShowsOverlayImmediately() throws {
+        try ensureAppKit()
+        let monitor = StateMonitor.shared
+        let controller = StatusOverlayController.shared
+
+        controller.hide()
+        monitor.isDaemonConnected = true
+        monitor.isPaused = false
+        monitor.isMasterPaused = false
+        monitor.isIdleAutoPaused = false
+        monitor.isTranscribing = false
+        monitor.isVoiceActivity = false
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.2))
+
+        let detected = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: #"{"type":"VoiceActivityDetected","data":null}"#.data(using: .utf8)!
+        )
+        NotificationCenter.default.post(name: .daemonEvent, object: detected)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+
+        XCTAssertTrue(monitor.isVoiceActivity)
+        XCTAssertTrue(isStatusOverlayVisible())
     }
 
     func testStateMonitorTogglesPauseFromEvents() throws {

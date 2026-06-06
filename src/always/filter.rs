@@ -154,10 +154,20 @@ mod tests {
     fn rejects_conversation_fillers() {
         assert!(is_rejected("mm hmm"));
         assert!(is_rejected("uh huh"));
+        assert!(is_rejected("Mwah!"));
+        assert!(is_rejected("Pfff."));
         assert!(is_rejected("oh okay"));
         assert!(is_rejected("sounds good"));
         assert!(is_rejected("that's great"));
         assert!(is_rejected("absolutely"));
+    }
+
+    #[test]
+    fn rejects_standalone_departure_fillers() {
+        assert!(is_rejected("I'm going to go."));
+        assert!(is_rejected("I am going to go"));
+        assert!(is_rejected("I'm gonna go"));
+        assert!(is_rejected("I gotta go"));
     }
 
     #[test]
@@ -186,6 +196,7 @@ mod tests {
         assert!(!is_rejected("create thank you function"));
         assert!(!is_rejected("send a thank you email"));
         assert!(!is_rejected("open hello world file"));
+        assert!(!is_rejected("write i'm going to go in the note"));
         assert!(!is_rejected("git status"));
         assert!(!is_rejected("run tests"));
     }
