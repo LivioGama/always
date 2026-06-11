@@ -4,11 +4,14 @@
 //! receives daemon events, and renders overlay UI. It mirrors the macOS
 //! overlay behavior using the same daemon event stream.
 
+mod backend;
+mod factory;
 mod renderer;
 mod state;
 mod uds_client;
+mod wayland;
 
-use renderer::OverlayRenderer;
+use factory::create_renderer;
 use state::{DaemonEvent, OverlayStateReducer};
 use uds_client::UDSClient;
 
@@ -37,8 +40,8 @@ async fn main() -> Result<()> {
     // Create state reducer
     let mut reducer = OverlayStateReducer::new();
 
-    // Create overlay renderer
-    let mut renderer = OverlayRenderer::new().context("Failed to initialize overlay renderer")?;
+    // Create overlay renderer using factory (detects X11 vs Wayland)
+    let mut renderer = create_renderer().context("Failed to initialize overlay renderer")?;
 
     // Main loop with reconnection logic
     loop {

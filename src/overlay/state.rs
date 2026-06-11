@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 // Reuse the daemon's DaemonEvent type from the always library
 pub use always::always::event::DaemonEvent;
 
+const MIN_VOICE_ACTIVITY_DISPLAY: Duration = Duration::from_millis(250);
+
 // Parse event from JSON line
 pub fn parse_daemon_event(line: &str) -> Result<DaemonEvent, serde_json::Error> {
     serde_json::from_str(line)
@@ -163,6 +165,8 @@ pub struct OverlayStateReducer {
     pub initial_sync_deadline: Option<Instant>,
     pub flash_deadline: Option<Instant>,
     pub pending_persistent_state: Option<OverlayState>,
+    transcribing_deferred_until: Option<Instant>,
+    voice_activity_started_at: Option<Instant>,
 }
 
 impl OverlayStateReducer {
@@ -172,6 +176,8 @@ impl OverlayStateReducer {
             initial_sync_deadline: None,
             flash_deadline: None,
             pending_persistent_state: None,
+            transcribing_deferred_until: None,
+            voice_activity_started_at: None,
         }
     }
 
@@ -195,26 +201,40 @@ impl OverlayStateReducer {
             DaemonEvent::ListeningStopped => {
                 self.state.is_listening_active = false;
                 self.state.is_voice_activity = false;
+                self.voice_activity_started_at = None;
+                self.transcribing_deferred_until = None;
                 self.update_ongoing_overlay()
             }
 
             DaemonEvent::TranscribingStarted => {
                 self.state.is_transcribing = true;
+                if let Some(started_at) = self.voice_activity_started_at {
+                    let ready_at = started_at + MIN_VOICE_ACTIVITY_DISPLAY;
+                    if Instant::now() < ready_at {
+                        self.transcribing_deferred_until = Some(ready_at);
+                        return self.show_voice_activity_overlay();
+                    }
+                }
+                self.transcribing_deferred_until = None;
                 Some(OverlayState::Transcribing)
             }
 
             DaemonEvent::TranscribingStopped => {
                 self.state.is_transcribing = false;
+                self.transcribing_deferred_until = None;
                 self.update_ongoing_overlay()
             }
 
             DaemonEvent::VoiceActivityDetected => {
                 self.state.is_voice_activity = true;
+                self.voice_activity_started_at = Some(Instant::now());
                 self.update_ongoing_overlay()
             }
 
             DaemonEvent::VoiceActivityEnded => {
                 self.state.is_voice_activity = false;
+                self.voice_activity_started_at = None;
+                self.transcribing_deferred_until = None;
                 self.update_ongoing_overlay()
             }
 
@@ -273,6 +293,8 @@ impl OverlayStateReducer {
                 // Clear ongoing state and flash filtered overlay
                 self.state.is_transcribing = false;
                 self.state.is_voice_activity = false;
+                self.voice_activity_started_at = None;
+                self.transcribing_deferred_until = None;
                 self.start_flash(
                     OverlayState::Filtered {
                         reason: reason.clone(),
@@ -285,6 +307,8 @@ impl OverlayStateReducer {
                 // Clear ongoing state and flash error overlay
                 self.state.is_transcribing = false;
                 self.state.is_voice_activity = false;
+                self.voice_activity_started_at = None;
+                self.transcribing_deferred_until = None;
                 self.start_flash(
                     OverlayState::TranscriptionFailed {
                         message: message.clone(),
@@ -341,6 +365,8 @@ impl OverlayStateReducer {
                 // Clear ongoing state immediately
                 self.state.is_transcribing = false;
                 self.state.is_voice_activity = false;
+                self.voice_activity_started_at = None;
+                self.transcribing_deferred_until = None;
                 self.update_ongoing_overlay()
             }
 
@@ -412,6 +438,13 @@ impl OverlayStateReducer {
 
         // Activity-only model: overlay represents something happening
         if self.state.is_transcribing {
+            if let Some(ready_at) = self.transcribing_deferred_until
+                && Instant::now() < ready_at
+                && self.state.is_voice_activity
+            {
+                return self.show_voice_activity_overlay();
+            }
+            self.transcribing_deferred_until = None;
             let new_state = OverlayState::Transcribing;
             if self.state.current_overlay != Some(new_state.clone()) {
                 self.state.current_overlay = Some(new_state.clone());
@@ -443,6 +476,15 @@ impl OverlayStateReducer {
 
         // No activity -> hide
         let new_state = OverlayState::Hidden;
+        if self.state.current_overlay != Some(new_state.clone()) {
+            self.state.current_overlay = Some(new_state.clone());
+            return Some(new_state);
+        }
+        None
+    }
+
+    fn show_voice_activity_overlay(&mut self) -> Option<OverlayState> {
+        let new_state = OverlayState::VoiceActivity;
         if self.state.current_overlay != Some(new_state.clone()) {
             self.state.current_overlay = Some(new_state.clone());
             return Some(new_state);
@@ -508,6 +550,13 @@ impl OverlayStateReducer {
             }
         }
 
+        if let Some(deadline) = self.transcribing_deferred_until
+            && Instant::now() >= deadline
+        {
+            self.transcribing_deferred_until = None;
+            return self.update_ongoing_overlay();
+        }
+
         // Check flash deadline
         self.check_flash_expiry()
     }
@@ -543,6 +592,26 @@ mod tests {
 
         let state = reducer.process_event(&DaemonEvent::TranscribingStarted);
         assert_eq!(state, Some(OverlayState::Transcribing));
+    }
+
+    #[test]
+    fn test_transcribing_waits_for_minimum_listening_display() {
+        let mut reducer = OverlayStateReducer::new();
+
+        reducer.process_event(&DaemonEvent::Hello { version: 7 });
+        assert_eq!(
+            reducer.process_event(&DaemonEvent::VoiceActivityDetected),
+            Some(OverlayState::VoiceActivity)
+        );
+
+        assert_eq!(
+            reducer.process_event(&DaemonEvent::TranscribingStarted),
+            None
+        );
+        assert_eq!(reducer.current_state(), &OverlayState::VoiceActivity);
+
+        std::thread::sleep(MIN_VOICE_ACTIVITY_DISPLAY + Duration::from_millis(20));
+        assert_eq!(reducer.check_timeouts(), Some(OverlayState::Transcribing));
     }
 
     #[test]

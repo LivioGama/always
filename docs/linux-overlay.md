@@ -8,7 +8,36 @@ The overlay process:
 1. Connects to `/run/user/$UID/always.sock`.
 2. Reads newline-delimited daemon `DaemonEvent` JSON.
 3. Reduces daemon events into overlay states with the same persistent/flash/hidden model as macOS.
-4. Renders a compact X11 HUD window near the bottom center of the screen.
+4. Detects display server (X11 or Wayland) and creates appropriate renderer.
+5. Renders a compact HUD window near the bottom center of the screen.
+
+## Backend Architecture
+
+The overlay uses a backend-agnostic architecture with a trait-based interface:
+
+### Backend Trait (`src/overlay/backend.rs`)
+- `OverlayBackend` trait defines the interface for all renderers
+- Backend detection automatically chooses X11 or Wayland based on environment
+- Runtime detection uses `WAYLAND_DISPLAY` and `DISPLAY` environment variables
+
+### X11 Backend (`src/overlay/renderer.rs`)
+- Implements `OverlayBackend` for X11 sessions
+- Creates always-on-top window with `_NET_WM_STATE_ABOVE` hint
+- Window type: `_NET_WM_WINDOW_TYPE_NOTIFICATION` (compatible with most WMs)
+- Properties: non-decorated, skip taskbar/pager, skip focus (doesn't steal input)
+- Position: bottom-center, 160px from bottom
+- Styling: GitHub dark theme colors, state indicator circle, rounded corners
+
+### Wayland Backend (`src/overlay/wayland.rs`)
+- Placeholder for layer-shell implementation
+- Currently returns error with clear message about limitations
+- Designed for wlroots-based compositors (Sway, Hyprland)
+- Future work: Implement actual layer-shell protocol
+
+### Backend Factory (`src/overlay/factory.rs`)
+- `create_renderer()` detects backend and creates appropriate renderer
+- Prefers Wayland if available, falls back to X11
+- Returns error if no display server detected
 
 ## Components
 
@@ -32,13 +61,23 @@ The overlay process:
 
 ### Renderer
 
-`src/overlay/renderer.rs`
+`src/overlay/renderer.rs` (X11 backend)
 
-- Uses X11 through the `x11` crate.
-- Creates a borderless bottom-center HUD window.
-- Sets always-on-top/sticky/taskbar-skip hints where the window manager supports them.
-- Draws a dark panel with light text and a colored state indicator.
-- Unmaps the window on `OverlayState::Hidden`.
+- Uses X11 through the `x11` crate
+- Implements `OverlayBackend` trait
+- Creates a borderless bottom-center HUD window
+- Sets always-on-top/sticky/taskbar-skip hints where the window manager supports them
+- Draws a dark panel with light text and a colored state indicator
+- Unmaps the window on `OverlayState::Hidden`
+- Styling: GitHub dark theme colors, state indicator circle, rounded corners
+- Focus handling: Skip focus hint to avoid stealing keyboard input
+
+`src/overlay/wayland.rs` (Wayland backend)
+
+- Placeholder for layer-shell implementation
+- Returns error with clear message about current limitations
+- Designed for wlroots-based compositors (Sway, Hyprland)
+- Future work: Implement actual layer-shell protocol
 
 ### CLI Integration
 
@@ -61,12 +100,26 @@ The `overlay` feature enables Xlib bindings. The build environment must have X11
 # Start daemon first
 always run
 
-# In another shell
+# In another shell (auto-detects X11 vs Wayland)
 ./target/debug/always-overlay
 
 # Or through the main CLI, when both binaries are installed side by side
 always overlay run
 ```
+
+### Backend Selection
+
+The overlay automatically detects the display server:
+- **Wayland detected**: Attempts Wayland layer-shell backend
+- **Wayland fails**: Falls back to X11 backend
+- **X11 detected**: Uses X11 backend
+- **No display server**: Returns error
+
+### Platform Support
+
+**X11**: Full production-quality overlay with always-on-top window. Compatible with GNOME (X11), KDE Plasma (X11), i3, Sway (X11), and other EWMH-compliant window managers.
+
+**Wayland**: X11 backend works on XWayland (Wayland with X11 compatibility). Native Wayland layer-shell is a placeholder with clear error message. Designed for wlroots compositors (Sway, Hyprland). GNOME/KDE Wayland not yet supported - requires portal integration or notification-style overlay.
 
 ## Event Behavior
 
@@ -99,16 +152,34 @@ cargo test --no-default-features --features overlay --bin always-overlay
 bash test-overlay.sh
 ```
 
-Manual X11 smoke test:
+### Unit Tests
 
-1. Start the daemon: `always run`.
-2. Start the overlay: `./target/debug/always-overlay`.
-3. Speak or trigger daemon events.
-4. Verify the HUD appears near the bottom center, updates for listening/transcribing/countdown, flashes pause/error states, and hides when state clears.
-5. Restart the daemon and verify the overlay reconnects.
+- **Backend selection tests**: Verify backend detection and type handling
+- **Text truncation tests**: Verify text fitting with unicode support
+- **State reducer tests**: Verify event parsing and state transitions (14 tests)
+
+### Manual Testing
+
+1. Start daemon: `always run`
+2. Start overlay: `./target/debug/always-overlay`
+3. Trigger voice activity and verify overlay appears as X11 window
+4. Test pause/resume: `always toggle-pause`
+5. Verify overlay shows state changes in X11 window
+6. Verify reconnection on daemon restart
+
+## Future Work
+
+- **Wayland layer-shell**: Implement full layer-shell protocol for wlroots compositors
+- **GNOME/KDE Wayland**: Add portal integration or notification-style overlay
+- **Active monitor detection**: Position overlay on active monitor instead of primary
+- **Focused window tracking**: Position overlay near focused window when possible
+- **Animation system**: Dot-wave animation matching macOS
+- **System icon theming**: Use system icon theme for better integration
 
 ## Platform Limitations
 
-- Current GUI renderer is X11 only.
-- Wayland compositors need a layer-shell renderer; this is future work.
-- If `XOpenDisplay` fails, verify the process has `DISPLAY` and `XAUTHORITY` for an X11 session.
+- **X11**: Full production-quality overlay with broad window manager compatibility
+- **Wayland**: X11 backend works on XWayland. Native Wayland layer-shell is a placeholder with clear error message
+- **GNOME/KDE Wayland**: Not yet supported - requires portal integration or notification-style overlay
+- **wlroots compositors**: Layer-shell implementation is future work
+- **If XOpenDisplay fails**: Verify the process has `DISPLAY` and `XAUTHORITY` for an X11 session

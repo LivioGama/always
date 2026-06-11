@@ -115,6 +115,8 @@ const SHORT_SPEECH_MS: u32 = 400;
 const SHORT_SILENCE_MS: u32 = 200;
 const NORMAL_SILENCE_CAP_SECS: f64 = 0.50;
 const NORMAL_SILENCE_FLOOR_SECS: f64 = 0.30;
+const EARLY_VOICE_ENERGY_RATIO: f64 = 0.70;
+const EARLY_VOICE_FALSE_START_MS: u32 = 150;
 
 fn record_with_local_vad(
     cfg: &AlwaysConfig,
@@ -134,6 +136,10 @@ fn record_with_local_vad(
     let max_speech_frames = (300_usize * 1000) / FRAME_MS as usize;
     let min_speech_frames = (cfg.onset_ms / FRAME_MS).max(1) as usize;
     let voice_activity_energy_threshold = voice_activity_energy_threshold(cfg);
+    let early_voice_energy_threshold =
+        (voice_activity_energy_threshold * EARLY_VOICE_ENERGY_RATIO).max(cfg.hear_energy_threshold);
+    let early_voice_false_start_frames =
+        ((EARLY_VOICE_FALSE_START_MS as f64) / FRAME_MS as f64).ceil() as usize;
     // Short-utterance cutoff. Computed once; activated per-iteration
     // when `speech_samples` duration is still under SHORT_SPEECH_MS.
     let short_silence_frames = ((SHORT_SILENCE_MS as f64) / FRAME_MS as f64).ceil() as usize;
@@ -193,8 +199,11 @@ fn record_with_local_vad(
     let mut speech_samples: Vec<i16> = Vec::with_capacity(64_000);
     let mut consecutive_silence = 0usize;
     let mut consecutive_speech = 0usize;
+    let mut tentative_voice_silence = 0usize;
     let mut in_speech = false;
     let mut voice_logged = false;
+    let mut voice_activity_announced = false;
+    let mut voice_activity_announced_at: Option<std::time::Instant> = None;
     let mut total_frames = 0usize;
     let mut pre_buffer: VecDeque<Vec<i16>> = VecDeque::with_capacity(pre_buffer_frames);
 
@@ -231,6 +240,15 @@ fn record_with_local_vad(
                     transcribing_overlay = false;
                 }
                 event::global_broadcaster().transcribing_stopped();
+            }
+        }};
+    }
+    macro_rules! announce_voice_activity {
+        () => {{
+            if !voice_activity_announced {
+                voice_activity_announced = true;
+                voice_activity_announced_at = Some(std::time::Instant::now());
+                event::global_broadcaster().voice_activity_detected();
             }
         }};
     }
@@ -360,8 +378,17 @@ fn record_with_local_vad(
                 || (last_prob >= speech_threshold * 0.65
                     && frame_energy >= cfg.energy_threshold * 1.1)
         };
+        let credible_early_voice = !in_speech
+            && !voice_activity_announced
+            && frame_energy >= early_voice_energy_threshold
+            && last_prob >= speech_threshold * 0.55;
+        if credible_early_voice {
+            announce_voice_activity!();
+            tentative_voice_silence = 0;
+        }
 
         if is_speech {
+            tentative_voice_silence = 0;
             // Speech resumed: discard any pending speculation (its audio snapshot
             // is now stale because more speech will be appended).
             if speculation_pending {
@@ -395,7 +422,7 @@ fn record_with_local_vad(
                         }
 
                         // Send voice activity detected event
-                        event::global_broadcaster().voice_activity_detected();
+                        announce_voice_activity!();
                         // Clear the idle-auto-paused flag the moment we
                         // see voice. Upstream calls `mark_voice_seen()`
                         // unconditionally below (every confirmed speech
@@ -531,6 +558,21 @@ fn record_with_local_vad(
             }
         } else {
             consecutive_speech = 0;
+            if voice_activity_announced && !voice_logged {
+                tentative_voice_silence += 1;
+                let enough_wall_time = voice_activity_announced_at
+                    .map(|started| {
+                        started.elapsed()
+                            >= std::time::Duration::from_millis(EARLY_VOICE_FALSE_START_MS as u64)
+                    })
+                    .unwrap_or(false);
+                if enough_wall_time && tentative_voice_silence >= early_voice_false_start_frames {
+                    voice_activity_announced = false;
+                    voice_activity_announced_at = None;
+                    tentative_voice_silence = 0;
+                    event::global_broadcaster().voice_activity_ended();
+                }
+            }
             // Maintain pre-buffer: add new frame, drop oldest if full
             pre_buffer.push_back(samples.to_vec());
             if pre_buffer.len() > pre_buffer_frames {

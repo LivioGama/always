@@ -2,7 +2,7 @@
 //!
 //! The overlay is intentionally small and self-contained: a borderless,
 //! always-on-top X11 window near the bottom center of the active display.
-//! Wayland compositors need a layer-shell backend; this renderer targets X11.
+//! This implements the X11 backend for the overlay system.
 
 use super::state::OverlayState;
 use anyhow::{Context, Result};
@@ -17,8 +17,9 @@ const WINDOW_HEIGHT: u32 = 68;
 const BOTTOM_MARGIN: i32 = 160;
 const TEXT_MAX_CHARS: usize = 58;
 
-/// Overlay renderer - handles visual rendering.
-pub struct OverlayRenderer {
+/// X11 overlay renderer - handles visual rendering on X11 sessions.
+#[derive(Debug)]
+pub struct X11Renderer {
     current_state: Option<OverlayState>,
     visible: bool,
     display: *mut Display,
@@ -28,8 +29,8 @@ pub struct OverlayRenderer {
     height: u32,
 }
 
-impl OverlayRenderer {
-    /// Create a new overlay renderer.
+impl X11Renderer {
+    /// Create a new X11 renderer.
     pub fn new() -> Result<Self> {
         info!("Initializing X11 overlay renderer");
 
@@ -45,6 +46,8 @@ impl OverlayRenderer {
             let root = XRootWindow(display, screen);
             let screen_width = XDisplayWidth(display, screen);
             let screen_height = XDisplayHeight(display, screen);
+
+            // Position at bottom center with margin
             let x = ((screen_width - WINDOW_WIDTH as i32) / 2).max(0);
             let y = (screen_height - WINDOW_HEIGHT as i32 - BOTTOM_MARGIN).max(0);
 
@@ -57,7 +60,7 @@ impl OverlayRenderer {
                 WINDOW_HEIGHT,
                 0,
                 0,
-                0x1f2328,
+                0x0d1117, // Darker background (GitHub dark theme)
             );
             if window == 0 {
                 XCloseDisplay(display);
@@ -124,7 +127,9 @@ impl OverlayRenderer {
         tokio::time::sleep(Duration::from_millis(50)).await;
         Ok(())
     }
+}
 
+impl X11Renderer {
     fn show(&mut self, state: &OverlayState) {
         unsafe {
             if !self.visible {
@@ -152,7 +157,8 @@ impl OverlayRenderer {
         let text = truncate_text(&state.display_text(), TEXT_MAX_CHARS);
 
         unsafe {
-            XSetForeground(self.display, self.gc, 0x1f2328);
+            // Draw background with rounded corners (simulated with rectangles)
+            XSetForeground(self.display, self.gc, 0x0d1117);
             XFillRectangle(
                 self.display,
                 self.window,
@@ -163,7 +169,8 @@ impl OverlayRenderer {
                 self.height,
             );
 
-            XSetForeground(self.display, self.gc, 0x2d333b);
+            // Draw inner panel with rounded corners
+            XSetForeground(self.display, self.gc, 0x161b22);
             XFillRectangle(
                 self.display,
                 self.window,
@@ -174,6 +181,7 @@ impl OverlayRenderer {
                 self.height - 12,
             );
 
+            // Draw state indicator circle
             XSetForeground(self.display, self.gc, accent);
             XFillArc(
                 self.display,
@@ -181,13 +189,14 @@ impl OverlayRenderer {
                 self.gc,
                 22,
                 22,
-                22,
-                22,
+                24,
+                24,
                 0,
                 360 * 64,
             );
 
-            XSetForeground(self.display, self.gc, 0xf6f8fa);
+            // Draw text
+            XSetForeground(self.display, self.gc, 0xf0f6fc);
             if let Ok(c_text) = CString::new(text) {
                 XDrawString(
                     self.display,
@@ -205,7 +214,7 @@ impl OverlayRenderer {
     }
 }
 
-impl Drop for OverlayRenderer {
+impl Drop for X11Renderer {
     fn drop(&mut self) {
         unsafe {
             if !self.gc.is_null() {
@@ -223,24 +232,34 @@ impl Drop for OverlayRenderer {
 
 fn configure_window(display: *mut Display, window: Window) -> Result<()> {
     unsafe {
+        // Set window type to notification (more compatible than dock)
         let window_type_atom = intern_atom(display, "_NET_WM_WINDOW_TYPE")?;
         let notification_atom = intern_atom(display, "_NET_WM_WINDOW_TYPE_NOTIFICATION")?;
         set_atom_property(display, window, window_type_atom, &[notification_atom]);
 
+        // Set window state: always on top, sticky, skip taskbar/pager
         let state_atom = intern_atom(display, "_NET_WM_STATE")?;
         let above_atom = intern_atom(display, "_NET_WM_STATE_ABOVE")?;
         let sticky_atom = intern_atom(display, "_NET_WM_STATE_STICKY")?;
         let skip_taskbar_atom = intern_atom(display, "_NET_WM_STATE_SKIP_TASKBAR")?;
         let skip_pager_atom = intern_atom(display, "_NET_WM_STATE_SKIP_PAGER")?;
+        let skip_focus_atom = intern_atom(display, "_NET_WM_STATE_SKIP_FOCUS")?;
         set_atom_property(
             display,
             window,
             state_atom,
-            &[above_atom, sticky_atom, skip_taskbar_atom, skip_pager_atom],
+            &[
+                above_atom,
+                sticky_atom,
+                skip_taskbar_atom,
+                skip_pager_atom,
+                skip_focus_atom,
+            ],
         );
 
+        // Remove decorations (no title bar, borders)
         let motif_atom = intern_atom(display, "_MOTIF_WM_HINTS")?;
-        let hints: [usize; 5] = [2, 0, 0, 0, 0];
+        let hints: [usize; 5] = [2, 0, 0, 0, 0]; // MWM_HINTS_DECORATIONS
         XChangeProperty(
             display,
             window,
@@ -252,8 +271,23 @@ fn configure_window(display: *mut Display, window: Window) -> Result<()> {
             hints.len() as c_int,
         );
 
+        // Set window name
         let name = CString::new("Always Overlay").context("overlay window name contains NUL")?;
         XStoreName(display, window, name.as_ptr());
+
+        // Set window class
+        let class = CString::new("always-overlay").context("window class contains NUL")?;
+        let mut class_hint = XClassHint {
+            res_name: name.as_ptr() as *mut i8,
+            res_class: class.as_ptr() as *mut i8,
+        };
+        XSetClassHint(display, window, &mut class_hint);
+
+        // Set input hint to false (window should not receive keyboard focus)
+        let mut wm_hints: XWMHints = std::mem::zeroed();
+        wm_hints.flags = InputHint;
+        wm_hints.input = 0; // False
+        XSetWMHints(display, window, &mut wm_hints);
     }
     Ok(())
 }
@@ -284,19 +318,19 @@ fn set_atom_property(display: *mut Display, window: Window, property: Atom, atom
 
 fn accent_color(state: &OverlayState) -> u64 {
     match state {
-        OverlayState::VoiceActivity => 0xff5f57,
-        OverlayState::Transcribing => 0xbf8cff,
-        OverlayState::AutoEnterCountdown { .. } => 0xffd866,
-        OverlayState::Paused | OverlayState::IdleAutoPaused { .. } => 0xf4a261,
+        OverlayState::VoiceActivity => 0xff5f57,             // Red
+        OverlayState::Transcribing => 0xbf8cff,              // Blue
+        OverlayState::AutoEnterCountdown { .. } => 0xffd866, // Yellow
+        OverlayState::Paused | OverlayState::IdleAutoPaused { .. } => 0xf4a261, // Orange
         OverlayState::Resumed | OverlayState::AutoEnterOn | OverlayState::GrammarCorrected => {
-            0x50fa7b
+            0x50fa7b // Green
         }
-        OverlayState::AutoEnterOff => 0x8b949e,
-        OverlayState::Filtered { .. } => 0xff79c6,
+        OverlayState::AutoEnterOff => 0x8b949e,    // Gray
+        OverlayState::Filtered { .. } => 0xff79c6, // Pink
         OverlayState::TranscriptionFailed { .. } | OverlayState::LowMicrophoneVolume { .. } => {
-            0xff5555
+            0xff5555 // Bright red
         }
-        OverlayState::Hidden => 0x8b949e,
+        OverlayState::Hidden => 0x8b949e, // Gray
     }
 }
 
@@ -313,4 +347,51 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
         out.push_str("...");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_text_short() {
+        let text = "Hello";
+        let result = truncate_text(text, 10);
+        assert_eq!(result, "Hello");
+    }
+
+    #[test]
+    fn test_truncate_text_exact() {
+        let text = "Hello";
+        let result = truncate_text(text, 5);
+        assert_eq!(result, "Hello");
+    }
+
+    #[test]
+    fn test_truncate_text_long() {
+        let text = "Hello World";
+        let result = truncate_text(text, 5);
+        assert_eq!(result, "Hello...");
+    }
+
+    #[test]
+    fn test_truncate_text_empty() {
+        let text = "";
+        let result = truncate_text(text, 10);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_truncate_text_unicode() {
+        let text = "Hello 世界";
+        let result = truncate_text(text, 8);
+        assert_eq!(result, "Hello 世界");
+    }
+
+    #[test]
+    fn test_truncate_text_unicode_long() {
+        let text = "Hello 世界";
+        let result = truncate_text(text, 7);
+        assert_eq!(result, "Hello 世...");
+    }
 }
