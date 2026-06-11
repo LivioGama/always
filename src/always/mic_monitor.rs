@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::time::{Duration, Instant};
 
 /// Cross-platform microphone usage monitor
@@ -183,8 +183,6 @@ impl MicrophoneMonitor {
 #[cfg(target_os = "linux")]
 impl MicrophoneMonitor {
     fn check_microphone_usage_linux(&self) -> Result<bool> {
-        use std::process::Command;
-
         // Method 1: Check PulseAudio/PipeWire sources
         if let Ok(true) = self.check_pulseaudio_sources() {
             return Ok(true);
@@ -210,19 +208,12 @@ impl MicrophoneMonitor {
         match output {
             Ok(result) if result.status.success() => {
                 let output_str = String::from_utf8_lossy(&result.stdout);
-                // If there are any source outputs, something is using the microphone
-                return Ok(output_str.contains("Source Output #"));
-            }
-            _ => {}
-        }
-
-        // Try pw-cli (PipeWire)
-        let output = Command::new("pw-cli").args(&["list-objects"]).output();
-
-        match output {
-            Ok(result) if result.status.success() => {
-                let output_str = String::from_utf8_lossy(&result.stdout);
-                return Ok(output_str.contains("node.name") && output_str.contains("input"));
+                // Ignore our own persistent SoX recorder; it is the
+                // capture client that feeds Always.
+                return Ok(output_str
+                    .split("Source Output #")
+                    .skip(1)
+                    .any(|entry| !Self::is_own_recorder_source(entry)));
             }
             _ => {}
         }
@@ -231,25 +222,8 @@ impl MicrophoneMonitor {
     }
 
     fn check_alsa_devices(&self) -> Result<bool> {
-        use std::fs;
-
-        // Check if any ALSA capture devices are in use. Best-effort: any I/O
-        // failure here is treated as "no device in use" rather than panicking.
-        let Ok(content) = fs::read_to_string("/proc/asound/cards") else {
-            return Ok(false);
-        };
-        if content.is_empty() {
-            return Ok(false);
-        }
-        let Ok(entries) = fs::read_dir("/proc/asound/") else {
-            return Ok(false);
-        };
-        for card_dir in entries {
-            let Ok(entry) = card_dir else { continue };
-            if entry.path().join("pcm0c").join("info").exists() {
-                return Ok(true);
-            }
-        }
+        // Device metadata under /proc/asound proves capture hardware exists,
+        // not that another client is actively recording from it.
         Ok(false)
     }
 
@@ -279,9 +253,6 @@ impl MicrophoneMonitor {
             "kdenlive",
             "openshot",
             "audacious",
-            "pulseaudio",
-            "pipewire",
-            "jack",
         ];
 
         let processes_lower = processes.to_lowercase();
@@ -311,7 +282,9 @@ impl MicrophoneMonitor {
                 for line in output_str.lines() {
                     if line.trim().starts_with("application.name = ") {
                         if let Some(app_name) = line.split('"').nth(1) {
-                            users.push(app_name.to_string());
+                            if !Self::is_own_recorder_app(app_name) {
+                                users.push(app_name.to_string());
+                            }
                         }
                     }
                 }
@@ -323,6 +296,19 @@ impl MicrophoneMonitor {
         }
 
         Ok(users)
+    }
+
+    fn is_own_recorder_source(entry: &str) -> bool {
+        entry.lines().any(|line| {
+            line.trim()
+                .strip_prefix("application.name = ")
+                .and_then(|value| value.split('"').nth(1))
+                .is_some_and(Self::is_own_recorder_app)
+        })
+    }
+
+    fn is_own_recorder_app(app_name: &str) -> bool {
+        matches!(app_name.to_ascii_lowercase().as_str(), "sox" | "rec")
     }
 
     fn get_common_audio_apps_linux(&self) -> Result<Vec<String>> {

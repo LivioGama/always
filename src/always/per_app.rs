@@ -174,10 +174,11 @@ pub fn effective_auto_enter(global: bool) -> bool {
 /// active. See module doc for the design rationale.
 pub fn effective_paused_for_current_app() -> bool {
     let Some(bundle) = super::pause::current_app() else {
-        // No focused app reported yet — be conservative and stay
-        // paused so we don't capture audio before we know whose
-        // typing context we'd be pasting into.
-        return true;
+        // macOS has a focused-app monitor and paste target, so stay
+        // conservative until it reports context. CLI-only platforms do
+        // not send focus events; treating "no focused app" as paused
+        // would leave the daemon permanently muted.
+        return cfg!(target_os = "macos");
     };
     // Always itself is never on the allowlist — we'd be transcribing
     // into Settings. Treat as paused regardless of any stale override

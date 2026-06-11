@@ -53,26 +53,41 @@ pub fn copy_to_clipboard(text: String) -> Result<()> {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
 
-    let mut pbcopy = Command::new("pbcopy")
+    let copy_cmd = if cfg!(target_os = "macos") {
+        "pbcopy"
+    } else if cfg!(target_os = "linux") {
+        "xclip"
+    } else {
+        anyhow::bail!("copy_to_clipboard not implemented for this platform");
+    };
+
+    let mut command = Command::new(copy_cmd);
+    if cfg!(target_os = "linux") {
+        command.args(["-selection", "clipboard", "-in"]);
+    }
+
+    let mut copy = command
         .stdin(Stdio::piped())
         .spawn()
-        .context("Failed to run pbcopy")?;
+        .with_context(|| format!("Failed to run {copy_cmd}"))?;
     let write_res: Result<()> = (|| {
-        pbcopy
+        copy
             .stdin
             .as_mut()
-            .context("Failed to open pbcopy stdin")?
+            .with_context(|| format!("Failed to open {copy_cmd} stdin"))?
             .write_all(text.as_bytes())
             .context("Failed to write transcript to clipboard")?;
         Ok(())
     })();
     // Always reap the child even when the write failed. `wait()` closes our
-    // stdin handle first (so pbcopy sees EOF and exits); skipping it on the
+    // stdin handle first (so the clipboard tool sees EOF and exits); skipping it on the
     // error path would leak a zombie process on this always-on daemon.
-    let status = pbcopy.wait().context("Failed waiting for pbcopy")?;
+    let status = copy
+        .wait()
+        .with_context(|| format!("Failed waiting for {copy_cmd}"))?;
     write_res?;
     if !status.success() {
-        anyhow::bail!("pbcopy failed");
+        anyhow::bail!("{copy_cmd} failed");
     }
     Ok(())
 }
@@ -176,11 +191,20 @@ pub fn paste_text(auto_enter: bool) -> Result<()> {
 }
 
 #[cfg(not(feature = "macos"))]
-pub fn paste_text(_auto_enter: bool) -> Result<()> {
-    anyhow::bail!(
-        "paste_text is not implemented for this platform yet; \
-         macOS uses Core Graphics, Linux/Windows are scheduled for a future release"
-    )
+pub fn paste_text(auto_enter: bool) -> Result<()> {
+    if !cfg!(target_os = "linux") {
+        anyhow::bail!("paste_text is not implemented for this platform");
+    }
+    if focused_window_is_terminal().unwrap_or(false) {
+        post_xdotool_key(["key", "--clearmodifiers", "ctrl+shift+v"])?;
+    } else {
+        post_xdotool_key(["key", "--clearmodifiers", "ctrl+v"])?;
+    }
+    if auto_enter {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        post_xdotool_key(["key", "--clearmodifiers", "Return"])?;
+    }
+    Ok(())
 }
 
 pub fn paste(text: &str, auto_enter: bool) -> Result<()> {
@@ -200,11 +224,19 @@ pub fn paste(text: &str, auto_enter: bool) -> Result<()> {
 /// not captured and therefore not restored — plain-text round-trip is the
 /// high-value case for an always-on dictation daemon.
 pub fn read_clipboard_text() -> Result<String> {
-    let output = std::process::Command::new("pbpaste")
+    let (cmd, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("pbpaste", &[])
+    } else if cfg!(target_os = "linux") {
+        ("xclip", &["-selection", "clipboard", "-out"])
+    } else {
+        anyhow::bail!("read_clipboard_text not implemented for this platform");
+    };
+    let output = std::process::Command::new(cmd)
+        .args(args)
         .output()
-        .context("spawn pbpaste")?;
+        .with_context(|| format!("spawn {cmd}"))?;
     if !output.status.success() {
-        anyhow::bail!("pbpaste exited with status {}", output.status);
+        anyhow::bail!("{cmd} exited with status {}", output.status);
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
@@ -269,7 +301,60 @@ pub fn press_return() -> Result<()> {
 
 #[cfg(not(feature = "macos"))]
 pub fn press_return() -> Result<()> {
-    anyhow::bail!("press_return not implemented for this platform")
+    if !cfg!(target_os = "linux") {
+        anyhow::bail!("press_return not implemented for this platform");
+    }
+    post_xdotool_key(["key", "--clearmodifiers", "Return"])
+}
+
+#[cfg(not(feature = "macos"))]
+fn focused_window_is_terminal() -> Result<bool> {
+    let output = std::process::Command::new("xdotool")
+        .args(["getactivewindow", "getwindowclassname"])
+        .output()
+        .context("Failed to query active window class with xdotool")?;
+    if !output.status.success() {
+        anyhow::bail!("xdotool getwindowclassname failed with status {}", output.status);
+    }
+    Ok(is_terminal_window_class(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
+}
+
+#[cfg(not(feature = "macos"))]
+fn is_terminal_window_class(class_name: &str) -> bool {
+    matches!(
+        class_name.to_ascii_lowercase().as_str(),
+        "alacritty"
+            | "com.mitchellh.ghostty"
+            | "foot"
+            | "gnome-terminal-server"
+            | "hyper"
+            | "kgx"
+            | "kitty"
+            | "konsole"
+            | "org.wezfurlong.wezterm"
+            | "ptyxis"
+            | "tabby"
+            | "terminator"
+            | "tilix"
+            | "urxvt"
+            | "wezterm"
+            | "xfce4-terminal"
+            | "xterm"
+    )
+}
+
+#[cfg(not(feature = "macos"))]
+fn post_xdotool_key<const N: usize>(args: [&str; N]) -> Result<()> {
+    let status = std::process::Command::new("xdotool")
+        .args(args)
+        .status()
+        .context("Failed to run xdotool")?;
+    if !status.success() {
+        anyhow::bail!("xdotool failed with status {status}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -299,6 +384,15 @@ mod tests {
         // Erased trait object — the daemon hands `Box<dyn ClipboardProvider>`
         // around. If this stops compiling we've broken DI.
         let _: Box<dyn ClipboardProvider> = Box::new(MockClipboardProvider::new());
+    }
+
+    #[cfg(not(feature = "macos"))]
+    #[test]
+    fn terminal_window_classes_use_terminal_paste_chord() {
+        assert!(is_terminal_window_class("kitty"));
+        assert!(is_terminal_window_class("Gnome-Terminal-Server"));
+        assert!(is_terminal_window_class("org.wezfurlong.WezTerm"));
+        assert!(!is_terminal_window_class("firefox"));
     }
 }
 

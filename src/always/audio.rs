@@ -82,7 +82,12 @@ impl RecChild {
     pub fn spawn() -> Result<Self> {
         tracing::info!("rec_spawn_starting");
         let overrun_count = Arc::new(AtomicU32::new(0));
-        let mut child = std::process::Command::new("/opt/homebrew/bin/rec")
+        let rec_path = if cfg!(target_os = "macos") {
+            "/opt/homebrew/bin/rec"
+        } else {
+            "/usr/bin/rec"
+        };
+        let mut child = std::process::Command::new(rec_path)
             // Capture at the device's native rate/channels (typically 48 kHz
             // stereo on USB mics), then resample to 16 kHz mono on the
             // output side. Requesting `-c 1 -r 16000` on input makes
@@ -114,7 +119,7 @@ impl RecChild {
             // denial looked identical to a healthy idle daemon.
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .context("Failed to run 'rec' command. Install SoX: brew install sox")?;
+            .with_context(|| format!("Failed to run '{rec_path}'. Install SoX"))?;
         let stdout = child.stdout.take().context("sox stdout missing")?;
         if let Some(stderr) = child.stderr.take() {
             let overruns = Arc::clone(&overrun_count);
