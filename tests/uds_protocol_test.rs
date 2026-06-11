@@ -14,7 +14,7 @@ fn protocol_version_matches_swift_client() {
     // one without the other will fail both this test and the Swift
     // `testProtocolVersionMatchesDaemon` mirror.
     assert_eq!(
-        PROTOCOL_VERSION, 7,
+        PROTOCOL_VERSION, 8,
         "protocol version bumped without updating UDSClient.swift?"
     );
 }
@@ -48,6 +48,20 @@ fn transcript_final_serializes_with_text_payload() {
     assert_eq!(
         json,
         r#"{"type":"TranscriptFinal","data":{"text":"git status"}}"#
+    );
+}
+
+#[test]
+fn stt_fallback_engaged_serializes_with_model_payload() {
+    // The Swift client decodes this through the loose `[String:String]`
+    // data dict, so the payload must be a flat string map.
+    let ev = DaemonEvent::SttFallbackEngaged {
+        model: "parakeet-tdt-0.6b-v2".to_string(),
+    };
+    let json = serde_json::to_string(&ev).unwrap();
+    assert_eq!(
+        json,
+        r#"{"type":"SttFallbackEngaged","data":{"model":"parakeet-tdt-0.6b-v2"}}"#
     );
 }
 

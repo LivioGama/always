@@ -33,7 +33,7 @@ static LAST_LOW_MIC_OVERLAY: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(||
 ///
 /// **v6 (2026-05-25):** Low microphone volume warning event.
 /// `LowMicrophoneVolume` notifies GUI when mic energy is barely above threshold.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Event types for daemon-to-GUI communication
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,6 +228,13 @@ pub enum DaemonEvent {
     TranscriptionFailed {
         kind: String,
         message: String,
+    },
+    /// The Groq circuit breaker opened and the daemon loaded the named
+    /// local model to keep transcribing offline. Emitted once per daemon
+    /// run (the engine stays loaded afterwards); the GUI flashes a brief
+    /// "using local model" notice so degradation is never silent.
+    SttFallbackEngaged {
+        model: String,
     },
 }
 
@@ -571,6 +578,14 @@ impl EventBroadcaster {
         self.send(DaemonEvent::TranscriptionFailed {
             kind: kind.into(),
             message: message.into(),
+        });
+    }
+
+    /// Announce that the Groq breaker opened and the named local model
+    /// took over transcription. See [`DaemonEvent::SttFallbackEngaged`].
+    pub fn stt_fallback_engaged(&self, model: impl Into<String>) {
+        self.send(DaemonEvent::SttFallbackEngaged {
+            model: model.into(),
         });
     }
 

@@ -6,7 +6,7 @@ import os.log
 // Wire-format protocol version. MUST match `PROTOCOL_VERSION` in
 // `src/always/event.rs`. Bumping either side without the other will
 // cause the client to refuse the connection.
-let UDS_PROTOCOL_VERSION: UInt32 = 7
+let UDS_PROTOCOL_VERSION: UInt32 = 8
 
 // Event types matching Rust DaemonEvent enum
 enum DaemonEventType: String, Codable {
@@ -78,6 +78,9 @@ enum DaemonEventType: String, Codable {
     case grammarCorrected = "GrammarCorrected"
     /// Transcription failed (Groq API error: bad key, quota, or network).
     case transcriptionFailed = "TranscriptionFailed"
+    /// Groq circuit breaker opened — daemon switched to the named local
+    /// model so dictation keeps working offline.
+    case sttFallbackEngaged = "SttFallbackEngaged"
 }
 
 // Event data structures

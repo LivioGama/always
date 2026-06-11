@@ -144,6 +144,10 @@ impl FallbackTranscriber {
         match (self.loader)() {
             Ok(t) => {
                 *slot = Some(LocalSlot::Ready(Arc::clone(&t)));
+                // One-shot GUI notice (the engine stays loaded for the
+                // rest of the daemon run): degradation must be visible.
+                crate::always::event::global_broadcaster()
+                    .stt_fallback_engaged(self.model_id.clone());
                 Some(t)
             }
             Err(e) => {

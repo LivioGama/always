@@ -416,6 +416,13 @@ class StateMonitor: ObservableObject {
             isVoiceActivity = false
             let message = event.data?["message"] ?? "Transcription failed"
             StatusOverlayController.shared.flash(state: .transcriptionFailed(message: message), duration: 3.0)
+        case .sttFallbackEngaged:
+            // Groq is unreachable — the daemon degraded to a local model.
+            // One-shot notice per daemon run: dictation keeps working,
+            // but the user should know quality/latency may differ until
+            // the connection recovers.
+            let model = event.data?["model"] ?? "local model"
+            StatusOverlayController.shared.flash(state: .sttFallback(model: model), duration: 4.0)
         case .lowMicrophoneVolume:
             // Microphone volume is too low - flash a warning overlay
             if let energy = event.data?["energy"] as? Double {

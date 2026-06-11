@@ -120,6 +120,8 @@ enum OverlayState: Equatable, Hashable {
     /// Async grammar correction silently replaced the pasted text.
     case grammarCorrected
     case transcriptionFailed(message: String)
+    /// Groq unreachable — daemon degraded to the named local model.
+    case sttFallback(model: String)
 
     /// Persistent HUD states that should appear instantly (no fade-in).
     var isInstantShow: Bool {
@@ -148,6 +150,7 @@ enum OverlayState: Equatable, Hashable {
         case .lowMicrophoneVolume(let energy): return String(format: "Low mic volume · energy %.3f", energy)
         case .grammarCorrected: return "✓ Grammar corrected"
         case .transcriptionFailed(let message): return message.isEmpty ? "Transcription failed" : message
+        case .sttFallback(let model): return "Offline · using \(model)"
         }
     }
 
@@ -168,6 +171,7 @@ enum OverlayState: Equatable, Hashable {
         case .lowMicrophoneVolume: return "speaker.slash.fill"
         case .grammarCorrected: return "sparkles"
         case .transcriptionFailed: return "exclamationmark.triangle.fill"
+        case .sttFallback: return "wifi.slash"
         }
     }
 
@@ -188,6 +192,7 @@ enum OverlayState: Equatable, Hashable {
         case .lowMicrophoneVolume: return .systemRed
         case .grammarCorrected: return .systemTeal
         case .transcriptionFailed: return .systemRed
+        case .sttFallback: return .systemOrange
         }
     }
 }
