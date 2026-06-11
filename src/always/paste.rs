@@ -240,6 +240,58 @@ pub fn read_clipboard_text() -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// `NSPasteboard.general.changeCount` — a counter the pasteboard server
+/// bumps on every write by any process. Capturing it right after our own
+/// `pbcopy` gives a token that detects *any* later clipboard write, even
+/// one that wrote the identical string or a non-text flavor (both
+/// invisible to the `pbpaste` string compare).
+///
+/// Raw objc-runtime calls rather than an AppKit crate dependency — two
+/// message sends are not worth a new dep tree. Returns `None` off-macOS
+/// or if the runtime lookup fails, in which case callers fall back to
+/// the string-compare guard alone.
+#[cfg(feature = "macos")]
+pub fn pasteboard_change_count() -> Option<i64> {
+    use std::ffi::c_void;
+
+    // Force AppKit into the process so the NSPasteboard class is
+    // registered with the runtime — CoreGraphics alone doesn't pull it in.
+    #[link(name = "AppKit", kind = "framework")]
+    unsafe extern "C" {}
+    unsafe extern "C" {
+        fn objc_getClass(name: *const u8) -> *mut c_void;
+        fn sel_registerName(name: *const u8) -> *mut c_void;
+        fn objc_msgSend();
+    }
+
+    unsafe {
+        let class = objc_getClass(c"NSPasteboard".as_ptr().cast());
+        if class.is_null() {
+            return None;
+        }
+        let send_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let general = send_ptr(
+            class,
+            sel_registerName(c"generalPasteboard".as_ptr().cast()),
+        );
+        if general.is_null() {
+            return None;
+        }
+        let send_int: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i64 =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        Some(send_int(
+            general,
+            sel_registerName(c"changeCount".as_ptr().cast()),
+        ))
+    }
+}
+
+#[cfg(not(feature = "macos"))]
+pub fn pasteboard_change_count() -> Option<i64> {
+    None
+}
+
 /// Restore a previously-snapshotted clipboard string, but only if the
 /// current clipboard still holds exactly what we wrote (`just_wrote`).
 ///
@@ -250,6 +302,13 @@ pub fn read_clipboard_text() -> Result<String> {
 /// so we leave their clipboard alone. Only when the clipboard is still
 /// our own transcript do we put `prev` back.
 ///
+/// `write_token` is the [`pasteboard_change_count`] captured right after
+/// our own clipboard write. When available it is the stronger guard: any
+/// later write bumps the count — including one that wrote the *same
+/// string* or only non-text flavors, both of which the string compare
+/// below cannot see. `None` (off-macOS, runtime lookup failed) degrades
+/// to the string compare alone.
+///
 /// Caller is responsible for sleeping long enough that the target app has
 /// consumed the paste before invoking this. Best-effort: a failed restore
 /// is logged by the caller, never propagated — losing the user's prior
@@ -258,7 +317,18 @@ pub fn read_clipboard_text() -> Result<String> {
 ///
 /// As with [`read_clipboard_text`], only the string flavor is restored;
 /// non-text flavors that were on the clipboard before are not preserved.
-pub fn restore_clipboard_if_unchanged(prev: &str, just_wrote: &str) -> Result<()> {
+pub fn restore_clipboard_if_unchanged(
+    prev: &str,
+    just_wrote: &str,
+    write_token: Option<i64>,
+) -> Result<()> {
+    // Strong guard: the pasteboard server counted a write after ours —
+    // whatever is on the clipboard now, it isn't (only) our transcript.
+    if let (Some(token), Some(current)) = (write_token, pasteboard_change_count())
+        && current != token
+    {
+        return Ok(());
+    }
     // If the clipboard no longer matches the transcript we wrote, a fresh
     // copy happened during the paste window — don't clobber it.
     match read_clipboard_text() {
@@ -445,5 +515,44 @@ pub mod mock {
             self.calls.lock().paste_calls.push(auto_enter);
             Ok(())
         }
+    }
+}
+
+#[cfg(all(test, feature = "macos"))]
+mod pasteboard_tests {
+    use super::*;
+
+    /// Live probe of the objc changeCount bridge. Ignored by default
+    /// because it writes to (and then restores) the real pasteboard.
+    #[test]
+    #[ignore = "touches the real macOS pasteboard"]
+    fn change_count_bumps_on_write_and_restore_respects_token() {
+        let prev = read_clipboard_text().unwrap_or_default();
+
+        let before = pasteboard_change_count().expect("changeCount available");
+        copy_to_clipboard("changecount-probe".into()).expect("pbcopy");
+        let token = pasteboard_change_count().expect("changeCount available");
+        assert!(token > before, "write must bump changeCount");
+
+        // Simulate a foreign write after ours: the restore must skip.
+        copy_to_clipboard("foreign-write".into()).expect("pbcopy");
+        restore_clipboard_if_unchanged(&prev, "changecount-probe", Some(token))
+            .expect("guarded restore");
+        assert_eq!(
+            read_clipboard_text().expect("pbpaste"),
+            "foreign-write",
+            "restore must not clobber a post-write clipboard change"
+        );
+
+        // With a fresh token and untouched clipboard, the restore fires.
+        copy_to_clipboard("changecount-probe".into()).expect("pbcopy");
+        let token2 = pasteboard_change_count().expect("changeCount available");
+        restore_clipboard_if_unchanged(&prev, "changecount-probe", Some(token2))
+            .expect("guarded restore");
+        assert_eq!(
+            read_clipboard_text().expect("pbpaste"),
+            prev,
+            "restore must put the prior clipboard back"
+        );
     }
 }

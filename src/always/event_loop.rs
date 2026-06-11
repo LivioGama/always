@@ -567,7 +567,13 @@ fn handle_speech(
             // `end_paste()` or the daemon goes permanently mute (future
             // utterances drop as "in_flight"). A bare `?` here previously
             // leaked the lock when pbcopy failed.
-            if let Err(err) = paste::copy_to_clipboard(paste_clipboard) {
+            let copy_result = paste::copy_to_clipboard(paste_clipboard);
+            // Capture the pasteboard changeCount immediately after our own
+            // write: the restore below only fires while the count still
+            // matches, so any later clipboard write (even an identical
+            // string, even non-text flavors) cancels the restore.
+            let write_token = paste::pasteboard_change_count();
+            if let Err(err) = copy_result {
                 tracing::warn!(error = %err, "clipboard_copy_failed");
                 log.write(Event::Error {
                     message: "Skipped paste: clipboard copy failed",
@@ -636,9 +642,11 @@ fn handle_speech(
                 // meantime). See `restore_clipboard_if_unchanged`.
                 if let Some(prev) = prev_clipboard {
                     std::thread::sleep(Duration::from_millis(150));
-                    if let Err(err) =
-                        paste::restore_clipboard_if_unchanged(&prev, &written_clipboard)
-                    {
+                    if let Err(err) = paste::restore_clipboard_if_unchanged(
+                        &prev,
+                        &written_clipboard,
+                        write_token,
+                    ) {
                         tracing::warn!(error = %err, "clipboard_restore_failed");
                     }
                 }
