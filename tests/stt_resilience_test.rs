@@ -213,3 +213,70 @@ async fn should_fall_back_only_for_circuit_open() {
         .should_fall_back()
     );
 }
+
+#[tokio::test]
+async fn open_breaker_degrades_to_local_fallback_instead_of_dropping() {
+    use std::sync::Arc;
+
+    use always::stt::{GroqTranscriber, Transcriber};
+    use always::stt_dispatch::FallbackTranscriber;
+
+    let _guard = SERIAL.lock().await;
+    reset_circuit_breaker_for_test();
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/openai/v1/audio/transcriptions"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    struct StubLocal;
+    impl Transcriber for StubLocal {
+        fn transcribe_from_bytes(&self, _audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
+            Ok(TranscriptionResult {
+                text: "offline transcript".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    let base_url = server.uri();
+    let result = tokio::task::spawn_blocking(move || {
+        let _env_guard = always::stt::GROQ_BASE_URL_ENV_LOCK
+            .lock()
+            .expect("GROQ_BASE_URL_ENV_LOCK poisoned");
+        unsafe { std::env::set_var("ALWAYS_GROQ_BASE_URL", base_url) };
+
+        let wrapped = FallbackTranscriber::new(
+            Arc::new(GroqTranscriber::new("test_key")),
+            "stub-model".into(),
+            Box::new(|| Ok(Arc::new(StubLocal) as Arc<dyn Transcriber>)),
+        );
+
+        // Three real failures (retried internally) trip the breaker; the
+        // wrapped transcriber must NOT fall back for these — they are
+        // ServerError, not Unavailable.
+        for _ in 0..3 {
+            let err = wrapped
+                .transcribe_from_bytes(dummy_wav_bytes())
+                .expect_err("500s must surface while the breaker is closed");
+            assert!(matches!(err, SttError::ServerError { .. }));
+        }
+
+        // Breaker is now open: the fourth utterance degrades to the
+        // local engine instead of erroring for the whole cool-down.
+        let result = wrapped.transcribe_from_bytes(dummy_wav_bytes());
+
+        unsafe { std::env::remove_var("ALWAYS_GROQ_BASE_URL") };
+        result
+    })
+    .await
+    .expect("blocking task panicked");
+
+    assert_eq!(
+        result.expect("fallback should transcribe").text,
+        "offline transcript"
+    );
+    reset_circuit_breaker_for_test();
+}

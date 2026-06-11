@@ -9,9 +9,10 @@
 //! * A circuit breaker opens for 60 s after 3 consecutive transcription
 //!   failures and short-circuits further calls with [`SttError::Unavailable`].
 //!   This turns slow, repeated failures into a fast failure for the duration
-//!   of the cool-down — it does not itself perform any fallback. Callers can
-//!   opt into a local strategy via [`SttError::should_fall_back`]; the breaker
-//!   only spares the user from stalling on each call while Groq is down.
+//!   of the cool-down — it does not itself perform any fallback. The dispatch
+//!   layer opts into a local strategy via [`SttError::should_fall_back`]
+//!   (see `stt_dispatch::FallbackTranscriber`); the breaker only spares the
+//!   user from stalling on each call while Groq is down.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

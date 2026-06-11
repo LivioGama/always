@@ -89,6 +89,102 @@ impl Transcriber for PendingTranscriber {
     }
 }
 
+/// Builds the local engine the first time the fallback engages. Boxed
+/// closure (rather than a concrete `LocalTranscriber`) so the decorator
+/// itself stays feature-independent and unit-testable without `local-stt`.
+type LocalLoader = Box<dyn Fn() -> Result<Arc<dyn Transcriber>> + Send + Sync>;
+
+enum LocalSlot {
+    Ready(Arc<dyn Transcriber>),
+    /// The load failed once. Stay failed until the next daemon start /
+    /// backend hot-swap — retrying a broken model load on every
+    /// utterance would add seconds of stall to each one.
+    Failed,
+}
+
+/// Decorator that rides a remote primary (Groq) and, while its circuit
+/// breaker is open ([`SttError::should_fall_back`]), transcribes with a
+/// lazily-loaded local engine instead of dropping utterances for the
+/// whole cool-down window.
+///
+/// The local engine is only loaded on the first fallback (3–10 s for a
+/// cold model load — that first utterance pays the price, subsequent
+/// ones reuse the engine). If the local path also fails, the *primary*
+/// error is returned so the user-facing toast classification stays
+/// accurate about the original outage.
+pub struct FallbackTranscriber {
+    primary: Arc<dyn Transcriber>,
+    /// Lazily-initialized local engine (`None` = not yet attempted).
+    /// The mutex is intentionally held across the multi-second model
+    /// load: concurrent utterances should wait for the one load instead
+    /// of racing a second.
+    local: Mutex<Option<LocalSlot>>,
+    loader: LocalLoader,
+    model_id: String,
+}
+
+impl FallbackTranscriber {
+    pub fn new(primary: Arc<dyn Transcriber>, model_id: String, loader: LocalLoader) -> Self {
+        Self {
+            primary,
+            local: Mutex::new(None),
+            loader,
+            model_id,
+        }
+    }
+
+    fn local_engine(&self) -> Option<Arc<dyn Transcriber>> {
+        let mut slot = self.local.lock();
+        match &*slot {
+            Some(LocalSlot::Ready(t)) => return Some(Arc::clone(t)),
+            Some(LocalSlot::Failed) => return None,
+            None => {}
+        }
+        tracing::info!(model = %self.model_id, "stt_fallback_engaged, loading local model");
+        match (self.loader)() {
+            Ok(t) => {
+                *slot = Some(LocalSlot::Ready(Arc::clone(&t)));
+                Some(t)
+            }
+            Err(e) => {
+                tracing::error!(model = %self.model_id, error = %e, "stt_fallback_load_failed");
+                *slot = Some(LocalSlot::Failed);
+                None
+            }
+        }
+    }
+}
+
+impl Transcriber for FallbackTranscriber {
+    fn transcribe_from_bytes(&self, audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
+        // The primary consumes the buffer, so keep a copy in case the
+        // breaker is open — ~1 MB per utterance, cheap next to the call.
+        let copy = audio.clone();
+        let primary_err = match self.primary.transcribe_from_bytes(audio) {
+            Ok(r) => return Ok(r),
+            Err(e) if e.should_fall_back() => e,
+            Err(e) => return Err(e),
+        };
+        let Some(local) = self.local_engine() else {
+            return Err(primary_err);
+        };
+        match local.transcribe_from_bytes(copy) {
+            Ok(r) => {
+                tracing::info!(model = %self.model_id, "stt_fallback_used");
+                Ok(r)
+            }
+            Err(local_err) => {
+                tracing::warn!(
+                    model = %self.model_id,
+                    error = %local_err,
+                    "stt_fallback_failed, surfacing primary error"
+                );
+                Err(primary_err)
+            }
+        }
+    }
+}
+
 /// User's transcription backend pick. Serialises to a single TEXT
 /// column in the prefs DB (`groq` or `local:<model_id>`). The
 /// FromStr/Display impls own that wire format so the DB layer and the
@@ -143,13 +239,18 @@ impl FromStr for TranscriberBackendChoice {
 /// * Local backend, model missing or `local-stt` feature off →
 ///   Groq (with a warning). The alternative — refusing to start —
 ///   leaves users stranded if they delete a downloaded model.
-/// * Groq backend → [`GroqTranscriber`] using the config's API key.
+/// * Groq backend → [`GroqTranscriber`] using the config's API key,
+///   wrapped in a [`FallbackTranscriber`] when a verified local model
+///   is on disk so an open circuit breaker degrades to offline
+///   transcription instead of dropping utterances.
 pub fn build_transcriber(
     cfg: &AlwaysConfig,
     registry: &ModelRegistry,
 ) -> Result<Arc<dyn Transcriber>> {
     match &cfg.transcriber_backend {
-        TranscriberBackendChoice::Groq => Ok(build_groq(cfg)?),
+        TranscriberBackendChoice::Groq => {
+            Ok(wrap_with_local_fallback(build_groq(cfg)?, cfg, registry))
+        }
         TranscriberBackendChoice::Local { model_id } => {
             let info = registry
                 .get(model_id)
@@ -159,11 +260,74 @@ pub fn build_transcriber(
                     model = %model_id,
                     "local model not downloaded, falling back to remote Groq"
                 );
-                return build_groq(cfg);
+                return Ok(wrap_with_local_fallback(build_groq(cfg)?, cfg, registry));
             }
             build_local(cfg, registry, &info)
         }
     }
+}
+
+/// Wrap a Groq primary in a [`FallbackTranscriber`] armed with the best
+/// downloaded local model. Identity when nothing usable is on disk (the
+/// outage then surfaces as an error, as before) or when `local-stt`
+/// isn't compiled in.
+#[cfg(feature = "local-stt")]
+fn wrap_with_local_fallback(
+    primary: Arc<dyn Transcriber>,
+    cfg: &AlwaysConfig,
+    registry: &ModelRegistry,
+) -> Arc<dyn Transcriber> {
+    use crate::always::stt_local::LocalTranscriber;
+
+    let Some(info) = pick_fallback_model(registry) else {
+        tracing::info!("stt_fallback_unarmed: no verified local model downloaded");
+        return primary;
+    };
+    let Some(path) = registry.model_path(&info.id) else {
+        return primary;
+    };
+    let lang = if cfg.lang == "auto" || cfg.lang.is_empty() {
+        None
+    } else {
+        Some(cfg.lang.clone())
+    };
+    let engine = info.engine_type;
+    let model_id = info.id.clone();
+    tracing::info!(model = %model_id, "stt_fallback_armed");
+    let loader: LocalLoader = Box::new(move || {
+        let t = LocalTranscriber::load(engine, &path, lang.clone())
+            .with_context(|| format!("loading fallback local engine {engine:?}"))?;
+        Ok(Arc::new(t) as Arc<dyn Transcriber>)
+    });
+    Arc::new(FallbackTranscriber::new(primary, model_id, loader))
+}
+
+#[cfg(not(feature = "local-stt"))]
+fn wrap_with_local_fallback(
+    primary: Arc<dyn Transcriber>,
+    _cfg: &AlwaysConfig,
+    _registry: &ModelRegistry,
+) -> Arc<dyn Transcriber> {
+    primary
+}
+
+/// Best downloaded model to degrade to: recommended catalog entries
+/// first, then the highest combined speed+accuracy score. `is_downloaded`
+/// already encodes integrity (SHA256 / `.verified` marker), so partial
+/// or unverified downloads never qualify.
+#[cfg(feature = "local-stt")]
+fn pick_fallback_model(
+    registry: &ModelRegistry,
+) -> Option<crate::managers::model_registry::ModelInfo> {
+    registry
+        .list()
+        .into_iter()
+        .filter(|m| m.is_downloaded && !m.is_downloading)
+        .max_by(|a, b| {
+            (a.is_recommended, a.speed_score + a.accuracy_score)
+                .partial_cmp(&(b.is_recommended, b.speed_score + b.accuracy_score))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
 }
 
 fn build_groq(cfg: &AlwaysConfig) -> Result<Arc<dyn Transcriber>> {
@@ -270,5 +434,135 @@ mod tests {
         assert!("".parse::<TranscriberBackendChoice>().is_err());
         assert!("local:".parse::<TranscriberBackendChoice>().is_err());
         assert!("openai".parse::<TranscriberBackendChoice>().is_err());
+    }
+
+    // -- FallbackTranscriber ------------------------------------------------
+
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn ok_result(text: &str) -> TranscriptionResult {
+        TranscriptionResult {
+            text: text.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Scripted primary: errors with the given constructor per call, or
+    /// succeeds when `error` is `None`.
+    struct ScriptedPrimary {
+        error: Option<fn() -> SttError>,
+        calls: AtomicU32,
+    }
+
+    impl Transcriber for ScriptedPrimary {
+        fn transcribe_from_bytes(&self, _audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.error {
+                Some(make) => Err(make()),
+                None => Ok(ok_result("remote text")),
+            }
+        }
+    }
+
+    struct StaticLocal(&'static str);
+
+    impl Transcriber for StaticLocal {
+        fn transcribe_from_bytes(&self, _audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
+            Ok(ok_result(self.0))
+        }
+    }
+
+    fn breaker_open() -> SttError {
+        SttError::Unavailable { remaining_ms: 1000 }
+    }
+
+    fn counting_loader(
+        counter: Arc<AtomicU32>,
+        result: fn() -> Result<Arc<dyn Transcriber>>,
+    ) -> LocalLoader {
+        Box::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            result()
+        })
+    }
+
+    #[test]
+    fn fallback_used_when_breaker_open_and_engine_cached() {
+        let loads = Arc::new(AtomicU32::new(0));
+        let t = FallbackTranscriber::new(
+            Arc::new(ScriptedPrimary {
+                error: Some(breaker_open),
+                calls: AtomicU32::new(0),
+            }),
+            "test-model".into(),
+            counting_loader(Arc::clone(&loads), || {
+                Ok(Arc::new(StaticLocal("local text")) as Arc<dyn Transcriber>)
+            }),
+        );
+
+        let first = t.transcribe_from_bytes(vec![1, 2, 3]).unwrap();
+        assert_eq!(first.text, "local text");
+        let second = t.transcribe_from_bytes(vec![4, 5, 6]).unwrap();
+        assert_eq!(second.text, "local text");
+        // The engine loaded once, then was reused.
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn primary_success_never_touches_local() {
+        let loads = Arc::new(AtomicU32::new(0));
+        let t = FallbackTranscriber::new(
+            Arc::new(ScriptedPrimary {
+                error: None,
+                calls: AtomicU32::new(0),
+            }),
+            "test-model".into(),
+            counting_loader(Arc::clone(&loads), || {
+                Ok(Arc::new(StaticLocal("local text")) as Arc<dyn Transcriber>)
+            }),
+        );
+
+        let r = t.transcribe_from_bytes(vec![1]).unwrap();
+        assert_eq!(r.text, "remote text");
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn non_breaker_errors_bubble_without_fallback() {
+        let loads = Arc::new(AtomicU32::new(0));
+        let t = FallbackTranscriber::new(
+            Arc::new(ScriptedPrimary {
+                error: Some(|| SttError::RateLimited { attempts: 3 }),
+                calls: AtomicU32::new(0),
+            }),
+            "test-model".into(),
+            counting_loader(Arc::clone(&loads), || {
+                Ok(Arc::new(StaticLocal("local text")) as Arc<dyn Transcriber>)
+            }),
+        );
+
+        let err = t.transcribe_from_bytes(vec![1]).unwrap_err();
+        assert!(matches!(err, SttError::RateLimited { .. }));
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn load_failure_surfaces_primary_error_and_never_retries() {
+        let loads = Arc::new(AtomicU32::new(0));
+        let t = FallbackTranscriber::new(
+            Arc::new(ScriptedPrimary {
+                error: Some(breaker_open),
+                calls: AtomicU32::new(0),
+            }),
+            "test-model".into(),
+            counting_loader(Arc::clone(&loads), || anyhow::bail!("model file corrupt")),
+        );
+
+        let err = t.transcribe_from_bytes(vec![1]).unwrap_err();
+        assert!(matches!(err, SttError::Unavailable { .. }));
+        let err2 = t.transcribe_from_bytes(vec![2]).unwrap_err();
+        assert!(matches!(err2, SttError::Unavailable { .. }));
+        // Failed load is sticky — no per-utterance retry stall.
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
     }
 }
