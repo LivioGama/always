@@ -66,47 +66,48 @@ pub fn apply_custom_words(
     let mut i = 0;
 
     while i < words.len() {
-        let mut matched = false;
-
-        // Greedy longest-first: a 3-gram match wins over a 1-gram
-        // sub-match, so multi-word canonical terms (`Claude Code`,
-        // `pull request`) survive.
+        // Score every window size and keep the lowest score. Iterating
+        // longest-first means score ties still prefer the longer window
+        // (multi-word canonical terms like `Claude Code` survive), but a
+        // strictly better shorter match wins — taking the first 3-gram
+        // hit unconditionally swallowed trailing words (`cloud code for`
+        // → `Claude Code`, dropping `for`).
+        let mut best: Option<(usize, &String, f64)> = None;
         for n in (1..=MAX_NGRAM).rev() {
             if i + n > words.len() {
                 continue;
             }
-            let window = &words[i..i + n];
-            let ngram = build_ngram(window);
-
-            let Some((replacement, _score)) =
+            let ngram = build_ngram(&words[i..i + n]);
+            if let Some((replacement, score)) =
                 find_best_match(&ngram, custom_words, &custom_words_nospace, threshold)
-            else {
-                continue;
-            };
-
-            let (prefix, _) = extract_punctuation(window[0]);
-            let (_, suffix) = extract_punctuation(window[n - 1]);
-            let cased = preserve_case_pattern(window[0], replacement);
-
-            let original_window = window.join(" ");
-            let rewritten = format!("{prefix}{cased}{suffix}");
-
-            // Only record as a substitution if it actually changed
-            // something — exact case-insensitive matches that round-trip
-            // would otherwise pollute the log.
-            if original_window.to_lowercase() != rewritten.to_lowercase() {
-                subs.push((original_window, rewritten.clone()));
+                && best.is_none_or(|(_, _, s)| score < s)
+            {
+                best = Some((n, replacement, score));
             }
-            result.push(rewritten);
-            i += n;
-            matched = true;
-            break;
         }
 
-        if !matched {
+        let Some((n, replacement, _score)) = best else {
             result.push(words[i].to_string());
             i += 1;
+            continue;
+        };
+
+        let window = &words[i..i + n];
+        let (prefix, _) = extract_punctuation(window[0]);
+        let (_, suffix) = extract_punctuation(window[n - 1]);
+        let cased = preserve_case_pattern(window[0], replacement);
+
+        let original_window = window.join(" ");
+        let rewritten = format!("{prefix}{cased}{suffix}");
+
+        // Only record as a substitution if it actually changed
+        // something — exact case-insensitive matches that round-trip
+        // would otherwise pollute the log.
+        if original_window.to_lowercase() != rewritten.to_lowercase() {
+            subs.push((original_window, rewritten.clone()));
         }
+        result.push(rewritten);
+        i += n;
     }
 
     (result.join(" "), subs)
@@ -328,6 +329,23 @@ mod tests {
         let custom = words(&["ChargeBee"]);
         let (out, _) = apply_custom_words("Pay with Charge B today", &custom, DEFAULT_THRESHOLD);
         assert!(out.contains("ChargeBee"), "got: {out}");
+    }
+
+    #[test]
+    fn trailing_word_not_swallowed_by_wider_ngram() {
+        // Regression: `cloud code for` (3-gram, score ~0.125) used to win
+        // over `cloud code` (2-gram, score ~0.06) because the loop took
+        // the first longest-window hit — the trailing `for` was deleted
+        // from the transcript. The best-scoring window must win instead.
+        let custom = words(&["Claude Code"]);
+        let (out, subs) = apply_custom_words(
+            "I really enjoy using cloud code for my projects.",
+            &custom,
+            DEFAULT_THRESHOLD,
+        );
+        assert_eq!(out, "I really enjoy using Claude Code for my projects.");
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].0, "cloud code");
     }
 
     #[test]

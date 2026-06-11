@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::time::{Duration, Instant};
 
 /// Cross-platform microphone usage monitor
@@ -179,6 +179,9 @@ impl MicrophoneMonitor {
         Ok(matched.join("\n"))
     }
 }
+
+#[cfg(target_os = "linux")]
+use anyhow::Context;
 
 #[cfg(target_os = "linux")]
 impl MicrophoneMonitor {

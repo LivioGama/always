@@ -15,6 +15,7 @@ path = "src/main.rs"
 [[bin]]
 name = "always-overlay"
 path = "src/overlay/main.rs"
+required-features = ["overlay"]
 
 [features]
 # `macos` is the default — full GUI overlay + clipboard paste + global

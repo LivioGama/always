@@ -336,7 +336,7 @@ every term that lands in your glossary now comes from real user data.
 | **MacWhisper** | ✅ checks `/Applications/MacWhisper.app` | ✅ **real** (when present) | Reads the user's "Replacements" list from `~/Library/Containers/com.dipped.MacWhisper/Data/…/replacements.json` (or the matching `.plist`). Imports the `replace`/`to`/`with` value of each entry. |
 | **Wispr Flow** | ✅ checks `/Applications/Wispr Flow.app` | ❌ cloud-hosted | Detection only. Wispr Flow stores the user's custom dictionary on their servers; we won't authenticate against their cloud to scrape it. |
 | **Dragon NaturallySpeaking** | ✅ checks `/Applications/Dragon` | ⚠️ legacy | Returns a small list of common IT terms (Dragon's `.dvc` vocabulary files are not yet parsed). Kept for back-compat. |
-| **Installed apps** | ✅ macOS / Linux | ✅ **real** | Every installed `.app` / binary name in `/Applications` and `~/Applications` becomes a glossary entry — so you can paste app names verbatim ("Linear", "Notion", "Cursor"). |
+| **Installed apps** | ✅ macOS / Linux | ✅ **real** | Every installed `.app` / binary name in `/Applications` and `~/Applications` becomes a glossary entry for Whisper biasing ("Linear", "Notion", "Cursor"). Bare imported app names do not trigger local acoustic rewrites unless you later teach a wrong form or bump-confirm the term. |
 
 Sources that **used to be listed** and have been removed because their
 "extraction" was a hardcoded generic-vocabulary list with no real user

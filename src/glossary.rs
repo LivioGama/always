@@ -63,14 +63,16 @@ pub fn postprocess_system_prompt() -> &'static str {
     POSTPROCESS_PROMPT.get_or_init(|| build_postprocess_prompt(entries()))
 }
 
-/// All canonical `term` strings from the loaded glossary, deduped
-/// (case-insensitive) and non-empty. Returned in glossary order
-/// (`entries()` is sorted frequency-desc).
+/// All canonical `term` strings from the loaded glossary that are safe
+/// for local acoustic rewrite, deduped (case-insensitive) and non-empty.
+/// Returned in glossary order (`entries()` is sorted frequency-desc).
 ///
 /// This feeds the local acoustic matcher, not the LLM rewrite prompt.
-/// Bare terms are useful here because the matcher has length/phonetic
-/// guards and can fix cases like `Cloud Code` -> `Claude Code` even
-/// when the user has not listed an explicit mistranscription.
+/// Default-weight bare terms are kept out because `always vocab import`
+/// adds installed app names with no wrong-form evidence; letting those
+/// participate in Soundex rewrites can invent products from ordinary
+/// speech. Explicit mistranscriptions and user-bumped standalone terms
+/// are trusted enough to rewrite acoustically.
 pub fn user_glossary_terms() -> Vec<String> {
     collect_user_glossary_terms(entries())
 }
@@ -81,6 +83,9 @@ fn collect_user_glossary_terms(entries: &[Entry]) -> Vec<String> {
     for e in entries {
         let term = e.term.trim();
         if term.is_empty() {
+            continue;
+        }
+        if e.mistranscriptions.is_empty() && e.weight <= default_weight() {
             continue;
         }
         if seen.insert(term.to_lowercase()) {
@@ -266,6 +271,15 @@ mod tests {
         }
     }
 
+    fn weighted_entry(term: &str, miss: &[&str], weight: i64) -> Entry {
+        Entry {
+            term: term.to_string(),
+            mistranscriptions: miss.iter().map(|s| s.to_string()).collect(),
+            frequency: 100,
+            weight,
+        }
+    }
+
     #[test]
     fn postprocess_prompt_excludes_bare_auto_imported_terms_from_listing() {
         // Regression: the listing used to include "IntelliJ IDEA" with
@@ -347,9 +361,10 @@ mod tests {
     }
 
     #[test]
-    fn acoustic_terms_include_bare_canonical_glossary_entries() {
+    fn acoustic_terms_include_curated_and_bumped_entries_only() {
         let entries = vec![
-            entry("Claude Code", &[]),
+            entry("AnythingLLM", &[]),
+            weighted_entry("Claude Code", &[], 2),
             entry("Kubernetes", &["kubernetics"]),
             entry("  ", &[]),
             entry("claude code", &["cloud code"]),
@@ -361,8 +376,8 @@ mod tests {
     }
 
     #[test]
-    fn bare_glossary_entry_can_fix_cloud_code_acoustically() {
-        let entries = vec![entry("Claude Code", &[])];
+    fn bumped_bare_glossary_entry_can_fix_cloud_code_acoustically() {
+        let entries = vec![weighted_entry("Claude Code", &[], 2)];
         let terms = collect_user_glossary_terms(&entries);
 
         let (out, subs) = crate::always::text_match::apply_custom_words(
@@ -376,5 +391,21 @@ mod tests {
             subs,
             vec![("Cloud Code".to_string(), "Claude Code".to_string())]
         );
+    }
+
+    #[test]
+    fn default_bare_app_name_does_not_rewrite_ordinary_speech() {
+        let entries = vec![entry("AnythingLLM", &[])];
+        let terms = collect_user_glossary_terms(&entries);
+
+        let (out, subs) = crate::always::text_match::apply_custom_words(
+            "Can you pull anything else from the logs?",
+            &terms,
+            crate::always::text_match::DEFAULT_THRESHOLD,
+        );
+
+        assert!(terms.is_empty());
+        assert_eq!(out, "Can you pull anything else from the logs?");
+        assert!(subs.is_empty());
     }
 }
