@@ -13,6 +13,12 @@ Totals across finders (pre-dedup): **6 CRITICAL, 27 HIGH, 62 MEDIUM, 54 LOW**.
 This document tracks the high-severity findings and their status. It is the
 single source of truth for what was fixed and what remains.
 
+> **Status as of 2026-06-12: all CRITICAL and HIGH findings are fixed and
+> verified at HEAD.** See the per-item evidence in "Remaining — prioritized
+> backlog" below. What's left: the MEDIUM/LOW pool under `docs/audit/`, the
+> async-grammar clipboard restore (MEDIUM), and the `rdev` → CGEventTap
+> migration (blocks crates.io publish, not the DMG release).
+
 ---
 
 ## Fixed in this pass (verified: `cargo build` + `cargo clippy` clean, `cargo test` green, also builds under `--features local-stt`)
@@ -47,20 +53,26 @@ single source of truth for what was fixed and what remains.
 
 ## Remaining — prioritized backlog
 
-> Status legend: ✅ = fixed & verified in the subagent fan-out (pass 2 — `cargo build`/`cargo test`/`clippy` green, `--features local-stt` + `swift build` green); 🔲 = open / recommended next.
+> Status legend: ✅ = fixed & verified (`cargo build`/`cargo test`/`clippy` green, `--features local-stt` + `swift build` green); 🔲 = open / recommended next.
+>
+> **2026-06-12 sweep:** every formerly-open CRITICAL/HIGH item below was
+> re-verified against HEAD and is now fixed. Status flipped with the fixing
+> commit + current file:line evidence so this document stops claiming open
+> blockers that no longer exist.
 
 ### CRITICAL
 
-- 🔲 **Handy-cached / pre-existing models loaded with NO SHA256 verification** — `src/managers/model_registry.rs` (`model_path`, `refresh_disk_status`). `verify_sha256` runs *only* on bytes this process downloads itself; a file already on disk (incl. Handy's cache, a dir outside our trust boundary) is marked `is_downloaded` and loaded verbatim. *Deferred deliberately:* the correct fix is non-trivial (single-file `.bin` can be re-hashed against the catalog SHA, but directory/tar.gz models cannot — they need a `.verified` marker dropped only when **we** extract them), and this is in the file currently being iterated on (Handy-cache reuse WIP). Recommend: re-hash `.bin` models before first use; require a `.verified` marker for directory models; never blindly trust Handy's extracted dir.
-- 🔲 **Production paste destroys the clipboard with no save/restore** — `src/always/paste.rs` + `event_loop.rs`. Every dictation clobbers the user's clipboard permanently. *Deferred deliberately:* a correct fix needs `NSPasteboard.changeCount` (via the objc bridge) to avoid the restore racing a concurrent user copy — the naive pbpaste-only restore is itself a bug (it would overwrite a fresh copy). `correction.rs` already has the snapshot/restore pattern but without the changeCount guard. Recommend: implement save/restore guarded by `changeCount`, behind a config opt-out.
+- ✅ **Handy-cached / pre-existing models loaded with NO SHA256 verification** — fixed in `c373db89`. `model_path` / `refresh_disk_status` (`src/managers/model_registry.rs:243`) now re-hash single-file `.bin` models against the catalog SHA (memoized by size+mtime) and trust directory models only with our own `<filename>.verified` marker; Handy's extracted directories are never returned for directory models.
+- ✅ **Production paste destroys the clipboard with no save/restore** — fixed in two steps. `7b1a3593` added the guarded snapshot/restore (`event_loop.rs` snapshots before the write and `restore_clipboard_if_unchanged` re-checks the pasteboard); `7bd8adb1` added the `NSPasteboard.changeCount` token (raw objc bridge in `src/always/paste.rs`) so a foreign write of the *identical string* or of non-text flavors also cancels the restore. Remaining (MEDIUM): the async-grammar path defers its restore (`TODO(clipboard-restore)` in `event_loop.rs`) and only the string flavor round-trips.
+
 ### HIGH
 
-- 🔲 `src/always/event_loop.rs:623` — **`apply_grammar_blocking` runs an untimed `rt.block_on(pp.process(..))` on the main loop thread**; a hung LLM endpoint freezes the daemon (no new utterance recorded). Wrap in `tokio::time::timeout` and fall back to the acoustic text (the error arm already does this). *(Owner: maintainer — file has in-flight WIP.)*
-- 🔲 `src/stt.rs` + `src/always/vad.rs` — **circuit breaker / `should_fall_back` never actually falls back to local**: the documented graceful-degradation during a Groq outage is not wired (utterances are simply lost for the cooldown). Either implement the local fallback or remove the promise from the docs.
-- 🔲 `src/always/daemon.rs:333` — **PID file truncated before the flock** (visibility window where a live daemon looks dead) and **a 0-byte PID file is leaked on the post-lock bail paths** (the "cleaned up on drop" comment is false — `File` drop doesn't `remove_file`). *(Owner: maintainer — PidGuard has in-flight WIP.)*
-- 🔲 `src/always/focus_state.rs` — **`save()` / `restore_on_startup()` are dead code** (zero call sites); the "restore per-app pause across restarts" feature never runs, so dictation appears dead right after a daemon restart until refocus. Wire it (persist on focus change; restore at startup) or delete the module.
-- 🔲 `src/always/audio.rs` / `vad.rs` — **mic disconnect/EOF abandons the in-progress capture and leaves the dead recorder in the global slot** (no respawn/retry on transient USB re-enumeration), and **`read_frame` blocks under the global recorder mutex** (a wedged `rec` can deadlock every audio caller). Higher-risk; needs careful design.
-- 🔲 `src/always/uds_server.rs` / `event.rs` — **no size bound on daemon→client events** (`TranscriptFinal`, `ModelsList`, …); a huge transcript becomes one unbounded line every client must buffer.
+- ✅ `src/always/event_loop.rs` — **`apply_grammar_blocking` untimed block** — fixed in `34bb5d1a`: wrapped in `tokio::time::timeout(GRAMMAR_BLOCKING_TIMEOUT /* 8s */)` with fallback to the acoustic text (`event_loop.rs:777`).
+- ✅ `src/stt.rs` + `src/stt_dispatch.rs` — **circuit breaker now actually falls back to local** — fixed in `be25248a`: `build_transcriber` wraps the Groq primary in `FallbackTranscriber`, which lazily loads the best downloaded (integrity-verified) local model on the first open-breaker error and transcribes offline until Groq recovers. `4f6e10be` adds the one-shot `SttFallbackEngaged` UDS event + orange overlay notice so degradation is visible.
+- ✅ `src/always/daemon.rs` — **PID file races** — fixed in `7b1a3593`: `PidGuard::install` takes the flock *before* writing (no truncate-on-open visibility window) and unlinks the PID file on every bail path.
+- ✅ `src/always/focus_state.rs` — **dead code wired** — fixed in `adb5e7d3`: persisted on focus change (`uds_server.rs`) and restored at daemon startup (`event_loop.rs:81`).
+- ✅ `src/always/audio.rs` / `vad.rs` — **dead/wedged recorder recovery** — fixed in two steps. `7b1a3593` evicts the dead `RecChild` from the global slot on EOF so the next capture cycle respawns. `b8f362a8` bounds every `read_frame` with a raw `poll(2)` (2s ceiling; healthy capture delivers a frame every 30ms) and evicts on timeout — a wedged `rec` (bytes never arrive, no EOF) can no longer hold the recorder mutex forever and deadlock all audio callers.
+- ✅ `src/always/uds_server.rs` / `event.rs` — **event size bound** — fixed in `c373db89`: `MAX_EVENT_FIELD_CHARS = 8192` with `cap_field` truncation (+ elision marker) applied at serialization (`event.rs`).
 
 ### MEDIUM / LOW
 
