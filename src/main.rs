@@ -12,6 +12,9 @@ use always::db;
 mod cli;
 use cli::LogsCommand;
 
+#[cfg(feature = "overlay")]
+mod overlay_integration;
+
 /// Full version string: semver + git short SHA stamped at build time.
 /// Read by `--version` and emitted in the daemon-start tracing event so
 /// the Mac app can detect daemon/app revision drift.
@@ -108,6 +111,12 @@ enum Commands {
         #[command(subcommand)]
         action: MenuBarAction,
     },
+    /// Run overlay companion process (Linux)
+    #[cfg(feature = "overlay")]
+    Overlay {
+        #[command(subcommand)]
+        action: OverlayAction,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -116,7 +125,14 @@ enum MenuBarAction {
     Reset,
 }
 
-#[derive(Subcommand)]
+#[cfg(feature = "overlay")]
+#[derive(clap::Subcommand)]
+enum OverlayAction {
+    /// Run overlay companion process
+    Run,
+}
+
+#[derive(clap::Subcommand)]
 enum CorrectionsAction {
     /// List pending corrections awaiting review.
     List,
@@ -212,6 +228,10 @@ fn main() -> Result<()> {
         Some(Commands::MenuBar { action }) => match action {
             MenuBarAction::Reset => cli::menu_bar::reset(),
         },
+        #[cfg(feature = "overlay")]
+        Some(Commands::Overlay { action }) => match action {
+            OverlayAction::Run => overlay_integration::run(),
+        },
         None => {
             eprintln!("always: always-on voice activation daemon");
             eprintln!("Usage: always <COMMAND>");
@@ -230,6 +250,8 @@ fn main() -> Result<()> {
             eprintln!("  toggle-auto-enter Toggle auto-enter state");
             eprintln!("  logs              View and manage Always logs");
             eprintln!("  menu-bar reset    Clear macOS menu bar cache for Always");
+            #[cfg(feature = "overlay")]
+            eprintln!("  overlay run       Run overlay companion process (Linux)");
             eprintln!();
             eprintln!("Use 'always <COMMAND> --help' for more information on a command.");
             Ok(())

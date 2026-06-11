@@ -71,8 +71,7 @@ pub fn copy_to_clipboard(text: String) -> Result<()> {
         .spawn()
         .with_context(|| format!("Failed to run {copy_cmd}"))?;
     let write_res: Result<()> = (|| {
-        copy
-            .stdin
+        copy.stdin
             .as_mut()
             .with_context(|| format!("Failed to open {copy_cmd} stdin"))?
             .write_all(text.as_bytes())
@@ -314,7 +313,10 @@ fn focused_window_is_terminal() -> Result<bool> {
         .output()
         .context("Failed to query active window class with xdotool")?;
     if !output.status.success() {
-        anyhow::bail!("xdotool getwindowclassname failed with status {}", output.status);
+        anyhow::bail!(
+            "xdotool getwindowclassname failed with status {}",
+            output.status
+        );
     }
     Ok(is_terminal_window_class(
         String::from_utf8_lossy(&output.stdout).trim(),

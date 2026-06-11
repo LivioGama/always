@@ -1,6 +1,5 @@
 use anyhow::Result;
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 pub mod plugins;
 use plugins::get_all_plugins;
@@ -100,13 +99,13 @@ fn is_dragon_installed() -> bool {
             r"C:\Program Files\Nuance\NaturallySpeaking",
             r"C:\Program Files (x86)\Nuance\NaturallySpeaking",
         ];
-        paths.iter().any(|p| PathBuf::from(p).exists())
+        paths.iter().any(|p| std::path::PathBuf::from(p).exists())
     }
 
     #[cfg(target_os = "macos")]
     {
         // Check macOS Dragon installation
-        PathBuf::from("/Applications/Dragon").exists()
+        std::path::PathBuf::from("/Applications/Dragon").exists()
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]

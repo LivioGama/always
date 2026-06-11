@@ -343,12 +343,14 @@ impl VocabPlugin for SuperwhisperPlugin {
     }
 
     fn get_installation_paths(&self) -> Vec<PathBuf> {
-        let mut paths = Vec::new();
         #[cfg(target_os = "macos")]
         {
-            paths.push(PathBuf::from("/Applications/superwhisper.app"));
+            vec![PathBuf::from("/Applications/superwhisper.app")]
         }
-        paths
+        #[cfg(not(target_os = "macos"))]
+        {
+            vec![]
+        }
     }
 
     fn is_installed(&self) -> bool {

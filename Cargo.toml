@@ -12,6 +12,10 @@ categories = ["command-line-utilities", "multimedia::audio"]
 name = "always"
 path = "src/main.rs"
 
+[[bin]]
+name = "always-overlay"
+path = "src/overlay/main.rs"
+
 [features]
 # `macos` is the default — full GUI overlay + clipboard paste + global
 # keyboard shortcuts. `linux` and `windows` build the daemon CLI only;
@@ -22,6 +26,8 @@ default = ["macos"]
 macos = ["dep:core-graphics", "dep:oslog", "dep:rdev"]
 linux = []
 windows = []
+# Linux overlay UI with X11 renderer.
+overlay = ["dep:x11", "x11/xlib"]
 # Opt-in offline transcription via `transcribe-rs`. On macOS we pin to
 # the same `whisper-metal + onnx` build Handy ships (`transcribe-rs
 # 0.3.3`) — it builds clean under Xcode 16 / macOS 26 where the generic
@@ -60,6 +66,8 @@ tracing-appender = "0.2"
 keyring = "2.3"
 humantime = "2"
 libc = "0.2"
+# Linux overlay UI dependency.
+x11 = { version = "2.21", optional = true }
 # Local-model registry support (ports Handy's downloader). `sha2`/`tar`/`flate2`
 # for verify+extract, `futures-util` for streaming download bodies.
 sha2 = "0.10"
