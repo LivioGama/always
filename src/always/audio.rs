@@ -22,6 +22,49 @@ pub const FRAME_BYTES: usize = 960;
 /// Elgato Wave:3 @ 48 kHz stereo).
 const REC_OVERRUN_RESPAWN_THRESHOLD: u32 = 64;
 
+/// Max wall-clock wait for any bytes of a single frame before declaring
+/// the recorder wedged. Healthy capture delivers a frame every
+/// [`FRAME_MS`] (30 ms) even in total silence, so two full seconds with
+/// neither data nor EOF is a stuck child, not a quiet room.
+const READ_FRAME_TIMEOUT_MS: i32 = 2_000;
+
+/// Block until `fd` is readable (or hung up) or `timeout_ms` elapses.
+/// `Ok(true)` = readable now, `Ok(false)` = timed out. Raw `poll(2)`
+/// rather than a `libc`/`nix` dependency — one struct, one extern.
+fn wait_readable(fd: i32, timeout_ms: i32) -> io::Result<bool> {
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    const POLLIN: i16 = 0x0001;
+    unsafe extern "C" {
+        fn poll(fds: *mut PollFd, nfds: u32, timeout: i32) -> i32;
+    }
+
+    let mut pfd = PollFd {
+        fd,
+        events: POLLIN,
+        revents: 0,
+    };
+    loop {
+        let rc = unsafe { poll(&mut pfd, 1, timeout_ms) };
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            // Retried with the full timeout again — a rare signal mid-wait
+            // over-waits slightly rather than complicating with a deadline.
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        // POLLHUP/POLLERR also count as "go read": the read will observe
+        // EOF/error immediately instead of blocking.
+        return Ok(rc > 0);
+    }
+}
+
 static TEMP_WAV_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // Global persistent audio recorder to avoid spawning processes repeatedly
@@ -202,8 +245,23 @@ impl RecChild {
     }
 
     pub fn read_frame(&mut self, buf: &mut [u8; FRAME_BYTES]) -> io::Result<usize> {
+        use std::os::fd::AsRawFd as _;
+
+        let fd = self.stdout.as_raw_fd();
         let mut read = 0;
         while read < FRAME_BYTES {
+            // Bounded wait before each blocking read. A healthy `rec`
+            // streams PCM continuously (silence included), so seconds of
+            // no bytes — without EOF — means CoreAudio wedged the child.
+            // An unbounded read here would hold the global recorder mutex
+            // forever and deadlock every audio caller in the daemon.
+            if !wait_readable(fd, READ_FRAME_TIMEOUT_MS)? {
+                tracing::warn!(read, "rec_read_frame_timeout");
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "no audio from rec within timeout — recorder wedged",
+                ));
+            }
             match self.stdout.read(&mut buf[read..]) {
                 Ok(0) => {
                     // EOF on rec's stdout means the recorder died — either
@@ -316,7 +374,16 @@ impl AudioFrameSource for SoxAudioSource {
                 "audio recorder not initialized",
             ));
         };
-        rec.read_frame(buf)
+        match rec.read_frame(buf) {
+            // Wedged recorder: evict from the shared slot (Drop kills the
+            // child) so the next `get_or_spawn` recovers with a fresh one.
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                *guard = None;
+                tracing::warn!("rec_timeout_recorder_reset");
+                Err(e)
+            }
+            other => other,
+        }
     }
 }
 
@@ -403,6 +470,48 @@ pub fn temp_wav_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{create_wav_bytes_i16_mono_16k, temp_wav_path};
+
+    #[test]
+    fn wait_readable_times_out_on_silent_pipe() {
+        use std::os::fd::AsRawFd as _;
+        use std::process::{Command, Stdio};
+
+        // `sleep` holds its stdout pipe open without ever writing — the
+        // exact shape of a wedged recorder (no bytes, no EOF).
+        let mut child = Command::new("sleep")
+            .arg("5")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+        let fd = child.stdout.as_ref().expect("stdout").as_raw_fd();
+
+        let started = std::time::Instant::now();
+        let readable = super::wait_readable(fd, 150).expect("poll");
+        assert!(!readable, "silent pipe must time out, not read");
+        assert!(started.elapsed().as_millis() >= 140);
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn wait_readable_returns_true_when_data_or_eof_arrives() {
+        use std::os::fd::AsRawFd as _;
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("echo")
+            .arg("hi")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn echo");
+        let fd = child.stdout.as_ref().expect("stdout").as_raw_fd();
+
+        // Generous timeout — echo writes immediately; poll should return
+        // readable long before it.
+        assert!(super::wait_readable(fd, 2_000).expect("poll"));
+
+        let _ = child.wait();
+    }
 
     #[test]
     fn temp_wav_paths_are_unique() {

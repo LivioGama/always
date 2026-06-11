@@ -285,10 +285,23 @@ fn record_with_local_vad(
         // a read timeout before this invariant can be relaxed.
         let read = {
             let mut recorder = recorder_arc.lock();
-            if let Some(ref mut rec) = recorder.as_mut() {
-                rec.read_frame(&mut frame_buf)?
-            } else {
+            let Some(rec) = recorder.as_mut() else {
                 return Err(anyhow::anyhow!("Audio recorder not available"));
+            };
+            match rec.read_frame(&mut frame_buf) {
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    // Wedged recorder (alive but producing neither bytes
+                    // nor EOF): evict it like the EOF case below — Drop
+                    // kills and reaps the child — so the next capture
+                    // cycle respawns fresh instead of wedging forever.
+                    // Any partial audio flows through the post-loop path.
+                    if recorder.take().is_some() {
+                        tracing::warn!("rec_timeout_recorder_reset");
+                    }
+                    break;
+                }
+                Err(e) => return Err(e.into()),
             }
         };
 
