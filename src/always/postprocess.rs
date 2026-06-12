@@ -29,6 +29,13 @@ pub struct PostProcessor {
     /// `(cache, cache_order)` is treated as a single unit; both locks
     /// are taken together in `insert_cached`.
     cache_order: Arc<Mutex<VecDeque<String>>>,
+    /// In-flight requests keyed by exact input text. The speculative
+    /// grammar warm (kicked off from the VAD silence window) and the
+    /// blocking paste path frequently ask for the same text concurrently;
+    /// the second caller joins the first request instead of issuing a
+    /// duplicate. A failed call leaves the cell uninitialized so the next
+    /// caller retries — matching the old retry-on-next-call behavior.
+    inflight: Arc<Mutex<HashMap<String, Arc<tokio::sync::OnceCell<String>>>>>,
     config: PostprocessConfig,
 }
 
@@ -42,6 +49,7 @@ impl PostProcessor {
             groq_api_key,
             cache: Arc::new(Mutex::new(HashMap::new())),
             cache_order: Arc::new(Mutex::new(VecDeque::new())),
+            inflight: Arc::new(Mutex::new(HashMap::new())),
             config,
         }
     }
@@ -91,6 +99,33 @@ impl PostProcessor {
             return Ok(cached.clone());
         }
 
+        // Single-flight: join an identical in-flight request instead of
+        // duplicating it. Lock is only held to fetch/insert the cell —
+        // never across the await below.
+        let cell = {
+            let mut inflight = self.inflight.lock();
+            Arc::clone(
+                inflight
+                    .entry(text.to_string())
+                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+            )
+        };
+        let outcome = cell
+            .get_or_try_init(|| self.fetch_correction(text, api_key, context))
+            .await
+            .cloned();
+        self.inflight.lock().remove(text);
+        outcome
+    }
+
+    /// The actual Groq round-trip + response sanitation + cache insert.
+    /// Only ever reached via the single-flight cell in `correct_grammar`.
+    async fn fetch_correction(
+        &self,
+        text: &str,
+        api_key: &str,
+        context: Option<&str>,
+    ) -> Result<String> {
         let started = std::time::Instant::now();
         // Pooled client: a fresh `reqwest::Client::new()` here paid the
         // full DNS+TCP+TLS handshake (~100-300ms) on every utterance.
@@ -289,6 +324,47 @@ mod tests {
         let processor = PostProcessor::new(None);
         let out = processor.process("hello world", None).await.unwrap();
         assert_eq!(out, "hello world");
+    }
+
+    /// A cached entry short-circuits before any network call (api_key is
+    /// set, so a miss here would attempt a real request and fail) and is
+    /// reported as a cache hit to the latency instrumentation.
+    #[tokio::test]
+    async fn process_traced_reports_cache_hit_without_network() {
+        let processor = PostProcessor::new(Some("test-key-never-used".to_string()));
+        processor.insert_cached("hello world how are you".into(), "Hello world, how are you?".into());
+        let (out, cache_hit) = processor
+            .process_traced("hello world how are you", None)
+            .await
+            .unwrap();
+        assert_eq!(out, "Hello world, how are you?");
+        assert!(cache_hit);
+    }
+
+    /// Concurrent identical requests share one in-flight cell: the second
+    /// caller must observe the same `Arc` rather than creating a duplicate.
+    #[tokio::test]
+    async fn inflight_cell_is_shared_for_identical_text() {
+        let processor = PostProcessor::new(Some("test-key-never-used".to_string()));
+        let cell_a = {
+            let mut inflight = processor.inflight.lock();
+            Arc::clone(
+                inflight
+                    .entry("same text".to_string())
+                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+            )
+        };
+        let cell_b = {
+            let mut inflight = processor.inflight.lock();
+            Arc::clone(
+                inflight
+                    .entry("same text".to_string())
+                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+            )
+        };
+        assert!(Arc::ptr_eq(&cell_a, &cell_b));
+        cell_a.set("Corrected.".to_string()).unwrap();
+        assert_eq!(cell_b.get().map(String::as_str), Some("Corrected."));
     }
 
     #[test]

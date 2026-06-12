@@ -314,7 +314,7 @@ fn process_one(
     transcriber: &Arc<dyn Transcriber>,
 ) -> Result<()> {
     let cfg = active_cfg.read();
-    let record_result = match vad::record_utterance(&cfg, log, transcriber) {
+    let record_result = match vad::record_utterance(&cfg, log, transcriber, rt) {
         Ok(r) => r,
         Err(e) => {
             let (kind, message) = classify_transcription_error(&e);
@@ -795,7 +795,9 @@ fn word_count(text: &str) -> usize {
 }
 
 /// Stage 1 — acoustic glossary fix-up (Soundex + Levenshtein).
-fn apply_acoustic_corrections(text: &str) -> String {
+/// `pub(crate)` so the speculative grammar warm in `vad.rs` can produce
+/// the exact same cache key as the blocking paste path.
+pub(crate) fn apply_acoustic_corrections(text: &str) -> String {
     let custom_words = crate::glossary::user_glossary_terms();
     let (acoustic, acoustic_subs) = crate::always::text_match::apply_custom_words(
         text,

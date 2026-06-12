@@ -83,8 +83,9 @@ pub fn record_utterance(
     cfg: &AlwaysConfig,
     log: &mut Logger,
     transcriber: &Arc<dyn Transcriber>,
+    rt: &tokio::runtime::Handle,
 ) -> Result<RecordResult> {
-    record_with_local_vad(cfg, log, transcriber)
+    record_with_local_vad(cfg, log, transcriber, rt)
 }
 
 /// Single-frame energy probe used while idle-paused so the user can wake
@@ -137,6 +138,7 @@ fn record_with_local_vad(
     cfg: &AlwaysConfig,
     log: &mut Logger,
     transcriber: &Arc<dyn Transcriber>,
+    rt: &tokio::runtime::Handle,
 ) -> Result<RecordResult> {
     let silence_frames = normal_silence_frames(cfg);
     // Two distinct timeouts:
@@ -544,6 +546,15 @@ fn record_with_local_vad(
                 let audio_snapshot = speech_samples.clone();
                 let transcriber_for_spec = Arc::clone(transcriber);
                 let slot = Arc::clone(&speculation_slot);
+                // For the speculative grammar warm below: the post-processor
+                // and runtime handle must be owned by the thread (the `cfg`
+                // borrow can't cross it).
+                let grammar_warm = if cfg.postprocess_config.grammar_correction_enabled {
+                    cfg.post_processor.clone()
+                } else {
+                    None
+                };
+                let rt_for_warm = rt.clone();
                 std::thread::spawn(move || {
                     // Wrap in catch_unwind: a panic in transcribe_from_bytes
                     // (network, deserialization, etc.) used to poison
@@ -577,7 +588,32 @@ fn record_with_local_vad(
                     {
                         event::global_broadcaster().transcript_chunk(r.text.clone());
                     }
+                    let warm_text = match &outcome {
+                        Ok(r) if !r.text.is_empty() => Some(r.text.clone()),
+                        _ => None,
+                    };
+                    // Store the STT result FIRST — the paste path must never
+                    // wait on the grammar warm.
                     slot.store_if_current(captured_gen, outcome);
+                    // Speculative grammar warm: when this STT result survives
+                    // to final silence (the common case), the paste path asks
+                    // grammar for the exact same text — starting the LLM call
+                    // now hides its ~600ms inside the remaining silence wait.
+                    // The single-flight cell in PostProcessor dedupes if the
+                    // paste path arrives while this is still in flight. If
+                    // the user resumed speaking, the final text differs and
+                    // this warm is a wasted-but-cached call.
+                    if let Some(text) = warm_text
+                        && captured_gen == slot.current_generation()
+                        && !crate::always::event_loop::is_short_utterance(&text)
+                        && let Some(pp) = grammar_warm
+                    {
+                        let acoustic =
+                            crate::always::event_loop::apply_acoustic_corrections(&text);
+                        rt_for_warm.spawn(async move {
+                            let _ = pp.process(&acoustic, None).await;
+                        });
+                    }
                 });
             }
 
