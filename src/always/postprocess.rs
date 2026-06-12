@@ -92,7 +92,9 @@ impl PostProcessor {
         }
 
         let started = std::time::Instant::now();
-        let client = reqwest::Client::new();
+        // Pooled client: a fresh `reqwest::Client::new()` here paid the
+        // full DNS+TCP+TLS handshake (~100-300ms) on every utterance.
+        let client = crate::http_client::async_client();
         let response = client
             .post("https://api.groq.com/openai/v1/chat/completions")
             .header("Authorization", format!("Bearer {}", api_key))

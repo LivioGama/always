@@ -106,6 +106,27 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     // Now do the expensive operations after UDS is accepting connections
     let active = active_placeholder;
 
+    // Prewarm the pooled HTTPS connection to Groq so the first utterance's
+    // STT/grammar calls skip the DNS+TCP+TLS handshake (~100-300ms). Fire
+    // and forget — a failure here just means the first real call pays the
+    // handshake like before.
+    let prewarm_key = cfg.groq_stt_api_key.clone();
+    let _prewarm_handle = rt.spawn(async move {
+        let started = Instant::now();
+        let mut req = crate::http_client::async_client().get("https://api.groq.com/openai/v1/models");
+        if let Some(key) = prewarm_key {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+        match req.send().await {
+            Ok(resp) => tracing::info!(
+                status = %resp.status(),
+                groq_prewarm_ms = started.elapsed().as_millis() as u64,
+                "groq_prewarm"
+            ),
+            Err(e) => tracing::debug!(error = %e, "groq_prewarm_failed"),
+        }
+    });
+
     // Heartbeat task: emit Heartbeat every 5s so connected GUI clients can
     // detect a dead/stalled daemon via watchdog timeout.
     let _heartbeat_handle = rt.spawn(async {
