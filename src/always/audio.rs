@@ -22,11 +22,27 @@ pub const FRAME_BYTES: usize = 960;
 /// Elgato Wave:3 @ 48 kHz stereo).
 const REC_OVERRUN_RESPAWN_THRESHOLD: u32 = 64;
 
-/// Max wall-clock wait for any bytes of a single frame before declaring
-/// the recorder wedged. Healthy capture delivers a frame every
-/// [`FRAME_MS`] (30 ms) even in total silence, so two full seconds with
-/// neither data nor EOF is a stuck child, not a quiet room.
-const READ_FRAME_TIMEOUT_MS: i32 = 2_000;
+/// Max wall-clock wait for the next bytes of a frame before declaring the
+/// recorder *wedged* (alive, but permanently producing neither data nor
+/// EOF) and recycling it. This exists only to stop a stuck `rec` from
+/// holding the global recorder mutex forever and deadlocking every audio
+/// caller — it is NOT a real-time-quality knob.
+///
+/// It must sit well above the device's legitimate inter-frame gap, or it
+/// truncates live speech. Real USB capture is burstier than its nominal
+/// 30 ms/frame: SoX delivers resampled output in chunks, and an Elgato
+/// Wave:3 MK.2 (48 kHz → 16 kHz) was measured with ~4.5 s cold-start and
+/// up to ~4.1 s gaps *mid-stream while healthy*. 15 s is ~3× that worst
+/// case — generous enough never to false-positive on bursty delivery,
+/// still finite so a genuinely dead device recovers instead of hanging.
+/// (An earlier 2–3 s value reset the recorder mid-utterance and cut
+/// speech off; do not lower it below the measured device gap.)
+const READ_FRAME_TIMEOUT_MS: i32 = 15_000;
+
+// Compile-time floor: the wedge timeout must clear the measured worst-case
+// device gap (~4.5s) with margin, or it truncates live speech. A regression
+// once shipped a 2-3s value that cut utterances off — keep this guard.
+const _: () = assert!(READ_FRAME_TIMEOUT_MS >= 10_000);
 
 /// Block until `fd` is readable (or hung up) or `timeout_ms` elapses.
 /// `Ok(true)` = readable now, `Ok(false)` = timed out. Raw `poll(2)`
@@ -250,11 +266,12 @@ impl RecChild {
         let fd = self.stdout.as_raw_fd();
         let mut read = 0;
         while read < FRAME_BYTES {
-            // Bounded wait before each blocking read. A healthy `rec`
-            // streams PCM continuously (silence included), so seconds of
-            // no bytes — without EOF — means CoreAudio wedged the child.
-            // An unbounded read here would hold the global recorder mutex
-            // forever and deadlock every audio caller in the daemon.
+            // Bounded wait before each blocking read so a wedged `rec`
+            // (alive, but producing neither bytes nor EOF) can't hold the
+            // global recorder mutex forever and deadlock every audio
+            // caller. The budget sits well above the device's real
+            // (bursty) inter-frame gap so it never truncates live speech —
+            // see [`READ_FRAME_TIMEOUT_MS`].
             if !wait_readable(fd, READ_FRAME_TIMEOUT_MS)? {
                 tracing::warn!(read, "rec_read_frame_timeout");
                 return Err(io::Error::new(
