@@ -306,8 +306,18 @@ fn process_one(
             text,
             energy,
             transcription,
+            timing,
         } => {
-            handle_speech(&cfg, log, &text, energy, &transcription, last_process, rt)?;
+            handle_speech(
+                &cfg,
+                log,
+                &text,
+                energy,
+                &transcription,
+                &timing,
+                last_process,
+                rt,
+            )?;
         }
         vad::RecordResult::Silence => {
             // Don't log silence events - they're too frequent and not useful
@@ -325,12 +335,14 @@ fn process_one(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_speech(
     cfg: &AlwaysConfig,
     log: &mut Logger,
     text: &str,
     energy: f64,
     transcription: &crate::stt::TranscriptionResult,
+    timing: &vad::UtteranceTiming,
     last_process: &mut Instant,
     rt: &Handle,
 ) -> Result<()> {
@@ -420,13 +432,16 @@ fn handle_speech(
             // get pasted verbatim. Longer utterances: acoustic fix-up is
             // sync (fast); LLM grammar runs async after paste when enabled
             // so the user sees text immediately (~300-800ms sooner).
-            let (final_text, grammar_patch_async) = if is_short_utterance(&transformed) {
+            let grammar_started = Instant::now();
+            let (final_text, grammar_cache_hit, grammar_patch_async) = if is_short_utterance(
+                &transformed,
+            ) {
                 tracing::info!(
                     stage = "short_utterance_bypass",
                     text = %transformed,
                     "skipping correction stack — too short to benefit"
                 );
-                (transformed.clone(), false)
+                (transformed.clone(), false, false)
             } else {
                 // Single-paste policy: correct synchronously, then paste the
                 // final text exactly ONCE. The old "paste acoustic now, patch
@@ -437,8 +452,10 @@ fn handle_speech(
                 // contenteditable), or focus shifted. One clean paste of the
                 // corrected text is worth the small extra latency.
                 let acoustic = apply_acoustic_corrections(&transformed);
-                (apply_grammar_blocking(&acoustic, cfg, rt), false)
+                let (corrected, cache_hit) = apply_grammar_blocking(&acoustic, cfg, rt);
+                (corrected, cache_hit, false)
             };
+            let grammar_ms = grammar_started.elapsed().as_millis() as u64;
 
             // Privacy: gate transcript text behind `should_log_transcripts`
             if crate::always::telemetry::should_log_transcripts() {
@@ -561,6 +578,7 @@ fn handle_speech(
             // guarded restore can confirm nothing else clobbered it since.
             let prev_clipboard = paste::read_clipboard_text().ok();
             let written_clipboard = paste_clipboard.clone();
+            let paste_started = Instant::now();
 
             // NOTE: the paste-in-flight lock is held from `try_begin_paste()`
             // above. Every early-return below MUST release it via
@@ -610,6 +628,28 @@ fn handle_speech(
                 return Err(err);
             }
             let pasted_at = Instant::now();
+            // One structured line per pasted utterance so production logs
+            // expose where speech-end → paste time goes. `stt_wait_ms` is 0
+            // when speculative STT beat the final-silence cut; `grammar_ms`
+            // near 0 means the speculative grammar warm landed in cache.
+            tracing::info!(
+                stage = "latency_breakdown",
+                stt_wait_ms = timing
+                    .stt_done_at
+                    .saturating_duration_since(timing.speech_end_at)
+                    .as_millis() as u64,
+                pipeline_ms = grammar_started
+                    .saturating_duration_since(timing.stt_done_at)
+                    .as_millis() as u64,
+                grammar_ms,
+                paste_ms = pasted_at.saturating_duration_since(paste_started).as_millis() as u64,
+                total_ms = pasted_at
+                    .saturating_duration_since(timing.speech_end_at)
+                    .as_millis() as u64,
+                speculation_used = timing.speculation_used,
+                grammar_cache_hit,
+                "utterance latency"
+            );
             // Snapshot the focused app at paste time. If the user switches
             // apps (or submits the message) before the grammar patch fires,
             // Cmd+Z would land in the wrong window and create a double paste.
@@ -765,7 +805,9 @@ fn apply_acoustic_corrections(text: &str) -> String {
 }
 
 /// Stage 2 — blocking LLM grammar cleanup (merge path or grammar disabled).
-fn apply_grammar_blocking(text: &str, cfg: &AlwaysConfig, rt: &Handle) -> String {
+/// Returns the corrected text and whether it came from the PostProcessor
+/// cache (true when the speculative grammar warm already paid the LLM cost).
+fn apply_grammar_blocking(text: &str, cfg: &AlwaysConfig, rt: &Handle) -> (String, bool) {
     if cfg.postprocess_config.grammar_correction_enabled
         && let Some(ref pp) = cfg.post_processor
     {
@@ -782,7 +824,7 @@ fn apply_grammar_blocking(text: &str, cfg: &AlwaysConfig, rt: &Handle) -> String
         // imported at the top of this file.
         const GRAMMAR_BLOCKING_TIMEOUT: Duration = Duration::from_secs(8);
         let timed = rt.block_on(async {
-            tokio::time::timeout(GRAMMAR_BLOCKING_TIMEOUT, pp.process(text, None)).await
+            tokio::time::timeout(GRAMMAR_BLOCKING_TIMEOUT, pp.process_traced(text, None)).await
         });
         let process_result = match timed {
             Ok(inner) => inner,
@@ -792,11 +834,11 @@ fn apply_grammar_blocking(text: &str, cfg: &AlwaysConfig, rt: &Handle) -> String
                     fallback_text = %text,
                     "grammar correction timed out, using acoustic match result"
                 );
-                return text.to_string();
+                return (text.to_string(), false);
             }
         };
         match process_result {
-            Ok(cleaned) => {
+            Ok((cleaned, cache_hit)) => {
                 let elapsed_ms = started.elapsed().as_millis() as u64;
                 if text != cleaned {
                     tracing::info!(
@@ -804,6 +846,7 @@ fn apply_grammar_blocking(text: &str, cfg: &AlwaysConfig, rt: &Handle) -> String
                         before = %text,
                         after = %cleaned,
                         elapsed_ms = elapsed_ms,
+                        cache_hit,
                         "grammar correction applied"
                     );
                 } else {
@@ -811,10 +854,11 @@ fn apply_grammar_blocking(text: &str, cfg: &AlwaysConfig, rt: &Handle) -> String
                         stage = "grammar_correction",
                         text = %cleaned,
                         elapsed_ms = elapsed_ms,
+                        cache_hit,
                         "no grammar changes"
                     );
                 }
-                cleaned
+                (cleaned, cache_hit)
             }
             Err(err) => {
                 tracing::warn!(
@@ -822,7 +866,7 @@ fn apply_grammar_blocking(text: &str, cfg: &AlwaysConfig, rt: &Handle) -> String
                     fallback_text = %text,
                     "grammar correction failed, using acoustic match result"
                 );
-                text.to_string()
+                (text.to_string(), false)
             }
         }
     } else {
@@ -831,7 +875,7 @@ fn apply_grammar_blocking(text: &str, cfg: &AlwaysConfig, rt: &Handle) -> String
             text = %text,
             "grammar correction disabled"
         );
-        text.to_string()
+        (text.to_string(), false)
     }
 }
 

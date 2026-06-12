@@ -48,11 +48,26 @@ impl SpeculationSlot {
     }
 }
 
+/// Per-utterance latency capture points, consumed by the
+/// `latency_breakdown` log line in `event_loop` so regressions in the
+/// speech-end → paste path are visible in production logs.
+pub struct UtteranceTiming {
+    /// When the final-silence (or max-frames) cut fired — the moment the
+    /// user is considered done speaking.
+    pub speech_end_at: std::time::Instant,
+    /// When the transcription result became available to the main loop
+    /// (speculation slot taken or fresh transcription returned).
+    pub stt_done_at: std::time::Instant,
+    /// Whether the speculative transcription result was used.
+    pub speculation_used: bool,
+}
+
 pub enum RecordResult {
     Speech {
         text: String,
         energy: f64,
         transcription: crate::stt::TranscriptionResult,
+        timing: UtteranceTiming,
     },
     Silence,
     DroppedLowEnergy {
@@ -607,6 +622,10 @@ fn record_with_local_vad(
         }
     }
 
+    // "Speech end" for latency accounting: the loop exit is within one
+    // 30ms frame of the final-silence cut firing.
+    let speech_end_at = std::time::Instant::now();
+
     if speech_samples.is_empty() {
         // Send voice activity ended event if no speech was detected
         event::global_broadcaster().voice_activity_ended();
@@ -673,10 +692,10 @@ fn record_with_local_vad(
         None
     };
 
-    let result = match speculation {
+    let (result, speculation_used) = match speculation {
         Some(Ok(r)) => {
             event::global_broadcaster().transcribing_stopped();
-            r
+            (r, true)
         }
         _ => {
             // No speculation, speculation errored, or timeout — do a fresh
@@ -691,7 +710,7 @@ fn record_with_local_vad(
             match transcriber.transcribe_from_bytes(wav_data) {
                 Ok(result) => {
                     event::global_broadcaster().transcribing_stopped();
-                    result
+                    (result, false)
                 }
                 Err(err) => {
                     event::global_broadcaster().transcribing_stopped();
@@ -700,6 +719,7 @@ fn record_with_local_vad(
             }
         }
     };
+    let stt_done_at = std::time::Instant::now();
 
     let raw = result.text.clone();
 
@@ -734,6 +754,11 @@ fn record_with_local_vad(
         text: raw,
         energy: speech_energy,
         transcription: result,
+        timing: UtteranceTiming {
+            speech_end_at,
+            stt_done_at,
+            speculation_used,
+        },
     })
 }
 

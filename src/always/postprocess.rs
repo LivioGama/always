@@ -53,16 +53,30 @@ impl PostProcessor {
     /// `glossary::build_postprocess_prompt` keep the LLM from inventing
     /// substitutions. Voice-to-text delivers what was said by default.
     pub async fn process(&self, text: &str, context: Option<&str>) -> Result<String> {
+        Ok(self
+            .process_traced(text, context)
+            .await
+            .map(|(corrected, _cache_hit)| corrected)
+            .unwrap_or_else(|_| text.to_string()))
+    }
+
+    /// Same as [`process`](Self::process) but surfaces errors and reports
+    /// whether the result came from the memoization cache, so callers can
+    /// log cache effectiveness (see `latency_breakdown` in `event_loop`).
+    pub async fn process_traced(
+        &self,
+        text: &str,
+        context: Option<&str>,
+    ) -> Result<(String, bool)> {
         if !self.config.grammar_correction_enabled {
-            return Ok(text.to_string());
+            return Ok((text.to_string(), false));
         }
         let Some(ref api_key) = self.groq_api_key else {
-            return Ok(text.to_string());
+            return Ok((text.to_string(), false));
         };
-        Ok(self
-            .correct_grammar(text, api_key, context)
-            .await
-            .unwrap_or_else(|_| text.to_string()))
+        let cache_hit = self.cache.lock().contains_key(text);
+        let corrected = self.correct_grammar(text, api_key, context).await?;
+        Ok((corrected, cache_hit))
     }
 
     async fn correct_grammar(
@@ -73,9 +87,11 @@ impl PostProcessor {
     ) -> Result<String> {
         // Check cache first
         if let Some(cached) = self.cache.lock().get(text) {
+            tracing::debug!(stage = "grammar_correction", "grammar cache hit");
             return Ok(cached.clone());
         }
 
+        let started = std::time::Instant::now();
         let client = reqwest::Client::new();
         let response = client
             .post("https://api.groq.com/openai/v1/chat/completions")
@@ -123,6 +139,11 @@ impl PostProcessor {
         let corrected = sanitize_corrected_text(text, &raw_corrected)
             .unwrap_or_else(|| text.trim().to_string());
 
+        tracing::info!(
+            grammar_api_ms = started.elapsed().as_millis() as u64,
+            model = %self.config.groq_model,
+            "grammar_api_call"
+        );
         self.insert_cached(text.to_string(), corrected.clone());
         Ok(corrected)
     }
