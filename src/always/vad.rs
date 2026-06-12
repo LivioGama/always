@@ -131,7 +131,11 @@ const SHORT_SPEECH_MS: u32 = 400;
 const SHORT_SILENCE_MS: u32 = 200;
 const NORMAL_SILENCE_CAP_SECS: f64 = 0.50;
 const NORMAL_SILENCE_FLOOR_SECS: f64 = 0.30;
-const EARLY_VOICE_ENERGY_RATIO: f64 = 0.70;
+/// Lowered 0.70 → 0.60 for a snappier overlay: the user perceived the
+/// activity-only overlay as slow to appear. Misfires are cheap — the
+/// false-start retraction below (150ms window) pulls the announcement
+/// back before any transcription work starts.
+const EARLY_VOICE_ENERGY_RATIO: f64 = 0.60;
 const EARLY_VOICE_FALSE_START_MS: u32 = 150;
 
 fn record_with_local_vad(
@@ -408,10 +412,13 @@ fn record_with_local_vad(
                 || (last_prob >= speech_threshold * 0.65
                     && frame_energy >= cfg.energy_threshold * 1.1)
         };
+        // Silero factor lowered 0.55 → 0.45 together with
+        // EARLY_VOICE_ENERGY_RATIO above — both gates must pass, so each
+        // alone stays conservative enough; retraction covers the rest.
         let credible_early_voice = !in_speech
             && !voice_activity_announced
             && frame_energy >= early_voice_energy_threshold
-            && last_prob >= speech_threshold * 0.55;
+            && last_prob >= speech_threshold * 0.45;
         if credible_early_voice {
             announce_voice_activity!();
             tentative_voice_silence = 0;
