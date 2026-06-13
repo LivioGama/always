@@ -23,9 +23,20 @@ use std::time::Instant;
 
 use parking_lot::Mutex;
 
-/// User's explicit global force-pause switch + auto-pause from
-/// idle/audio/mic. When `true`, EFFECTIVE is unconditionally `true`.
+/// User's explicit global force-pause switch. When `true`, EFFECTIVE is
+/// unconditionally `true`. The audio/mic watchdogs used to overload this
+/// flag, which meant their auto-resume (`set_paused(false)`) silently
+/// wiped a pause the USER had set — they now have their own sources
+/// below and MASTER carries user intent only.
 static MASTER_PAUSED: AtomicBool = AtomicBool::new(false);
+
+/// Watchdog source: the Mac is playing audio (Swift's
+/// `NotifySystemAudioState`). Auto-clears when playback stops.
+static AUDIO_OUTPUT_PAUSED: AtomicBool = AtomicBool::new(false);
+
+/// Watchdog source: another app (Zoom, FaceTime, …) holds the
+/// microphone. Auto-clears when the app releases it.
+static MIC_CONFLICT_PAUSED: AtomicBool = AtomicBool::new(false);
 
 /// Derived "what the audio pipeline gates on". Recomputed by
 /// `recompute_effective()` whenever MASTER, current_app, or the per-app
@@ -44,6 +55,10 @@ pub fn recompute_effective() -> (bool, bool) {
 
 fn compute_effective() -> bool {
     if MASTER_PAUSED.load(Ordering::Relaxed) {
+        return true;
+    }
+    if AUDIO_OUTPUT_PAUSED.load(Ordering::Relaxed) || MIC_CONFLICT_PAUSED.load(Ordering::Relaxed)
+    {
         return true;
     }
     if IDLE_AUTO_PAUSED.load(Ordering::Relaxed) {
@@ -161,6 +176,45 @@ pub fn toggle_pause() -> (bool, bool) {
 /// caller can decide whether to broadcast a UDS event.
 pub fn set_paused(paused: bool) -> (bool, bool) {
     MASTER_PAUSED.store(paused, Ordering::Relaxed);
+    recompute_effective()
+}
+
+/// Set/clear the audio-output watchdog pause source. Never touches
+/// MASTER — a manual pause survives playback stopping.
+pub fn set_audio_output_paused(paused: bool) -> (bool, bool) {
+    AUDIO_OUTPUT_PAUSED.store(paused, Ordering::Relaxed);
+    recompute_effective()
+}
+
+pub fn is_audio_output_paused() -> bool {
+    AUDIO_OUTPUT_PAUSED.load(Ordering::Relaxed)
+}
+
+/// Set/clear the mic-conflict watchdog pause source. Never touches
+/// MASTER — a manual pause survives the call ending.
+pub fn set_mic_conflict_paused(paused: bool) -> (bool, bool) {
+    MIC_CONFLICT_PAUSED.store(paused, Ordering::Relaxed);
+    recompute_effective()
+}
+
+pub fn is_mic_conflict_paused() -> bool {
+    MIC_CONFLICT_PAUSED.load(Ordering::Relaxed)
+}
+
+/// True when ANY global pause source is active (user master pause or a
+/// watchdog). The global pause chord resumes by clearing all of them —
+/// an explicit user resume overrides the watchdogs until their next
+/// state transition (so you CAN force dictation while music plays).
+pub fn is_any_global_pause() -> bool {
+    is_master_paused() || is_audio_output_paused() || is_mic_conflict_paused()
+}
+
+/// Clear every global pause source (user + watchdogs) at once. Used by
+/// the explicit global-resume chord.
+pub fn clear_global_pauses() -> (bool, bool) {
+    MASTER_PAUSED.store(false, Ordering::Relaxed);
+    AUDIO_OUTPUT_PAUSED.store(false, Ordering::Relaxed);
+    MIC_CONFLICT_PAUSED.store(false, Ordering::Relaxed);
     recompute_effective()
 }
 
@@ -423,6 +477,10 @@ pub fn dictation_buffer_set(text: impl Into<String>) {
 
 pub fn dictation_buffer_clear() {
     *DICTATION_BUFFER.lock() = None;
+    // The dictation session rides on the same "user took control"
+    // signals (Return commit, keystroke, pause, focus-driven pause) —
+    // clearing here keeps a single choke point for both.
+    super::dictation::clear();
 }
 
 #[cfg(test)]
@@ -440,10 +498,79 @@ mod tests {
 
     fn reset_pause_state_for_test() {
         MASTER_PAUSED.store(false, Ordering::Relaxed);
+        AUDIO_OUTPUT_PAUSED.store(false, Ordering::Relaxed);
+        MIC_CONFLICT_PAUSED.store(false, Ordering::Relaxed);
         IDLE_AUTO_PAUSED.store(false, Ordering::Relaxed);
         EFFECTIVE_PAUSED.store(true, Ordering::Relaxed);
         *CURRENT_APP.lock() = None;
         per_app::set_cache_for_test(HashMap::new());
+    }
+
+    /// Allowlist the given bundle and focus it so the only thing keeping
+    /// us paused is whatever global source the test sets.
+    fn focus_allowlisted_app(bundle: &str) {
+        per_app::set_cache_for_test(HashMap::from([(
+            bundle.to_string(),
+            AppOverride {
+                paused: Some(false),
+                ..Default::default()
+            },
+        )]));
+        set_current_app_and_recompute(Some(bundle.to_string()));
+    }
+
+    #[test]
+    fn manual_pause_survives_watchdog_resume() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        reset_pause_state_for_test();
+        focus_allowlisted_app("com.example.editor");
+        assert!(!is_paused());
+
+        // Watchdog pauses (call starts), then the USER also pauses
+        // manually, then the call ends. The old code routed the
+        // watchdog through MASTER, so its resume wiped the manual
+        // pause — the daemon resumed listening against the user's
+        // explicit wish.
+        set_mic_conflict_paused(true);
+        set_paused(true);
+        let (effective, _) = set_mic_conflict_paused(false);
+        assert!(effective, "manual master pause must survive mic release");
+        assert!(is_master_paused());
+    }
+
+    #[test]
+    fn audio_output_pause_is_its_own_source() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        reset_pause_state_for_test();
+        focus_allowlisted_app("com.example.editor");
+
+        let (effective, changed) = set_audio_output_paused(true);
+        assert!(effective);
+        assert!(changed);
+        assert!(!is_master_paused(), "watchdogs must not touch MASTER");
+
+        let (effective, changed) = set_audio_output_paused(false);
+        assert!(!effective);
+        assert!(changed);
+    }
+
+    #[test]
+    fn clear_global_pauses_overrides_all_watchdogs() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        reset_pause_state_for_test();
+        focus_allowlisted_app("com.example.editor");
+
+        set_paused(true);
+        set_audio_output_paused(true);
+        set_mic_conflict_paused(true);
+        assert!(is_any_global_pause());
+
+        // The global-resume chord: one press clears everything so the
+        // user can force dictation over music / during a call.
+        let (effective, changed) = clear_global_pauses();
+        assert!(!effective);
+        assert!(changed);
+        assert!(!is_any_global_pause());
     }
 
     #[test]
@@ -504,16 +631,16 @@ mod tests {
     fn own_bundle_id_is_never_resumed() {
         let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
         reset_pause_state_for_test();
+        let own_bundle_id = per_app::ALWAYS_OWN_BUNDLE_IDS[0];
         per_app::set_cache_for_test(HashMap::from([(
-            per_app::ALWAYS_OWN_BUNDLE_ID.to_string(),
+            own_bundle_id.to_string(),
             AppOverride {
                 paused: Some(false),
                 ..Default::default()
             },
         )]));
 
-        let (effective, _) =
-            set_current_app_and_recompute(Some(per_app::ALWAYS_OWN_BUNDLE_ID.to_string()));
+        let (effective, _) = set_current_app_and_recompute(Some(own_bundle_id.to_string()));
         assert!(effective);
         assert!(is_paused());
     }

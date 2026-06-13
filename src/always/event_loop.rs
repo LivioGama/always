@@ -12,7 +12,7 @@ use crate::always::speech_action::{
 };
 use crate::always::{
     AlwaysConfig, auto_enter_countdown, clipboard_watcher, daemon, event, filter, idle_watcher,
-    keyboard, mic_monitor, paste, pause, per_app, uds_server, vad,
+    keyboard, mic_watcher, paste, pause, per_app, transcript_stream, uds_server, vad,
 };
 use crate::managers::model_registry::ModelRegistry;
 use crate::stt::Transcriber;
@@ -156,12 +156,14 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     // `idle_pause_secs == 0`. Lives for the daemon lifetime.
     idle_watcher::spawn(rt.handle(), cfg.idle_pause_secs, cfg.idle_pause_action);
 
+    // Mic-conflict watchdog: dedicated task so a call starting while
+    // `record_utterance` blocks (up to 30s waiting for voice) is caught
+    // within the poll interval instead of after the wait. Replaces the
+    // inline check that used to live at the top of this loop.
+    mic_watcher::spawn(rt.handle());
+
     let mut last_process = Instant::now() - Duration::from_secs(10);
     let mut last_dup_check = Instant::now();
-
-    // Initialize microphone monitor for auto-pause functionality
-    let mut mic_monitor = mic_monitor::MicrophoneMonitor::new();
-    let mut auto_paused_for_mic = false;
 
     loop {
         if last_dup_check.elapsed() >= Duration::from_secs(30) {
@@ -169,71 +171,11 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
             daemon::reconcile_duplicate_processes();
         }
 
-        // Check if other apps are using the microphone
-        match mic_monitor.is_microphone_in_use() {
-            Ok(true) if !auto_paused_for_mic => {
-                // Another app started using the microphone - pause Always
-                if let Ok(users) = mic_monitor.get_microphone_users() {
-                    let app_list = if users.is_empty() {
-                        "another application".to_string()
-                    } else {
-                        users.join(", ")
-                    };
-                    tracing::info!(apps = %app_list, "microphone_auto_paused");
-
-                    // Log the auto-pause event
-                    log.write(Event::MicrophoneAutoPaused { apps: &app_list });
-                }
-                let (_effective, changed) = pause::set_paused(true);
-                event::global_broadcaster().master_pause_changed(true);
-                if changed {
-                    pause::dictation_buffer_clear();
-                    event::global_broadcaster().paused();
-                }
-                auto_paused_for_mic = true;
-            }
-            Ok(false) if auto_paused_for_mic => {
-                // Microphone is no longer in use - resume Always
-                tracing::info!("microphone_auto_resumed");
-
-                // Log the auto-resume event
-                log.write(Event::MicrophoneAutoResumed);
-
-                // Clear the idle-auto-paused flag so subsequent
-                // audio-output stop events resume the daemon. Previously
-                // we set `paused=false` but left `idle_auto_paused=true`,
-                // so `uds_server::NotifySystemAudioState{playing:false}`
-                // would refuse to auto-resume (it gates on
-                // `!is_idle_auto_paused()`) and the daemon stayed paused
-                // even though the user could see "Listening" in the UI.
-                pause::set_idle_auto_paused(false);
-                let (effective, changed) = pause::set_paused(false);
-                event::global_broadcaster().master_pause_changed(false);
-                // Reset the voice-seen timestamp so the idle watchdog
-                // doesn't immediately re-pause us based on the gap that
-                // accumulated while we were mic-paused.
-                pause::mark_voice_seen();
-                if changed {
-                    if effective {
-                        event::global_broadcaster().paused();
-                    } else {
-                        event::global_broadcaster().resumed();
-                    }
-                }
-                auto_paused_for_mic = false;
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "microphone_check_failed");
-            }
-            _ => {} // No change in microphone state
-        }
-
         if pause::is_paused() {
             // Wake-on-voice while idle-paused: keep the mic hot enough to
             // detect speech without running the full VAD/transcribe loop.
             if pause::is_idle_auto_paused()
-                && !pause::is_master_paused()
-                && !auto_paused_for_mic
+                && !pause::is_any_global_pause()
                 && vad::poll_speech_energy(&active_cfg.read()).unwrap_or(false)
             {
                 pause::set_idle_auto_paused(false);
@@ -319,41 +261,59 @@ fn process_one(
         Err(e) => {
             let (kind, message) = classify_transcription_error(&e);
             event::global_broadcaster().transcription_failed(kind, message);
+            emit_utterance_terminal();
             return Err(e).context("failed to record/transcribe utterance");
         }
     };
-    match record_result {
+    let outcome = match record_result {
         vad::RecordResult::Speech {
             text,
             energy,
             transcription,
             timing,
-        } => {
-            handle_speech(
-                &cfg,
-                log,
-                &text,
-                energy,
-                &transcription,
-                &timing,
-                last_process,
-                rt,
-            )?;
-        }
+        } => handle_speech(
+            &cfg,
+            log,
+            &text,
+            energy,
+            &transcription,
+            &timing,
+            last_process,
+            rt,
+        ),
         vad::RecordResult::Silence => {
             // Don't log silence events - they're too frequent and not useful
+            Ok(())
         }
-        vad::RecordResult::Timeout => log.write(Event::Timeout),
+        vad::RecordResult::Timeout => {
+            log.write(Event::Timeout);
+            Ok(())
+        }
         vad::RecordResult::DroppedLowEnergy { energy } => {
             log.write(Event::DroppedLowEnergy { energy });
             event::global_broadcaster().low_microphone_volume_maybe(energy);
+            Ok(())
         }
         vad::RecordResult::DroppedNoise { raw } => {
             tracing::debug!(raw, "dropped_noise");
             log.write(Event::DroppedNoise { raw: &raw });
+            Ok(())
         }
-    }
-    Ok(())
+    };
+    emit_utterance_terminal();
+    outcome
+}
+
+/// Terminal overlay events for one utterance cycle. Every exit of
+/// `process_one` — paste, drop, silence, error — must leave the GUI with
+/// no lingering "Listening"/"Transcribing" state, otherwise a path that
+/// announced voice but never pasted re-shows a stale overlay (the
+/// "listening comes back after transcribing" bug). The broadcaster only
+/// puts these on the wire when the matching start event is still open,
+/// so calling this unconditionally is free on idle cycles.
+fn emit_utterance_terminal() {
+    event::global_broadcaster().voice_activity_ended();
+    event::global_broadcaster().transcribing_stopped();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -447,7 +407,17 @@ fn handle_speech(
             // Resume-merge must use the full blocking pipeline — async
             // grammar patch only replaces the last paste via Cmd+Z, which
             // cannot safely rewrite a merged delta mid-countdown.
-            let merge_active = pause::dictation_buffer_text().is_some();
+            //
+            // The merge anchor comes from EITHER the auto-enter dictation
+            // buffer (countdown still pending) OR the dictation session
+            // (recently pasted text in the same app, no auto-enter
+            // required). The session is what fixes choppy long-form
+            // dictation for users without auto-enter: natural pauses no
+            // longer reset every utterance to a fresh capitalized
+            // sentence.
+            let merge_previous = pause::dictation_buffer_text()
+                .or_else(crate::always::dictation::session_text);
+            let merge_active = merge_previous.is_some();
 
             // Short-utterance bypass: tiny inputs like "yes", "ok", "done"
             // get pasted verbatim. Longer utterances: acoustic fix-up is
@@ -472,8 +442,19 @@ fn handle_speech(
                 // the app has non-standard undo (Slack, terminals, web
                 // contenteditable), or focus shifted. One clean paste of the
                 // corrected text is worth the small extra latency.
-                let acoustic = apply_acoustic_corrections(&transformed);
-                let (corrected, cache_hit) = apply_grammar_blocking(&acoustic, cfg, rt);
+                //
+                // The request bundles tier-1 acoustic rewrites, deferred
+                // fuzzy glossary candidates, and dictation-session context
+                // into one LLM message. The speculative warm in `vad.rs`
+                // builds the identical request, so the cache key matches
+                // and the LLM cost is usually already paid.
+                let llm_available = cfg
+                    .post_processor
+                    .as_ref()
+                    .is_some_and(|pp| pp.can_correct());
+                let req =
+                    crate::always::correction_request::build(&transformed, llm_available);
+                let (corrected, cache_hit) = apply_grammar_blocking_request(&req, cfg, rt);
                 (corrected, cache_hit, false)
             };
             let grammar_ms = grammar_started.elapsed().as_millis() as u64;
@@ -520,7 +501,7 @@ fn handle_speech(
             // cleared on Return commit / pause / explicit user cancel,
             // so this can't leak across sessions.
             let (paste_clipboard, buffer_text) = if merge_active {
-                let previous = pause::dictation_buffer_text().unwrap_or_default();
+                let previous = merge_previous.unwrap_or_default();
                 let (joined, delta) =
                     merge_dictation_with(&cfg.localization, &previous, &final_text);
                 tracing::info!(
@@ -562,6 +543,14 @@ fn handle_speech(
                 );
                 event::global_broadcaster().voice_activity_ended();
                 return Ok(());
+            }
+
+            // External transcript stream (IRIS ears): after dedup so a
+            // suppressed double-paste is never double-streamed, but before
+            // the paused / cmd-held drops — the user DID speak, only the
+            // paste is withheld there.
+            if cfg.transcript_stream_enabled {
+                transcript_stream::append(&final_text);
             }
 
             // Focus moved to a paused app (or master/idle pause kicked in)
@@ -749,7 +738,23 @@ fn handle_speech(
             // there's nothing for a correction-diff to anchor on.
             // For merge: store the full joined text so correction tools
             // diff against what's actually on screen.
-            pause::set_last_pasted(buffer_text);
+            pause::set_last_pasted(buffer_text.clone());
+            // Refresh the dictation session with the authoritative
+            // on-screen text. Runs AFTER the auto-enter branch (which may
+            // clear buffers) — replace semantics make the ordering safe.
+            // The next utterance within the session window joins as a
+            // continuation and the grammar LLM sees this as context.
+            //
+            // Fresh pastes use the CLIPBOARD payload (trailing space
+            // included) so the session mirrors what's actually on screen
+            // — merging against a space-stripped buffer would add a
+            // second space on every continuation. Merge pastes use the
+            // joined text, whose spacing already chains correctly.
+            if merge_active {
+                crate::always::dictation::note_pasted(&buffer_text);
+            } else {
+                crate::always::dictation::note_pasted(&written_clipboard);
+            }
             // Explicit voice-activity-ended after a successful paste so the
             // Swift overlay clears cleanly. Without this, the next VAD loop
             // iteration can pick up residual mic energy and fire a new
@@ -794,79 +799,49 @@ fn word_count(text: &str) -> usize {
     text.split_whitespace().count()
 }
 
-/// Stage 1 — acoustic glossary fix-up (Soundex + Levenshtein).
-/// `pub(crate)` so the speculative grammar warm in `vad.rs` can produce
-/// the exact same cache key as the blocking paste path.
-pub(crate) fn apply_acoustic_corrections(text: &str) -> String {
-    let custom_words = crate::glossary::user_glossary_terms();
-    let (acoustic, acoustic_subs) = crate::always::text_match::apply_custom_words(
-        text,
-        &custom_words,
-        crate::always::text_match::DEFAULT_THRESHOLD,
-    );
-    if !acoustic_subs.is_empty() {
-        let pairs: Vec<String> = acoustic_subs
-            .iter()
-            .map(|(w, r)| format!("{w}->{r}"))
-            .collect();
-        tracing::info!(
-            stage = "acoustic_match",
-            before = %text,
-            after = %acoustic,
-            count = acoustic_subs.len(),
-            pairs = %pairs.join(", "),
-            "glossary corrections applied"
-        );
-    } else {
-        tracing::debug!(
-            stage = "acoustic_match",
-            text = %acoustic,
-            "no glossary corrections needed"
-        );
-    }
-    acoustic
-}
-
-/// Stage 2 — blocking LLM grammar cleanup (merge path or grammar disabled).
-/// Returns the corrected text and whether it came from the PostProcessor
-/// cache (true when the speculative grammar warm already paid the LLM cost).
-fn apply_grammar_blocking(text: &str, cfg: &AlwaysConfig, rt: &Handle) -> (String, bool) {
+/// Stage 2 — blocking LLM grammar cleanup over a prepared
+/// [`CorrectionRequest`] (tier-1 acoustic text + deferred glossary
+/// candidates + dictation-session context). Returns the corrected text
+/// and whether it came from the PostProcessor cache (true when the
+/// speculative grammar warm already paid the LLM cost).
+fn apply_grammar_blocking_request(
+    req: &crate::always::correction_request::CorrectionRequest,
+    cfg: &AlwaysConfig,
+    rt: &Handle,
+) -> (String, bool) {
+    let fallback = req.acoustic_text.clone();
     if cfg.postprocess_config.grammar_correction_enabled
         && let Some(ref pp) = cfg.post_processor
     {
         let started = Instant::now();
         // Bound the blocking grammar call: this runs on the main loop
-        // thread (merge path / async-grammar disabled), so a hung cloud
-        // endpoint would otherwise freeze the whole daemon — no new
-        // utterance could be recorded until it returned. On timeout we
-        // fall back to the acoustic `text` exactly like the error arm
-        // below, so behavior on a stalled endpoint matches a failed one.
-        // Returning the fallback string directly (rather than synthesizing
-        // an Err) keeps the result type identical to `pp.process(..)` and
-        // avoids reaching into its concrete error type. `Duration` is
-        // imported at the top of this file.
+        // thread, so a hung cloud endpoint would otherwise freeze the
+        // whole daemon — no new utterance could be recorded until it
+        // returned. On timeout we fall back to the tier-1 acoustic text
+        // exactly like the error arm below, so behavior on a stalled
+        // endpoint matches a failed one.
         const GRAMMAR_BLOCKING_TIMEOUT: Duration = Duration::from_secs(8);
         let timed = rt.block_on(async {
-            tokio::time::timeout(GRAMMAR_BLOCKING_TIMEOUT, pp.process_traced(text, None)).await
+            tokio::time::timeout(GRAMMAR_BLOCKING_TIMEOUT, pp.process_request(req)).await
         });
         let process_result = match timed {
             Ok(inner) => inner,
             Err(_elapsed) => {
                 tracing::warn!(
                     timeout_secs = GRAMMAR_BLOCKING_TIMEOUT.as_secs(),
-                    fallback_text = %text,
+                    fallback_text = %fallback,
                     "grammar correction timed out, using acoustic match result"
                 );
-                return (text.to_string(), false);
+                return (fallback, false);
             }
         };
         match process_result {
             Ok((cleaned, cache_hit)) => {
                 let elapsed_ms = started.elapsed().as_millis() as u64;
-                if text != cleaned {
+                if fallback != cleaned {
                     tracing::info!(
                         stage = "grammar_correction",
-                        before = %text,
+                        before = %fallback,
                         after = %cleaned,
                         elapsed_ms = elapsed_ms,
                         cache_hit,
@@ -886,19 +861,19 @@ fn apply_grammar_blocking(text: &str, cfg: &AlwaysConfig, rt: &Handle) -> (Strin
             Err(err) => {
                 tracing::warn!(
                     error = %err,
-                    fallback_text = %text,
+                    fallback_text = %fallback,
                     "grammar correction failed, using acoustic match result"
                 );
-                (text.to_string(), false)
+                (fallback, false)
             }
         }
     } else {
         tracing::debug!(
             stage = "grammar_correction",
-            text = %text,
+            text = %fallback,
             "grammar correction disabled"
         );
-        (text.to_string(), false)
+        (fallback, false)
     }
 }
 

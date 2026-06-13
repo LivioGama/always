@@ -282,7 +282,7 @@ private struct ModelRow: View {
             // Progress + status — only shown while something is in flight.
             if let progress = manager.downloadProgress[model.id] {
                 downloadStatusBar(progress: progress)
-            } else if manager.verifying.contains(model.id) {
+            } else if manager.verifying.contains(model.id) || model.isVerifying {
                 infoLine(systemImage: "shield.checkered", text: "Verifying checksum…")
             } else if manager.extracting.contains(model.id) {
                 infoLine(systemImage: "shippingbox", text: "Extracting archive…")

@@ -1,4 +1,5 @@
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -33,7 +34,12 @@ static LAST_LOW_MIC_OVERLAY: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(||
 ///
 /// **v6 (2026-05-25):** Low microphone volume warning event.
 /// `LowMicrophoneVolume` notifies GUI when mic energy is barely above threshold.
-pub const PROTOCOL_VERSION: u32 = 8;
+///
+/// **v9 (2026-06-13):** Pause-chord scope feedback. The pause hotkey is
+/// now strictly per-app (master pause moved to its own chord) and the
+/// daemon emits [`DaemonEvent::PauseScopeToggled`] so the GUI can flash
+/// which scope was toggled.
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Event types for daemon-to-GUI communication
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +159,31 @@ pub enum DaemonEvent {
     /// ("Pause globally" vs "Resume globally").
     MasterPauseChanged {
         master_paused: bool,
+    },
+    /// A pause hotkey fired and the daemon resolved it to a concrete
+    /// scope. Lets the GUI flash exactly what was toggled ("Resumed in
+    /// Safari" / "Paused everywhere") so the chord never feels like it
+    /// did something random. `scope` is `"master"` or `"app"`;
+    /// `bundle_id` is set for app scope.
+    PauseScopeToggled {
+        scope: String,
+        bundle_id: Option<String>,
+        paused: bool,
+    },
+    /// Continuous speech crossed the warning threshold — the GUI flashes
+    /// a heads-up that the recording hard-caps at `cap_secs`.
+    LongRecordingWarning {
+        elapsed_secs: u32,
+        cap_secs: u32,
+    },
+    /// A watchdog pause source flipped. `source` is `"mic_conflict"` or
+    /// `"audio_output"`; `detail` names the offending app when known
+    /// ("Zoom"). Lets the UI say WHY it's paused instead of a generic
+    /// badge. Distinct from `MasterPauseChanged`, which is user intent.
+    PauseSourceChanged {
+        source: String,
+        paused: bool,
+        detail: Option<String>,
     },
     /// Snapshot of the resumed-app allowlist (bundle ids whose
     /// `paused` override is set to `false`). Sent on connect and
@@ -459,13 +490,25 @@ impl DaemonCommand {
 #[derive(Clone)]
 pub struct EventBroadcaster {
     tx: broadcast::Sender<DaemonEvent>,
+    /// True while a `VoiceActivityDetected` has been broadcast without a
+    /// matching `VoiceActivityEnded`. Lets every utterance exit path emit
+    /// `voice_activity_ended()` unconditionally — the broadcaster swallows
+    /// the call when nothing is active, so idle `Silence` cycles don't
+    /// flood the UDS clients with redundant terminal events.
+    voice_active: Arc<AtomicBool>,
+    /// Same transition guard for `TranscribingStarted`/`TranscribingStopped`.
+    transcribing_active: Arc<AtomicBool>,
 }
 
 impl EventBroadcaster {
     /// Create a new event broadcaster
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(100);
-        Self { tx }
+        Self {
+            tx,
+            voice_active: Arc::new(AtomicBool::new(false)),
+            transcribing_active: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// Broadcast an event to all subscribers
@@ -498,14 +541,19 @@ impl EventBroadcaster {
         self.send(DaemonEvent::ProcessingStopped);
     }
 
-    /// Send transcribing started event
+    /// Send transcribing started event. Always broadcast (re-emits double
+    /// as a keep-alive heartbeat for the GUI's stale-state watchdog).
     pub fn transcribing_started(&self) {
+        self.transcribing_active.store(true, Ordering::SeqCst);
         self.send(DaemonEvent::TranscribingStarted);
     }
 
-    /// Send transcribing stopped event
+    /// Send transcribing stopped event — only when transcribing was
+    /// announced and not yet stopped (safe to call from any exit path).
     pub fn transcribing_stopped(&self) {
-        self.send(DaemonEvent::TranscribingStopped);
+        if self.transcribing_active.swap(false, Ordering::SeqCst) {
+            self.send(DaemonEvent::TranscribingStopped);
+        }
     }
 
     /// Send partial transcript chunk (speculative / streaming preview)
@@ -555,14 +603,19 @@ impl EventBroadcaster {
         self.send(DaemonEvent::AutoEnterDisabled);
     }
 
-    /// Send voice activity detected event
+    /// Send voice activity detected event. Always broadcast (re-emits
+    /// double as a keep-alive heartbeat for the GUI's stale-state watchdog).
     pub fn voice_activity_detected(&self) {
+        self.voice_active.store(true, Ordering::SeqCst);
         self.send(DaemonEvent::VoiceActivityDetected);
     }
 
-    /// Send voice activity ended event
+    /// Send voice activity ended event — only when voice activity was
+    /// announced and not yet ended (safe to call from any exit path).
     pub fn voice_activity_ended(&self) {
-        self.send(DaemonEvent::VoiceActivityEnded);
+        if self.voice_active.swap(false, Ordering::SeqCst) {
+            self.send(DaemonEvent::VoiceActivityEnded);
+        }
     }
 
     /// Send transcription-filtered event with the human-readable reason.
@@ -678,6 +731,34 @@ impl EventBroadcaster {
         self.send(DaemonEvent::MasterPauseChanged { master_paused });
     }
 
+    /// Announce which scope a pause hotkey just toggled. `bundle_id` is
+    /// `Some` for per-app toggles, `None` for the master switch.
+    pub fn pause_scope_toggled(&self, scope: &str, bundle_id: Option<String>, paused: bool) {
+        self.send(DaemonEvent::PauseScopeToggled {
+            scope: scope.to_string(),
+            bundle_id,
+            paused,
+        });
+    }
+
+    /// One-shot warning that a continuous recording is approaching the
+    /// hard cap (emitted once per utterance by the VAD loop).
+    pub fn long_recording_warning(&self, elapsed_secs: u32, cap_secs: u32) {
+        self.send(DaemonEvent::LongRecordingWarning {
+            elapsed_secs,
+            cap_secs,
+        });
+    }
+
+    /// A watchdog pause source flipped (mic conflict / audio output).
+    pub fn pause_source_changed(&self, source: &str, paused: bool, detail: Option<String>) {
+        self.send(DaemonEvent::PauseSourceChanged {
+            source: source.to_string(),
+            paused,
+            detail,
+        });
+    }
+
     pub fn resumed_apps_changed(&self, bundles: Vec<String>) {
         self.send(DaemonEvent::ResumedAppsChanged { bundles });
     }
@@ -702,4 +783,70 @@ static GLOBAL_BROADCASTER: std::sync::LazyLock<EventBroadcaster> =
 /// Get the global event broadcaster
 pub fn global_broadcaster() -> &'static EventBroadcaster {
     &GLOBAL_BROADCASTER
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn drain(rx: &mut broadcast::Receiver<DaemonEvent>) -> Vec<DaemonEvent> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            out.push(ev);
+        }
+        out
+    }
+
+    #[test]
+    fn voice_activity_ended_is_swallowed_when_nothing_active() {
+        let b = EventBroadcaster::new();
+        let mut rx = b.subscribe();
+        // Idle utterance cycles (Silence results) call ended unconditionally —
+        // nothing must reach the wire.
+        b.voice_activity_ended();
+        b.voice_activity_ended();
+        assert!(drain(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn voice_activity_ended_fires_once_per_detected() {
+        let b = EventBroadcaster::new();
+        let mut rx = b.subscribe();
+        b.voice_activity_detected();
+        b.voice_activity_ended();
+        b.voice_activity_ended(); // duplicate terminal from a second exit path
+        let events = drain(&mut rx);
+        assert!(matches!(events[0], DaemonEvent::VoiceActivityDetected));
+        assert!(matches!(events[1], DaemonEvent::VoiceActivityEnded));
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn voice_activity_detected_reemits_as_heartbeat() {
+        let b = EventBroadcaster::new();
+        let mut rx = b.subscribe();
+        // Lease heartbeat re-emits detected while an utterance is live;
+        // every re-emit must reach the GUI to refresh its watchdog.
+        b.voice_activity_detected();
+        b.voice_activity_detected();
+        b.voice_activity_detected();
+        b.voice_activity_ended();
+        let events = drain(&mut rx);
+        assert_eq!(events.len(), 4);
+        assert!(matches!(events[3], DaemonEvent::VoiceActivityEnded));
+    }
+
+    #[test]
+    fn transcribing_stopped_is_transition_guarded() {
+        let b = EventBroadcaster::new();
+        let mut rx = b.subscribe();
+        b.transcribing_stopped(); // never started — swallowed
+        b.transcribing_started();
+        b.transcribing_stopped();
+        b.transcribing_stopped(); // duplicate — swallowed
+        let events = drain(&mut rx);
+        assert!(matches!(events[0], DaemonEvent::TranscribingStarted));
+        assert!(matches!(events[1], DaemonEvent::TranscribingStopped));
+        assert_eq!(events.len(), 2);
+    }
 }

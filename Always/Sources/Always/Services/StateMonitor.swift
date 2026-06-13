@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Combine
 import os.log
@@ -34,6 +35,10 @@ class StateMonitor: ObservableObject {
     /// `per_app_settings_json` and refreshed whenever the daemon
     /// acknowledges a `SetAppPaused` write.
     @Published var resumedBundleIds: Set<String> = []
+    /// Human-readable reason a watchdog paused listening ("Zoom is
+    /// using the mic", "audio playing"), nil when no watchdog pause is
+    /// active. Drives explanatory copy in the menu/overlay.
+    @Published var pauseReason: String? = nil
 
     private var cancellables = Set<AnyCancellable>()
     private var udsClient: UDSClient
@@ -45,6 +50,31 @@ class StateMonitor: ObservableObject {
     /// overlay flashes for initial-state events that the daemon sends
     /// immediately after every (re)connection (AutoEnterEnabled, etc.).
     private var isInitialSync = false
+
+    /// Stale-overlay watchdog leases. The daemon re-emits
+    /// `VoiceActivityDetected` every ~2s while an utterance is live and
+    /// guarantees a terminal event on every exit path — but a UDS
+    /// reconnect can still swallow the terminal frame. Each lease clears
+    /// its flag if no fresh event arrives within the window, so a lost
+    /// terminal event strands the overlay for at most one lease, never
+    /// forever.
+    private var voiceLeaseWork: DispatchWorkItem?
+    private var transcribingLeaseWork: DispatchWorkItem?
+    /// When the current transcription started. Drives the elapsed-time
+    /// overlay ("Transcribing… 12s") that replaces the bare badge once a
+    /// wait runs long enough to read as a hang.
+    private var transcribingSince: Date?
+    private var transcribingTicker: Timer?
+    /// Show elapsed seconds only after this long — short transcriptions
+    /// keep the clean badge.
+    private let transcribingElapsedThreshold: TimeInterval = 5.0
+    /// 3× the daemon heartbeat cadence — tolerates two dropped beats.
+    private let voiceLeaseSeconds: TimeInterval = 6.0
+    /// The daemon re-emits TranscribingStarted every ~2s while a
+    /// transcription is genuinely in flight (speculation waits and the
+    /// blocking fallback both heartbeat), so 4 missed beats means the
+    /// daemon-side work is gone — clear the badge.
+    private let transcribingLeaseSeconds: TimeInterval = 8.0
 
     /// Diagnostic logger — goes only to `os.Logger`. The previous
     /// implementation also wrote `/tmp/statemonitor.log`; that file
@@ -306,7 +336,12 @@ class StateMonitor: ObservableObject {
         // Activity-only model: the overlay represents something happening
         // (you speaking or the daemon transcribing), not "daemon is alive".
         if isTranscribing {
-            StatusOverlayController.shared.show(state: .transcribing)
+            let elapsed = transcribingSince.map { Date().timeIntervalSince($0) } ?? 0
+            if elapsed >= transcribingElapsedThreshold {
+                StatusOverlayController.shared.show(state: .transcribingElapsed(seconds: Int(elapsed)))
+            } else {
+                StatusOverlayController.shared.show(state: .transcribing)
+            }
         } else if isVoiceActivity {
             StatusOverlayController.shared.show(state: .voiceActivity)
         } else {
@@ -314,8 +349,68 @@ class StateMonitor: ObservableObject {
         }
     }
 
+    /// Start the 1s ticker that re-renders the transcribing overlay with
+    /// elapsed time. Idempotent; stopped by `stopTranscribingTicker`.
+    private func startTranscribingTicker() {
+        if transcribingSince == nil {
+            transcribingSince = Date()
+        }
+        guard transcribingTicker == nil else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.transcribingTicker == nil else { return }
+            self.transcribingTicker = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) {
+                [weak self] _ in
+                guard let self, self.isTranscribing else { return }
+                self.updateOverlay()
+            }
+        }
+    }
+
+    private func stopTranscribingTicker() {
+        transcribingSince = nil
+        DispatchQueue.main.async { [weak self] in
+            self?.transcribingTicker?.invalidate()
+            self?.transcribingTicker = nil
+        }
+    }
+
     private func showOngoingOverlayIfNeeded() {
         updateOverlay()
+    }
+
+    /// (Re)arm the voice-activity lease. Called on every
+    /// `voiceActivityDetected` — the daemon's 2s heartbeat keeps pushing
+    /// the expiry forward while the utterance is genuinely live.
+    private func armVoiceLease() {
+        voiceLeaseWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isVoiceActivity else { return }
+            self.log("voiceActivity lease expired — clearing stale overlay")
+            self.isVoiceActivity = false
+        }
+        voiceLeaseWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + voiceLeaseSeconds, execute: work)
+    }
+
+    private func cancelVoiceLease() {
+        voiceLeaseWork?.cancel()
+        voiceLeaseWork = nil
+    }
+
+    private func armTranscribingLease() {
+        transcribingLeaseWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isTranscribing else { return }
+            self.log("transcribing lease expired — clearing stale overlay")
+            self.isTranscribing = false
+        }
+        transcribingLeaseWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + transcribingLeaseSeconds, execute: work)
+    }
+
+    private func cancelTranscribingLease() {
+        transcribingLeaseWork?.cancel()
+        transcribingLeaseWork = nil
     }
 
     private func setupUDSEventListener() {
@@ -376,11 +471,19 @@ class StateMonitor: ObservableObject {
             isListeningActive = false
             isVoiceActivity = false
         case .transcribingStarted:
-            isTranscribing = true
-            partialTranscript = ""   // reset preview for new utterance
-            StatusOverlayController.shared.show(state: .transcribing)
+            // Re-emitted every ~2s as a keep-alive during long waits, so
+            // only treat the first as the start of a new transcription.
+            if !isTranscribing {
+                isTranscribing = true
+                partialTranscript = ""   // reset preview for new utterance
+                startTranscribingTicker()
+            }
+            armTranscribingLease()
+            updateOverlay()
         case .transcribingStopped:
             isTranscribing = false
+            cancelTranscribingLease()
+            stopTranscribingTicker()
         case .transcriptChunk:
             // Speculative transcription result — update the streaming preview.
             if let text = event.data?["text"], !text.isEmpty {
@@ -394,12 +497,17 @@ class StateMonitor: ObservableObject {
             isTranscribing = false
             isVoiceActivity = false
             partialTranscript = ""
+            cancelVoiceLease()
+            cancelTranscribingLease()
+            stopTranscribingTicker()
         case .voiceActivityDetected:
             isVoiceActivity = true
+            armVoiceLease()
             showOngoingOverlayIfNeeded()
             NSLog("Always: VoiceActivityDetected -> overlay")
         case .voiceActivityEnded:
             isVoiceActivity = false
+            cancelVoiceLease()
             NSLog("Always: VoiceActivityEnded -> hide overlay")
         case .transcriptionFiltered:
             // Transcription was rejected — clear ongoing state and flash
@@ -407,6 +515,8 @@ class StateMonitor: ObservableObject {
             // heard them but suppressed the paste.
             isTranscribing = false
             isVoiceActivity = false
+            cancelVoiceLease()
+            cancelTranscribingLease()
             let reason = event.data?["reason"] ?? ""
             StatusOverlayController.shared.flash(state: .filtered(reason: reason), duration: 1.8)
         case .transcriptionFailed:
@@ -414,6 +524,8 @@ class StateMonitor: ObservableObject {
             // overlay so the user isn't left on a stuck "Processing…".
             isTranscribing = false
             isVoiceActivity = false
+            cancelVoiceLease()
+            cancelTranscribingLease()
             let message = event.data?["message"] ?? "Transcription failed"
             StatusOverlayController.shared.flash(state: .transcriptionFailed(message: message), duration: 3.0)
         case .sttFallbackEngaged:
@@ -516,8 +628,62 @@ class StateMonitor: ObservableObject {
                 resumedBundleIds = Set(bundles)
                 applyLocalEffectivePauseState()
             }
+        case .pauseScopeToggled:
+            // Explicit chord feedback: say exactly what was toggled.
+            // This flash intentionally arrives after (and replaces) the
+            // generic Paused/Resumed flash from the effective-state
+            // events the same chord press may have emitted.
+            guard let info = event.pauseScope else { break }
+            switch info.scope {
+            case "master":
+                StatusOverlayController.shared.flash(
+                    state: .pauseScope(target: "everywhere", paused: info.paused))
+            case "app":
+                let target = appDisplayName(forBundleId: info.bundle_id)
+                StatusOverlayController.shared.flash(
+                    state: .pauseScope(target: target, paused: info.paused))
+            default:
+                StatusOverlayController.shared.flash(state: .pauseScopeNoApp, duration: 2.2)
+            }
+        case .longRecordingWarning:
+            let capMinutes = Int(event.longRecording?.cap_secs ?? 300) / 60
+            StatusOverlayController.shared.flash(
+                state: .longRecording(capMinutes: capMinutes), duration: 3.0)
+        case .pauseSourceChanged:
+            guard let info = event.pauseSource else { break }
+            if info.paused {
+                let reason: String
+                switch info.source {
+                case "mic_conflict":
+                    reason = "\(info.detail ?? "Another app") is using the mic"
+                case "audio_output":
+                    reason = "Audio playing"
+                default:
+                    reason = info.detail ?? "Paused automatically"
+                }
+                pauseReason = reason
+                // Arrives after the generic Paused flash — replaces it
+                // with the explanatory copy.
+                StatusOverlayController.shared.flash(
+                    state: .pausedExternal(reason: reason), duration: 2.5)
+            } else {
+                pauseReason = nil
+            }
         default:
             break
         }
+    }
+
+    /// Resolve a bundle id to a human-readable app name for overlay
+    /// copy ("Resumed · Safari"). Falls back to the bundle id's last
+    /// component when the app isn't running anymore.
+    private func appDisplayName(forBundleId bundleId: String?) -> String {
+        guard let bundleId else { return "app" }
+        if let name = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
+            .first?.localizedName
+        {
+            return name
+        }
+        return bundleId.components(separatedBy: ".").last ?? bundleId
     }
 }

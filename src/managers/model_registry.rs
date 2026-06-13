@@ -79,6 +79,13 @@ pub struct ModelInfo {
     pub supported_languages: Vec<String>,
     pub supports_language_selection: bool,
     pub is_custom: bool,
+    /// True while the startup background pass is still SHA-verifying
+    /// this model's on-disk bytes. `is_downloaded` is provisional
+    /// (existence-based) until this clears; activation always re-checks
+    /// the hash via `model_path`, so a corrupt file can be *listed* but
+    /// never *loaded*.
+    #[serde(default)]
+    pub is_verifying: bool,
 }
 
 /// Streaming download progress payload. Emitted at most ~10 times per
@@ -129,6 +136,10 @@ pub enum ModelEvent {
     ActiveChanged {
         model_id: Option<String>,
     },
+    /// The startup background verification pass finished re-hashing
+    /// on-disk models — `is_downloaded`/`is_verifying` flags are now
+    /// authoritative. The UDS bridge re-pushes the full catalog.
+    DiskStatusRefreshed,
 }
 
 /// RAII cleanup for the `is_downloading` flag + cancel slot. Borrowed
@@ -157,6 +168,16 @@ impl Drop for DownloadCleanup<'_> {
 /// Aliased to keep the `ModelRegistry` field readable and satisfy
 /// `clippy::type_complexity` (the CI gate runs `clippy -D warnings`).
 type VerifyCache = Arc<Mutex<HashMap<(PathBuf, u64, SystemTime), bool>>>;
+
+/// On-disk row of the persisted verify cache (`.verify-cache.json`).
+/// `SystemTime` flattens to unix seconds so the JSON stays portable.
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedVerdict {
+    path: PathBuf,
+    len: u64,
+    mtime_unix_secs: u64,
+    verdict: bool,
+}
 
 /// Registry of all known local STT models. Constructed once at daemon
 /// startup; cloning is cheap (only `Arc`s).
@@ -206,7 +227,30 @@ impl ModelRegistry {
             verify_cache: Arc::new(Mutex::new(HashMap::new())),
         };
 
-        registry.refresh_disk_status()?;
+        // Startup used to block here SHA256-hashing every multi-GB model
+        // (several seconds per gigabyte, on EVERY daemon start because
+        // the verdict cache was memory-only). Now: load the persisted
+        // verdicts, do a hash-free provisional pass so the catalog is
+        // immediately usable, and finish real verification on a
+        // background thread. Activation still hashes via `model_path`,
+        // so nothing unverified can ever be loaded.
+        registry.load_verify_cache();
+        registry.refresh_disk_status_provisional();
+        let background = registry.clone();
+        std::thread::Builder::new()
+            .name("model-verify".into())
+            .spawn(move || {
+                let started = Instant::now();
+                if let Err(e) = background.refresh_disk_status() {
+                    tracing::warn!(error = %e, "model_background_verify_failed");
+                }
+                tracing::info!(
+                    verify_ms = started.elapsed().as_millis() as u64,
+                    "model_background_verify_done"
+                );
+                let _ = background.events_tx.send(ModelEvent::DiskStatusRefreshed);
+            })
+            .context("spawn model-verify thread")?;
         Ok(registry)
     }
 
@@ -295,6 +339,76 @@ impl ModelRegistry {
         self.verified_marker(filename).is_file()
     }
 
+    /// Sidecar file persisting SHA verdicts across daemon restarts.
+    /// Without it the memory-only cache forced a full re-hash of every
+    /// downloaded model on every startup. Keys include size+mtime, so a
+    /// replaced/corrupted file never inherits a stale verdict.
+    fn verify_cache_path(&self) -> PathBuf {
+        self.models_dir.join(".verify-cache.json")
+    }
+
+    /// Best-effort load of persisted verdicts. A corrupt or missing
+    /// cache file is silently discarded — worst case we re-hash.
+    fn load_verify_cache(&self) {
+        let Ok(raw) = fs::read_to_string(self.verify_cache_path()) else {
+            return;
+        };
+        let Ok(entries) = serde_json::from_str::<Vec<PersistedVerdict>>(&raw) else {
+            tracing::warn!("model_verify_cache_corrupt_discarding");
+            return;
+        };
+        let mut cache = self.verify_cache.lock();
+        for e in entries {
+            let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(e.mtime_unix_secs);
+            cache.insert((e.path, e.len, mtime), e.verdict);
+        }
+        tracing::info!(entries = cache.len(), "model_verify_cache_loaded");
+    }
+
+    /// Best-effort atomic persist (tmp + rename). Called after every
+    /// fresh hash so a crash never costs more than one verdict.
+    fn save_verify_cache(&self) {
+        let entries: Vec<PersistedVerdict> = self
+            .verify_cache
+            .lock()
+            .iter()
+            .map(|((path, len, mtime), &verdict)| PersistedVerdict {
+                path: path.clone(),
+                len: *len,
+                mtime_unix_secs: mtime
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                verdict,
+            })
+            .collect();
+        let Ok(json) = serde_json::to_string(&entries) else {
+            return;
+        };
+        let target = self.verify_cache_path();
+        let tmp = target.with_extension("json.tmp");
+        if fs::write(&tmp, json).is_ok() {
+            let _ = fs::rename(&tmp, &target);
+        }
+    }
+
+    /// Cache-only verdict lookup — never hashes. `None` means "unknown,
+    /// a real hash is required".
+    fn bin_cached_verdict(&self, path: &Path, expected: Option<&str>) -> Option<bool> {
+        if expected.is_none() {
+            // Custom model without a catalog hash: existence is trust.
+            return Some(path.is_file());
+        }
+        let meta = path.metadata().ok()?;
+        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let key = (path.to_path_buf(), meta.len(), mtime);
+        let hit = self.verify_cache.lock().get(&key).copied();
+        if hit.is_some() {
+            tracing::debug!(path = %path.display(), "model_verify_cache_hit");
+        }
+        hit
+    }
+
     /// True when a single-file `.bin` at `path` is safe to treat as
     /// downloaded. When `expected` is `Some`, the on-disk bytes must
     /// hash to the catalog SHA256; the verdict is memoized by
@@ -333,6 +447,9 @@ impl ModelRegistry {
             );
         }
         self.verify_cache.lock().insert(key, verdict);
+        // Persist immediately: a fresh hash of a multi-GB file is the
+        // expensive thing this cache exists to avoid repeating.
+        self.save_verify_cache();
         verdict
     }
 
@@ -343,6 +460,20 @@ impl ModelRegistry {
     /// exists with the right kind, the model is treated as downloaded
     /// even when we haven't fetched it ourselves.
     pub fn refresh_disk_status(&self) -> Result<()> {
+        self.refresh_disk_status_inner(true)
+    }
+
+    /// Hash-free variant used at startup: existence + cached verdicts
+    /// only, so the catalog is listable in milliseconds. Models whose
+    /// bytes still need a real hash get `is_verifying = true` and a
+    /// provisional existence-based `is_downloaded`; the background
+    /// `refresh_disk_status` pass settles them and broadcasts
+    /// [`ModelEvent::DiskStatusRefreshed`].
+    fn refresh_disk_status_provisional(&self) {
+        let _ = self.refresh_disk_status_inner(false);
+    }
+
+    fn refresh_disk_status_inner(&self, hash_missing: bool) -> Result<()> {
         let handy = handy_models_dir();
         let mut models = self.available_models.lock();
         for model in models.values_mut() {
@@ -364,6 +495,7 @@ impl ModelRegistry {
             // Integrity gate: a file only counts as "downloaded" once we
             // can vouch for it. We never blindly trust existence alone —
             // see the per-kind rules below.
+            let mut needs_hash = false;
             let downloaded = if model.is_directory {
                 // tar.gz models extract to a directory whose contents the
                 // catalog SHA (over the *archive*) can't re-verify. Trust
@@ -371,26 +503,40 @@ impl ModelRegistry {
                 // sibling `<filename>.verified` file in our own dir. Handy's
                 // extracted dirs live outside our trust boundary and are
                 // deliberately ignored here (the user re-downloads once).
+                // Marker check is cheap — identical in both passes.
                 path_matches_kind(&model_path, true) && self.dir_verified(&model.filename)
             } else {
-                // Single-file `.bin`: re-hash against the catalog SHA
+                // Single-file `.bin`: verify against the catalog SHA
                 // (cached by size+mtime). Own dir wins, then Handy's. A
                 // custom `.bin` (sha256 == None) keeps the legacy
-                // existence-only behavior.
-                let own_ok = path_matches_kind(&model_path, false)
-                    && self.bin_verified(&model_path, model.sha256.as_deref());
+                // existence-only behavior. In the provisional pass an
+                // unknown verdict reports existence and flags the model
+                // as still-verifying instead of hashing inline.
+                let mut bin_status = |path: &Path| -> bool {
+                    if !path_matches_kind(path, false) {
+                        return false;
+                    }
+                    match self.bin_cached_verdict(path, model.sha256.as_deref()) {
+                        Some(verdict) => verdict,
+                        None if hash_missing => {
+                            self.bin_verified(path, model.sha256.as_deref())
+                        }
+                        None => {
+                            needs_hash = true;
+                            true // provisional: file exists, hash pending
+                        }
+                    }
+                };
+                let own_ok = bin_status(&model_path);
                 let handy_ok = !own_ok
                     && handy
                         .as_ref()
-                        .map(|h| {
-                            let candidate = h.join(&model.filename);
-                            path_matches_kind(&candidate, false)
-                                && self.bin_verified(&candidate, model.sha256.as_deref())
-                        })
+                        .map(|h| bin_status(&h.join(&model.filename)))
                         .unwrap_or(false);
                 own_ok || handy_ok
             };
             model.is_downloaded = downloaded;
+            model.is_verifying = needs_hash && !hash_missing;
             model.is_downloading = false;
             model.partial_size = partial_path.metadata().map(|m| m.len()).unwrap_or(0);
         }
@@ -911,6 +1057,7 @@ fn discover_custom_whisper_models(
                 supported_languages: vec![],
                 supports_language_selection: true,
                 is_custom: true,
+                is_verifying: false,
             },
         );
     }
@@ -957,6 +1104,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: whisper_languages.clone(),
             supports_language_selection: true,
             is_custom: false,
+            is_verifying: false,
         },
     );
 
@@ -983,6 +1131,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: whisper_languages.clone(),
             supports_language_selection: true,
             is_custom: false,
+            is_verifying: false,
         },
     );
 
@@ -1009,6 +1158,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: whisper_languages.clone(),
             supports_language_selection: true,
             is_custom: false,
+            is_verifying: false,
         },
     );
 
@@ -1035,6 +1185,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: whisper_languages.clone(),
             supports_language_selection: true,
             is_custom: false,
+            is_verifying: false,
         },
     );
 
@@ -1061,6 +1212,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: vec!["zh".into(), "zh-Hans".into(), "zh-Hant".into(), "en".into()],
             supports_language_selection: true,
             is_custom: false,
+            is_verifying: false,
         },
     );
 
@@ -1092,6 +1244,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: vec!["en".to_string()],
             supports_language_selection: false,
             is_custom: false,
+            is_verifying: false,
         },
     );
 
@@ -1124,6 +1277,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: vec!["en".to_string()],
             supports_language_selection: false,
             is_custom: false,
+            is_verifying: false,
         },
     );
 
@@ -1150,6 +1304,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: vec!["en".into()],
             supports_language_selection: false,
             is_custom: false,
+            is_verifying: false,
         },
     );
     map.insert(
@@ -1175,6 +1330,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: vec!["en".into()],
             supports_language_selection: false,
             is_custom: false,
+            is_verifying: false,
         },
     );
     map.insert(
@@ -1200,6 +1356,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: vec!["en".into()],
             supports_language_selection: false,
             is_custom: false,
+            is_verifying: false,
         },
     );
     map.insert(
@@ -1225,6 +1382,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: vec!["en".into()],
             supports_language_selection: false,
             is_custom: false,
+            is_verifying: false,
         },
     );
 
@@ -1257,6 +1415,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: sense_voice_languages,
             supports_language_selection: true,
             is_custom: false,
+            is_verifying: false,
         },
     );
 
@@ -1283,6 +1442,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: vec!["ru".into()],
             supports_language_selection: false,
             is_custom: false,
+            is_verifying: false,
         },
     );
 
@@ -1314,6 +1474,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: canary_flash_languages,
             supports_language_selection: true,
             is_custom: false,
+            is_verifying: false,
         },
     );
 
@@ -1348,6 +1509,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: canary_1b_languages,
             supports_language_selection: true,
             is_custom: false,
+            is_verifying: false,
         },
     );
 
@@ -1382,6 +1544,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: cohere_languages,
             supports_language_selection: true,
             is_custom: false,
+            is_verifying: false,
         },
     );
 }
@@ -1431,5 +1594,77 @@ mod tests {
                 m.id
             );
         }
+    }
+
+    /// Bare registry pointed at a temp dir — no background thread, no
+    /// catalog — for exercising the verify-cache persistence in isolation.
+    fn bare_registry(dir: &Path) -> ModelRegistry {
+        let (events_tx, _rx) = broadcast::channel(4);
+        ModelRegistry {
+            models_dir: dir.to_path_buf(),
+            available_models: Arc::new(Mutex::new(HashMap::new())),
+            cancel_flags: Arc::new(Mutex::new(HashMap::new())),
+            extracting_models: Arc::new(Mutex::new(HashSet::new())),
+            events_tx,
+            verify_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    #[test]
+    fn verify_cache_round_trips_to_disk() {
+        let dir = std::env::temp_dir().join(format!("always-verify-cache-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let key = (dir.join("ggml-small.bin"), 487_000_123u64, mtime);
+        let registry = bare_registry(&dir);
+        registry.verify_cache.lock().insert(key.clone(), true);
+        registry.save_verify_cache();
+
+        let reloaded = bare_registry(&dir);
+        reloaded.load_verify_cache();
+        assert_eq!(reloaded.verify_cache.lock().get(&key), Some(&true));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_verify_cache_is_discarded_gracefully() {
+        let dir = std::env::temp_dir().join(format!(
+            "always-verify-cache-corrupt-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(".verify-cache.json"), "{not json[").unwrap();
+
+        let registry = bare_registry(&dir);
+        registry.load_verify_cache();
+        assert!(registry.verify_cache.lock().is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_mtime_misses_cache() {
+        let dir = std::env::temp_dir().join(format!("always-verify-stale-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // A real file whose verdict was cached under a DIFFERENT mtime —
+        // the lookup must miss (file changed → re-hash required).
+        let file = dir.join("model.bin");
+        fs::write(&file, b"new bytes").unwrap();
+        let stale_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let registry = bare_registry(&dir);
+        registry
+            .verify_cache
+            .lock()
+            .insert((file.clone(), 9, stale_mtime), true);
+
+        assert_eq!(registry.bin_cached_verdict(&file, Some("deadbeef")), None);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

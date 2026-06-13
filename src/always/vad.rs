@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::always::audio::{self, FRAME_BYTES, FRAME_MS, FRAME_SAMPLES};
 use crate::always::config::AlwaysConfig;
@@ -129,7 +129,13 @@ const SHORT_SPEECH_MS: u32 = 400;
 /// Mid-sentence safety is covered by the higher-level `silence_secs` which
 /// catches longer phrases once the utterance grows beyond `SHORT_SPEECH_MS`.
 const SHORT_SILENCE_MS: u32 = 200;
-const NORMAL_SILENCE_CAP_SECS: f64 = 0.50;
+/// Safety floor only. The configured `silence_secs` is validated once in
+/// config (`SILENCE_SECS_MIN..=SILENCE_SECS_MAX`) and trusted here. The
+/// old `NORMAL_SILENCE_CAP_SECS = 0.50` silently overrode every user
+/// setting above half a second — combined with config's old 0.7 floor it
+/// pinned the window to exactly 0.5s and made mid-speech cutoffs
+/// untunable. Responsiveness is preserved by speculative STT, which
+/// kicks off at 1/3 of the window regardless of its length.
 const NORMAL_SILENCE_FLOOR_SECS: f64 = 0.30;
 /// Lowered 0.70 → 0.60 for a snappier overlay: the user perceived the
 /// activity-only overlay as slow to appear. Misfires are cheap — the
@@ -137,6 +143,25 @@ const NORMAL_SILENCE_FLOOR_SECS: f64 = 0.30;
 /// back before any transcription work starts.
 const EARLY_VOICE_ENERGY_RATIO: f64 = 0.60;
 const EARLY_VOICE_FALSE_START_MS: u32 = 150;
+/// Consecutive qualifying frames required before the early-voice
+/// announcement fires. A single 30ms frame was enough before, and
+/// keyboard clacks / door thumps / mouse clicks are near-always exactly
+/// one frame of combined energy+Silero spike — they tripped the overlay
+/// on noise that never became speech. Real speech onset sustains both
+/// gates across frames, so requiring 2 (60ms total) kills transient
+/// false positives at an imperceptible latency cost.
+const EARLY_VOICE_MIN_FRAMES: usize = 2;
+/// Keep-alive cadence for `VoiceActivityDetected` re-emits while an
+/// utterance is live. The GUI arms a stale-overlay watchdog (6s lease)
+/// on every detected event; the heartbeat keeps the lease fresh during
+/// long utterances so a lost terminal event can never strand the
+/// "Listening" overlay for more than one lease window.
+const VOICE_HEARTBEAT_MS: u64 = 2000;
+/// One-shot overlay warning when continuous speech reaches this many
+/// seconds, so the 5-minute hard cap never surprises anyone mid-thought.
+const LONG_RECORDING_WARN_SECS: u32 = 60;
+/// Continuous-speech hard cap (mirrors `max_speech_frames` below).
+const MAX_SPEECH_SECS: u32 = 300;
 
 fn record_with_local_vad(
     cfg: &AlwaysConfig,
@@ -154,7 +179,7 @@ fn record_with_local_vad(
     //   (the original 30s cap was mid-sentence-cutting users who gave
     //   long prompts — observed split at the 28s mark).
     let max_pre_voice_frames = (cfg.timeout_secs as usize * 1000) / FRAME_MS as usize;
-    let max_speech_frames = (300_usize * 1000) / FRAME_MS as usize;
+    let max_speech_frames = (MAX_SPEECH_SECS as usize * 1000) / FRAME_MS as usize;
     let min_speech_frames = (cfg.onset_ms / FRAME_MS).max(1) as usize;
     let voice_activity_energy_threshold = voice_activity_energy_threshold(cfg);
     let early_voice_energy_threshold =
@@ -225,6 +250,9 @@ fn record_with_local_vad(
     let mut voice_logged = false;
     let mut voice_activity_announced = false;
     let mut voice_activity_announced_at: Option<std::time::Instant> = None;
+    let mut last_voice_heartbeat: Option<std::time::Instant> = None;
+    let mut early_voice_streak = 0usize;
+    let mut long_recording_warned = false;
     let mut total_frames = 0usize;
     let mut pre_buffer: VecDeque<Vec<i16>> = VecDeque::with_capacity(pre_buffer_frames);
 
@@ -269,6 +297,10 @@ fn record_with_local_vad(
             if !voice_activity_announced {
                 voice_activity_announced = true;
                 voice_activity_announced_at = Some(std::time::Instant::now());
+                #[allow(unused_assignments)]
+                {
+                    last_voice_heartbeat = Some(std::time::Instant::now());
+                }
                 event::global_broadcaster().voice_activity_detected();
             }
         }};
@@ -412,16 +444,38 @@ fn record_with_local_vad(
                 || (last_prob >= speech_threshold * 0.65
                     && frame_energy >= cfg.energy_threshold * 1.1)
         };
-        // Silero factor lowered 0.55 → 0.45 together with
-        // EARLY_VOICE_ENERGY_RATIO above — both gates must pass, so each
-        // alone stays conservative enough; retraction covers the rest.
-        let credible_early_voice = !in_speech
-            && !voice_activity_announced
-            && frame_energy >= early_voice_energy_threshold
-            && last_prob >= speech_threshold * 0.45;
-        if credible_early_voice {
-            announce_voice_activity!();
-            tentative_voice_silence = 0;
+        // Early-voice announce: a per-frame gate plus a short streak.
+        // The gate ratios (0.60 energy / 0.45 Silero) are deliberately
+        // loose for snappiness; the streak is the transient
+        // discriminator (see EARLY_VOICE_MIN_FRAMES) and the 150ms
+        // retraction below covers anything that still slips through.
+        if !in_speech && !voice_activity_announced {
+            if early_voice_frame_ok(
+                frame_energy,
+                last_prob,
+                early_voice_energy_threshold,
+                speech_threshold,
+            ) {
+                early_voice_streak += 1;
+            } else {
+                early_voice_streak = 0;
+            }
+            if early_voice_streak >= EARLY_VOICE_MIN_FRAMES {
+                announce_voice_activity!();
+                tentative_voice_silence = 0;
+                early_voice_streak = 0;
+            }
+        }
+
+        // Lease heartbeat: re-emit VoiceActivityDetected every 2s while
+        // the announcement is live so the GUI watchdog never expires
+        // mid-utterance (see VOICE_HEARTBEAT_MS).
+        if voice_activity_announced
+            && last_voice_heartbeat
+                .is_some_and(|t| t.elapsed() >= std::time::Duration::from_millis(VOICE_HEARTBEAT_MS))
+        {
+            last_voice_heartbeat = Some(std::time::Instant::now());
+            event::global_broadcaster().voice_activity_detected();
         }
 
         if is_speech {
@@ -615,10 +669,16 @@ fn record_with_local_vad(
                         && !crate::always::event_loop::is_short_utterance(&text)
                         && let Some(pp) = grammar_warm
                     {
-                        let acoustic =
-                            crate::always::event_loop::apply_acoustic_corrections(&text);
+                        // Build through the SAME request builder as the
+                        // paste path — identical tiering, candidates, and
+                        // session context mean an identical cache key, so
+                        // the paste path's grammar call is a cache hit.
+                        let req = crate::always::correction_request::build(
+                            &text,
+                            pp.can_correct(),
+                        );
                         rt_for_warm.spawn(async move {
-                            let _ = pp.process(&acoustic, None).await;
+                            let _ = pp.process_request(&req).await;
                         });
                     }
                 });
@@ -652,6 +712,15 @@ fn record_with_local_vad(
         }
 
         total_frames += 1;
+        // One-shot heads-up well before the hard cap cuts the recording.
+        if in_speech && !long_recording_warned {
+            let speech_secs = (speech_samples.len() / 16_000) as u32;
+            if speech_secs >= LONG_RECORDING_WARN_SECS {
+                long_recording_warned = true;
+                tracing::info!(speech_secs, cap_secs = MAX_SPEECH_SECS, "long_recording_warning");
+                event::global_broadcaster().long_recording_warning(speech_secs, MAX_SPEECH_SECS);
+            }
+        }
         // Two-tier timeout: pre-voice frames get the short cap so a
         // dead recorder bails fast; in-speech frames get the long cap
         // so a user mid-monologue doesn't get sliced in half.
@@ -713,13 +782,20 @@ fn record_with_local_vad(
     flip_to_transcribing!();
 
     // Try to use the speculative transcription if it was kicked off and
-    // wasn't invalidated by a speech resume. Wait briefly if it's still in
-    // flight — it has been running for up to (silence_secs - tentative) seconds
-    // already, so it's likely complete or close to it.
+    // wasn't invalidated by a speech resume. Wait if it's still in
+    // flight — it has been running for up to (silence_secs - tentative)
+    // seconds already, so it's likely complete or close to it. The wait
+    // cap scales with utterance length: a flat 10s meant a 2-minute
+    // monologue routinely timed out, threw the near-done speculative
+    // result away, and re-transcribed the ENTIRE audio from scratch —
+    // doubling the worst wait exactly when it was already longest.
     let speculation = if speculation_pending {
         let started_wait = std::time::Instant::now();
-        let max_wait = std::time::Duration::from_secs(10);
+        let audio_secs = speech_samples.len() as f64 / 16_000.0;
+        let max_wait =
+            std::time::Duration::from_secs_f64((audio_secs * 0.5).clamp(10.0, 60.0));
         let mut taken: Option<Result<crate::stt::TranscriptionResult>> = None;
+        let mut last_heartbeat = std::time::Instant::now();
         loop {
             if let Some(r) = speculation_slot.take() {
                 taken = Some(r);
@@ -727,6 +803,12 @@ fn record_with_local_vad(
             }
             if started_wait.elapsed() >= max_wait {
                 break;
+            }
+            // Keep the GUI's transcribing lease fresh during long waits
+            // (TranscribingStarted re-emits double as the heartbeat).
+            if last_heartbeat.elapsed() >= std::time::Duration::from_secs(2) {
+                last_heartbeat = std::time::Instant::now();
+                event::global_broadcaster().transcribing_started();
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -750,7 +832,26 @@ fn record_with_local_vad(
                     return Err(err).context("failed to create WAV data in memory");
                 }
             };
-            match transcriber.transcribe_from_bytes(wav_data) {
+            // The blocking transcription below can run tens of seconds
+            // for long audio — heartbeat from a helper thread so the
+            // GUI's transcribing lease can't expire mid-call.
+            let heartbeat_stop = Arc::new(AtomicBool::new(false));
+            let heartbeat_handle = {
+                let stop = Arc::clone(&heartbeat_stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        event::global_broadcaster().transcribing_started();
+                    }
+                })
+            };
+            let transcribed = transcriber.transcribe_from_bytes(wav_data);
+            heartbeat_stop.store(true, Ordering::Relaxed);
+            let _ = heartbeat_handle.join();
+            match transcribed {
                 Ok(result) => {
                     event::global_broadcaster().transcribing_stopped();
                     (result, false)
@@ -859,10 +960,22 @@ fn voice_activity_energy_threshold(cfg: &AlwaysConfig) -> f64 {
     cfg.hear_energy_threshold.max(cfg.energy_threshold)
 }
 
+/// Per-frame early-voice gate: both raw energy and Silero probability
+/// must clear their (deliberately loose) early thresholds. Pure so the
+/// streak behavior is unit-testable with synthetic frame sequences.
+fn early_voice_frame_ok(
+    frame_energy: f64,
+    silero_prob: f32,
+    early_voice_energy_threshold: f64,
+    speech_threshold: f32,
+) -> bool {
+    frame_energy >= early_voice_energy_threshold && silero_prob >= speech_threshold * 0.45
+}
+
 fn normal_silence_frames(cfg: &AlwaysConfig) -> usize {
     let secs = cfg
         .silence_secs
-        .clamp(NORMAL_SILENCE_FLOOR_SECS, NORMAL_SILENCE_CAP_SECS);
+        .clamp(NORMAL_SILENCE_FLOOR_SECS, crate::always::config::SILENCE_SECS_MAX);
     ((secs * 1000.0) / FRAME_MS as f64).ceil() as usize
 }
 
@@ -873,8 +986,8 @@ fn tentative_silence_frames(final_silence_frames: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        fast_energy_check, fast_normalized_energy, normal_silence_frames, normalized_energy,
-        tentative_silence_frames, voice_activity_energy_threshold,
+        early_voice_frame_ok, fast_energy_check, fast_normalized_energy, normal_silence_frames,
+        normalized_energy, tentative_silence_frames, voice_activity_energy_threshold,
     };
     use crate::always::AlwaysConfig;
 
@@ -938,29 +1051,97 @@ mod tests {
     }
 
     #[test]
-    fn normal_silence_window_is_capped_for_responsive_finalize() {
+    fn normal_silence_window_honors_configured_value() {
+        // 0.6s default → 20 frames; the old internal 0.5s cap would
+        // have produced 17 and silently shortened every utterance tail.
+        let cfg = AlwaysConfig {
+            silence_secs: 0.6,
+            ..Default::default()
+        };
+        assert_eq!(normal_silence_frames(&cfg), 20);
+
+        // User-raised window passes through (0.8s → 27 frames).
+        let cfg = AlwaysConfig {
+            silence_secs: 0.8,
+            ..Default::default()
+        };
+        assert_eq!(normal_silence_frames(&cfg), 27);
+
+        // 2.0s → 67 frames, no cap.
         let cfg = AlwaysConfig {
             silence_secs: 2.0,
             ..Default::default()
         };
-        assert_eq!(normal_silence_frames(&cfg), 17);
+        assert_eq!(normal_silence_frames(&cfg), 67);
 
+        // Hard floor still protects against degenerate configs.
         let cfg = AlwaysConfig {
             silence_secs: 0.1,
             ..Default::default()
         };
         assert_eq!(normal_silence_frames(&cfg), 10);
-
-        let cfg = AlwaysConfig {
-            silence_secs: 0.45,
-            ..Default::default()
-        };
-        assert_eq!(normal_silence_frames(&cfg), 15);
     }
 
     #[test]
     fn tentative_silence_starts_before_final_cutoff() {
         assert_eq!(tentative_silence_frames(17), 5);
         assert_eq!(tentative_silence_frames(1), 1);
+    }
+
+    /// Mirror of the in-loop streak logic so synthetic frame sequences
+    /// can prove transient rejection without a live audio pipeline.
+    fn announce_after(frames: &[(f64, f32)]) -> bool {
+        let early_energy_threshold = 0.0072; // 0.60 × 0.012 default
+        let speech_threshold = 0.5f32;
+        let mut streak = 0usize;
+        for &(energy, prob) in frames {
+            if early_voice_frame_ok(energy, prob, early_energy_threshold, speech_threshold) {
+                streak += 1;
+            } else {
+                streak = 0;
+            }
+            if streak >= super::EARLY_VOICE_MIN_FRAMES {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn early_voice_gate_requires_both_signals() {
+        // Energy alone (keyboard clack): Silero stays low → no.
+        assert!(!early_voice_frame_ok(0.05, 0.10, 0.0072, 0.5));
+        // Silero alone (distant TV murmur under the energy floor) → no.
+        assert!(!early_voice_frame_ok(0.001, 0.60, 0.0072, 0.5));
+        // Both → yes.
+        assert!(early_voice_frame_ok(0.02, 0.40, 0.0072, 0.5));
+    }
+
+    #[test]
+    fn single_frame_transient_does_not_announce() {
+        // One loud frame (clap / key press) surrounded by silence.
+        assert!(!announce_after(&[
+            (0.0001, 0.01),
+            (0.05, 0.30), // the transient — passes both gates for 1 frame
+            (0.0001, 0.02),
+            (0.0001, 0.01),
+        ]));
+    }
+
+    #[test]
+    fn interrupted_streak_resets() {
+        // Two qualifying frames separated by a silent frame must not
+        // accumulate across the gap.
+        assert!(!announce_after(&[
+            (0.05, 0.30),
+            (0.0001, 0.01),
+            (0.05, 0.30),
+            (0.0001, 0.01),
+        ]));
+    }
+
+    #[test]
+    fn sustained_speech_onset_announces() {
+        assert!(announce_after(&[(0.0001, 0.01), (0.03, 0.35), (0.04, 0.55)]));
     }
 }

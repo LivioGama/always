@@ -241,6 +241,10 @@ pub struct AlwaysConfig {
     /// to [`Localization::ENGLISH`]; overridable so non-English users
     /// get correct merge-time casing without code changes.
     pub localization: Localization,
+    /// Append accepted utterances to `~/.always/transcripts.jsonl` for
+    /// external consumers (e.g. IRIS tailing the file). Opt-in: persisted
+    /// transcripts are privacy-relevant, so this defaults to off.
+    pub transcript_stream_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -428,6 +432,7 @@ impl AlwaysConfig {
             // users can override at the call site (or via a future
             // CLI/preference) without touching the merge logic.
             localization: Localization::ENGLISH,
+            transcript_stream_enabled: resolve_transcript_stream(&prefs),
         };
 
         Ok(config)
@@ -468,7 +473,49 @@ impl Default for AlwaysConfig {
             idle_pause_secs: DEFAULT_IDLE_PAUSE_SECS,
             idle_pause_action: IdlePauseAction::default(),
             localization: Localization::ENGLISH,
+            transcript_stream_enabled: false,
         }
+    }
+}
+
+/// Resolve the transcript-stream opt-in. Order: DB pref →
+/// `ALWAYS_TRANSCRIPT_STREAM` env var → default off.
+fn resolve_transcript_stream(prefs: &Preferences) -> bool {
+    if let Some(saved) = prefs.transcript_stream {
+        return saved;
+    }
+    std::env::var("ALWAYS_TRANSCRIPT_STREAM")
+        .ok()
+        .and_then(|s| match s.to_lowercase().as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod transcript_stream_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn saved_preference_wins() {
+        let prefs = Preferences {
+            transcript_stream: Some(true),
+            ..Default::default()
+        };
+        assert!(resolve_transcript_stream(&prefs));
+
+        let prefs = Preferences {
+            transcript_stream: Some(false),
+            ..Default::default()
+        };
+        assert!(!resolve_transcript_stream(&prefs));
+    }
+
+    #[test]
+    fn defaults_off_when_unset() {
+        assert!(!resolve_transcript_stream(&Preferences::default()));
     }
 }
 
@@ -605,11 +652,19 @@ fn resolve_transcriber_backend(prefs: &Preferences) -> TranscriberBackendChoice 
     TranscriberBackendChoice::default()
 }
 
+/// Single source of truth for the silence-window range. The VAD trusts
+/// the configured value as-is (no second clamp): a config floor of 0.7
+/// combined with the VAD's old internal 0.5s cap meant the window was
+/// pinned to exactly 0.5s and the user's setting was silently dead —
+/// the direct cause of "it cuts me off mid-sentence and I can't fix it".
+pub const SILENCE_SECS_MIN: f64 = 0.3;
+pub const SILENCE_SECS_MAX: f64 = 15.0;
+
 fn resolve_silence_secs(cli_silence_secs: Option<f64>, prefs: &Preferences) -> f64 {
     cli_silence_secs
         .or(prefs.stt_silence)
         .unwrap_or(DEFAULT_SILENCE_SECS)
-        .clamp(0.7, 15.0)
+        .clamp(SILENCE_SECS_MIN, SILENCE_SECS_MAX)
 }
 
 #[cfg(test)]
@@ -637,11 +692,17 @@ mod tests {
     }
 
     #[test]
-    fn silence_default_and_lower_bound_are_seven_hundred_ms() {
+    fn silence_default_is_honored_and_floor_is_three_hundred_ms() {
         let prefs = Preferences::default();
 
-        assert_eq!(resolve_silence_secs(None, &prefs), 0.7);
-        assert_eq!(resolve_silence_secs(Some(0.2), &prefs), 0.7);
+        // The default must survive resolution unchanged — the old 0.7
+        // floor silently rewrote it, and the VAD's old 0.5 cap then
+        // rewrote it again. One range, applied once, here.
+        assert_eq!(resolve_silence_secs(None, &prefs), DEFAULT_SILENCE_SECS);
+        assert_eq!(resolve_silence_secs(Some(0.2), &prefs), SILENCE_SECS_MIN);
+        assert_eq!(resolve_silence_secs(Some(20.0), &prefs), SILENCE_SECS_MAX);
+        // User-configured values in range pass through untouched.
+        assert_eq!(resolve_silence_secs(Some(0.8), &prefs), 0.8);
     }
 }
 

@@ -122,11 +122,29 @@ enum OverlayState: Equatable, Hashable {
     case transcriptionFailed(message: String)
     /// Groq unreachable — daemon degraded to the named local model.
     case sttFallback(model: String)
+    /// A pause hotkey resolved to a concrete scope — flash exactly what
+    /// was toggled so the chord never feels like it did something random.
+    /// `target` is "everywhere" for master scope or the app's display
+    /// name for app scope.
+    case pauseScope(target: String, paused: Bool)
+    /// Per-app pause chord fired with nothing to toggle (no real app
+    /// focused, or Always itself frontmost).
+    case pauseScopeNoApp
+    /// Continuous recording crossed the warning threshold; shows when
+    /// the hard cap will cut it.
+    case longRecording(capMinutes: Int)
+    /// Transcription has been running for a while — same persistent HUD
+    /// as `.transcribing` but with the elapsed time so a long wait
+    /// reads as progress, not a hang.
+    case transcribingElapsed(seconds: Int)
+    /// A watchdog paused listening — explains WHY ("Zoom is using the
+    /// mic") instead of the generic Paused badge.
+    case pausedExternal(reason: String)
 
     /// Persistent HUD states that should appear instantly (no fade-in).
     var isInstantShow: Bool {
         switch self {
-        case .voiceActivity, .transcribing, .autoEnterCountdown:
+        case .voiceActivity, .transcribing, .transcribingElapsed, .autoEnterCountdown:
             return true
         default:
             return false
@@ -151,6 +169,12 @@ enum OverlayState: Equatable, Hashable {
         case .grammarCorrected: return "✓ Grammar corrected"
         case .transcriptionFailed(let message): return message.isEmpty ? "Transcription failed" : message
         case .sttFallback(let model): return "Offline · using \(model)"
+        case .pauseScope(let target, let paused):
+            return paused ? "Paused · \(target)" : "Resumed · \(target)"
+        case .pauseScopeNoApp: return "No app focused · ⌃⌥⇧P pauses everywhere"
+        case .longRecording(let capMinutes): return "Long recording · cuts at \(capMinutes):00"
+        case .transcribingElapsed(let s): return "Transcribing… \(s)s"
+        case .pausedExternal(let reason): return "Paused · \(reason)"
         }
     }
 
@@ -172,6 +196,11 @@ enum OverlayState: Equatable, Hashable {
         case .grammarCorrected: return "sparkles"
         case .transcriptionFailed: return "exclamationmark.triangle.fill"
         case .sttFallback: return "wifi.slash"
+        case .pauseScope(_, let paused): return paused ? "pause.fill" : "play.fill"
+        case .pauseScopeNoApp: return "questionmark.circle"
+        case .longRecording: return "timer"
+        case .transcribingElapsed: return "waveform.circle.fill"
+        case .pausedExternal: return "pause.circle.fill"
         }
     }
 
@@ -193,6 +222,11 @@ enum OverlayState: Equatable, Hashable {
         case .grammarCorrected: return .systemTeal
         case .transcriptionFailed: return .systemRed
         case .sttFallback: return .systemOrange
+        case .pauseScope(_, let paused): return paused ? .systemOrange : .systemTeal
+        case .pauseScopeNoApp: return .systemGray
+        case .longRecording: return .systemYellow
+        case .transcribingElapsed: return .systemPurple
+        case .pausedExternal: return .systemOrange
         }
     }
 }

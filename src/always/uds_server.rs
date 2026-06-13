@@ -286,6 +286,14 @@ fn spawn_registry_event_bridge(registry: ModelRegistry) {
                             };
                             DaemonEvent::ActiveTranscriberChanged { backend }
                         }
+                        ModelEvent::DiskStatusRefreshed => {
+                            // Background verification settled the
+                            // provisional flags — push the authoritative
+                            // catalog so the Models tab drops its spinners.
+                            DaemonEvent::ModelsList {
+                                models: registry.list(),
+                            }
+                        }
                     };
                     global_broadcaster().send(daemon_ev);
                 }
@@ -588,27 +596,22 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
             tracing::info!(bundle = ?bundle_id, effective, "uds_focused_app_changed");
         }
         DaemonCommand::NotifySystemAudioState { playing } => {
-            // Audio output started → master-pause everything (force
-            // overrides). Audio output stopped → clear master if we
-            // weren't in idle-pause, then let per-app rules decide.
+            // Audio output started/stopped → flip the audio-output pause
+            // SOURCE only. This used to stomp MASTER pause, which meant
+            // a pause the user set manually was silently cleared the
+            // moment their music stopped — MASTER is user intent now.
             if playing {
-                let was_master = pause::is_master_paused();
-                let (effective, changed) = pause::set_paused(true);
-                if !was_master {
-                    global_broadcaster().master_pause_changed(true);
-                }
+                let (effective, changed) = pause::set_audio_output_paused(true);
+                global_broadcaster().pause_source_changed("audio_output", true, None);
                 if changed {
                     pause::dictation_buffer_clear();
                     global_broadcaster().paused();
                     tracing::info!(effective, "audio_output_auto_paused");
                 }
             } else if !pause::is_idle_auto_paused() {
-                let was_master = pause::is_master_paused();
-                let (effective, changed) = pause::set_paused(false);
+                let (effective, changed) = pause::set_audio_output_paused(false);
                 pause::mark_voice_seen();
-                if was_master {
-                    global_broadcaster().master_pause_changed(false);
-                }
+                global_broadcaster().pause_source_changed("audio_output", false, None);
                 if changed {
                     if effective {
                         global_broadcaster().paused();
@@ -617,6 +620,10 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
                     }
                     tracing::info!(effective, "audio_output_auto_resumed");
                 }
+            } else {
+                // Idle-paused: drop the audio source flag quietly so it
+                // can't strand a pause after idle resume.
+                let _ = pause::set_audio_output_paused(false);
             }
         }
         DaemonCommand::SetAppPaused { bundle_id, paused } => {

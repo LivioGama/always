@@ -77,6 +77,37 @@ pub fn user_glossary_terms() -> Vec<String> {
     collect_user_glossary_terms(entries())
 }
 
+/// Same curation rules as [`user_glossary_terms`] but carrying each
+/// term's learned mistranscriptions, for the two-tier acoustic matcher
+/// (exact wrong-form hits rewrite deterministically; fuzzy hits defer
+/// to the grammar LLM).
+pub fn glossary_match_entries() -> Vec<crate::always::text_match::GlossaryMatchEntry> {
+    collect_glossary_match_entries(entries())
+}
+
+fn collect_glossary_match_entries(
+    entries: &[Entry],
+) -> Vec<crate::always::text_match::GlossaryMatchEntry> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for e in entries {
+        let term = e.term.trim();
+        if term.is_empty() {
+            continue;
+        }
+        if e.mistranscriptions.is_empty() && e.weight <= default_weight() {
+            continue;
+        }
+        if seen.insert(term.to_lowercase()) {
+            out.push(crate::always::text_match::GlossaryMatchEntry {
+                term: term.to_string(),
+                mistranscriptions: e.mistranscriptions.clone(),
+            });
+        }
+    }
+    out
+}
+
 fn collect_user_glossary_terms(entries: &[Entry]) -> Vec<String> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -191,6 +222,26 @@ canonical term unless the transcript contains one of its listed wrong forms.\n\n
         }
         out.push('\n');
     }
+
+    out.push_str(
+        "# Continuation context\n\n\
+The user message MAY include `<context_before>...</context_before>` — text the user already \
+dictated into the same document immediately before this transcript. When present, the \
+transcript is a CONTINUATION of that text:\n\
+- Choose capitalization and leading punctuation so the transcript flows naturally from the \
+  context: lowercase the first word when it continues an unfinished sentence; capitalize \
+  when the context ended with sentence-final punctuation.\n\
+- Prefer joining fragments into flowing written prose — a transcript that continues an \
+  unfinished sentence must NOT be turned into a new standalone sentence.\n\
+- NEVER repeat or output any text from context_before. Output ONLY the cleaned transcript.\n\n\
+# Glossary candidates\n\n\
+The user message MAY include `<glossary_candidates>` lines of the form `heard → Canonical`. \
+Each is a POSSIBLE mistranscription of the canonical term (a product, tool, or name the \
+user cares about). Replace `heard` with the canonical form ONLY when the sentence context \
+clearly refers to that product/tool/name. When the literal word makes sense in the \
+sentence, KEEP it: \"deploy this to the cloud\" stays \"cloud\", but \"ask cloud to fix \
+the bug\" becomes \"ask Claude to fix the bug\" when the candidate is `cloud → Claude`.\n\n",
+    );
 
     out.push_str(
         "# Rules\n\n\

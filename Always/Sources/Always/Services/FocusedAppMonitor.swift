@@ -67,8 +67,8 @@ final class FocusedAppMonitor: ObservableObject {
     /// dead until the user Cmd+Tab'd away and back.
     func resyncCurrentAppToDaemon() {
         let front = NSWorkspace.shared.frontmostApplication
-        let bundle: String?
-        let name: String?
+        var bundle: String?
+        var name: String?
         if front?.bundleIdentifier == Self.ownBundleId {
             // Settings is frontmost — keep reporting the last real app
             // so the allowlist still applies to the workspace the user
@@ -78,6 +78,18 @@ final class FocusedAppMonitor: ObservableObject {
         } else {
             bundle = front?.bundleIdentifier
             name = front?.localizedName
+        }
+        if bundle == nil {
+            // Fresh launch with Always frontmost and no focus history:
+            // without a fallback the daemon keeps current_app == nil and
+            // the per-app pause chord has nothing to toggle until the
+            // user Cmd-Tabs away and back. The menu-bar-owning app is
+            // the best available proxy for "the user's workspace app".
+            let owner = NSWorkspace.shared.menuBarOwningApplication
+            if let ownerBundle = owner?.bundleIdentifier, ownerBundle != Self.ownBundleId {
+                bundle = ownerBundle
+                name = owner?.localizedName
+            }
         }
         guard let bundle else {
             logger.debug("resync skipped — no real app to report")

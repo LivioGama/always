@@ -180,8 +180,10 @@ impl Combo {
 }
 
 #[allow(dead_code)] // referenced only in tests + macos listener
-fn default_shortcuts() -> (Combo, Combo, Combo, Combo, Combo) {
+fn default_shortcuts() -> (Combo, Combo, Combo, Combo, Combo, Combo) {
     (
+        // ⌃⌥P is strictly per-app: toggle the focused app's place on
+        // the resumed allowlist. Global pause lives on ⌃⌥⇧P below.
         Combo::from_str("ctrl+alt+p").expect("default pause shortcut is valid"),
         Combo::from_str("ctrl+alt+a").expect("default auto-enter shortcut is valid"),
         Combo::from_str("ctrl+alt+v").expect("default force-paste shortcut is valid"),
@@ -192,23 +194,28 @@ fn default_shortcuts() -> (Combo, Combo, Combo, Combo, Combo) {
         // ⌃⌥W opens the dialog-driven correction path: type the
         // intended spelling, daemon diffs against the last transcript.
         Combo::from_str("ctrl+alt+w").expect("default correction-dialog shortcut is valid"),
+        // ⌃⌥⇧P flips the master (global) pause switch.
+        Combo::from_str("ctrl+alt+shift+p").expect("default master-pause shortcut is valid"),
     )
 }
 
 #[cfg(feature = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn resolve_shortcuts(
     pause: Option<&str>,
     auto_enter: Option<&str>,
     force_paste: Option<&str>,
     log_correction: Option<&str>,
     correction_dialog: Option<&str>,
-) -> (Combo, Combo, Combo, Combo, Combo) {
+    master_pause: Option<&str>,
+) -> (Combo, Combo, Combo, Combo, Combo, Combo) {
     let (
         default_pause,
         default_auto_enter,
         default_force_paste,
         default_log_correction,
         default_correction_dialog,
+        default_master_pause,
     ) = default_shortcuts();
     let pause_combo = pause.and_then(Combo::from_str).unwrap_or(default_pause);
     let auto_enter_combo = auto_enter
@@ -223,6 +230,9 @@ fn resolve_shortcuts(
     let correction_dialog_combo = correction_dialog
         .and_then(Combo::from_str)
         .unwrap_or(default_correction_dialog);
+    let master_pause_combo = master_pause
+        .and_then(Combo::from_str)
+        .unwrap_or(default_master_pause);
 
     (
         pause_combo,
@@ -230,11 +240,12 @@ fn resolve_shortcuts(
         force_paste_combo,
         log_correction_combo,
         correction_dialog_combo,
+        master_pause_combo,
     )
 }
 
 #[cfg(feature = "macos")]
-fn load_shortcuts() -> (Combo, Combo, Combo, Combo, Combo) {
+fn load_shortcuts() -> (Combo, Combo, Combo, Combo, Combo, Combo) {
     let defaults = default_shortcuts();
 
     let Ok(conn) = crate::db::open() else {
@@ -250,6 +261,7 @@ fn load_shortcuts() -> (Combo, Combo, Combo, Combo, Combo) {
         prefs.shortcut_force_paste.as_deref(),
         prefs.shortcut_log_correction.as_deref(),
         prefs.shortcut_correction_dialog.as_deref(),
+        prefs.shortcut_master_pause.as_deref(),
     )
 }
 
@@ -291,6 +303,32 @@ fn key_to_shortcut_name(key: &rdev::Key) -> Option<&'static str> {
     }
 }
 
+/// Resolution of a per-app pause chord press. Pure data so the
+/// decision is unit-testable without a live focus monitor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // consumed by the macos listener only
+enum ChordAction {
+    /// Toggle this bundle's place on the resumed-allowlist.
+    TogglePerApp(String),
+    /// No real app is focused (none reported yet, or Always itself is
+    /// frontmost) — nothing sensible to toggle; give feedback instead.
+    NoFocusedApp,
+}
+
+/// Decide what the per-app pause chord should do for the currently
+/// focused app. Strictly per-app: master pause never hijacks this
+/// chord (it has its own), and Always's own windows are never a valid
+/// toggle target.
+#[allow(dead_code)] // referenced only in tests + macos listener
+fn pause_chord_action(current_app: Option<&str>) -> ChordAction {
+    match current_app {
+        Some(bundle) if !crate::always::per_app::is_own_bundle_id(bundle) => {
+            ChordAction::TogglePerApp(bundle.to_string())
+        }
+        _ => ChordAction::NoFocusedApp,
+    }
+}
+
 /// Toggle the per-app allowlist for `bundle`. Adds the bundle as
 /// resumed (override `paused: false`) when it's not yet listed;
 /// removes the override otherwise. Recomputes the effective state and
@@ -316,6 +354,15 @@ fn handle_per_app_pause_hotkey(bundle: &str) {
         }
     }
     event::global_broadcaster().resumed_apps_changed(per_app::resumed_apps());
+    // Scope feedback: tell the GUI exactly what this chord did
+    // ("Resumed in Safari"), independent of the effective-state
+    // events above. `paused` is from the app's perspective: it was
+    // resumed → now paused again, and vice versa.
+    event::global_broadcaster().pause_scope_toggled(
+        "app",
+        Some(bundle.to_string()),
+        was_resumed,
+    );
     if let Ok(log_path) = always_config::configured_log_path()
         && let Ok(mut logger) = log::Logger::open(&log_path)
     {
@@ -329,23 +376,31 @@ fn handle_per_app_pause_hotkey(bundle: &str) {
         was_resumed,
         new_resumed = !was_resumed,
         effective,
-        "hotkey_per_app_toggled"
+        scope = "app",
+        "hotkey_pause_chord"
     );
 }
 
-/// Original behaviour of ctrl+option+P: flip the master pause flag.
-/// Used as a fallback when no focused app is reported (or it's
-/// Always itself), so a globally-paused user can still un-master-pause
-/// with the same chord they're used to.
+/// ctrl+option+shift+P: global pause/resume. When ANY global source is
+/// pausing (user master pause, audio-output watchdog, mic conflict) the
+/// chord clears them ALL — an explicit user resume overrides the
+/// watchdogs until their next transition, so dictating over music or
+/// into notes during a call is one chord away. Otherwise it sets the
+/// user master pause.
 #[cfg(feature = "macos")]
 fn handle_master_pause_hotkey() {
-    let (effective, changed) = pause::toggle_pause();
+    let (effective, changed) = if pause::is_any_global_pause() {
+        pause::clear_global_pauses()
+    } else {
+        pause::set_paused(true)
+    };
     let master = pause::is_master_paused();
     if !master {
         pause::set_idle_auto_paused(false);
         pause::mark_voice_seen();
     }
     event::global_broadcaster().master_pause_changed(master);
+    event::global_broadcaster().pause_scope_toggled("master", None, master);
     if changed {
         if effective {
             pause::dictation_buffer_clear();
@@ -359,7 +414,7 @@ fn handle_master_pause_hotkey() {
     {
         logger.write(log::Event::PauseToggled { paused: effective });
     }
-    tracing::info!(master, effective, changed, "hotkey_master_toggled");
+    tracing::info!(master, effective, changed, scope = "master", "hotkey_pause_chord");
 }
 
 #[cfg(feature = "macos")]
@@ -372,6 +427,7 @@ pub fn start_keyboard_listener() -> Result<()> {
         force_paste_combo,
         log_correction_combo,
         correction_dialog_combo,
+        master_pause_combo,
     ) = load_shortcuts();
     let (tx, _rx) = mpsc::channel();
 
@@ -432,29 +488,29 @@ pub fn start_keyboard_listener() -> Result<()> {
                     pause::countdown_request_cancel();
                     pause::dictation_buffer_clear();
                 }
-                if pause_combo.matches_name(ctrl_pressed, shift_pressed, alt_pressed, name) {
-                    // Context-aware pause hotkey:
-                    //   1. Master pause is set (idle/audio/mic watchdog
-                    //      or explicit "Pause everything") → clear
-                    //      master, leave per-app entries alone.
-                    //   2. A non-Always app is focused → toggle that
-                    //      app's place on the resumed-allowlist.
-                    //   3. No focused app (or it's Always) → flip
-                    //      master so the user can still globally
-                    //      pause with the same chord.
-                    if pause::is_master_paused() {
-                        handle_master_pause_hotkey();
-                    } else {
-                        let current = pause::current_app();
-                        match current.as_deref() {
-                            Some(bundle)
-                                if bundle != crate::always::per_app::ALWAYS_OWN_BUNDLE_ID =>
-                            {
-                                handle_per_app_pause_hotkey(bundle);
-                            }
-                            _ => {
-                                handle_master_pause_hotkey();
-                            }
+                if master_pause_combo.matches_name(ctrl_pressed, shift_pressed, alt_pressed, name)
+                {
+                    handle_master_pause_hotkey();
+                } else if pause_combo.matches_name(ctrl_pressed, shift_pressed, alt_pressed, name)
+                {
+                    // ⌃⌥P is strictly per-app: toggle the focused app's
+                    // place on the resumed-allowlist. Master pause has
+                    // its own chord (⌃⌥⇧P) — the old context-aware
+                    // dispatch silently retargeted this chord to master
+                    // whenever any watchdog (audio, idle, mic) had set
+                    // master pause, which read as "the shortcut is
+                    // broken" in the field.
+                    match pause_chord_action(pause::current_app().as_deref()) {
+                        ChordAction::TogglePerApp(bundle) => {
+                            handle_per_app_pause_hotkey(&bundle);
+                        }
+                        ChordAction::NoFocusedApp => {
+                            tracing::info!("hotkey_pause_chord_no_focused_app");
+                            event::global_broadcaster().pause_scope_toggled(
+                                "none",
+                                None,
+                                pause::is_paused(),
+                            );
                         }
                     }
                 } else if auto_enter_combo.matches_name(
@@ -687,48 +743,82 @@ mod tests {
     #[cfg(feature = "macos")]
     #[test]
     fn falls_back_to_defaults_for_invalid_configured_shortcuts() {
-        let (pause, auto_enter, force_paste, log_correction, correction_dialog) =
+        let (pause, auto_enter, force_paste, log_correction, correction_dialog, master_pause) =
             super::resolve_shortcuts(
                 Some("ctrl+alt+return"),
                 Some("a"),
                 Some("v"),
                 Some("not a combo"),
                 Some(""),
+                Some("nope"),
             );
         assert!(pause.matches_name(true, false, true, "p"));
         assert!(auto_enter.matches_name(true, false, true, "a"));
         assert!(force_paste.matches_name(true, false, true, "v"));
         assert!(log_correction.matches_name(true, false, true, "x"));
         assert!(correction_dialog.matches_name(true, false, true, "w"));
+        assert!(master_pause.matches_name(true, true, true, "p"));
     }
 
     #[cfg(feature = "macos")]
     #[test]
     fn uses_configured_shortcuts_when_valid() {
-        let (pause, auto_enter, force_paste, log_correction, correction_dialog) =
+        let (pause, auto_enter, force_paste, log_correction, correction_dialog, master_pause) =
             super::resolve_shortcuts(
                 Some("shift+x"),
                 Some("ctrl+space"),
                 Some("ctrl+shift+v"),
                 Some("ctrl+alt+l"),
                 Some("ctrl+alt+m"),
+                Some("ctrl+shift+g"),
             );
         assert!(pause.matches_name(false, true, false, "x"));
         assert!(auto_enter.matches_name(true, false, false, "space"));
         assert!(force_paste.matches_name(true, true, false, "v"));
         assert!(log_correction.matches_name(true, false, true, "l"));
         assert!(correction_dialog.matches_name(true, false, true, "m"));
+        assert!(master_pause.matches_name(true, true, false, "g"));
     }
 
     #[cfg(feature = "macos")]
     #[test]
     fn log_correction_default_is_ctrl_alt_x() {
-        let (pause, auto_enter, force_paste, log_correction, correction_dialog) =
-            super::resolve_shortcuts(None, None, None, None, None);
+        let (pause, auto_enter, force_paste, log_correction, correction_dialog, master_pause) =
+            super::resolve_shortcuts(None, None, None, None, None, None);
         assert!(pause.matches_name(true, false, true, "p"));
         assert!(auto_enter.matches_name(true, false, true, "a"));
         assert!(force_paste.matches_name(true, false, true, "v"));
         assert!(log_correction.matches_name(true, false, true, "x"));
         assert!(correction_dialog.matches_name(true, false, true, "w"));
+        assert!(master_pause.matches_name(true, true, true, "p"));
+    }
+
+    #[test]
+    fn pause_chord_never_collides_with_master_chord() {
+        // The defining regression: ⌃⌥P (no shift) must not match the
+        // master chord, and ⌃⌥⇧P must not match the per-app chord.
+        let (pause, _, _, _, _, master) = default_shortcuts();
+        assert!(pause.matches_name(true, false, true, "p"));
+        assert!(!pause.matches_name(true, true, true, "p"));
+        assert!(master.matches_name(true, true, true, "p"));
+        assert!(!master.matches_name(true, false, true, "p"));
+    }
+
+    #[test]
+    fn chord_action_targets_focused_real_app() {
+        use super::{ChordAction, pause_chord_action};
+        assert_eq!(
+            pause_chord_action(Some("com.apple.Safari")),
+            ChordAction::TogglePerApp("com.apple.Safari".to_string())
+        );
+    }
+
+    #[test]
+    fn chord_action_refuses_own_bundles_and_none() {
+        use super::{ChordAction, pause_chord_action};
+        assert_eq!(pause_chord_action(None), ChordAction::NoFocusedApp);
+        for own in crate::always::per_app::ALWAYS_OWN_BUNDLE_IDS {
+            assert_eq!(pause_chord_action(Some(own)), ChordAction::NoFocusedApp);
+        }
     }
 }

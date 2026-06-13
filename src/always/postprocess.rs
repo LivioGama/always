@@ -54,6 +54,13 @@ impl PostProcessor {
         }
     }
 
+    /// True when a grammar call will actually reach the LLM (feature on
+    /// AND an API key configured). Drives glossary tiering: fuzzy
+    /// matches defer to the LLM only when the LLM will really run.
+    pub fn can_correct(&self) -> bool {
+        self.config.grammar_correction_enabled && self.groq_api_key.is_some()
+    }
+
     /// Single optional cleanup pass.
     ///
     /// Just the LLM call when `grammar_correction_enabled` is true;
@@ -76,25 +83,61 @@ impl PostProcessor {
         text: &str,
         context: Option<&str>,
     ) -> Result<(String, bool)> {
+        let user_message = match context {
+            Some(ctx) => {
+                format!("<context_before>{ctx}</context_before>\n<transcript>{text}</transcript>")
+            }
+            None => format!("<transcript>{text}</transcript>"),
+        };
+        self.process_keyed(&user_message, text, context).await
+    }
+
+    /// Request-based entry point — the warm path and the paste path both
+    /// arrive here through `correction_request::build`, so the cache /
+    /// single-flight key (the user message itself) is identical by
+    /// construction.
+    pub async fn process_request(
+        &self,
+        req: &crate::always::correction_request::CorrectionRequest,
+    ) -> Result<(String, bool)> {
+        self.process_keyed(
+            &req.user_message,
+            &req.acoustic_text,
+            req.context_before.as_deref(),
+        )
+        .await
+    }
+
+    async fn process_keyed(
+        &self,
+        user_message: &str,
+        transcript: &str,
+        context: Option<&str>,
+    ) -> Result<(String, bool)> {
         if !self.config.grammar_correction_enabled {
-            return Ok((text.to_string(), false));
+            return Ok((transcript.to_string(), false));
         }
         let Some(ref api_key) = self.groq_api_key else {
-            return Ok((text.to_string(), false));
+            return Ok((transcript.to_string(), false));
         };
-        let cache_hit = self.cache.lock().contains_key(text);
-        let corrected = self.correct_grammar(text, api_key, context).await?;
+        let cache_hit = self.cache.lock().contains_key(user_message);
+        let corrected = self
+            .correct_grammar(user_message, transcript, api_key, context)
+            .await?;
         Ok((corrected, cache_hit))
     }
 
     async fn correct_grammar(
         &self,
-        text: &str,
+        user_message: &str,
+        transcript: &str,
         api_key: &str,
         context: Option<&str>,
     ) -> Result<String> {
-        // Check cache first
-        if let Some(cached) = self.cache.lock().get(text) {
+        // Check cache first — keyed on the FULL user message (context +
+        // candidates + transcript). The same transcript under different
+        // context must not collide: the correction legitimately differs.
+        if let Some(cached) = self.cache.lock().get(user_message) {
             tracing::debug!(stage = "grammar_correction", "grammar cache hit");
             return Ok(cached.clone());
         }
@@ -106,15 +149,15 @@ impl PostProcessor {
             let mut inflight = self.inflight.lock();
             Arc::clone(
                 inflight
-                    .entry(text.to_string())
+                    .entry(user_message.to_string())
                     .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
             )
         };
         let outcome = cell
-            .get_or_try_init(|| self.fetch_correction(text, api_key, context))
+            .get_or_try_init(|| self.fetch_correction(user_message, transcript, api_key, context))
             .await
             .cloned();
-        self.inflight.lock().remove(text);
+        self.inflight.lock().remove(user_message);
         outcome
     }
 
@@ -122,7 +165,8 @@ impl PostProcessor {
     /// Only ever reached via the single-flight cell in `correct_grammar`.
     async fn fetch_correction(
         &self,
-        text: &str,
+        user_message: &str,
+        transcript: &str,
         api_key: &str,
         context: Option<&str>,
     ) -> Result<String> {
@@ -143,13 +187,7 @@ impl PostProcessor {
                     },
                     {
                         "role": "user",
-                        "content": match context {
-                            Some(ctx) => format!(
-                                "<context_before>{}</context_before>\n<transcript>{}</transcript>",
-                                ctx, text
-                            ),
-                            None => format!("<transcript>{}</transcript>", text),
-                        }
+                        "content": user_message
                     }
                 ],
                 "temperature": 0.1,
@@ -173,15 +211,25 @@ impl PostProcessor {
             .context("Invalid Groq response format")?
             .trim()
             .to_string();
-        let corrected = sanitize_corrected_text(text, &raw_corrected)
-            .unwrap_or_else(|| text.trim().to_string());
+        let corrected = sanitize_corrected_text(transcript, &raw_corrected)
+            .filter(|cleaned| {
+                // Context-echo guard: a model that prepends the supplied
+                // context would double the user's text on paste. Reject
+                // and fall back to the acoustic transcript.
+                let echoed = context.is_some_and(|ctx| echoes_context(ctx, cleaned));
+                if echoed {
+                    tracing::warn!(stage = "grammar_correction", "rejected context echo");
+                }
+                !echoed
+            })
+            .unwrap_or_else(|| transcript.trim().to_string());
 
         tracing::info!(
             grammar_api_ms = started.elapsed().as_millis() as u64,
             model = %self.config.groq_model,
             "grammar_api_call"
         );
-        self.insert_cached(text.to_string(), corrected.clone());
+        self.insert_cached(user_message.to_string(), corrected.clone());
         Ok(corrected)
     }
 
@@ -210,6 +258,17 @@ impl PostProcessor {
             }
         }
     }
+}
+
+/// True when the model's output starts by repeating the supplied
+/// context (≥20 chars of it) — the failure mode where "continue from
+/// context" is misread as "output context + continuation", which would
+/// paste the user's earlier text twice.
+fn echoes_context(context: &str, cleaned: &str) -> bool {
+    let ctx = context.trim();
+    let out = cleaned.trim();
+    let prefix: String = ctx.chars().take(20).collect();
+    prefix.chars().count() >= 20 && out.to_lowercase().starts_with(&prefix.to_lowercase())
 }
 
 fn sanitize_corrected_text(input: &str, output: &str) -> Option<String> {
@@ -332,7 +391,10 @@ mod tests {
     #[tokio::test]
     async fn process_traced_reports_cache_hit_without_network() {
         let processor = PostProcessor::new(Some("test-key-never-used".to_string()));
-        processor.insert_cached("hello world how are you".into(), "Hello world, how are you?".into());
+        processor.insert_cached(
+            "<transcript>hello world how are you</transcript>".into(),
+            "Hello world, how are you?".into(),
+        );
         let (out, cache_hit) = processor
             .process_traced("hello world how are you", None)
             .await
@@ -392,5 +454,32 @@ mod tests {
             "Sure, the issue is probably caused by your microphone, and here are several steps you can try.",
         );
         assert!(out.is_none());
+    }
+
+    #[test]
+    fn context_echo_is_detected() {
+        let ctx = "I went to the store yesterday and bought";
+        assert!(echoes_context(
+            ctx,
+            "I went to the store yesterday and bought milk and eggs."
+        ));
+        // A genuine continuation does not echo.
+        assert!(!echoes_context(ctx, "milk and eggs for breakfast."));
+        // Short context can't reliably signal an echo — never reject.
+        assert!(!echoes_context("Hi.", "Hi. How are you?"));
+    }
+
+    #[test]
+    fn cache_distinguishes_same_text_under_different_context() {
+        // Same transcript, different context → different user message →
+        // different cache entries. A collision here would paste a
+        // correction tuned for the WRONG surrounding text.
+        let processor = PostProcessor::new(Some("test-key-never-used".to_string()));
+        processor.insert_cached(
+            "<context_before>Hello.</context_before>\n<transcript>and more</transcript>".into(),
+            "And more.".into(),
+        );
+        let other_key = "<transcript>and more</transcript>";
+        assert!(!processor.cache.lock().contains_key(other_key));
     }
 }

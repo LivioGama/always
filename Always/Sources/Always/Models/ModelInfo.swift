@@ -52,6 +52,12 @@ struct ModelInfo: Codable, Identifiable, Equatable, Hashable {
     let supported_languages: [String]
     let supports_language_selection: Bool
     let is_custom: Bool
+    /// True while the daemon's startup background pass is still
+    /// SHA-verifying this model — `is_downloaded` is provisional until
+    /// it clears. Optional so older daemons (no field) decode fine.
+    let is_verifying: Bool?
+
+    var isVerifying: Bool { is_verifying ?? false }
 
     /// "146 MB" / "1.5 GB" — same units the Handy UI uses.
     var sizeLabel: String {

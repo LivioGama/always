@@ -44,6 +44,13 @@ pub struct Preferences {
     /// Active STT backend. Stored as `groq` or `local:<model_id>`.
     /// Parsed via [`crate::stt_dispatch::TranscriberBackendChoice`].
     pub transcriber_backend: Option<String>,
+    /// Shortcut for the global (master) pause toggle. The plain pause
+    /// shortcut is strictly per-app; this chord is the explicit
+    /// "pause/resume everything" switch (default ctrl+alt+shift+p).
+    pub shortcut_master_pause: Option<String>,
+    /// Stream accepted utterances to `~/.always/transcripts.jsonl` for
+    /// external consumers (e.g. IRIS). Opt-in (default off).
+    pub transcript_stream: Option<bool>,
 }
 
 pub fn open() -> Result<Connection> {
@@ -147,6 +154,13 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN shortcut_force_paste TEXT;")?;
     }
 
+    let has_shortcut_master_pause = conn
+        .prepare("SELECT shortcut_master_pause FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_shortcut_master_pause {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN shortcut_master_pause TEXT;")?;
+    }
+
     let has_postprocess_enabled = conn
         .prepare("SELECT postprocess_enabled FROM preferences LIMIT 0")
         .is_ok();
@@ -212,6 +226,13 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN transcriber_backend TEXT;")?;
     }
 
+    let has_transcript_stream = conn
+        .prepare("SELECT transcript_stream FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_transcript_stream {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN transcript_stream INTEGER;")?;
+    }
+
     encode_plaintext_groq_key(conn)?;
 
     Ok(())
@@ -243,7 +264,7 @@ fn encode_plaintext_groq_key(conn: &Connection) -> Result<()> {
 
 pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
     let mut stmt = conn.prepare(
-        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, idle_pause_action, shortcut_correction_dialog, per_app_settings_json, transcriber_backend FROM preferences WHERE id = 1",
+        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, idle_pause_action, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream FROM preferences WHERE id = 1",
     )?;
     let result = stmt.query_row([], |row| {
         Ok(Preferences {
@@ -272,6 +293,8 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             shortcut_correction_dialog: row.get(22)?,
             per_app_settings_json: row.get(23)?,
             transcriber_backend: row.get(24)?,
+            shortcut_master_pause: row.get(25)?,
+            transcript_stream: row.get::<_, Option<i64>>(26)?.map(|v| v != 0),
         })
     });
     match result {
@@ -312,6 +335,8 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "shortcut_correction_dialog",
         "per_app_settings_json",
         "transcriber_backend",
+        "shortcut_master_pause",
+        "transcript_stream",
     ];
     if !valid_keys.contains(&key) {
         anyhow::bail!(
@@ -371,8 +396,11 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
             let parsed = value
                 .parse::<f64>()
                 .context("stt_silence must be a number")?;
-            if !(0.2..=15.0).contains(&parsed) {
-                anyhow::bail!("stt_silence must be between 0.2 and 15.0 seconds");
+            // Mirror config::SILENCE_SECS_MIN/MAX — the resolver clamps
+            // to the same range, so rejecting here keeps the stored
+            // value and the effective value identical.
+            if !(0.3..=15.0).contains(&parsed) {
+                anyhow::bail!("stt_silence must be between 0.3 and 15.0 seconds");
             }
         }
         "silero_threshold" => {
@@ -386,7 +414,8 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "stt_trim_silence"
         | "stt_auto_enter"
         | "postprocess_enabled"
-        | "passive_correction_capture" => {
+        | "passive_correction_capture"
+        | "transcript_stream" => {
             if !matches!(value, "true" | "false" | "1" | "0") {
                 anyhow::bail!("{key} must be one of: true, false, 1, 0");
             }
@@ -441,7 +470,8 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "stt_trim_silence"
         | "stt_auto_enter"
         | "postprocess_enabled"
-        | "passive_correction_capture" => {
+        | "passive_correction_capture"
+        | "transcript_stream" => {
             if matches!(value, "true" | "1") {
                 "1".to_string()
             } else {

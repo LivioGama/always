@@ -27,6 +27,38 @@
 
 use strsim::levenshtein;
 
+/// One glossary term with its learned wrong forms, as needed by the
+/// tiered matcher. Mirrors the curated subset of `glossary::Entry`.
+#[derive(Debug, Clone)]
+pub struct GlossaryMatchEntry {
+    pub term: String,
+    pub mistranscriptions: Vec<String>,
+}
+
+/// How confident a substitution is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubstitutionTier {
+    /// The window literally matched a user-taught mistranscription —
+    /// deterministic, applied immediately.
+    Exact,
+    /// Soundex/Levenshtein similarity only. The heard word might be a
+    /// perfectly good English word ("cloud", "idea") — needs sentence
+    /// context to decide, which only the grammar LLM has.
+    Fuzzy,
+}
+
+/// A (possible) glossary substitution found in the transcript.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Substitution {
+    pub original: String,
+    pub replacement: String,
+    pub tier: SubstitutionTier,
+    /// Whether the rewrite was applied to the returned text. Exact
+    /// matches always apply; fuzzy matches apply only when the caller
+    /// has no LLM to arbitrate (grammar disabled).
+    pub applied: bool,
+}
+
 /// Default match threshold mirrored from Handy's settings_store.json.
 /// Combined score = `levenshtein_normalized * (0.3 if phonetic else 1.0)`,
 /// so 0.18 accepts strong typos and any phonetic match within ~60% edit
@@ -41,6 +73,146 @@ const MAX_NGRAM: usize = 3;
 /// Maximum candidate length for matching. Prevents pathological long
 /// "n-grams" from a single mis-tokenized line.
 const MAX_CANDIDATE_LEN: usize = 50;
+
+/// Two-tier glossary matching.
+///
+/// Tier 1 (Exact): the window literally matches one of a term's learned
+/// `mistranscriptions` (case-insensitive, punctuation-stripped, spaces
+/// collapsed) — rewritten in place unconditionally.
+///
+/// Tier 2 (Fuzzy): Soundex/Levenshtein similarity within `threshold`.
+/// When `apply_fuzzy` is false the text is left UNCHANGED and the match
+/// is returned as an unapplied [`Substitution`] for the grammar LLM to
+/// arbitrate with sentence context ("deploy to the cloud" must stay
+/// "cloud" even when `Claude` is in the glossary). When `apply_fuzzy`
+/// is true (grammar disabled — nobody downstream to decide) the legacy
+/// rewrite-in-place behavior is preserved.
+pub fn apply_glossary_tiered(
+    text: &str,
+    entries: &[GlossaryMatchEntry],
+    threshold: f64,
+    apply_fuzzy: bool,
+) -> (String, Vec<Substitution>) {
+    if entries.is_empty() || text.trim().is_empty() {
+        return (text.to_string(), Vec::new());
+    }
+
+    let terms: Vec<String> = entries.iter().map(|e| e.term.clone()).collect();
+    let terms_nospace: Vec<String> = terms
+        .iter()
+        .map(|w| w.to_lowercase().replace(' ', ""))
+        .collect();
+    // Normalized mistranscription → canonical-term index.
+    let mut exact_forms: Vec<(String, usize)> = Vec::new();
+    for (idx, e) in entries.iter().enumerate() {
+        for wrong in &e.mistranscriptions {
+            let norm = wrong.to_lowercase().replace(' ', "");
+            let norm: String = norm.chars().filter(|c| c.is_alphanumeric()).collect();
+            if !norm.is_empty() {
+                exact_forms.push((norm, idx));
+            }
+        }
+    }
+
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut result: Vec<String> = Vec::with_capacity(words.len());
+    let mut subs: Vec<Substitution> = Vec::new();
+    let mut i = 0;
+
+    while i < words.len() {
+        // Exact pass first — longest window wins so multi-word wrong
+        // forms ("cloud code") beat their single-word prefixes.
+        let mut exact_hit: Option<(usize, usize)> = None; // (n, entry_idx)
+        for n in (1..=MAX_NGRAM).rev() {
+            if i + n > words.len() {
+                continue;
+            }
+            let ngram = build_ngram(&words[i..i + n]);
+            if let Some((_, idx)) = exact_forms.iter().find(|(form, _)| *form == ngram) {
+                exact_hit = Some((n, *idx));
+                break;
+            }
+        }
+        if let Some((n, idx)) = exact_hit {
+            let window = &words[i..i + n];
+            let (prefix, _) = extract_punctuation(window[0]);
+            let (_, suffix) = extract_punctuation(window[n - 1]);
+            let cased = preserve_case_pattern(window[0], &terms[idx]);
+            let original_window = window.join(" ");
+            let rewritten = format!("{prefix}{cased}{suffix}");
+            if original_window.to_lowercase() != rewritten.to_lowercase() {
+                subs.push(Substitution {
+                    original: original_window,
+                    replacement: rewritten.clone(),
+                    tier: SubstitutionTier::Exact,
+                    applied: true,
+                });
+            }
+            result.push(rewritten);
+            i += n;
+            continue;
+        }
+
+        // Fuzzy pass — identical scoring to the legacy matcher.
+        let mut best: Option<(usize, &String, f64)> = None;
+        for n in (1..=MAX_NGRAM).rev() {
+            if i + n > words.len() {
+                continue;
+            }
+            let ngram = build_ngram(&words[i..i + n]);
+            if let Some((replacement, score)) =
+                find_best_match(&ngram, &terms, &terms_nospace, threshold)
+                && best.is_none_or(|(_, _, s)| score < s)
+            {
+                best = Some((n, replacement, score));
+            }
+        }
+
+        let Some((n, replacement, _score)) = best else {
+            result.push(words[i].to_string());
+            i += 1;
+            continue;
+        };
+
+        let window = &words[i..i + n];
+        let (prefix, _) = extract_punctuation(window[0]);
+        let (_, suffix) = extract_punctuation(window[n - 1]);
+        let cased = preserve_case_pattern(window[0], replacement);
+        let original_window = window.join(" ");
+        let rewritten = format!("{prefix}{cased}{suffix}");
+
+        if original_window.to_lowercase() == rewritten.to_lowercase() {
+            // Case-only round trip — keep the original, no substitution.
+            result.push(rewritten);
+            i += n;
+            continue;
+        }
+
+        if apply_fuzzy {
+            subs.push(Substitution {
+                original: original_window,
+                replacement: rewritten.clone(),
+                tier: SubstitutionTier::Fuzzy,
+                applied: true,
+            });
+            result.push(rewritten);
+        } else {
+            subs.push(Substitution {
+                original: original_window.clone(),
+                replacement: rewritten,
+                tier: SubstitutionTier::Fuzzy,
+                applied: false,
+            });
+            // Text untouched — the LLM decides with sentence context.
+            for w in window {
+                result.push(w.to_string());
+            }
+        }
+        i += n;
+    }
+
+    (result.join(" "), subs)
+}
 
 /// Walk `text` word-by-word and replace n-grams that match a custom
 /// vocabulary term within `threshold`. Returns the rewritten text plus
@@ -402,5 +574,79 @@ mod tests {
         let (out, subs) = apply_custom_words("Claude is here", &custom, DEFAULT_THRESHOLD);
         assert_eq!(out, "Claude is here");
         assert!(subs.is_empty());
+    }
+
+    fn entries(list: &[(&str, &[&str])]) -> Vec<GlossaryMatchEntry> {
+        list.iter()
+            .map(|(term, miss)| GlossaryMatchEntry {
+                term: term.to_string(),
+                mistranscriptions: miss.iter().map(|s| s.to_string()).collect(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tiered_exact_mistranscription_rewrites_immediately() {
+        let glossary = entries(&[("Claude Code", &["cloud code"])]);
+        let (out, subs) =
+            apply_glossary_tiered("open cloud code now", &glossary, DEFAULT_THRESHOLD, false);
+        assert_eq!(out, "open Claude Code now");
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].tier, SubstitutionTier::Exact);
+        assert!(subs[0].applied);
+    }
+
+    #[test]
+    fn tiered_fuzzy_is_deferred_when_llm_available() {
+        // "cloud" fuzzily matches "Claude" but the sentence is about
+        // actual clouds — the text must stay untouched and the match
+        // surface as an unapplied candidate for the LLM.
+        let glossary = entries(&[("Claude", &[])]);
+        let (out, subs) = apply_glossary_tiered(
+            "deploy this to the cloud today",
+            &glossary,
+            DEFAULT_THRESHOLD,
+            false,
+        );
+        assert_eq!(out, "deploy this to the cloud today");
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].tier, SubstitutionTier::Fuzzy);
+        assert!(!subs[0].applied);
+        assert_eq!(subs[0].original, "cloud");
+        assert_eq!(subs[0].replacement, "Claude");
+    }
+
+    #[test]
+    fn tiered_fuzzy_applies_when_no_llm() {
+        // Grammar disabled: nobody downstream to arbitrate, keep the
+        // legacy rewrite-in-place behavior.
+        let glossary = entries(&[("Claude", &[])]);
+        let (out, subs) =
+            apply_glossary_tiered("I love cloud today", &glossary, DEFAULT_THRESHOLD, true);
+        assert_eq!(out, "I love Claude today");
+        assert_eq!(subs.len(), 1);
+        assert!(subs[0].applied);
+    }
+
+    #[test]
+    fn tiered_exact_beats_fuzzy_for_same_window() {
+        // A taught wrong form is deterministic even when LLM arbitration
+        // is on — the user explicitly mapped it.
+        let glossary = entries(&[("Kubernetes", &["kubernetics"])]);
+        let (out, subs) = apply_glossary_tiered(
+            "deploy kubernetics today",
+            &glossary,
+            DEFAULT_THRESHOLD,
+            false,
+        );
+        assert_eq!(out, "deploy Kubernetes today");
+        assert_eq!(subs[0].tier, SubstitutionTier::Exact);
+    }
+
+    #[test]
+    fn tiered_preserves_punctuation_on_exact() {
+        let glossary = entries(&[("Claude", &["cloud"])]);
+        let (out, _) = apply_glossary_tiered("Hi cloud, hello!", &glossary, DEFAULT_THRESHOLD, false);
+        assert_eq!(out, "Hi Claude, hello!");
     }
 }

@@ -47,7 +47,16 @@ use crate::db;
 /// in `Always/Info.plist`). The daemon refuses to write an override
 /// for this bundle id so the user can never accidentally add Always
 /// to its own resumed-app allowlist.
-pub const ALWAYS_OWN_BUNDLE_ID: &str = "com.always";
+pub const ALWAYS_OWN_BUNDLE_IDS: &[&str] = &[
+    "com.always",
+    "com.always.v2",
+    "com.alwaysapp",
+];
+
+/// Return true when a bundle id belongs to an Always GUI process.
+pub fn is_own_bundle_id(bundle_id: &str) -> bool {
+    ALWAYS_OWN_BUNDLE_IDS.contains(&bundle_id)
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppOverride {
@@ -183,7 +192,7 @@ pub fn effective_paused_for_current_app() -> bool {
     // Always itself is never on the allowlist — we'd be transcribing
     // into Settings. Treat as paused regardless of any stale override
     // that might still be sitting in the DB.
-    if bundle == ALWAYS_OWN_BUNDLE_ID {
+    if is_own_bundle_id(&bundle) {
         return true;
     }
     load().get(&bundle).and_then(|o| o.paused).unwrap_or(true)
@@ -206,7 +215,7 @@ pub fn resumed_apps() -> Vec<String> {
     let mut out: Vec<String> = load()
         .iter()
         .filter_map(|(k, v)| {
-            if k == ALWAYS_OWN_BUNDLE_ID {
+            if is_own_bundle_id(k) {
                 return None;
             }
             (v.paused == Some(false)).then(|| k.clone())
@@ -226,7 +235,7 @@ pub fn set_app_paused_override(bundle_id: &str, paused: Option<bool>) -> anyhow:
     // Hard-stop: Always must never appear in its own allowlist —
     // resuming voice typing into Settings would paste into the wrong
     // window and confuse every UI surface that surfaces "active in X".
-    if bundle_id == ALWAYS_OWN_BUNDLE_ID {
+    if is_own_bundle_id(bundle_id) {
         anyhow::bail!("refusing to write per-app override for Always's own bundle id");
     }
     let mut overrides = load();

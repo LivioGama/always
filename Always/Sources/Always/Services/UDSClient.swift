@@ -6,7 +6,7 @@ import os.log
 // Wire-format protocol version. MUST match `PROTOCOL_VERSION` in
 // `src/always/event.rs`. Bumping either side without the other will
 // cause the client to refuse the connection.
-let UDS_PROTOCOL_VERSION: UInt32 = 8
+let UDS_PROTOCOL_VERSION: UInt32 = 9
 
 // Event types matching Rust DaemonEvent enum
 enum DaemonEventType: String, Codable {
@@ -54,6 +54,16 @@ enum DaemonEventType: String, Codable {
     // (which track effective state). UI uses this to label the global
     // toggle.
     case masterPauseChanged = "MasterPauseChanged"
+    // A pause hotkey fired; carries the resolved scope so the overlay
+    // can flash exactly what was toggled ("Resumed in Safari" /
+    // "Paused everywhere" / "No app focused").
+    case pauseScopeToggled = "PauseScopeToggled"
+    // Continuous speech crossed the warning threshold — flash a
+    // heads-up that the recording hard-caps at cap_secs.
+    case longRecordingWarning = "LongRecordingWarning"
+    // A watchdog pause source flipped (mic_conflict / audio_output) —
+    // lets the UI say WHY listening is paused ("Zoom is using the mic").
+    case pauseSourceChanged = "PauseSourceChanged"
     // Snapshot of bundle ids whose per-app `paused` override is
     // `false` (the user's resumed-app allowlist).
     case resumedAppsChanged = "ResumedAppsChanged"
@@ -142,6 +152,26 @@ struct MasterPauseChangedData: Codable {
     let master_paused: Bool
 }
 
+struct PauseScopeToggledData: Codable {
+    /// "master", "app", or "none" (chord fired with no toggleable app).
+    let scope: String
+    let bundle_id: String?
+    let paused: Bool
+}
+
+struct LongRecordingWarningData: Codable {
+    let elapsed_secs: UInt32
+    let cap_secs: UInt32
+}
+
+struct PauseSourceChangedData: Codable {
+    /// "mic_conflict" or "audio_output".
+    let source: String
+    let paused: Bool
+    /// Offending app name(s) when known, e.g. "Zoom".
+    let detail: String?
+}
+
 struct ResumedAppsChangedData: Codable {
     let bundles: [String]
 }
@@ -199,6 +229,12 @@ struct DaemonEvent: Codable {
     let focusedApp: FocusedAppChangedData?
     /// Populated for `MasterPauseChanged`.
     let masterPause: MasterPauseChangedData?
+    /// Populated for `PauseScopeToggled`.
+    let pauseScope: PauseScopeToggledData?
+    /// Populated for `LongRecordingWarning`.
+    let longRecording: LongRecordingWarningData?
+    /// Populated for `PauseSourceChanged`.
+    let pauseSource: PauseSourceChangedData?
     /// Populated for `ResumedAppsChanged`.
     let resumedApps: ResumedAppsChangedData?
     /// Populated for `CorrectionDialogRequested`.
@@ -241,6 +277,9 @@ struct DaemonEvent: Codable {
         var idleAutoPaused: IdleAutoPausedData? = nil
         var focusedApp: FocusedAppChangedData? = nil
         var masterPause: MasterPauseChangedData? = nil
+        var pauseScope: PauseScopeToggledData? = nil
+        var longRecording: LongRecordingWarningData? = nil
+        var pauseSource: PauseSourceChangedData? = nil
         var resumedApps: ResumedAppsChangedData? = nil
         var correctionDialogRequest: CorrectionDialogRequestedData? = nil
         var modelsList: ModelsListData? = nil
@@ -268,6 +307,12 @@ struct DaemonEvent: Codable {
             focusedApp = try container.decodeIfPresent(FocusedAppChangedData.self, forKey: .data)
         case .masterPauseChanged:
             masterPause = try container.decodeIfPresent(MasterPauseChangedData.self, forKey: .data)
+        case .pauseScopeToggled:
+            pauseScope = try container.decodeIfPresent(PauseScopeToggledData.self, forKey: .data)
+        case .longRecordingWarning:
+            longRecording = try container.decodeIfPresent(LongRecordingWarningData.self, forKey: .data)
+        case .pauseSourceChanged:
+            pauseSource = try container.decodeIfPresent(PauseSourceChangedData.self, forKey: .data)
         case .resumedAppsChanged:
             resumedApps = try container.decodeIfPresent(ResumedAppsChangedData.self, forKey: .data)
         case .correctionDialogRequested:
@@ -304,6 +349,9 @@ struct DaemonEvent: Codable {
         self.idleAutoPaused = idleAutoPaused
         self.focusedApp = focusedApp
         self.masterPause = masterPause
+        self.pauseScope = pauseScope
+        self.longRecording = longRecording
+        self.pauseSource = pauseSource
         self.resumedApps = resumedApps
         self.correctionDialogRequest = correctionDialogRequest
         self.modelsList = modelsList
@@ -337,6 +385,12 @@ struct DaemonEvent: Codable {
             try container.encodeIfPresent(focusedApp, forKey: .data)
         case .masterPauseChanged:
             try container.encodeIfPresent(masterPause, forKey: .data)
+        case .pauseScopeToggled:
+            try container.encodeIfPresent(pauseScope, forKey: .data)
+        case .longRecordingWarning:
+            try container.encodeIfPresent(longRecording, forKey: .data)
+        case .pauseSourceChanged:
+            try container.encodeIfPresent(pauseSource, forKey: .data)
         case .resumedAppsChanged:
             try container.encodeIfPresent(resumedApps, forKey: .data)
         case .correctionDialogRequested:
@@ -373,6 +427,9 @@ struct DaemonEvent: Codable {
         idleAutoPaused: IdleAutoPausedData? = nil,
         focusedApp: FocusedAppChangedData? = nil,
         masterPause: MasterPauseChangedData? = nil,
+        pauseScope: PauseScopeToggledData? = nil,
+        longRecording: LongRecordingWarningData? = nil,
+        pauseSource: PauseSourceChangedData? = nil,
         resumedApps: ResumedAppsChangedData? = nil,
         correctionDialogRequest: CorrectionDialogRequestedData? = nil,
         modelsList: ModelsListData? = nil,
@@ -393,6 +450,9 @@ struct DaemonEvent: Codable {
         self.idleAutoPaused = idleAutoPaused
         self.focusedApp = focusedApp
         self.masterPause = masterPause
+        self.pauseScope = pauseScope
+        self.longRecording = longRecording
+        self.pauseSource = pauseSource
         self.resumedApps = resumedApps
         self.correctionDialogRequest = correctionDialogRequest
         self.modelsList = modelsList

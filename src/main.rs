@@ -404,6 +404,13 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                 "idle_pause_action: {}",
                 prefs.idle_pause_action.as_deref().unwrap_or("pause")
             );
+            println!(
+                "transcript_stream: {}",
+                prefs
+                    .transcript_stream
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "false".to_string())
+            );
         }
         ConfigAction::Set { key, value } => {
             // Store API keys in the preferences DB. Keychain access prompts
