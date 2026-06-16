@@ -377,6 +377,11 @@ impl Transcriber for GroqTranscriber {
 mod stt_unit_tests {
     use super::*;
 
+    /// The circuit-breaker counters are process-global atomics; the two
+    /// tests below interleave under the parallel test runner and trip
+    /// each other's thresholds. Serialize them.
+    static CIRCUIT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn transcriptions_url_default() {
         let _guard = GROQ_BASE_URL_ENV_LOCK
@@ -412,6 +417,7 @@ mod stt_unit_tests {
 
     #[test]
     fn record_failure_opens_circuit_after_threshold() {
+        let _guard = CIRCUIT_TEST_LOCK.lock().expect("circuit test lock poisoned");
         reset_circuit_breaker_for_test();
         for _ in 0..CIRCUIT_OPEN_FAILURES {
             record_failure();
@@ -423,6 +429,7 @@ mod stt_unit_tests {
 
     #[test]
     fn record_success_resets_failure_count() {
+        let _guard = CIRCUIT_TEST_LOCK.lock().expect("circuit test lock poisoned");
         reset_circuit_breaker_for_test();
         record_failure();
         record_failure();
