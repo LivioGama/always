@@ -20,9 +20,9 @@
     <string>0.0.1</string>
     <key>CFBundleShortVersionString</key>
     <string>0.0.1</string>
-    <!-- Menu-bar app: Settings stay reachable from the native status item. -->
+    <!-- Dock icon: Settings stay reachable when the menu-bar icon is hidden. -->
     <key>LSUIElement</key>
-    <true/>
+    <false/>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

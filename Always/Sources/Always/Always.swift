@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 import ApplicationServices
 import AVFoundation
-import Combine
 import Darwin
 @main
 struct Always: App {
@@ -40,6 +39,15 @@ struct Always: App {
             OnboardingView()
         }
         .defaultSize(width: 500, height: 400)
+
+        // Restored from the known-good menu-bar lineage: SwiftUI owns the
+        // status item. Creating a manual NSStatusItem regressed placement.
+        MenuBarExtra {
+            MenuBarView()
+        } label: {
+            MenuBarStatusLabel()
+        }
+        .menuBarExtraStyle(.menu)
     }
     
     init() {
@@ -80,10 +88,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     static var userInitiatedQuit = false
 
     private var stateMonitor: StateMonitor?
-    private var statusItem: NSStatusItem?
-    private var statusMenu: NSMenu?
-    private var statusCancellables = Set<AnyCancellable>()
-    private var settingsWindow: NSWindow?
     /// Invisible window that prevents SwiftUI from tearing down the process
     /// when no Settings window is open (macOS 26 silent exit).
     private var keepAliveWindow: NSWindow?
@@ -95,10 +99,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        // Native menu-bar utility: reachable from the status item without a
-        // Dock icon. Set this only after AppKit has created NSApp;
+        // Dock icon + MenuBarExtra: reachable Settings when Control Center
+        // hides the status item. Set this only after AppKit has created NSApp;
         // calling NSApplication.shared from App.init() aborts on macOS 26.
-        NSApp.setActivationPolicy(.accessory)
+        NSApp.setActivationPolicy(.regular)
         // Flock + process sweep — covers com.always / com.always.v2 / stale
         // Desktop copies that bypass bundle-ID checks.
         if !singleInstanceGuard.acquireOrHandOff() {
@@ -107,12 +111,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         installKeepAliveWindow()
         StateMonitor.shared.beginBootstrap()
         StateMonitor.shared.connectToDaemon()
+        NSLog("Always: MenuBarExtra installed")
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         cliService = CLIService()
-        installStatusItem()
-        NSLog("Always: status item installed")
 
         // Onboarding gating: if no saved Groq API key exists,
         // surface the onboarding window. The scene id "onboarding"
@@ -212,214 +215,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             SettingsWindowMetrics.apply(to: existing)
             existing.makeKeyAndOrderFront(nil)
             existing.orderFrontRegardless()
-            settingsWindow = existing
             return
         }
-
-        let window = NSWindow(
-            contentRect: NSRect(
-                x: 0,
-                y: 0,
-                width: SettingsWindowMetrics.width,
-                height: SettingsWindowMetrics.height
-            ),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Always Settings"
-        window.identifier = NSUserInterfaceItemIdentifier("settings")
-        window.contentViewController = NSHostingController(
-            rootView: SettingsWindow(cliService: CLIService())
-        )
-        window.isReleasedWhenClosed = false
-        SettingsWindowMetrics.apply(to: window)
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        window.orderFrontRegardless()
-        settingsWindow = window
-    }
-
-    private func installStatusItem() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "Always"
-        item.button?.imagePosition = .imageLeading
-        item.button?.toolTip = "Always"
-
-        let menu = NSMenu(title: "Always")
-        item.menu = menu
-        statusItem = item
-        statusMenu = menu
-
-        let refresh: () -> Void = { [weak self] in
-            DispatchQueue.main.async {
-                self?.refreshStatusItem()
-            }
-        }
-
-        StateMonitor.shared.objectWillChange
-            .sink { _ in refresh() }
-            .store(in: &statusCancellables)
-        FocusedAppMonitor.shared.objectWillChange
-            .sink { _ in refresh() }
-            .store(in: &statusCancellables)
-        UpdateService.shared.objectWillChange
-            .sink { _ in refresh() }
-            .store(in: &statusCancellables)
-
-        refreshStatusItem()
-    }
-
-    private func refreshStatusItem() {
-        guard let item = statusItem, let menu = statusMenu else { return }
-        let monitor = StateMonitor.shared
-        let symbolName = StatusIconResolver.symbolName(
-            isConnected: monitor.isDaemonConnected,
-            isDegraded: monitor.isDaemonDegraded,
-            isPaused: monitor.isPaused,
-            isTranscribing: monitor.isTranscribing
-        )
-        item.button?.title = "Always"
-        item.button?.image = NSImage(
-            systemSymbolName: symbolName,
-            accessibilityDescription: "Always"
-        )
-
-        menu.removeAllItems()
-
-        let status = NSMenuItem(title: statusText(), action: nil, keyEquivalent: "")
-        status.isEnabled = false
-        menu.addItem(status)
-        menu.addItem(.separator())
-
-        let appToggle = NSMenuItem(
-            title: appToggleLabel(),
-            action: #selector(toggleFocusedAppAllowlistFromStatusItem),
-            keyEquivalent: ""
-        )
-        appToggle.target = self
-        appToggle.isEnabled = monitor.isDaemonConnected
-            && FocusedAppMonitor.shared.currentBundleId != nil
-        menu.addItem(appToggle)
-        menu.addItem(.separator())
-
-        let settings = NSMenuItem(
-            title: "Settings",
-            action: #selector(openSettingsFromStatusItem),
-            keyEquivalent: ","
-        )
-        settings.target = self
-        menu.addItem(settings)
-
-        let log = NSMenuItem(
-            title: "Open Today's Log",
-            action: #selector(openTodaysLogFromStatusItem),
-            keyEquivalent: ""
-        )
-        log.target = self
-        menu.addItem(log)
-
-        menu.addItem(.separator())
-
-        let updates = NSMenuItem(
-            title: "Check for Updates…",
-            action: #selector(checkForUpdatesFromStatusItem),
-            keyEquivalent: ""
-        )
-        updates.target = self
-        updates.isEnabled = UpdateService.shared.canCheckForUpdates
-        menu.addItem(updates)
-
-        menu.addItem(.separator())
-
-        let quit = NSMenuItem(
-            title: "Quit Always",
-            action: #selector(quitFromStatusItem),
-            keyEquivalent: "q"
-        )
-        quit.target = self
-        menu.addItem(quit)
-    }
-
-    private func statusText() -> String {
-        let monitor = StateMonitor.shared
-        let focusedApp = FocusedAppMonitor.shared
-        if !monitor.isDaemonConnected {
-            return monitor.isDaemonDegraded ? "Reconnecting…" : "Connecting…"
-        }
-        if monitor.isPaused {
-            if monitor.isMasterPaused { return "Paused everywhere" }
-            if monitor.isIdleAutoPaused { return "Idle pause (speak or switch app)" }
-            if let name = focusedApp.currentAppName, !name.isEmpty { return "Paused for \(name)" }
-            return "Paused"
-        }
-        if monitor.isTranscribing { return "Transcribing" }
-        if let name = focusedApp.currentAppName, !name.isEmpty { return "Active in \(name)" }
-        return "Listening"
-    }
-
-    private func focusedAppIsResumed() -> Bool {
-        guard let bundle = FocusedAppMonitor.shared.currentBundleId else { return false }
-        return StateMonitor.shared.resumedBundleIds.contains(bundle)
-    }
-
-    private func appToggleLabel() -> String {
-        guard let name = FocusedAppMonitor.shared.currentAppName, !name.isEmpty else {
-            return "No focused app"
-        }
-        return focusedAppIsResumed()
-            ? "Remove \(name) from allowlist"
-            : "Resume Always for \(name)"
-    }
-
-    @objc private func toggleFocusedAppAllowlistFromStatusItem() {
-        guard let bundle = FocusedAppMonitor.shared.currentBundleId else { return }
-        let newPaused: Bool? = focusedAppIsResumed() ? nil : false
-        StateMonitor.shared.setAppPaused(bundleId: bundle, paused: newPaused)
-        refreshStatusItem()
-    }
-
-    @objc private func openSettingsFromStatusItem() {
-        openSettingsWindow()
-    }
-
-    @objc private func openTodaysLogFromStatusItem() {
-        let alwaysCLI = bundledDaemonPath()
-        let escapedCLI = alwaysCLI.replacingOccurrences(of: "'", with: "'\\''")
-        let command = "'\(escapedCLI)' logs --pretty"
-
-        let script = """
-        tell application "Terminal"
-            activate
-            do script "\(command)"
-        end tell
-        """
-
-        if let osa = NSAppleScript(source: script) {
-            var err: NSDictionary?
-            osa.executeAndReturnError(&err)
-            if let err {
-                NSLog("openTodaysLog AppleScript failed: \(err)")
-            }
-        }
-    }
-
-    @objc private func checkForUpdatesFromStatusItem() {
-        UpdateService.shared.checkForUpdates()
-    }
-
-    @objc private func quitFromStatusItem() {
-        Self.userInitiatedQuit = true
-        NSApp.terminate(nil)
-    }
-
-    private func bundledDaemonPath() -> String {
-        let bundled = Bundle.main.bundleURL
-            .appendingPathComponent("Contents")
-            .appendingPathComponent("MacOS")
-            .appendingPathComponent("always-daemon")
-            .path
-        return FileManager.default.fileExists(atPath: bundled) ? bundled : "always"
     }
 
     /// Dock-icon click handler (only when activation policy is `.regular`).

@@ -5,14 +5,8 @@ struct MenuBarStatusLabel: View {
     @ObservedObject private var stateMonitor = StateMonitor.shared
 
     var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: symbolName)
-            Text("Always")
-                .font(.system(size: 12, weight: .medium))
-        }
-        .lineLimit(1)
-        .fixedSize()
-        .accessibilityLabel("Always")
+        Image(systemName: symbolName)
+            .accessibilityLabel("Always")
     }
 
     private var symbolName: String {
