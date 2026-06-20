@@ -162,6 +162,18 @@ final class AlwaysTests: XCTestCase {
         )
     }
 
+    func testSingleInstanceGuardOnlyMatchesExecutablePath() throws {
+        XCTAssertTrue(SingleInstanceGuard.isAlwaysGUIProcess(
+            command: "/Applications/Always.app/Contents/MacOS/Always"
+        ))
+        XCTAssertTrue(SingleInstanceGuard.isAlwaysGUIProcess(
+            command: "/Users/livio/Documents/always/Always/.build/release/Always"
+        ))
+        XCTAssertFalse(SingleInstanceGuard.isAlwaysGUIProcess(
+            command: "zsh -lc open /Applications/Always.app && ps ax | grep Always.app/Contents/MacOS/Always"
+        ))
+    }
+
     // MARK: - StatusOverlayController flash protection
     //
     // Regression: calling show(state:) while a flash is animating used to

@@ -81,10 +81,11 @@ final class SingleInstanceGuard {
     }
 
     static func isAlwaysGUIProcess(command: String) -> Bool {
-        if command.contains("always-daemon") { return false }
-        if command.contains("Always.app/Contents/MacOS/Always") { return true }
+        let executable = command.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? command
+        if executable.contains("always-daemon") { return false }
+        if executable.hasSuffix("/Always.app/Contents/MacOS/Always") { return true }
         // Local `swift run` / `.build/.../Always` dev launches.
-        if command.hasSuffix("/Always") && !command.contains("Helper") { return true }
+        if executable.hasSuffix("/Always") && !executable.contains("Helper") { return true }
         return false
     }
 
