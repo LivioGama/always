@@ -105,13 +105,13 @@ final class SingleInstanceGuard {
         for bundleId in Self.knownBundleIDs {
             for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
                 where app.processIdentifier != myPid {
-                app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+                app.activate(options: [.activateAllWindows])
                 return
             }
         }
         if let pid = Self.listGUIProcessIDs(except: myPid).first,
            let app = NSRunningApplication(processIdentifier: pid) {
-            app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            app.activate(options: [.activateAllWindows])
         }
     }
 
