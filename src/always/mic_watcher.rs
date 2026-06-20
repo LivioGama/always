@@ -44,15 +44,13 @@ pub fn spawn(rt: &Handle) {
                     if let Ok(log_path) = always_config::configured_log_path()
                         && let Ok(mut logger) = Logger::open(&log_path)
                     {
-                        let apps = detail.clone().unwrap_or_else(|| "another application".into());
+                        let apps = detail
+                            .clone()
+                            .unwrap_or_else(|| "another application".into());
                         logger.write(Event::MicrophoneAutoPaused { apps: &apps });
                     }
                     let (_effective, changed) = pause::set_mic_conflict_paused(true);
-                    event::global_broadcaster().pause_source_changed(
-                        "mic_conflict",
-                        true,
-                        detail,
-                    );
+                    event::global_broadcaster().pause_source_changed("mic_conflict", true, detail);
                     if changed {
                         pause::dictation_buffer_clear();
                         event::global_broadcaster().paused();
@@ -71,11 +69,7 @@ pub fn spawn(rt: &Handle) {
                     pause::set_idle_auto_paused(false);
                     let (effective, changed) = pause::set_mic_conflict_paused(false);
                     pause::mark_voice_seen();
-                    event::global_broadcaster().pause_source_changed(
-                        "mic_conflict",
-                        false,
-                        None,
-                    );
+                    event::global_broadcaster().pause_source_changed("mic_conflict", false, None);
                     if changed {
                         if effective {
                             event::global_broadcaster().paused();

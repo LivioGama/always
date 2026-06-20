@@ -46,7 +46,7 @@ pub fn create_renderer() -> Result<OverlayBackend> {
 fn create_x11_renderer() -> Result<OverlayBackend> {
     info!("Using X11 renderer");
     X11Renderer::new()
-        .map(|r| OverlayBackend::X11(r))
+        .map(OverlayBackend::X11)
         .context("Failed to create X11 renderer")
 }
 

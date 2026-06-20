@@ -19,7 +19,7 @@
 //!
 //! Active-model selection lives outside this module by design — the
 //! registry only knows what's on disk and what's downloadable. The
-//! daemon's `stt_dispatch` picks the right [`Transcriber`] backend
+//! daemon's `stt_dispatch` picks the right `Transcriber` backend
 //! based on config.
 
 use std::collections::{HashMap, HashSet};
@@ -40,7 +40,7 @@ use tar::Archive;
 use tokio::sync::broadcast;
 
 /// Which transcription engine a downloaded model targets. The
-/// [`crate::always::stt_local::LocalTranscriber`] dispatches on this
+/// `crate::always::stt_local::LocalTranscriber` dispatches on this
 /// when loading the model into a `transcribe-rs` engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EngineType {
@@ -518,9 +518,7 @@ impl ModelRegistry {
                     }
                     match self.bin_cached_verdict(path, model.sha256.as_deref()) {
                         Some(verdict) => verdict,
-                        None if hash_missing => {
-                            self.bin_verified(path, model.sha256.as_deref())
-                        }
+                        None if hash_missing => self.bin_verified(path, model.sha256.as_deref()),
                         None => {
                             needs_hash = true;
                             true // provisional: file exists, hash pending

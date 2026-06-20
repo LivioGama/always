@@ -239,7 +239,7 @@ impl FromStr for TranscriberBackendChoice {
 ///
 /// Fallback policy:
 ///
-/// * Local backend, model on disk → [`LocalTranscriber`].
+/// * Local backend, model on disk → `LocalTranscriber`.
 /// * Local backend, model missing or `local-stt` feature off →
 ///   Groq (with a warning). The alternative — refusing to start —
 ///   leaves users stranded if they delete a downloaded model.

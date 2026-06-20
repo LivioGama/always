@@ -45,8 +45,8 @@
     <!-- Sparkle: appcast from release.yml; rotate EdDSA keys per docs/RELEASE.md. -->
     <key>SUFeedURL</key>
     <string>https://github.com/rtk-ai/always/releases/latest/download/appcast.xml</string>
-    <key>SUPublicEDKey</key>
-    <string>34fr+qLt9APKQfR2FSQfyEY4iAGjJOjZ5MIFMaGkK68=</string>
+	<key>SUPublicEDKey</key>
+	<string>8KumjXPlWc/w8FhOTjoFHEol/wmueg+tbRUzhJvVpMk=</string>
     <key>SUEnableAutomaticChecks</key>
     <true/>
     <key>SUScheduledCheckInterval</key>

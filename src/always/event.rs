@@ -304,7 +304,7 @@ fn cap_field(s: &str) -> Option<String> {
 impl DaemonEvent {
     /// Convert event to JSON line.
     ///
-    /// Over-long string fields are capped to [`MAX_EVENT_FIELD_CHARS`]
+    /// Over-long string fields are capped to `MAX_EVENT_FIELD_CHARS`
     /// before serialization so one giant transcript / error / catalog
     /// entry cannot balloon every connected client's line buffer. The
     /// public enum shape and the serialization format for normal-size

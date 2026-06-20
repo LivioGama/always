@@ -57,8 +57,7 @@ fn compute_effective() -> bool {
     if MASTER_PAUSED.load(Ordering::Relaxed) {
         return true;
     }
-    if AUDIO_OUTPUT_PAUSED.load(Ordering::Relaxed) || MIC_CONFLICT_PAUSED.load(Ordering::Relaxed)
-    {
+    if AUDIO_OUTPUT_PAUSED.load(Ordering::Relaxed) || MIC_CONFLICT_PAUSED.load(Ordering::Relaxed) {
         return true;
     }
     if IDLE_AUTO_PAUSED.load(Ordering::Relaxed) {

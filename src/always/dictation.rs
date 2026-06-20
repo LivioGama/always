@@ -93,7 +93,7 @@ fn session_text_for_app(current_app: Option<String>) -> Option<String> {
 }
 
 /// Tail of the live session buffer (word-boundary cut, max
-/// [`CONTEXT_MAX_CHARS`]) for the grammar LLM's `<context_before>`.
+/// `CONTEXT_MAX_CHARS`) for the grammar LLM's `<context_before>`.
 pub fn session_context() -> Option<String> {
     session_text().map(|full| tail_on_word_boundary(&full, CONTEXT_MAX_CHARS))
 }

@@ -7,7 +7,7 @@
 //! and so future Linux/Windows backends can plug in without rewriting
 //! callers.
 //!
-//! [`MockClipboardProvider`] (gated behind `cfg(test)`) records every
+//! `MockClipboardProvider` (gated behind `cfg(test)`) records every
 //! `copy` and `paste` call so tests can assert exactly what would have
 //! been sent to the OS.
 

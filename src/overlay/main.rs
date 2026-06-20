@@ -11,6 +11,7 @@ mod state;
 mod uds_client;
 mod wayland;
 
+use always::always::event::PROTOCOL_VERSION;
 use factory::create_renderer;
 use state::{DaemonEvent, OverlayStateReducer};
 use uds_client::UDSClient;
@@ -62,10 +63,13 @@ async fn main() -> Result<()> {
                                     info!("Received daemon event: {:?}", std::mem::discriminant(&event));
 
                                     // Validate protocol version
-                                    if let DaemonEvent::Hello { version } = &event {
-                                        if *version != 7 {
-                                            warn!("Protocol version mismatch: expected 7, got {}", version);
-                                        }
+                                    if let DaemonEvent::Hello { version } = &event
+                                        && *version != PROTOCOL_VERSION
+                                    {
+                                        warn!(
+                                            "Protocol version mismatch: expected {}, got {}",
+                                            PROTOCOL_VERSION, version
+                                        );
                                     }
 
                                     // Process event through state reducer

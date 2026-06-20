@@ -88,7 +88,7 @@ observer/timer cleanup in the Swift services.
 
 Strong baseline already in place: CI runs `fmt` + `clippy -D warnings` + tests +
 `cargo-llvm-cov` + `cargo-audit` + `cargo-deny` + `cargo-machete` + CodeQL +
-dependency-review; release pipeline does universal (arm64+x86_64) builds, DMG +
+dependency-review; release pipeline does arm64 Apple Silicon builds, DMG +
 SHA256 + Sparkle EdDSA appcast, and notarization with a real pre-flight check.
 `deny.toml` enforces licenses/bans (rustls-only, no OpenSSL) and flags the
 unmaintained `rdev`. No secrets tracked in git.

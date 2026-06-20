@@ -115,12 +115,11 @@ impl X11Renderer {
             while XPending(self.display) > 0 {
                 let mut event: XEvent = std::mem::zeroed();
                 XNextEvent(self.display, &mut event);
-                if event.get_type() == Expose {
-                    if let Some(state) = self.current_state.clone() {
-                        if !matches!(state, OverlayState::Hidden) {
-                            self.draw(&state);
-                        }
-                    }
+                if event.get_type() == Expose
+                    && let Some(state) = self.current_state.clone()
+                    && !matches!(state, OverlayState::Hidden)
+                {
+                    self.draw(&state);
                 }
             }
         }

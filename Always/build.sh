@@ -6,37 +6,52 @@ CRATE_VERSION="$(grep '^version' "$APP_DIR/../Cargo.toml" | head -1 | cut -d'"' 
 
 echo "Building Always..."
 cd "$APP_DIR"
-swift build
+SWIFT_CONFIGURATION="${ALWAYS_SWIFT_CONFIGURATION:-${ALWAYS_BUILD_PROFILE:-debug}}"
+case "$SWIFT_CONFIGURATION" in
+    release|debug) ;;
+    *)
+        echo "✗ Invalid Swift configuration: $SWIFT_CONFIGURATION"
+        echo "  Use ALWAYS_SWIFT_CONFIGURATION=debug or release."
+        exit 1
+        ;;
+esac
+swift build -c "$SWIFT_CONFIGURATION"
 
 echo "Creating app bundle..."
 mkdir -p Always.app/Contents/MacOS
 mkdir -p Always.app/Contents/Resources
 
-if [ -f .build/debug/Always ]; then
-    echo "✓ Executable found at .build/debug/Always"
+SWIFT_BIN=".build/$SWIFT_CONFIGURATION/Always"
+ARCH_SWIFT_BIN=".build/$(uname -m)-apple-macosx/$SWIFT_CONFIGURATION/Always"
+if [ -f "$SWIFT_BIN" ]; then
+    echo "✓ Executable found at $SWIFT_BIN"
+elif [ -f "$ARCH_SWIFT_BIN" ]; then
+    SWIFT_BIN="$ARCH_SWIFT_BIN"
+    echo "✓ Executable found at $SWIFT_BIN"
 else
-    echo "✗ Executable NOT found at .build/debug/Always"
-    echo "Trying direct path..."
-    if [ -f .build/arm64-apple-macosx/debug/Always ]; then
-        echo "✓ Found at .build/arm64-apple-macosx/debug/Always"
-    fi
+    echo "✗ Executable NOT found for Swift configuration '$SWIFT_CONFIGURATION'"
+    echo "  Checked: .build/$SWIFT_CONFIGURATION/Always"
+    echo "           $ARCH_SWIFT_BIN"
+    exit 1
 fi
 
 cp Info.plist Always.app/Contents/
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $CRATE_VERSION" Always.app/Contents/Info.plist
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $CRATE_VERSION" Always.app/Contents/Info.plist
-cp .build/debug/Always Always.app/Contents/MacOS/
+cp "$SWIFT_BIN" Always.app/Contents/MacOS/
 cp Resources/AlwaysIcon.icns Always.app/Contents/Resources/
 
 # Daemon binary: ALWAYS_BUILD_PROFILE=release|debug, else pick newest build.
 RELEASE_BIN="../target/release/always"
 DEBUG_BIN="../target/debug/always"
-DAEMON_PATH=""
+DAEMON_PATH="${ALWAYS_DAEMON_PATH:-}"
 case "${ALWAYS_BUILD_PROFILE:-}" in
-    release) DAEMON_PATH="$RELEASE_BIN" ;;
-    debug)   DAEMON_PATH="$DEBUG_BIN" ;;
+    release) DAEMON_PATH="${DAEMON_PATH:-$RELEASE_BIN}" ;;
+    debug)   DAEMON_PATH="${DAEMON_PATH:-$DEBUG_BIN}" ;;
     *)
-        if [ -f "$RELEASE_BIN" ] && [ -f "$DEBUG_BIN" ]; then
+        if [ -n "$DAEMON_PATH" ]; then
+            :
+        elif [ -f "$RELEASE_BIN" ] && [ -f "$DEBUG_BIN" ]; then
             if [ "$DEBUG_BIN" -nt "$RELEASE_BIN" ]; then
                 DAEMON_PATH="$DEBUG_BIN"
             else
@@ -83,6 +98,9 @@ fi
 echo "Code signing app..."
 # Prefer Apple Development identity so TCC grants survive debug rebuilds; else ad-hoc.
 SIGN_IDENTITY="${ALWAYS_CODESIGN_IDENTITY:-}"
+if [ -z "$SIGN_IDENTITY" ]; then
+    SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
+fi
 if [ -z "$SIGN_IDENTITY" ]; then
     SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)"
 fi

@@ -471,8 +471,9 @@ fn record_with_local_vad(
         // the announcement is live so the GUI watchdog never expires
         // mid-utterance (see VOICE_HEARTBEAT_MS).
         if voice_activity_announced
-            && last_voice_heartbeat
-                .is_some_and(|t| t.elapsed() >= std::time::Duration::from_millis(VOICE_HEARTBEAT_MS))
+            && last_voice_heartbeat.is_some_and(|t| {
+                t.elapsed() >= std::time::Duration::from_millis(VOICE_HEARTBEAT_MS)
+            })
         {
             last_voice_heartbeat = Some(std::time::Instant::now());
             event::global_broadcaster().voice_activity_detected();
@@ -673,10 +674,7 @@ fn record_with_local_vad(
                         // paste path — identical tiering, candidates, and
                         // session context mean an identical cache key, so
                         // the paste path's grammar call is a cache hit.
-                        let req = crate::always::correction_request::build(
-                            &text,
-                            pp.can_correct(),
-                        );
+                        let req = crate::always::correction_request::build(&text, pp.can_correct());
                         rt_for_warm.spawn(async move {
                             let _ = pp.process_request(&req).await;
                         });
@@ -717,7 +715,11 @@ fn record_with_local_vad(
             let speech_secs = (speech_samples.len() / 16_000) as u32;
             if speech_secs >= LONG_RECORDING_WARN_SECS {
                 long_recording_warned = true;
-                tracing::info!(speech_secs, cap_secs = MAX_SPEECH_SECS, "long_recording_warning");
+                tracing::info!(
+                    speech_secs,
+                    cap_secs = MAX_SPEECH_SECS,
+                    "long_recording_warning"
+                );
                 event::global_broadcaster().long_recording_warning(speech_secs, MAX_SPEECH_SECS);
             }
         }
@@ -792,8 +794,7 @@ fn record_with_local_vad(
     let speculation = if speculation_pending {
         let started_wait = std::time::Instant::now();
         let audio_secs = speech_samples.len() as f64 / 16_000.0;
-        let max_wait =
-            std::time::Duration::from_secs_f64((audio_secs * 0.5).clamp(10.0, 60.0));
+        let max_wait = std::time::Duration::from_secs_f64((audio_secs * 0.5).clamp(10.0, 60.0));
         let mut taken: Option<Result<crate::stt::TranscriptionResult>> = None;
         let mut last_heartbeat = std::time::Instant::now();
         loop {
@@ -973,9 +974,10 @@ fn early_voice_frame_ok(
 }
 
 fn normal_silence_frames(cfg: &AlwaysConfig) -> usize {
-    let secs = cfg
-        .silence_secs
-        .clamp(NORMAL_SILENCE_FLOOR_SECS, crate::always::config::SILENCE_SECS_MAX);
+    let secs = cfg.silence_secs.clamp(
+        NORMAL_SILENCE_FLOOR_SECS,
+        crate::always::config::SILENCE_SECS_MAX,
+    );
     ((secs * 1000.0) / FRAME_MS as f64).ceil() as usize
 }
 
@@ -1142,6 +1144,10 @@ mod tests {
 
     #[test]
     fn sustained_speech_onset_announces() {
-        assert!(announce_after(&[(0.0001, 0.01), (0.03, 0.35), (0.04, 0.55)]));
+        assert!(announce_after(&[
+            (0.0001, 0.01),
+            (0.03, 0.35),
+            (0.04, 0.55)
+        ]));
     }
 }

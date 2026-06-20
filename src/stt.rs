@@ -417,7 +417,9 @@ mod stt_unit_tests {
 
     #[test]
     fn record_failure_opens_circuit_after_threshold() {
-        let _guard = CIRCUIT_TEST_LOCK.lock().expect("circuit test lock poisoned");
+        let _guard = CIRCUIT_TEST_LOCK
+            .lock()
+            .expect("circuit test lock poisoned");
         reset_circuit_breaker_for_test();
         for _ in 0..CIRCUIT_OPEN_FAILURES {
             record_failure();
@@ -429,7 +431,9 @@ mod stt_unit_tests {
 
     #[test]
     fn record_success_resets_failure_count() {
-        let _guard = CIRCUIT_TEST_LOCK.lock().expect("circuit test lock poisoned");
+        let _guard = CIRCUIT_TEST_LOCK
+            .lock()
+            .expect("circuit test lock poisoned");
         reset_circuit_breaker_for_test();
         record_failure();
         record_failure();

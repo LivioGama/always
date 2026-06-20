@@ -16,6 +16,7 @@ secrets.
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password from appleid.apple.com. |
 | `HOMEBREW_TAP_TOKEN` | Fine-grained PAT with `contents:write` on `rtk-ai/homebrew-tap`. |
 | `CODECOV_TOKEN` | Codecov upload token (CI coverage). |
+| `SPARKLE_ED_PRIVATE_KEY` | Private EdDSA key used by Sparkle's `sign_update` when generating `appcast.xml`. |
 
 ## Release procedure
 
@@ -34,7 +35,7 @@ secrets.
    verifiable commit author.
 
 3. **CI runs `release.yml` automatically.** It:
-   * Builds a universal-binary daemon (`aarch64` + `x86_64` via `lipo`).
+   * Builds the Apple Silicon macOS daemon (`aarch64-apple-darwin`).
    * Codesigns + notarizes the Swift app via `Always/build.sh`.
    * Builds a DMG with a `/Applications` symlink.
    * Generates a CycloneDX SBOM.
@@ -88,6 +89,24 @@ The release workflow can be exercised locally with `act` or `nektos/act`,
 but the most useful manual validation is:
 
 ```bash
+# Run all local release-readiness gates (CI checks, docs, app bundle,
+# codesign verification, and DMG smoke test).
+./scripts/verify-release-readiness.sh local
+
+# Check that required GitHub release secrets are present.
+./scripts/verify-release-readiness.sh secrets
+
+# Verify all release-only secrets are present in the current shell.
+MAC_CERT_P12_BASE64=... \
+MAC_CERT_PASSWORD=... \
+KEYCHAIN_PASSWORD=... \
+APPLE_ID=... \
+APPLE_TEAM_ID=... \
+APPLE_APP_SPECIFIC_PASSWORD=... \
+HOMEBREW_TAP_TOKEN=... \
+SPARKLE_ED_PRIVATE_KEY=... \
+  ./scripts/release-preflight.sh
+
 # Drive the existing build script with notarization disabled to catch
 # pure build failures.
 ALWAYS_BUILD_PROFILE=release ./Always/build.sh

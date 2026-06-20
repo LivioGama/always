@@ -130,7 +130,7 @@ impl OverlayState {
 }
 
 /// Internal state tracked by the reducer
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct ReducerState {
     is_paused: bool,
     is_auto_enter: bool,
@@ -141,22 +141,6 @@ pub(crate) struct ReducerState {
     current_overlay: Option<OverlayState>,
     auto_enter_remaining_ms: Option<u32>,
     is_initial_sync: bool,
-}
-
-impl Default for ReducerState {
-    fn default() -> Self {
-        Self {
-            is_paused: false,
-            is_auto_enter: false,
-            is_transcribing: false,
-            is_voice_activity: false,
-            is_listening_active: false,
-            is_daemon_connected: false,
-            current_overlay: None,
-            auto_enter_remaining_ms: None,
-            is_initial_sync: false,
-        }
-    }
 }
 
 /// State reducer - processes daemon events and produces overlay state changes
@@ -375,6 +359,20 @@ impl OverlayStateReducer {
             | DaemonEvent::Heartbeat
             | DaemonEvent::FocusedAppChanged { bundle_id: _ }
             | DaemonEvent::MasterPauseChanged { master_paused: _ }
+            | DaemonEvent::PauseScopeToggled {
+                scope: _,
+                bundle_id: _,
+                paused: _,
+            }
+            | DaemonEvent::LongRecordingWarning {
+                elapsed_secs: _,
+                cap_secs: _,
+            }
+            | DaemonEvent::PauseSourceChanged {
+                source: _,
+                paused: _,
+                detail: _,
+            }
             | DaemonEvent::ResumedAppsChanged { bundles: _ }
             | DaemonEvent::CorrectionLogged { wrong: _, right: _ }
             | DaemonEvent::CorrectionPending {
@@ -405,7 +403,8 @@ impl OverlayStateReducer {
                 model_id: _,
                 error: _,
             }
-            | DaemonEvent::ActiveTranscriberChanged { backend: _ } => None,
+            | DaemonEvent::ActiveTranscriberChanged { backend: _ }
+            | DaemonEvent::SttFallbackEngaged { model: _ } => None,
 
             DaemonEvent::ProcessingStarted | DaemonEvent::ProcessingStopped => {
                 // Not used in current overlay logic
@@ -524,17 +523,17 @@ impl OverlayStateReducer {
 
     /// Check if flash state has expired and restore persistent state
     fn check_flash_expiry(&mut self) -> Option<OverlayState> {
-        if let Some(deadline) = self.flash_deadline {
-            if Instant::now() >= deadline {
-                self.flash_deadline = None;
-                if let Some(persistent) = self.pending_persistent_state.take() {
-                    self.state.current_overlay = Some(persistent.clone());
-                    return Some(persistent);
-                } else {
-                    // No persistent state to restore, hide overlay
-                    self.state.current_overlay = Some(OverlayState::Hidden);
-                    return Some(OverlayState::Hidden);
-                }
+        if let Some(deadline) = self.flash_deadline
+            && Instant::now() >= deadline
+        {
+            self.flash_deadline = None;
+            if let Some(persistent) = self.pending_persistent_state.take() {
+                self.state.current_overlay = Some(persistent.clone());
+                return Some(persistent);
+            } else {
+                // No persistent state to restore, hide overlay
+                self.state.current_overlay = Some(OverlayState::Hidden);
+                return Some(OverlayState::Hidden);
             }
         }
         None
@@ -543,11 +542,11 @@ impl OverlayStateReducer {
     /// Public method to check and process flash expiry (called by main loop)
     pub fn check_timeouts(&mut self) -> Option<OverlayState> {
         // Check initial sync deadline
-        if let Some(deadline) = self.initial_sync_deadline {
-            if Instant::now() >= deadline {
-                self.initial_sync_deadline = None;
-                self.state.is_initial_sync = false;
-            }
+        if let Some(deadline) = self.initial_sync_deadline
+            && Instant::now() >= deadline
+        {
+            self.initial_sync_deadline = None;
+            self.state.is_initial_sync = false;
         }
 
         if let Some(deadline) = self.transcribing_deferred_until

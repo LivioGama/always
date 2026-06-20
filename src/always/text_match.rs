@@ -646,7 +646,8 @@ mod tests {
     #[test]
     fn tiered_preserves_punctuation_on_exact() {
         let glossary = entries(&[("Claude", &["cloud"])]);
-        let (out, _) = apply_glossary_tiered("Hi cloud, hello!", &glossary, DEFAULT_THRESHOLD, false);
+        let (out, _) =
+            apply_glossary_tiered("Hi cloud, hello!", &glossary, DEFAULT_THRESHOLD, false);
         assert_eq!(out, "Hi Claude, hello!");
     }
 }

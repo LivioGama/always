@@ -15,8 +15,8 @@ use std::time::Duration;
 
 /// Spawn the passive watcher onto the supplied tokio runtime handle.
 ///
-/// Polls every [`POLL_INTERVAL`] and, when the clipboard changes within
-/// [`PASTE_WINDOW`] of a `pause::set_last_pasted` snapshot, runs a
+/// Polls every `POLL_INTERVAL` and, when the clipboard changes within
+/// `PASTE_WINDOW` of a `pause::set_last_pasted` snapshot, runs a
 /// word-level diff and (if any pair clears the correction-similarity
 /// gate) queues the candidate via `correction_queue::global_queue()`.
 ///

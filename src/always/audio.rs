@@ -353,7 +353,7 @@ pub fn create_wav_bytes_i16_mono_16k(samples: &[i16]) -> Result<Vec<u8>> {
 /// The default production implementation ([`SoxAudioSource`]) shells out
 /// to `/opt/homebrew/bin/rec` (SoX) on macOS. The trait exists so:
 ///
-/// 1. Tests can inject a deterministic [`mock::MockAudioSource`] without
+/// 1. Tests can inject a deterministic `mock::MockAudioSource` without
 ///    touching the user's microphone.
 /// 2. Future Linux (`cpal`/ALSA) and Windows (`cpal`/WASAPI) backends can
 ///    drop in without touching the VAD loop.

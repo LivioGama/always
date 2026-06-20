@@ -113,7 +113,8 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     let prewarm_key = cfg.groq_stt_api_key.clone();
     let _prewarm_handle = rt.spawn(async move {
         let started = Instant::now();
-        let mut req = crate::http_client::async_client().get("https://api.groq.com/openai/v1/models");
+        let mut req =
+            crate::http_client::async_client().get("https://api.groq.com/openai/v1/models");
         if let Some(key) = prewarm_key {
             req = req.header("Authorization", format!("Bearer {key}"));
         }
@@ -415,8 +416,8 @@ fn handle_speech(
             // dictation for users without auto-enter: natural pauses no
             // longer reset every utterance to a fresh capitalized
             // sentence.
-            let merge_previous = pause::dictation_buffer_text()
-                .or_else(crate::always::dictation::session_text);
+            let merge_previous =
+                pause::dictation_buffer_text().or_else(crate::always::dictation::session_text);
             let merge_active = merge_previous.is_some();
 
             // Short-utterance bypass: tiny inputs like "yes", "ok", "done"
@@ -424,39 +425,37 @@ fn handle_speech(
             // sync (fast); LLM grammar runs async after paste when enabled
             // so the user sees text immediately (~300-800ms sooner).
             let grammar_started = Instant::now();
-            let (final_text, grammar_cache_hit, grammar_patch_async) = if is_short_utterance(
-                &transformed,
-            ) {
-                tracing::info!(
-                    stage = "short_utterance_bypass",
-                    text = %transformed,
-                    "skipping correction stack — too short to benefit"
-                );
-                (transformed.clone(), false, false)
-            } else {
-                // Single-paste policy: correct synchronously, then paste the
-                // final text exactly ONCE. The old "paste acoustic now, patch
-                // via Cmd+Z + repaste when the LLM returns" path surfaced text
-                // a few hundred ms sooner but produced a DOUBLE transcript
-                // whenever the undo failed to land — user pressed Enter first,
-                // the app has non-standard undo (Slack, terminals, web
-                // contenteditable), or focus shifted. One clean paste of the
-                // corrected text is worth the small extra latency.
-                //
-                // The request bundles tier-1 acoustic rewrites, deferred
-                // fuzzy glossary candidates, and dictation-session context
-                // into one LLM message. The speculative warm in `vad.rs`
-                // builds the identical request, so the cache key matches
-                // and the LLM cost is usually already paid.
-                let llm_available = cfg
-                    .post_processor
-                    .as_ref()
-                    .is_some_and(|pp| pp.can_correct());
-                let req =
-                    crate::always::correction_request::build(&transformed, llm_available);
-                let (corrected, cache_hit) = apply_grammar_blocking_request(&req, cfg, rt);
-                (corrected, cache_hit, false)
-            };
+            let (final_text, grammar_cache_hit, grammar_patch_async) =
+                if is_short_utterance(&transformed) {
+                    tracing::info!(
+                        stage = "short_utterance_bypass",
+                        text = %transformed,
+                        "skipping correction stack — too short to benefit"
+                    );
+                    (transformed.clone(), false, false)
+                } else {
+                    // Single-paste policy: correct synchronously, then paste the
+                    // final text exactly ONCE. The old "paste acoustic now, patch
+                    // via Cmd+Z + repaste when the LLM returns" path surfaced text
+                    // a few hundred ms sooner but produced a DOUBLE transcript
+                    // whenever the undo failed to land — user pressed Enter first,
+                    // the app has non-standard undo (Slack, terminals, web
+                    // contenteditable), or focus shifted. One clean paste of the
+                    // corrected text is worth the small extra latency.
+                    //
+                    // The request bundles tier-1 acoustic rewrites, deferred
+                    // fuzzy glossary candidates, and dictation-session context
+                    // into one LLM message. The speculative warm in `vad.rs`
+                    // builds the identical request, so the cache key matches
+                    // and the LLM cost is usually already paid.
+                    let llm_available = cfg
+                        .post_processor
+                        .as_ref()
+                        .is_some_and(|pp| pp.can_correct());
+                    let req = crate::always::correction_request::build(&transformed, llm_available);
+                    let (corrected, cache_hit) = apply_grammar_blocking_request(&req, cfg, rt);
+                    (corrected, cache_hit, false)
+                };
             let grammar_ms = grammar_started.elapsed().as_millis() as u64;
 
             // Privacy: gate transcript text behind `should_log_transcripts`
@@ -652,7 +651,9 @@ fn handle_speech(
                     .saturating_duration_since(timing.stt_done_at)
                     .as_millis() as u64,
                 grammar_ms,
-                paste_ms = pasted_at.saturating_duration_since(paste_started).as_millis() as u64,
+                paste_ms = pasted_at
+                    .saturating_duration_since(paste_started)
+                    .as_millis() as u64,
                 total_ms = pasted_at
                     .saturating_duration_since(timing.speech_end_at)
                     .as_millis() as u64,

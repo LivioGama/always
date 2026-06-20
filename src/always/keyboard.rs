@@ -6,9 +6,9 @@
 //!
 //! ## Cross-platform layout
 //!
-//! [`Combo`] (parsing + matching) is portable — modifier flags + a single
+//! `Combo` (parsing + matching) is portable — modifier flags + a single
 //! key character string. The actual global hotkey listener that converts
-//! OS key events into [`Combo::matches`] calls is platform-specific:
+//! OS key events into `Combo::matches_name` calls is platform-specific:
 //!
 //! * **macOS** (`feature = "macos"`): uses `rdev` to subscribe to system
 //!   keyboard events. (P2 will replace `rdev` with a thin `CGEventTap`
@@ -358,11 +358,7 @@ fn handle_per_app_pause_hotkey(bundle: &str) {
     // ("Resumed in Safari"), independent of the effective-state
     // events above. `paused` is from the app's perspective: it was
     // resumed → now paused again, and vice versa.
-    event::global_broadcaster().pause_scope_toggled(
-        "app",
-        Some(bundle.to_string()),
-        was_resumed,
-    );
+    event::global_broadcaster().pause_scope_toggled("app", Some(bundle.to_string()), was_resumed);
     if let Ok(log_path) = always_config::configured_log_path()
         && let Ok(mut logger) = log::Logger::open(&log_path)
     {
@@ -414,7 +410,13 @@ fn handle_master_pause_hotkey() {
     {
         logger.write(log::Event::PauseToggled { paused: effective });
     }
-    tracing::info!(master, effective, changed, scope = "master", "hotkey_pause_chord");
+    tracing::info!(
+        master,
+        effective,
+        changed,
+        scope = "master",
+        "hotkey_pause_chord"
+    );
 }
 
 #[cfg(feature = "macos")]
@@ -488,11 +490,9 @@ pub fn start_keyboard_listener() -> Result<()> {
                     pause::countdown_request_cancel();
                     pause::dictation_buffer_clear();
                 }
-                if master_pause_combo.matches_name(ctrl_pressed, shift_pressed, alt_pressed, name)
-                {
+                if master_pause_combo.matches_name(ctrl_pressed, shift_pressed, alt_pressed, name) {
                     handle_master_pause_hotkey();
-                } else if pause_combo.matches_name(ctrl_pressed, shift_pressed, alt_pressed, name)
-                {
+                } else if pause_combo.matches_name(ctrl_pressed, shift_pressed, alt_pressed, name) {
                     // ⌃⌥P is strictly per-app: toggle the focused app's
                     // place on the resumed-allowlist. Master pause has
                     // its own chord (⌃⌥⇧P) — the old context-aware
