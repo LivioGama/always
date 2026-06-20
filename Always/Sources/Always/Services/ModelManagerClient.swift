@@ -57,7 +57,7 @@ final class ModelManagerClient: ObservableObject {
             queue: .main
         ) { [weak self] note in
             guard let event = note.object as? DaemonEvent else { return }
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 self?.handle(event)
             }
         }
