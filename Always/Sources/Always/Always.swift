@@ -50,9 +50,6 @@ struct Always: App {
     }
     
     init() {
-        // Dock icon + MenuBarExtra: reachable Settings when Control Center
-        // hides the status item. Keep-alive window prevents silent exit.
-        NSApplication.shared.setActivationPolicy(.regular)
         // Do NOT call disableAutomaticTermination here — it blocks Dock Quit / Cmd+Q
         // until enableAutomaticTermination is called, and the keep-alive window plus
         // applicationShouldTerminateAfterLastWindowClosed(false) already prevent the
@@ -101,6 +98,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // Dock icon + MenuBarExtra: reachable Settings when Control Center
+        // hides the status item. Set this only after AppKit has created NSApp;
+        // calling NSApplication.shared from App.init() aborts on macOS 26.
+        NSApp.setActivationPolicy(.regular)
         // Flock + process sweep — covers com.always / com.always.v2 / stale
         // Desktop copies that bypass bundle-ID checks.
         if !singleInstanceGuard.acquireOrHandOff() {

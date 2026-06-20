@@ -10,8 +10,12 @@
     <string>Always</string>
     <key>CFBundleExecutable</key>
     <string>Always</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
     <key>CFBundleIconFile</key>
     <string>AlwaysIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
     <key>CFBundleVersion</key>
     <string>0.0.1</string>
     <key>CFBundleShortVersionString</key>
