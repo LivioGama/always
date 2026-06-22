@@ -64,7 +64,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 tracing-appender = "0.2"
-keyring = "2.3"
+keyring = "4.1"
 humantime = "2"
 libc = "0.2"
 # Linux overlay UI dependency.
