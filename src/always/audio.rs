@@ -47,6 +47,7 @@ const _: () = assert!(READ_FRAME_TIMEOUT_MS >= 10_000);
 /// Block until `fd` is readable (or hung up) or `timeout_ms` elapses.
 /// `Ok(true)` = readable now, `Ok(false)` = timed out. Raw `poll(2)`
 /// rather than a `libc`/`nix` dependency — one struct, one extern.
+#[cfg(feature = "macos")]
 fn wait_readable(fd: i32, timeout_ms: i32) -> io::Result<bool> {
     #[repr(C)]
     struct PollFd {
@@ -84,6 +85,7 @@ fn wait_readable(fd: i32, timeout_ms: i32) -> io::Result<bool> {
 static TEMP_WAV_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // Global persistent audio recorder to avoid spawning processes repeatedly
+#[cfg(feature = "macos")]
 static GLOBAL_RECORDER: LazyLock<Arc<Mutex<Option<RecChild>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(None)));
 
@@ -129,6 +131,7 @@ impl Drop for AudioBuffer {
     }
 }
 
+#[cfg(feature = "macos")]
 pub struct RecChild {
     child: Child,
     stdout: ChildStdout,
@@ -137,6 +140,7 @@ pub struct RecChild {
     overrun_count: Arc<AtomicU32>,
 }
 
+#[cfg(feature = "macos")]
 impl RecChild {
     pub fn spawn() -> Result<Self> {
         tracing::info!("rec_spawn_starting");
@@ -299,6 +303,7 @@ impl RecChild {
     }
 }
 
+#[cfg(feature = "macos")]
 impl Drop for RecChild {
     fn drop(&mut self) {
         let _ = self.child.kill();

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
@@ -113,6 +114,7 @@ impl Drop for ClientGuard {
 }
 
 /// Unix Domain Socket path for daemon-to-GUI communication
+#[cfg(unix)]
 pub fn socket_path() -> Result<PathBuf> {
     let path = if cfg!(target_os = "macos") {
         // macOS: Use ~/Library/Caches/Always/always.sock
@@ -139,11 +141,17 @@ pub fn socket_path() -> Result<PathBuf> {
     Ok(path)
 }
 
+#[cfg(not(unix))]
+pub fn socket_path() -> Result<PathBuf> {
+    anyhow::bail!("Unix domain sockets not supported on this platform")
+}
+
 /// Start the Unix Domain Socket server.
 ///
 /// Takes the model registry and the active-transcriber lock so the
 /// `models.*` commands can mutate them and the `ModelRegistry::subscribe`
 /// channel can be bridged into the global event broadcaster.
+#[cfg(unix)]
 pub async fn start_server(
     registry: ModelRegistry,
     active: ActiveTranscriber,
@@ -310,6 +318,7 @@ fn spawn_registry_event_bridge(registry: ModelRegistry) {
 }
 
 /// Handle a single client connection
+#[cfg(unix)]
 async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     CONNECTED_CLIENTS.fetch_add(1, Ordering::Relaxed);
     let _guard = ClientGuard;

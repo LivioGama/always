@@ -90,6 +90,7 @@ pub fn record_utterance(
 
 /// Single-frame energy probe used while idle-paused so the user can wake
 /// listening by speaking without manually lifting pause.
+#[cfg(feature = "macos")]
 pub fn poll_speech_energy(cfg: &AlwaysConfig) -> Result<bool> {
     let recorder_arc = audio::RecChild::get_or_spawn()?;
     let mut frame_buf = [0u8; FRAME_BYTES];
@@ -114,6 +115,12 @@ pub fn poll_speech_energy(cfg: &AlwaysConfig) -> Result<bool> {
     }
     let energy = normalized_energy(&sample_buf[..]);
     Ok(energy >= voice_activity_energy_threshold(cfg))
+}
+
+/// Non-macOS stub.
+#[cfg(not(feature = "macos"))]
+pub fn poll_speech_energy(_cfg: &AlwaysConfig) -> Result<bool> {
+    Err(anyhow::anyhow!("Audio capture not supported on this platform"))
 }
 
 /// Speech shorter than this is treated as a "short utterance" and gets
@@ -163,6 +170,7 @@ const LONG_RECORDING_WARN_SECS: u32 = 60;
 /// Continuous-speech hard cap (mirrors `max_speech_frames` below).
 const MAX_SPEECH_SECS: u32 = 300;
 
+#[cfg(feature = "macos")]
 fn record_with_local_vad(
     cfg: &AlwaysConfig,
     log: &mut Logger,
@@ -905,6 +913,17 @@ fn record_with_local_vad(
             speculation_used,
         },
     })
+}
+
+/// Non-macOS stub.
+#[cfg(not(feature = "macos"))]
+fn record_with_local_vad(
+    _cfg: &AlwaysConfig,
+    _log: &mut Logger,
+    _transcriber: &Arc<dyn Transcriber>,
+    _rt: &tokio::runtime::Handle,
+) -> Result<RecordResult> {
+    Err(anyhow::anyhow!("Audio capture not supported on this platform"))
 }
 
 /// Fast energy check for very low thresholds using squared values to avoid sqrt

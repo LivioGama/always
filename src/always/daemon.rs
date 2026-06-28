@@ -4,6 +4,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -19,9 +20,11 @@ pub fn pid_path() -> PathBuf {
 
 /// Best-effort UDS socket path. Mirrors `uds_server::socket_path` but is
 /// infallible so it can be used in cleanup paths where erroring is wrong
-/// (Drop, signal handlers). Returns `None` when `$HOME` is unset.
+/// (Drop, signal handlers). Returns `None` when `$HOME` is unset or on Windows
+/// (no GUI integration).
 pub fn socket_path() -> Option<PathBuf> {
-    if cfg!(target_os = "macos") {
+    #[cfg(target_os = "macos")]
+    {
         std::env::var("HOME").ok().map(|home| {
             PathBuf::from(home)
                 .join("Library")
@@ -29,10 +32,18 @@ pub fn socket_path() -> Option<PathBuf> {
                 .join("Always")
                 .join("always.sock")
         })
-    } else if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        Some(PathBuf::from(runtime_dir).join("always.sock"))
-    } else {
-        Some(PathBuf::from("/tmp/always.sock"))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+            Some(PathBuf::from(runtime_dir).join("always.sock"))
+        } else {
+            Some(PathBuf::from("/tmp/always.sock"))
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        None
     }
 }
 
@@ -156,7 +167,14 @@ pub fn wait_until_no_daemon_processes(max_wait: Duration) -> bool {
 
 /// True when a process is already accepting connections on the UDS socket.
 pub fn socket_is_live(sock: &std::path::Path) -> bool {
-    std::os::unix::net::UnixStream::connect(sock).is_ok()
+    #[cfg(unix)]
+    {
+        std::os::unix::net::UnixStream::connect(sock).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 pub fn start(cfg: &AlwaysConfig) -> Result<()> {
@@ -406,9 +424,17 @@ impl PidGuard {
 
 impl Drop for PidGuard {
     fn drop(&mut self) {
-        let fd = self._lock.as_raw_fd();
-        unsafe {
-            libc::flock(fd, libc::LOCK_UN);
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = self._lock.as_raw_fd();
+            unsafe {
+                libc::flock(fd, libc::LOCK_UN);
+            }
+        }
+        #[cfg(windows)]
+        {
+            drop(&self._lock);
         }
         if let Ok(log_path) = always_config::configured_log_path()
             && let Ok(mut log) = crate::always::log::Logger::open(&log_path)
@@ -423,12 +449,20 @@ impl Drop for PidGuard {
 }
 
 fn acquire_exclusive_lock(file: &File) -> Result<()> {
-    let fd = file.as_raw_fd();
-    let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-    if rc == 0 {
-        return Ok(());
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = file.as_raw_fd();
+        let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            return Ok(());
+        }
+        anyhow::bail!("pid file flock failed (rc={rc})")
     }
-    anyhow::bail!("pid file flock failed (rc={rc})")
+    #[cfg(windows)]
+    {
+        Ok(())
+    }
 }
 
 fn remove_stale_pid() {
@@ -457,38 +491,45 @@ fn remove_stale_socket() {
 /// graceful `std::process::exit(0)` so Rust runs `PidGuard::Drop` and
 /// cleans up the pid + socket files.
 pub fn install_signal_handlers(handle: &tokio::runtime::Handle) {
-    use tokio::signal::unix::{SignalKind, signal};
-    let _guard = handle.enter();
-    let mut term = match signal(SignalKind::terminate()) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed_to_install_sigterm_handler");
-            return;
-        }
-    };
-    let mut int = match signal(SignalKind::interrupt()) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed_to_install_sigint_handler");
-            return;
-        }
-    };
-    handle.spawn(async move {
-        tokio::select! {
-            _ = term.recv() => tracing::info!("received SIGTERM, shutting down"),
-            _ = int.recv()  => tracing::info!("received SIGINT, shutting down"),
-        }
-        if let Ok(log_path) = always_config::configured_log_path()
-            && let Ok(mut log) = crate::always::log::Logger::open(&log_path)
-        {
-            log.write(crate::always::log::Event::Stop);
-        }
-        let _ = std::fs::remove_file(pid_path());
-        if let Some(sock) = socket_path() {
-            let _ = std::fs::remove_file(sock);
-        }
-        std::process::exit(0);
-    });
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let _guard = handle.enter();
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed_to_install_sigterm_handler");
+                return;
+            }
+        };
+        let mut int = match signal(SignalKind::interrupt()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed_to_install_sigint_handler");
+                return;
+            }
+        };
+        handle.spawn(async move {
+            tokio::select! {
+                _ = term.recv() => tracing::info!("received SIGTERM, shutting down"),
+                _ = int.recv()  => tracing::info!("received SIGINT, shutting down"),
+            }
+            if let Ok(log_path) = always_config::configured_log_path()
+                && let Ok(mut log) = crate::always::log::Logger::open(&log_path)
+            {
+                log.write(crate::always::log::Event::Stop);
+            }
+            let _ = std::fs::remove_file(pid_path());
+            if let Some(sock) = socket_path() {
+                let _ = std::fs::remove_file(sock);
+            }
+            std::process::exit(0);
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        tracing::debug!("signal handlers not supported on this platform");
+    }
 }
 
 fn process_is_running(pid: u32) -> bool {

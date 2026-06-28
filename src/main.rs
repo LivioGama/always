@@ -669,15 +669,23 @@ fn handle_toggle_auto_enter() -> Result<()> {
 fn send_uds_command(json: &str) -> Result<()> {
     use anyhow::Context as _;
     use std::io::Write as _;
+    #[cfg(unix)]
     use std::os::unix::net::UnixStream;
 
     let Some(sock_path) = always::always::daemon::socket_path() else {
         anyhow::bail!("no UDS socket path available on this platform");
     };
-    let mut stream = UnixStream::connect(&sock_path)
-        .with_context(|| format!("failed to connect to daemon at {}", sock_path.display()))?;
-    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
-    writeln!(stream, "{json}").context("failed to send UDS command")?;
+    #[cfg(unix)]
+    {
+        let mut stream = UnixStream::connect(&sock_path)
+            .with_context(|| format!("failed to connect to daemon at {}", sock_path.display()))?;
+        stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+        writeln!(stream, "{json}").context("failed to send UDS command")?;
+    }
+    #[cfg(not(unix))]
+    {
+        anyhow::bail!("UDS socket communication not supported on this platform");
+    }
     Ok(())
 }
 
@@ -701,39 +709,48 @@ fn handle_get_state() -> Result<()> {
 fn read_daemon_state() -> Result<Value> {
     use anyhow::Context as _;
     use std::io::{BufRead as _, BufReader};
+    #[cfg(unix)]
     use std::os::unix::net::UnixStream;
 
     let Some(sock_path) = always::always::daemon::socket_path() else {
         anyhow::bail!("no UDS socket path available on this platform");
     };
 
-    let stream = UnixStream::connect(&sock_path)
-        .with_context(|| format!("failed to connect to daemon at {}", sock_path.display()))?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    #[cfg(unix)]
+    {
+        let stream = UnixStream::connect(&sock_path)
+            .with_context(|| format!("failed to connect to daemon at {}", sock_path.display()))?;
+        stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
 
-    let mut reader = BufReader::new(stream);
-    let mut is_paused = None;
-    let mut is_auto_enter = None;
+        let mut reader = BufReader::new(stream);
+        let mut is_paused = None;
+        let mut is_auto_enter = None;
 
-    for _ in 0..16 {
-        let mut line = String::new();
-        let bytes = reader
-            .read_line(&mut line)
-            .context("failed to read daemon state")?;
-        if bytes == 0 {
-            break;
+        for _ in 0..16 {
+            let mut line = String::new();
+            let bytes = reader
+                .read_line(&mut line)
+                .context("failed to read daemon state")?;
+            if bytes == 0 {
+                break;
+            }
+
+            update_state_from_daemon_event(&line, &mut is_paused, &mut is_auto_enter)?;
+            if is_paused.is_some() && is_auto_enter.is_some() {
+                return Ok(json!({
+                    "isPaused": is_paused.unwrap_or(false),
+                    "isAutoEnter": is_auto_enter.unwrap_or(false)
+                }));
+            }
         }
 
-        update_state_from_daemon_event(&line, &mut is_paused, &mut is_auto_enter)?;
-        if is_paused.is_some() && is_auto_enter.is_some() {
-            return Ok(json!({
-                "isPaused": is_paused.unwrap_or(false),
-                "isAutoEnter": is_auto_enter.unwrap_or(false)
-            }));
-        }
+        anyhow::bail!("daemon did not send complete state");
     }
 
-    anyhow::bail!("daemon did not send complete state");
+    #[cfg(not(unix))]
+    {
+        anyhow::bail!("daemon state query not supported on this platform");
+    }
 }
 
 fn update_state_from_daemon_event(

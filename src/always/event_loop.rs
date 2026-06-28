@@ -50,22 +50,34 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
 
     // Start UDS server IMMEDIATELY with a placeholder transcriber so the GUI
     // can connect while the real backend loads in the background.
-    let cfg_for_uds = Arc::clone(&active_cfg);
-    let registry_placeholder = ModelRegistry::new().context("init model registry")?;
-    // Pending placeholder blocks transcribe() until the real backend swaps in,
-    // so the first utterance after launch waits for init instead of being
-    // dropped with a "still initializing" error.
-    let (pending, ready_signal) = PendingTranscriber::new();
-    let active_placeholder: ActiveTranscriber = Arc::new(RwLock::new(pending));
-    let registry_for_uds = registry_placeholder.clone();
-    let active_for_uds = Arc::clone(&active_placeholder);
-    let _uds_handle = rt.spawn(async move {
-        if let Err(e) =
-            uds_server::start_server(registry_for_uds, active_for_uds, cfg_for_uds).await
+    let (ready_signal, registry_placeholder, active_placeholder) = {
+        let cfg_for_uds = Arc::clone(&active_cfg);
+        let registry_placeholder = ModelRegistry::new().context("init model registry")?;
+        // Pending placeholder blocks transcribe() until the real backend swaps in,
+        // so the first utterance after launch waits for init instead of being
+        // dropped with a "still initializing" error.
+        let (pending, ready_signal) = PendingTranscriber::new();
+        let active_placeholder: ActiveTranscriber = Arc::new(RwLock::new(pending));
+
+        #[cfg(unix)]
         {
-            tracing::error!(error = %e, "UDS server error");
+            let registry_for_uds = registry_placeholder.clone();
+            let active_for_uds = Arc::clone(&active_placeholder);
+            let _uds_handle = rt.spawn(async move {
+                if let Err(e) =
+                    uds_server::start_server(registry_for_uds, active_for_uds, cfg_for_uds).await
+                {
+                    tracing::error!(error = %e, "UDS server error");
+                }
+            });
         }
-    });
+        #[cfg(not(unix))]
+        {
+            tracing::debug!("UDS server not available on this platform");
+        }
+
+        (ready_signal, registry_placeholder, active_placeholder)
+    };
 
     // Send initial state events immediately - UDS server will broadcast them
     // to clients as they connect via the initial state in handle_client
