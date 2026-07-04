@@ -580,6 +580,12 @@ pub fn start_keyboard_listener() -> Result<()> {
                             .and_then(|_| paste::paste_text(pause::is_auto_enter_enabled()))
                         {
                             tracing::error!(?error, "force_paste_failed");
+                            // `take` already consumed the slot — put the text
+                            // back so the user can retry the shortcut instead
+                            // of silently losing the transcript.
+                            pause::set_last_filtered(text);
+                            event::global_broadcaster()
+                                .transcription_filtered("Force-paste failed — try again");
                         } else {
                             event::global_broadcaster().transcript_final(text.clone());
                             if let Ok(log_path) = always_config::configured_log_path()
@@ -589,7 +595,9 @@ pub fn start_keyboard_listener() -> Result<()> {
                             }
                         }
                     } else {
-                        tracing::debug!("force_paste_no_text");
+                        tracing::info!("force_paste_no_text");
+                        event::global_broadcaster()
+                            .transcription_filtered("Nothing to paste — no held transcript");
                     }
                 } else if log_correction_combo.matches_name(
                     ctrl_pressed,

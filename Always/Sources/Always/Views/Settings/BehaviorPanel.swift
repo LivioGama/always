@@ -65,8 +65,8 @@ struct BehaviorPanel: View {
                         unit: "s",
                         formatter: SettingsWindow.secondsFormatter,
                         value: $config.sttSilence,
-                        defaultValue: 2.0,
-                        range: 0.1...10
+                        defaultValue: 0.9,
+                        range: 0.3...15
                     )
                     NumericSettingRow(
                         title: "Cooldown",

@@ -578,8 +578,12 @@ fn handle_speech(
                 log.write(Event::Error {
                     message: "Skipped paste: app paused mid-utterance",
                 });
+                // Keep the corrected text recoverable via the force-paste
+                // shortcut — this drop is the most common "why did my
+                // dictation vanish" path.
+                pause::set_last_filtered(final_text.clone());
                 event::global_broadcaster()
-                    .transcription_filtered("App paused mid-utterance — not pasted");
+                    .transcription_filtered("App paused — press ⌃⌥V to paste anyway");
                 pause::dictation_buffer_clear();
                 pause::end_paste();
                 return Ok(());
@@ -617,6 +621,7 @@ fn handle_speech(
                 log.write(Event::Error {
                     message: "Skipped paste: clipboard copy failed",
                 });
+                pause::set_last_filtered(final_text.clone());
                 event::global_broadcaster().transcription_filtered("Clipboard error — not pasted");
                 event::global_broadcaster().voice_activity_ended();
                 pause::dictation_buffer_clear();
@@ -633,6 +638,7 @@ fn handle_speech(
                 log.write(Event::Error {
                     message: "Skipped paste: Command key held",
                 });
+                pause::set_last_filtered(final_text.clone());
                 event::global_broadcaster().transcription_filtered("Held Command key — not pasted");
                 pause::dictation_buffer_clear();
                 pause::end_paste();
