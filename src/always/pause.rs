@@ -38,6 +38,15 @@ static AUDIO_OUTPUT_PAUSED: AtomicBool = AtomicBool::new(false);
 /// microphone. Auto-clears when the app releases it.
 static MIC_CONFLICT_PAUSED: AtomicBool = AtomicBool::new(false);
 
+/// Lifecycle source: the daemon was spawned by the Mac app and no UDS
+/// client has been connected for a short grace period — the app quit,
+/// crashed, or was force-killed. Dictation must not continue (and paste
+/// into windows) without the app present. Auto-clears when a client
+/// connects. Deliberately NOT part of `is_any_global_pause()` /
+/// `clear_global_pauses()`: it carries process lifecycle, not user
+/// intent, and only the GUI reconnecting may lift it.
+static NO_GUI_PAUSED: AtomicBool = AtomicBool::new(false);
+
 /// Derived "what the audio pipeline gates on". Recomputed by
 /// `recompute_effective()` whenever MASTER, current_app, or the per-app
 /// overrides change. Starts `true` so a fresh launch is paused-by-default
@@ -58,6 +67,9 @@ fn compute_effective() -> bool {
         return true;
     }
     if AUDIO_OUTPUT_PAUSED.load(Ordering::Relaxed) || MIC_CONFLICT_PAUSED.load(Ordering::Relaxed) {
+        return true;
+    }
+    if NO_GUI_PAUSED.load(Ordering::Relaxed) {
         return true;
     }
     if IDLE_AUTO_PAUSED.load(Ordering::Relaxed) {
@@ -198,6 +210,18 @@ pub fn set_mic_conflict_paused(paused: bool) -> (bool, bool) {
 
 pub fn is_mic_conflict_paused() -> bool {
     MIC_CONFLICT_PAUSED.load(Ordering::Relaxed)
+}
+
+/// Set/clear the no-GUI lifecycle pause source. Never touches MASTER.
+/// Engaged by the UDS orphan watchdog when a GUI-spawned daemon loses
+/// its last client; cleared on the next client connection.
+pub fn set_no_gui_paused(paused: bool) -> (bool, bool) {
+    NO_GUI_PAUSED.store(paused, Ordering::Relaxed);
+    recompute_effective()
+}
+
+pub fn is_no_gui_paused() -> bool {
+    NO_GUI_PAUSED.load(Ordering::Relaxed)
 }
 
 /// True when ANY global pause source is active (user master pause or a

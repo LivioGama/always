@@ -84,6 +84,11 @@ class CLIService: ObservableObject {
         }
         env.removeValue(forKey: "GROQ_API_KEY")
         env["ALWAYS_SKIP_ORPHAN_KILL"] = "1"
+        // Marks the daemon as GUI-owned: it mutes dictation shortly after
+        // the last UDS client disconnects and exits soon after, instead of
+        // pasting transcripts while the app is closed. A terminal-launched
+        // `always run` doesn't have this and keeps running standalone.
+        env["ALWAYS_SPAWNED_BY_GUI"] = "1"
     }
 
     func stopDaemon() async throws -> String {

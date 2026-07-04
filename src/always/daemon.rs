@@ -4,8 +4,6 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 

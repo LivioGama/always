@@ -39,7 +39,14 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long the daemon stays alive after the last UDS client disconnects.
 /// Prevents stale daemons surviving indefinitely when the Mac app quits.
-const ORPHAN_TIMEOUT_SECS: u64 = 120;
+/// Short because dictation is already muted after NO_GUI_MUTE_GRACE_SECS —
+/// this is just process cleanup.
+const ORPHAN_TIMEOUT_SECS: u64 = 30;
+
+/// How long a GUI-spawned daemon keeps dictating after its last UDS client
+/// disconnects. Long enough to survive a GUI restart / reconnect blip,
+/// short enough that speech never pastes into windows with the app gone.
+const NO_GUI_MUTE_GRACE_SECS: u64 = 5;
 
 static CONNECTED_CLIENTS: AtomicUsize = AtomicUsize::new(0);
 
@@ -202,14 +209,30 @@ pub async fn start_server(
     // `std::process::exit` does NOT run Drop, so `PidGuard::Drop` would
     // be skipped and the next launch would have to wait for
     // `remove_stale_pid` / `remove_stale_socket` to detect a dead PID.
-    tokio::spawn(async {
+    // Only a GUI-spawned daemon mutes itself when clients vanish — a
+    // daemon started manually from a terminal (`always run`) has no GUI
+    // to wait for and keeps today's behavior.
+    let gui_spawned = std::env::var("ALWAYS_SPAWNED_BY_GUI").ok().as_deref() == Some("1");
+    tokio::spawn(async move {
         let mut last_had_clients = Instant::now();
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let clients = CONNECTED_CLIENTS.load(Ordering::Relaxed);
             if clients > 0 {
                 last_had_clients = Instant::now();
-            } else if last_had_clients.elapsed() > Duration::from_secs(ORPHAN_TIMEOUT_SECS) {
+                continue;
+            }
+            // Mute first (fast, reversible), exit later (cleanup). The
+            // mute is what guarantees speech never pastes into windows
+            // while the app is closed.
+            if gui_spawned
+                && !pause::is_no_gui_paused()
+                && last_had_clients.elapsed() > Duration::from_secs(NO_GUI_MUTE_GRACE_SECS)
+            {
+                let (effective, changed) = pause::set_no_gui_paused(true);
+                tracing::warn!(effective, changed, "no_gui_pause_engaged");
+            }
+            if last_had_clients.elapsed() > Duration::from_secs(ORPHAN_TIMEOUT_SECS) {
                 tracing::warn!(
                     timeout_secs = ORPHAN_TIMEOUT_SECS,
                     "orphan_daemon_exit: no UDS clients for too long"
@@ -326,6 +349,21 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         clients = CONNECTED_CLIENTS.load(Ordering::Relaxed),
         "uds_client_connected"
     );
+
+    // Lift the no-GUI lifecycle mute the moment a client attaches — must
+    // happen BEFORE the state snapshot below so this client sees the
+    // post-clear pause state.
+    if pause::is_no_gui_paused() {
+        let (effective, changed) = pause::set_no_gui_paused(false);
+        tracing::info!(effective, "no_gui_pause_cleared");
+        if changed {
+            if effective {
+                global_broadcaster().paused();
+            } else {
+                global_broadcaster().resumed();
+            }
+        }
+    }
 
     let mut rx = global_broadcaster().subscribe();
     let (reader, mut writer) = stream.into_split();
