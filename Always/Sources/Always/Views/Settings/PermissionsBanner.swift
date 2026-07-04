@@ -17,7 +17,7 @@ struct PermissionsBanner: View {
     /// shouldn't see "Permissions: all good ✓" indefinitely after
     /// onboarding — they already know.
     private var isHidden: Bool {
-        perms.micStatus.isOK && perms.accessibilityStatus.isOK
+        perms.micStatus.isOK && perms.accessibilityStatus.isOK && perms.inputMonitoringStatus.isOK
     }
 
     var body: some View {
@@ -57,6 +57,15 @@ struct PermissionsBanner: View {
                         title: "Accessibility",
                         detail: "Required to paste transcripts into the focused app and to position the voice indicator near your cursor.",
                         action: .accessibility,
+                        actionTitle: "Open System Settings"
+                    )
+                }
+
+                if !perms.inputMonitoringStatus.isOK {
+                    permissionRow(
+                        title: "Input Monitoring",
+                        detail: "Required for the global keyboard shortcuts (pause ⌃⌥P, auto-enter, force-paste). Click to add Always under Privacy & Security → Input Monitoring, then enable it.",
+                        action: .inputMonitoring,
                         actionTitle: "Open System Settings"
                     )
                 }
@@ -117,6 +126,11 @@ struct PermissionsBanner: View {
             if !perms.accessibilityStatus.isOK {
                 perms.openSystemSettings(for: .accessibility)
             }
+        case .inputMonitoring:
+            // Surface "Always" in the Input Monitoring list (fires the
+            // one-time prompt), then deep-link so the user can enable it.
+            _ = perms.requestInputMonitoringIfNeeded()
+            perms.openSystemSettings(for: .inputMonitoring)
         }
     }
 

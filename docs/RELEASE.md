@@ -15,8 +15,11 @@ secrets.
 | `APPLE_TEAM_ID` | Apple Developer Team ID (e.g. `ZV4JCJ669Y`). |
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password from appleid.apple.com. |
 | `HOMEBREW_TAP_TOKEN` | Fine-grained PAT with `contents:write` on `rtk-ai/homebrew-tap`. |
-| `CODECOV_TOKEN` | Codecov upload token (CI coverage). |
 | `SPARKLE_ED_PRIVATE_KEY` | Private EdDSA key used by Sparkle's `sign_update` when generating `appcast.xml`. |
+
+CI coverage upload also uses `CODECOV_TOKEN`. It is intentionally not a
+release preflight secret because the Codecov upload is non-blocking
+(`fail_ci_if_error: false`).
 
 ## Release procedure
 

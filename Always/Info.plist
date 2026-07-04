@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.always.v2</string>
+    <string>com.always.v3</string>
     <key>CFBundleName</key>
     <string>Always</string>
     <key>CFBundleDisplayName</key>
@@ -20,7 +20,6 @@
     <string>0.0.1</string>
     <key>CFBundleShortVersionString</key>
     <string>0.0.1</string>
-    <!-- Dock icon: Settings stay reachable when the menu-bar icon is hidden. -->
     <key>LSUIElement</key>
     <false/>
     <key>CFBundleURLTypes</key>

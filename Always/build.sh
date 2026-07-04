@@ -108,7 +108,7 @@ if [ -z "$SIGN_IDENTITY" ]; then
     SIGN_IDENTITY="-"
 fi
 echo "Using signing identity: ${SIGN_IDENTITY}"
-codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "com.always.v2" --entitlements Always.entitlements Always.app
+codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "com.always.v3" --entitlements Always.entitlements Always.app
 
 # Notarize when ALWAYS_NOTARIZE_TEAM_ID, ALWAYS_NOTARIZE_APPLE_ID, and ALWAYS_NOTARIZE_APP_PWD are set.
 if [ "$SIGN_IDENTITY" != "-" ] \

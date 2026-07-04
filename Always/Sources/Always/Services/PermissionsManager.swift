@@ -3,6 +3,9 @@ import AppKit
 import ApplicationServices
 import AVFoundation
 import Combine
+import CoreGraphics
+import IOKit
+import IOKit.hid
 import os.log
 
 /// Tracks the two macOS TCC permissions Always actually needs:
@@ -19,6 +22,7 @@ final class PermissionsManager: ObservableObject {
 
     @Published private(set) var micStatus: MicStatus = .notDetermined
     @Published private(set) var accessibilityStatus: AccessibilityStatus = .notTrusted
+    @Published private(set) var inputMonitoringStatus: InputMonitoringStatus = .notGranted
 
     enum MicStatus: Equatable {
         case granted
@@ -32,6 +36,12 @@ final class PermissionsManager: ObservableObject {
         case trusted
         case notTrusted
         var isOK: Bool { self == .trusted }
+    }
+
+    enum InputMonitoringStatus: Equatable {
+        case granted
+        case notGranted
+        var isOK: Bool { self == .granted }
     }
 
     private let logger = Logger(subsystem: "com.always.app", category: "permissions")
@@ -57,6 +67,12 @@ final class PermissionsManager: ObservableObject {
         @unknown default:    newMic = .notDetermined
         }
         let newAccess: AccessibilityStatus = AXIsProcessTrusted() ? .trusted : .notTrusted
+        // Input Monitoring (kTCCServiceListenEvent) — gates the daemon's
+        // listen-only global-hotkey CGEventTap. Preflight is a cheap status
+        // read that never prompts.
+        let newInputMon: InputMonitoringStatus =
+            IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+            ? .granted : .notGranted
         DispatchQueue.main.async {
             if self.micStatus != newMic {
                 self.logger.info("mic permission \(String(describing: self.micStatus)) → \(String(describing: newMic), privacy: .public)")
@@ -65,6 +81,10 @@ final class PermissionsManager: ObservableObject {
             if self.accessibilityStatus != newAccess {
                 self.logger.info("accessibility permission \(String(describing: self.accessibilityStatus)) → \(String(describing: newAccess), privacy: .public)")
                 self.accessibilityStatus = newAccess
+            }
+            if self.inputMonitoringStatus != newInputMon {
+                self.logger.info("input-monitoring permission \(String(describing: self.inputMonitoringStatus)) → \(String(describing: newInputMon), privacy: .public)")
+                self.inputMonitoringStatus = newInputMon
             }
         }
     }
@@ -95,6 +115,29 @@ final class PermissionsManager: ObservableObject {
         return trusted
     }
 
+    /// Fire the system Input Monitoring (kTCCServiceListenEvent) prompt.
+    ///
+    /// The daemon's global-hotkey listener is a *listen-only* `CGEventTap`,
+    /// which macOS gates behind Input Monitoring — NOT Accessibility. The
+    /// daemon is spawned as a direct child of this app, so its requirement is
+    /// attributed to the responsible process: "Always". Requesting from the GUI
+    /// (which has a real bundle + windowserver session) reliably surfaces
+    /// "Always" in System Settings → Privacy & Security → Input Monitoring and
+    /// shows the one-time prompt; a faceless helper's own request does not. Once
+    /// the user enables it here, the daemon's tap is authorized. Must be
+    /// re-granted after a bundle-id change (TCC is keyed to bundle id).
+    @discardableResult
+    func requestInputMonitoringIfNeeded() -> Bool {
+        if IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted {
+            return true
+        }
+        // Registers "Always" in System Settings → Privacy & Security → Input
+        // Monitoring and fires the one-time prompt. This is the API working
+        // input-monitoring apps use; `CGRequestListenEventAccess` does not
+        // surface the entry on macOS 26.
+        return IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+    }
+
     /// Deep-link into System Settings → Privacy & Security pane for a
     /// specific permission. `nil` falls back to the root Privacy pane.
     func openSystemSettings(for permission: Permission) {
@@ -104,6 +147,8 @@ final class PermissionsManager: ObservableObject {
                 return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
             case .accessibility:
                 return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            case .inputMonitoring:
+                return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
             }
         }()
         if let url {
@@ -111,7 +156,7 @@ final class PermissionsManager: ObservableObject {
         }
     }
 
-    enum Permission { case microphone, accessibility }
+    enum Permission { case microphone, accessibility, inputMonitoring }
 
     /// Re-check status whenever the app comes to the foreground —
     /// this is the moment the user has likely just toggled a switch
@@ -129,7 +174,7 @@ final class PermissionsManager: ObservableObject {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
             self.refresh()
-            if self.micStatus.isOK && self.accessibilityStatus.isOK {
+            if self.micStatus.isOK && self.accessibilityStatus.isOK && self.inputMonitoringStatus.isOK {
                 timer.invalidate()
                 self.pollTimer = nil
             }

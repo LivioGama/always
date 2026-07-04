@@ -161,16 +161,21 @@ Items still pending after this session:
   session, and ships to users on first release.
 * **Workspace + `cargo xtask`** (P2.6). Scripts still co-exist;
   consolidation deferred to avoid disturbing IDE integrations mid-flight.
-* **Repository secrets** for `release.yml` not yet configured (Apple
-  Developer cert, notarization Apple ID + app-specific password,
-  Homebrew tap PAT, codecov token, **Sparkle EdDSA private key**). Listed
-  in [`docs/RELEASE.md`](docs/RELEASE.md). Until `SPARKLE_ED_PRIVATE_KEY`
-  is set the release workflow's appcast step will fail; everything else
-  proceeds.
-* **`SUPublicEDKey`** placeholder in `Info.plist` must be replaced with
-  the matching public half of the EdDSA keypair the user generates.
+* **Repository secrets** for `release.yml` are partially configured.
+  Present as of 2026-06-20: `APPLE_TEAM_ID`, `HOMEBREW_TAP_TOKEN`,
+  `KEYCHAIN_PASSWORD`, and `SPARKLE_ED_PRIVATE_KEY`. Missing:
+  `MAC_CERT_P12_BASE64`, `MAC_CERT_PASSWORD`, `APPLE_ID`, and
+  `APPLE_APP_SPECIFIC_PASSWORD`. Listed in
+  [`docs/RELEASE.md`](docs/RELEASE.md).
+* **Developer ID Application certificate** is not installed locally.
+  Local builds can be codesigned with the Apple Development identity and
+  pass the DMG smoke test, but public distribution still requires a
+  Developer ID Application `.p12` in GitHub secrets so the release
+  workflow can notarize the app.
 
-None of those block shipping a minor; all are 0.7-point items.
+The missing Developer ID/notarization secrets block a fully notarized
+public DMG release. The remaining engineering items above do not block a
+minor once the signing material is configured.
 
 ## Phase progression target
 

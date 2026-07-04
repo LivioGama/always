@@ -18,8 +18,8 @@ struct Always: App {
         Window("Always Settings", id: "settings") {
             SettingsWindow(cliService: CLIService())
         }
-        // Explicit size — `.contentSize` under-reports height on macOS 26
-        // (MenuBarExtra host), which left Settings clipped after Models.
+        // Explicit size — `.contentSize` under-reports height on macOS 26,
+        // which left Settings clipped after Models.
         .defaultSize(
             width: SettingsWindowMetrics.width,
             height: SettingsWindowMetrics.height
@@ -40,8 +40,11 @@ struct Always: App {
         }
         .defaultSize(width: 500, height: 400)
 
-        // Restored from the known-good menu-bar lineage: SwiftUI owns the
-        // status item. Creating a manual NSStatusItem regressed placement.
+        // Known-good menu-bar lineage: SwiftUI owns the status item so the
+        // system positions it in the real menu bar. A manual NSStatusItem
+        // does not place on this macOS 26 install (it lands at the bottom-left
+        // fallback coordinate), and the floating-NSPanel workaround that tried
+        // to compensate rendered a stray badge over the window — both removed.
         MenuBarExtra {
             MenuBarView()
         } label: {
@@ -51,6 +54,9 @@ struct Always: App {
     }
     
     init() {
+        // Regular policy (Dock icon) keeps the app alive on macOS 26 —
+        // `.accessory` triggers the SwiftUI silent-exit bug here.
+        NSApplication.shared.setActivationPolicy(.regular)
         // Do NOT call disableAutomaticTermination here — it blocks Dock Quit / Cmd+Q
         // until enableAutomaticTermination is called, and the keep-alive window plus
         // applicationShouldTerminateAfterLastWindowClosed(false) already prevent the
@@ -99,10 +105,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        // Dock icon + MenuBarExtra: reachable Settings when Control Center
-        // hides the status item. Set this only after AppKit has created NSApp;
-        // calling NSApplication.shared from App.init() aborts on macOS 26.
-        NSApp.setActivationPolicy(.regular)
         // Flock + process sweep — covers com.always / com.always.v2 / stale
         // Desktop copies that bypass bundle-ID checks.
         if !singleInstanceGuard.acquireOrHandOff() {
@@ -111,11 +113,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         installKeepAliveWindow()
         StateMonitor.shared.beginBootstrap()
         StateMonitor.shared.connectToDaemon()
-        NSLog("Always: MenuBarExtra installed")
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         cliService = CLIService()
+        NSLog("Always: MenuBarExtra installed")
 
         // Onboarding gating: if no saved Groq API key exists,
         // surface the onboarding window. The scene id "onboarding"
@@ -136,6 +138,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let perms = PermissionsManager.shared
         perms.requestMicrophoneIfNeeded()
         perms.requestAccessibilityIfNeeded()
+        // Input Monitoring gates the daemon's global-hotkey tap (listen-only
+        // CGEventTap). Requested from the GUI so "Always" appears in the list
+        // and the prompt fires — the daemon's own request never surfaces it.
+        perms.requestInputMonitoringIfNeeded()
 
         let cli = cliService
         // Connect immediately — UDS retries until the socket is live. Daemon
@@ -150,6 +156,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         daemonBootstrapTask = Task {
+            guard !Task.isCancelled else { return }
             if Self.isHealthyDaemon() {
                 NSLog("Always: healthy daemon detected — attaching without restart")
                 await Self.reconcileDuplicateDaemons(cli: cli)
@@ -159,9 +166,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             await Task.detached(priority: .userInitiated) {
                 Self.killStaleDaemon()
             }.value
+            guard !Task.isCancelled else { return }
 
             do {
                 _ = try await cli?.startDaemon()
+                guard !Task.isCancelled else {
+                    Self.killStaleDaemon()
+                    return
+                }
                 await Self.reconcileDuplicateDaemons(cli: cli)
             } catch {
                 await MainActor.run { StateMonitor.shared.endBootstrap() }
@@ -178,8 +190,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// 1×1 off-screen window so AppKit keeps the process alive when only
-    /// MenuBarExtra is visible (no Settings window open).
+    /// 1×1 off-screen window so AppKit keeps the process alive when no
+    /// Settings window is open.
     private func installKeepAliveWindow() {
         let window = NSWindow(
             contentRect: NSRect(x: -20000, y: -20000, width: 1, height: 1),
@@ -232,20 +244,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        stopDaemonForAppTermination(killDaemon: Self.killStaleDaemon)
+    }
+
+    func stopDaemonForAppTermination(killDaemon: () -> Void) {
+        daemonBootstrapTask?.cancel()
+        daemonBootstrapTask = nil
         stateMonitor?.prepareForQuit()
-        // Leave the voice daemon running so the next GUI launch can attach
-        // instantly over the existing UDS socket. Stale daemons are reaped
-        // by the orphan watchdog in uds_server.rs or by explicit restart.
+        killDaemon()
         singleInstanceGuard.release()
     }
 
-    /// Menu-bar (LSUIElement) apps must NOT quit when the last window
-    /// closes — they live in the status bar. The default value is true,
-    /// which caused the GUI to auto-quit moments after launch on macOS
-    /// 26.x: SwiftUI briefly considers all `Window` scenes "closed"
-    /// during the MenuBarExtra-only steady state, and AppKit honors the
-    /// default by terminating the process. Returning false keeps the
-    /// status-bar item alive.
+    /// Menu-bar app: keep running when Settings is closed — it lives in the
+    /// status bar via `MenuBarExtra`. Returning false prevents the macOS 26
+    /// silent-exit bug where SwiftUI briefly considers all `Window` scenes
+    /// closed during the MenuBarExtra-only steady state.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }

@@ -174,6 +174,20 @@ final class AlwaysTests: XCTestCase {
         ))
     }
 
+    func testApplicationTerminationRequestsDaemonStop() throws {
+        let delegate = AppDelegate()
+        var didRequestDaemonStop = false
+
+        delegate.stopDaemonForAppTermination {
+            didRequestDaemonStop = true
+        }
+
+        XCTAssertTrue(
+            didRequestDaemonStop,
+            "Quit cleanup must stop the daemon so it cannot keep transcribing after the app exits"
+        )
+    }
+
     // MARK: - StatusOverlayController flash protection
     //
     // Regression: calling show(state:) while a flash is animating used to

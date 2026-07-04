@@ -27,7 +27,7 @@ final class FocusedAppMonitor: ObservableObject {
     /// filter, allowlist filter, menu bar control — uses the same
     /// constant. If the bundle id ever changes both sides must update
     /// in lockstep or Always would appear in its own allowlist.
-    static let ownBundleId = "com.always.v2"
+    static let ownBundleId = "com.always.v3"
 
     @Published private(set) var currentBundleId: String?
     @Published private(set) var currentAppName: String?

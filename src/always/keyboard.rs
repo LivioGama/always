@@ -419,9 +419,46 @@ fn handle_master_pause_hotkey() {
     );
 }
 
+/// Ask macOS for Input Monitoring (listen-event) access.
+///
+/// `rdev`'s listener is a *listen-only* `CGEventTap`, which macOS gates behind
+/// the **Input Monitoring** permission (`kTCCServiceListenEvent`) — NOT
+/// Accessibility. `rdev` only calls `CGEventTapCreate` and never requests this
+/// access, so without an explicit request the tap silently receives no events
+/// and "Always" never even appears in System Settings → Privacy & Security →
+/// Input Monitoring. Calling `CGRequestListenEventAccess` triggers the one-time
+/// system prompt and registers the responsible app in that list so the user can
+/// enable it. It also self-heals after a bundle-id bump (which resets TCC
+/// grants). Safe to call repeatedly — once granted it's a cheap status read.
+#[cfg(feature = "macos")]
+fn request_input_monitoring_access() {
+    // Both symbols live in CoreGraphics (linked via the `core-graphics` crate)
+    // and exist since macOS 10.15.
+    unsafe extern "C" {
+        fn CGPreflightListenEventAccess() -> bool;
+        fn CGRequestListenEventAccess() -> bool;
+    }
+    let granted = unsafe {
+        // Preflight first so we don't re-trigger the prompt once granted.
+        CGPreflightListenEventAccess() || CGRequestListenEventAccess()
+    };
+    if granted {
+        tracing::info!("input_monitoring_access_granted");
+    } else {
+        tracing::warn!(
+            "input_monitoring_access_missing: global shortcuts are inert until \
+             you enable Always in System Settings → Privacy & Security → \
+             Input Monitoring"
+        );
+    }
+}
+
 #[cfg(feature = "macos")]
 pub fn start_keyboard_listener() -> Result<()> {
     use rdev::{EventType, Key, listen};
+
+    // Must run before the tap is created — see `request_input_monitoring_access`.
+    request_input_monitoring_access();
 
     let (
         pause_combo,

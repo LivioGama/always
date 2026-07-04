@@ -14,7 +14,7 @@ final class SingleInstanceGuard {
 
     /// All bundle IDs ever shipped — a second copy with a different ID still
     /// counts as a duplicate if it runs the Always GUI binary.
-    static let knownBundleIDs = ["com.always.v2", "com.always", "com.alwaysapp"]
+    static let knownBundleIDs = ["com.always.v3", "com.always.v2", "com.always", "com.alwaysapp"]
 
     private var lockFD: Int32 = -1
     private let lockPath: String
