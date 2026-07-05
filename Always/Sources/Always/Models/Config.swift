@@ -31,6 +31,9 @@ struct Config: Codable {
     var hearEnergyThreshold: Double
     var sttCooldownMs: Int
     var sttSilence: Double
+    /// Extend the silence window when the transcript-so-far looks
+    /// mid-sentence (daemon-side heuristic). Default on.
+    var sttAdaptiveSilence: Bool
     var sttAutoEnter: Bool
     /// Auto-enter delay in milliseconds. Single source of truth — UI
     /// displays as seconds via `Double(autoEnterDelayMs) / 1000` but the
@@ -57,7 +60,8 @@ struct Config: Codable {
         sttEnergyThreshold: 0.012,
         hearEnergyThreshold: 0.001,
         sttCooldownMs: 150,
-        sttSilence: 2.0,
+        sttSilence: 0.9,
+        sttAdaptiveSilence: true,
         sttAutoEnter: true,
         autoEnterDelayMs: 4000,
         groqApiKey: nil,
@@ -97,6 +101,8 @@ struct Config: Codable {
                     }
                 case "stt_silence", "stt_silence_secs":
                     config.sttSilence = Double(value.replacingOccurrences(of: "s", with: "")) ?? defaultConfig.sttSilence
+                case "stt_adaptive_silence":
+                    config.sttAdaptiveSilence = (value == "true" || value == "1")
                 case "stt_auto_enter":
                     config.sttAutoEnter = (value == "true" || value == "1")
                 case "auto_enter_delay_ms":

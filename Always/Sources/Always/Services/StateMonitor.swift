@@ -256,13 +256,15 @@ class StateMonitor: ObservableObject {
             let silence_secs: Double
             let cooldown_ms: UInt32
             let silero_threshold: Float
+            let adaptive_silence: Bool
         }
         let payload = Payload(
             auto_enter_delay_ms: UInt32(max(0, config.autoEnterDelayMs)),
             energy_threshold: config.sttEnergyThreshold,
             silence_secs: config.sttSilence,
             cooldown_ms: UInt32(max(0, config.sttCooldownMs)),
-            silero_threshold: config.sileroThreshold
+            silero_threshold: config.sileroThreshold,
+            adaptive_silence: config.sttAdaptiveSilence
         )
         udsClient.sendCommandWithData("ApplyRuntimePreferences", payload)
     }

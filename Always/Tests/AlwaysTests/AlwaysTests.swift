@@ -60,6 +60,7 @@ final class AlwaysTests: XCTestCase {
             "hearEnergyThreshold": 0.3,
             "sttCooldownMs": 150,
             "sttSilence": 0.4,
+            "sttAdaptiveSilence": true,
             "sttAutoEnter": true,
             "autoEnterDelayMs": 4000,
             "groqApiKey": null,
@@ -79,6 +80,7 @@ final class AlwaysTests: XCTestCase {
         XCTAssertEqual(config.hearEnergyThreshold, 0.3)
         XCTAssertEqual(config.sttCooldownMs, 150)
         XCTAssertEqual(config.sttSilence, 0.4)
+        XCTAssertTrue(config.sttAdaptiveSilence)
         XCTAssertTrue(config.sttAutoEnter)
         XCTAssertEqual(config.autoEnterDelayMs, 4000)
         XCTAssertEqual(config.sileroThreshold, 0.5)

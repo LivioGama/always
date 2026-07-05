@@ -315,7 +315,16 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                 prefs
                     .stt_silence
                     .map(|v| format!("{v}"))
-                    .unwrap_or_else(|| "2.0".to_string())
+                    .unwrap_or_else(
+                        || always::always::config::DEFAULT_SILENCE_SECS.to_string()
+                    )
+            );
+            println!(
+                "stt_adaptive_silence: {}",
+                prefs
+                    .stt_adaptive_silence
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "true".to_string())
             );
             println!(
                 "stt_auto_enter: {}",

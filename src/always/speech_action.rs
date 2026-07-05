@@ -330,6 +330,7 @@ mod tests {
             lang: "en".to_string(),
             timeout_secs: 30,
             silence_secs: 2.0,
+            adaptive_silence_enabled: true,
             auto_enter: false,
             filter_enabled: true,
             energy_threshold: 0.05,

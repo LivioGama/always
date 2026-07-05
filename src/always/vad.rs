@@ -46,6 +46,24 @@ impl SpeculationSlot {
     fn take(&self) -> Option<Result<crate::stt::TranscriptionResult>> {
         self.result.lock().take()
     }
+
+    /// Non-consuming look at the speculative transcript text. Used by the
+    /// adaptive mid-sentence extension to inspect the text while leaving
+    /// the result in place for the finalize path. Returns `None` while
+    /// the speculation is still in flight, failed, or was invalidated.
+    fn peek_text(&self) -> Option<String> {
+        match self.result.lock().as_ref() {
+            Some(Ok(r)) if !r.text.is_empty() => Some(r.text.clone()),
+            _ => None,
+        }
+    }
+
+    /// Has ANY speculation outcome (success or error) landed? Lets the
+    /// adaptive decision grace stop waiting as soon as the thread reports,
+    /// instead of burning the full grace on a failed transcription.
+    fn peek_ready(&self) -> bool {
+        self.result.lock().is_some()
+    }
 }
 
 /// Per-utterance latency capture points, consumed by the
@@ -169,6 +187,29 @@ const VOICE_HEARTBEAT_MS: u64 = 2000;
 const LONG_RECORDING_WARN_SECS: u32 = 60;
 /// Continuous-speech hard cap (mirrors `max_speech_frames` below).
 const MAX_SPEECH_SECS: u32 = 300;
+/// Adaptive mid-sentence extension: when the speculative transcript ends
+/// mid-thought (no terminator, or a trailing connector word), the final
+/// silence window is stretched by this factor so a thinking pause doesn't
+/// split one sentence into two pastes.
+const MIDSENTENCE_EXTENSION_FACTOR: f64 = 2.0;
+/// Absolute ceiling on the extra quiet the extension may add, so a large
+/// user-configured window doesn't double into something absurd.
+const MIDSENTENCE_MAX_EXTRA_SECS: f64 = 1.5;
+/// Decision grace past the base silence window while the speculative STT
+/// result is still in flight. The paste can't happen before STT completes
+/// anyway (the post-loop wait blocks on the same result), so holding the
+/// cut for up to this many frames costs ~zero user-visible latency — it
+/// just moves the wait INSIDE the loop where the mid-sentence decision
+/// can still extend the window. 20 frames = 600ms: observed Groq
+/// kickoff→result times range ~0.7-1.0s, so 300ms of grace lost the race
+/// whenever Groq was on the slow side of that band.
+const MIDSENTENCE_DECISION_GRACE_FRAMES: usize = 20;
+/// Trailing words that mark a clause as clearly unfinished even when
+/// Whisper appended its habitual period. Lowercase, punctuation-stripped.
+const TRAILING_CONNECTORS: &[&str] = &[
+    "and", "but", "or", "so", "because", "which", "that", "to", "the", "a", "an", "with", "for",
+    "of", "in", "on", "at", "by",
+];
 
 #[cfg(feature = "macos")]
 fn record_with_local_vad(
@@ -333,6 +374,12 @@ fn record_with_local_vad(
     // discarded if speech resumes before final silence.
     let speculation_slot = SpeculationSlot::new();
     let mut speculation_pending = false;
+    // Adaptive mid-sentence extension: latched once per silence run when
+    // the speculative transcript looks unfinished; reset on speech resume.
+    // `decided` records that the speculative text was inspected (either
+    // verdict) so the decision grace stops holding the cut.
+    let mut midsentence_extended = false;
+    let mut midsentence_decided = false;
 
     loop {
         // INVARIANT (concurrency): `read_frame` blocks on rec's stdout for up
@@ -498,6 +545,8 @@ fn record_with_local_vad(
                 // User resumed — flip back. (No-op if already listening.)
                 flip_to_listening!();
             }
+            midsentence_extended = false;
+            midsentence_decided = false;
             consecutive_speech += 1;
             consecutive_silence = 0;
             if consecutive_speech >= min_speech_frames {
@@ -690,7 +739,45 @@ fn record_with_local_vad(
                 });
             }
 
-            if consecutive_silence >= eff_silence_frames {
+            // Adaptive mid-sentence extension: once the speculative
+            // outcome lands, inspect the text (non-consuming; every 2nd
+            // frame to keep the hot loop cheap) and stretch the final
+            // window when it ends mid-thought. Decided at most once per
+            // silence run; both flags reset on speech resume.
+            let adaptive_active = cfg.adaptive_silence_enabled && !is_short && speculation_pending;
+            if adaptive_active
+                && !midsentence_decided
+                && consecutive_silence % 2 == 0
+                && speculation_slot.peek_ready()
+            {
+                midsentence_decided = true;
+                if let Some(spec_text) = speculation_slot.peek_text()
+                    && looks_mid_sentence(&cfg.localization, &spec_text)
+                {
+                    midsentence_extended = true;
+                }
+                // One line either way so production logs show how often
+                // the heuristic fires vs. passes.
+                tracing::info!(
+                    extended = midsentence_extended,
+                    decided_at_frame = consecutive_silence,
+                    base_frames = eff_silence_frames,
+                    extended_frames = extended_silence_frames(silence_frames),
+                    "midsentence_decision"
+                );
+            }
+
+            let eff_final_frames = if midsentence_extended {
+                extended_silence_frames(silence_frames)
+            } else if adaptive_active && !midsentence_decided {
+                // Speculative STT still in flight: hold the cut briefly so
+                // the decision above can happen. Costs ~no paste latency —
+                // the post-loop wait would block on the same result.
+                eff_silence_frames + MIDSENTENCE_DECISION_GRACE_FRAMES
+            } else {
+                eff_silence_frames
+            };
+            if consecutive_silence >= eff_final_frames {
                 break;
             }
         } else {
@@ -1001,14 +1088,57 @@ fn normal_silence_frames(cfg: &AlwaysConfig) -> usize {
 }
 
 fn tentative_silence_frames(final_silence_frames: usize) -> usize {
-    (final_silence_frames / 3).max(1)
+    // 1/4 of the window (was 1/3): with the 0.9s default the speculative
+    // STT now starts ~225ms into the silence, raising the odds the result
+    // (and the adaptive peek below) is home before the final cut. Wrong
+    // guesses are discarded on speech resume and are cheap.
+    (final_silence_frames / 4).max(1)
+}
+
+/// Extended final-silence window used once `looks_mid_sentence` fires:
+/// FACTOR × the configured window, capped at +MIDSENTENCE_MAX_EXTRA_SECS.
+fn extended_silence_frames(final_silence_frames: usize) -> usize {
+    let extra_cap = ((MIDSENTENCE_MAX_EXTRA_SECS * 1000.0) / FRAME_MS as f64).ceil() as usize;
+    (((final_silence_frames as f64) * MIDSENTENCE_EXTENSION_FACTOR) as usize)
+        .min(final_silence_frames + extra_cap)
+}
+
+/// Does the speculative transcript look like an unfinished thought?
+///
+/// Two signals, both cheap and unit-testable:
+/// - no sentence terminator at the end (commas/colons/dashes count as
+///   explicitly unfinished), or
+/// - a terminator is present but the last word is a connector ("and",
+///   "which", …) — Whisper habitually appends a period to incomplete
+///   clauses, so the trailing word overrides it.
+///
+/// False negatives are benign (current behavior: window unchanged).
+fn looks_mid_sentence(loc: &crate::always::localization::Localization, text: &str) -> bool {
+    let trimmed = text.trim();
+    let Some(last_char) = trimmed.chars().last() else {
+        return false;
+    };
+    if matches!(last_char, ',' | ';' | ':' | '—' | '-') {
+        return true;
+    }
+    let last_word: String = trimmed
+        .trim_end_matches(|c: char| !c.is_alphanumeric())
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    if TRAILING_CONNECTORS.contains(&last_word.as_str()) {
+        return true;
+    }
+    !loc.sentence_terminators.contains(&last_char)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        early_voice_frame_ok, fast_energy_check, fast_normalized_energy, normal_silence_frames,
-        normalized_energy, tentative_silence_frames, voice_activity_energy_threshold,
+        early_voice_frame_ok, extended_silence_frames, fast_energy_check, fast_normalized_energy,
+        looks_mid_sentence, normal_silence_frames, normalized_energy, tentative_silence_frames,
+        voice_activity_energy_threshold,
     };
     use crate::always::AlwaysConfig;
 
@@ -1105,8 +1235,39 @@ mod tests {
 
     #[test]
     fn tentative_silence_starts_before_final_cutoff() {
-        assert_eq!(tentative_silence_frames(17), 5);
+        // 1/4 of the window (30 frames = 0.9s default → kickoff at 7
+        // frames ≈ 210ms of silence).
+        assert_eq!(tentative_silence_frames(30), 7);
         assert_eq!(tentative_silence_frames(1), 1);
+    }
+
+    #[test]
+    fn extended_silence_doubles_but_caps() {
+        // 0.9s default → 30 frames → doubled to 60 (1.8s), under the
+        // +1.5s (50 frame) cap... 30+50=80 > 60, so factor wins.
+        assert_eq!(extended_silence_frames(30), 60);
+        // Large user window (3s → 100 frames): cap wins, 100+50=150 < 200.
+        assert_eq!(extended_silence_frames(100), 150);
+    }
+
+    #[test]
+    fn looks_mid_sentence_truth_table() {
+        let loc = &crate::always::localization::Localization::ENGLISH;
+        // No terminator → mid-sentence.
+        assert!(looks_mid_sentence(loc, "I went to the store"));
+        // Explicit continuation punctuation.
+        assert!(looks_mid_sentence(loc, "first item,"));
+        assert!(looks_mid_sentence(loc, "the following:"));
+        // Whisper's habitual period after a trailing connector.
+        assert!(looks_mid_sentence(loc, "I want to change the file and."));
+        assert!(looks_mid_sentence(loc, "It depends on the."));
+        // Genuinely complete sentences.
+        assert!(!looks_mid_sentence(loc, "Send the email now."));
+        assert!(!looks_mid_sentence(loc, "Is that correct?"));
+        assert!(!looks_mid_sentence(loc, "Stop!"));
+        // Degenerate inputs.
+        assert!(!looks_mid_sentence(loc, ""));
+        assert!(!looks_mid_sentence(loc, "   "));
     }
 
     /// Mirror of the in-loop streak logic so synthetic frame sequences

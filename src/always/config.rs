@@ -13,7 +13,13 @@ use crate::stt_dispatch::TranscriberBackendChoice;
 
 // Default configuration values
 const DEFAULT_AUTO_ENTER_DELAY_MS: u32 = 4000;
-const DEFAULT_SILENCE_SECS: f64 = 0.6;
+/// Raised 0.6 → 0.9: users pause mid-sentence to think, and 0.6s split one
+/// thought into two pastes with per-segment grammar correction. Speculative
+/// STT still hides the transcription cost inside the silence wait, so the
+/// user-visible cost is ~0.3s of extra quiet before paste — refunded by
+/// fewer split/re-dictation events. Pair with the adaptive mid-sentence
+/// extension in `vad.rs` for pauses longer than the base window.
+pub const DEFAULT_SILENCE_SECS: f64 = 0.9;
 /// Ten minutes of no voice before idle auto-pause. Short values (e.g. 120s)
 /// felt like the daemon "randomly" paused during normal desk work.
 const DEFAULT_IDLE_PAUSE_SECS: u32 = 600;
@@ -204,6 +210,10 @@ pub struct AlwaysConfig {
     pub lang: String,
     pub timeout_secs: u32,
     pub silence_secs: f64,
+    /// Extend the silence window when the speculative transcript looks
+    /// mid-sentence (see `vad.rs::looks_mid_sentence`). Default on;
+    /// DB pref `stt_adaptive_silence`.
+    pub adaptive_silence_enabled: bool,
     pub auto_enter: bool,
     pub filter_enabled: bool,
     pub energy_threshold: f64,
@@ -382,6 +392,7 @@ impl AlwaysConfig {
             // Settings UI. 0.7s minimum keeps paste responsive without
             // allowing absurdly tiny windows that split normal phrases.
             silence_secs: resolve_silence_secs(silence_secs, &prefs),
+            adaptive_silence_enabled: prefs.stt_adaptive_silence.unwrap_or(true),
             // `auto_enter` was already resolved above: CLI flag → DB pref →
             // canonical default. The previous code re-read `prefs.stt_auto_enter`
             // here, which silently undid an explicit CLI override.
@@ -449,10 +460,11 @@ impl Default for AlwaysConfig {
             timeout_secs: 30,
             // Defaults aligned with `SensitivityPreset::Normal` and the
             // Mic Sensitivity / Speaking Style picker in the GUI.
-            // 0.6s keeps the default responsive. Speculative STT starts
-            // before the final cutoff, and users who get mid-sentence
-            // splits can raise this in Settings.
+            // Speculative STT starts before the final cutoff, and users
+            // who still get mid-sentence splits can raise this in Settings
+            // (Pause tolerance picker).
             silence_secs: DEFAULT_SILENCE_SECS,
+            adaptive_silence_enabled: true,
             auto_enter: true,
             filter_enabled: true,
             energy_threshold: 0.012,

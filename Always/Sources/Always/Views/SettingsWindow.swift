@@ -187,6 +187,7 @@ struct SettingsWindow: View {
                 _ = try await cliService.setConfig(key: "stt_energy_threshold", value: String(config.sttEnergyThreshold))
                 _ = try await cliService.setConfig(key: "hear_energy_threshold", value: String(config.hearEnergyThreshold))
                 _ = try await cliService.setConfig(key: "stt_silence", value: String(config.sttSilence))
+                _ = try await cliService.setConfig(key: "stt_adaptive_silence", value: String(config.sttAdaptiveSilence))
                 _ = try await cliService.setConfig(key: "stt_cooldown_ms", value: String(config.sttCooldownMs))
                 _ = try await cliService.setConfig(key: "auto_enter_delay_ms", value: String(config.autoEnterDelayMs))
                 _ = try await cliService.setConfig(key: "silero_threshold", value: String(config.sileroThreshold))

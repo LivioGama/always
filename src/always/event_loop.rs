@@ -687,7 +687,10 @@ fn handle_speech(
             // Add a small delay after paste to prevent double-paste when
             // the user makes a break mid-utterance. This gives the system
             // time to settle before releasing the paste-in-flight lock.
-            std::thread::sleep(Duration::from_millis(200));
+            // 100ms (was 200): the Cmd+V key event has already been posted
+            // and consumed by the target app well within this window; the
+            // extra 100ms only delayed readiness for the next utterance.
+            std::thread::sleep(Duration::from_millis(100));
 
             if grammar_patch_async {
                 // TODO(clipboard-restore): the async-grammar path ends with

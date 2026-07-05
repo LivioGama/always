@@ -560,6 +560,7 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
             silence_secs,
             cooldown_ms,
             silero_threshold,
+            adaptive_silence,
         } => {
             apply_runtime_preferences(
                 ctx,
@@ -568,6 +569,7 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
                 silence_secs,
                 cooldown_ms,
                 silero_threshold,
+                adaptive_silence,
             );
         }
         DaemonCommand::ApproveCorrection { id } => handle_approve_correction(&id),
@@ -838,6 +840,7 @@ fn apply_runtime_preferences(
     silence_secs: f64,
     cooldown_ms: u32,
     silero_threshold: f32,
+    adaptive_silence: Option<bool>,
 ) {
     let mut cfg = ctx.cfg.write();
     cfg.auto_enter_delay_ms = auto_enter_delay_ms.min(60_000);
@@ -848,12 +851,16 @@ fn apply_runtime_preferences(
     );
     cfg.cooldown_ms = cooldown_ms;
     cfg.silero_threshold = silero_threshold.clamp(0.0, 1.0);
+    if let Some(adaptive) = adaptive_silence {
+        cfg.adaptive_silence_enabled = adaptive;
+    }
     tracing::info!(
         auto_enter_delay_ms = cfg.auto_enter_delay_ms,
         energy_threshold = cfg.energy_threshold,
         silence_secs = cfg.silence_secs,
         cooldown_ms = cfg.cooldown_ms,
         silero_threshold = cfg.silero_threshold,
+        adaptive_silence = cfg.adaptive_silence_enabled,
         "uds_apply_runtime_preferences"
     );
 }

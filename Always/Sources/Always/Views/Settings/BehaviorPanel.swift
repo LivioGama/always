@@ -41,6 +41,34 @@ struct BehaviorPanel: View {
                 .frame(width: 280)
             }
 
+            HStack {
+                Text("Pause Tolerance")
+                    .font(.body)
+                    .help(
+                        "How long a mid-sentence pause can be before the utterance is finalized and pasted. Higher = fewer split sentences, slightly later paste."
+                    )
+                Spacer()
+                Picker("", selection: pauseToleranceBinding) {
+                    ForEach(PauseTolerancePreset.allCases) { preset in
+                        Text(preset.label).tag(Optional(preset))
+                    }
+                    if currentPauseTolerance == nil {
+                        Text("Custom").tag(Optional<PauseTolerancePreset>.none)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 280)
+            }
+            Toggle(
+                "Extend automatically when a sentence sounds unfinished",
+                isOn: $config.sttAdaptiveSilence
+            )
+            .help(
+                "When the transcript-so-far ends mid-thought (no punctuation, trailing 'and'/'which'/…), the pause window is temporarily doubled so the sentence isn't split."
+            )
+            .font(.caption)
+
             DisclosureGroup("Advanced thresholds") {
                 VStack(alignment: .leading, spacing: 8) {
                     NumericSettingRow(
@@ -92,6 +120,20 @@ struct BehaviorPanel: View {
                 .padding(.top, 6)
             }
         }
+    }
+
+    private var pauseToleranceBinding: Binding<PauseTolerancePreset?> {
+        Binding(
+            get: { self.currentPauseTolerance },
+            set: { newValue in
+                guard let preset = newValue else { return }
+                config.sttSilence = preset.silenceSecs
+            }
+        )
+    }
+
+    private var currentPauseTolerance: PauseTolerancePreset? {
+        PauseTolerancePreset.from(silenceSecs: config.sttSilence)
     }
 
     private var presetBinding: Binding<SensitivityPreset?> {

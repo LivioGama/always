@@ -395,6 +395,9 @@ pub enum DaemonCommand {
         silence_secs: f64,
         cooldown_ms: u32,
         silero_threshold: f32,
+        /// Optional so payloads from older GUI builds still decode.
+        #[serde(default)]
+        adaptive_silence: Option<bool>,
     },
     /// Approve a pending correction in the queue and apply it to the
     /// glossary. The daemon emits `CorrectionLogged` on success.

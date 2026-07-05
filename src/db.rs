@@ -51,6 +51,10 @@ pub struct Preferences {
     /// Stream accepted utterances to `~/.always/transcripts.jsonl` for
     /// external consumers (e.g. IRIS). Opt-in (default off).
     pub transcript_stream: Option<bool>,
+    /// Extend the end-of-utterance silence window when the speculative
+    /// transcript looks mid-sentence, so brief thinking pauses don't
+    /// split one thought into two pastes. Default on.
+    pub stt_adaptive_silence: Option<bool>,
 }
 
 pub fn open() -> Result<Connection> {
@@ -233,6 +237,13 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN transcript_stream INTEGER;")?;
     }
 
+    let has_stt_adaptive_silence = conn
+        .prepare("SELECT stt_adaptive_silence FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_stt_adaptive_silence {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN stt_adaptive_silence INTEGER;")?;
+    }
+
     encode_plaintext_groq_key(conn)?;
 
     Ok(())
@@ -264,7 +275,7 @@ fn encode_plaintext_groq_key(conn: &Connection) -> Result<()> {
 
 pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
     let mut stmt = conn.prepare(
-        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, idle_pause_action, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream FROM preferences WHERE id = 1",
+        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, idle_pause_action, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream, stt_adaptive_silence FROM preferences WHERE id = 1",
     )?;
     let result = stmt.query_row([], |row| {
         Ok(Preferences {
@@ -295,6 +306,7 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             transcriber_backend: row.get(24)?,
             shortcut_master_pause: row.get(25)?,
             transcript_stream: row.get::<_, Option<i64>>(26)?.map(|v| v != 0),
+            stt_adaptive_silence: row.get::<_, Option<i64>>(27)?.map(|v| v != 0),
         })
     });
     match result {
@@ -337,6 +349,7 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "transcriber_backend",
         "shortcut_master_pause",
         "transcript_stream",
+        "stt_adaptive_silence",
     ];
     if !valid_keys.contains(&key) {
         anyhow::bail!(
@@ -415,7 +428,8 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         | "stt_auto_enter"
         | "postprocess_enabled"
         | "passive_correction_capture"
-        | "transcript_stream" => {
+        | "transcript_stream"
+        | "stt_adaptive_silence" => {
             if !matches!(value, "true" | "false" | "1" | "0") {
                 anyhow::bail!("{key} must be one of: true, false, 1, 0");
             }
@@ -471,7 +485,8 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         | "stt_auto_enter"
         | "postprocess_enabled"
         | "passive_correction_capture"
-        | "transcript_stream" => {
+        | "transcript_stream"
+        | "stt_adaptive_silence" => {
             if matches!(value, "true" | "1") {
                 "1".to_string()
             } else {

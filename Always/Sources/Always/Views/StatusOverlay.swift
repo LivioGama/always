@@ -532,6 +532,32 @@ class StatusOverlayWindow: NSPanel {
         orderFrontRegardless()
     }
 
+    /// Build the content view and realize the window-server surface once at
+    /// launch (invisible: alpha 0 + ignoresMouseEvents) so the first real
+    /// `show` only animates alpha instead of paying view creation, first
+    /// layout, and order-in (~30-80ms on first show).
+    func prewarmContent() {
+        if overlayView == nil {
+            let frame = NSRect(
+                x: 0, y: 0,
+                width: StatusOverlayWindow.overlayWidth,
+                height: StatusOverlayWindow.overlayHeight
+            )
+            overlayView = StatusOverlayView(frame: frame)
+            contentView = overlayView
+        }
+        alphaValue = 0.0
+        orderFrontRegardless()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self = self else { return }
+            // Only park it back out if no real show grabbed it meanwhile
+            // (a real show immediately animates alpha above 0).
+            if self.alphaValue == 0.0 {
+                self.orderOut(nil)
+            }
+        }
+    }
+
     func show(state: OverlayState, instant: Bool = false) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
@@ -880,13 +906,13 @@ class StatusOverlayController {
         }
     }
 
-    /// Create the HUD window off-screen so the first show is instant.
+    /// Create the HUD window AND its content view at launch so the first
+    /// show is instant — see `StatusOverlayWindow.prewarmContent`.
     func prewarm() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.ensureWindow()
-            self.window?.alphaValue = 0
-            self.window?.orderOut(nil)
+            self.window?.prewarmContent()
         }
     }
 
