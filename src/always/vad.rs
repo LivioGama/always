@@ -183,10 +183,35 @@ const EARLY_VOICE_MIN_FRAMES: usize = 2;
 /// "Listening" overlay for more than one lease window.
 const VOICE_HEARTBEAT_MS: u64 = 2000;
 /// One-shot overlay warning when continuous speech reaches this many
-/// seconds, so the 5-minute hard cap never surprises anyone mid-thought.
-const LONG_RECORDING_WARN_SECS: u32 = 60;
+/// seconds, so the hard cap never surprises anyone mid-thought. 25 min —
+/// chunking transcribes as it goes, so only the absolute cap remains.
+const LONG_RECORDING_WARN_SECS: u32 = 1500;
 /// Continuous-speech hard cap (mirrors `max_speech_frames` below).
-const MAX_SPEECH_SECS: u32 = 300;
+/// 30 minutes: an absolute runaway-recording safety only. Chunking (see
+/// `chunker.rs`) removes the old 5-minute single-request cliff — audio is
+/// flushed to STT every CHUNK_TARGET_SECS at a natural pause, so nothing
+/// accumulates toward an API payload limit.
+const MAX_SPEECH_SECS: u32 = 1800;
+/// Flush the live buffer as a committed chunk at the next tentative
+/// silence once it holds at least this much speech. 90s ≈ 2.9MB WAV —
+/// far below Groq's 25MB cap, big enough that chunk seams are rare.
+const CHUNK_TARGET_SECS: u32 = 90;
+
+/// `CHUNK_TARGET_SECS` with a test override: `ALWAYS_CHUNK_TARGET_SECS`
+/// lets an end-to-end test exercise the chunk path with seconds of audio
+/// instead of minutes. Floor of 3s so a typo can't flush every frame.
+fn chunk_target_secs() -> u32 {
+    std::env::var("ALWAYS_CHUNK_TARGET_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|v| v.max(3))
+        .unwrap_or(CHUNK_TARGET_SECS)
+}
+/// Absolute per-chunk ceiling: flush at a frame boundary even mid-speech
+/// if the user talks continuously for this long without a 0.2s dip.
+/// Whisper tolerates a clean-frame cut; 2.5 min of literally pause-free
+/// speech is vanishingly rare.
+const CHUNK_HARD_MAX_SECS: u32 = 150;
 /// Adaptive mid-sentence extension: when the speculative transcript ends
 /// mid-thought (no terminator, or a trailing connector word), the final
 /// silence window is stretched by this factor so a thinking pause doesn't
@@ -380,6 +405,15 @@ fn record_with_local_vad(
     // verdict) so the decision grace stops holding the cut.
     let mut midsentence_extended = false;
     let mut midsentence_decided = false;
+    // Rolling chunk transcription for long dictations (see chunker.rs).
+    // `committed_samples` tracks audio already flushed out of the live
+    // buffer so the long-recording warn/cap math still sees the total.
+    // `voiced_since_flush` gates the speculation kickoff: after a chunk
+    // drain the live buffer holds only trailing silence, which is not
+    // worth a speculative STT round trip.
+    let mut chunker = crate::always::chunker::ChunkAccumulator::new();
+    let mut committed_samples = 0usize;
+    let mut voiced_since_flush = true;
 
     loop {
         // INVARIANT (concurrency): `read_frame` blocks on rec's stdout for up
@@ -616,11 +650,37 @@ fn record_with_local_vad(
             }
             if in_speech {
                 speech_samples.extend_from_slice(samples);
+                voiced_since_flush = true;
                 // Same anchor refresh for the case where we were already in
                 // speech (consecutive_speech overflows min_speech_frames
                 // immediately) — keep the watchdog clock pinned to "right
                 // now" for as long as audio is genuinely voice.
                 pause::mark_voice_seen();
+
+                // Per-chunk ceiling: a pause-free monologue never reaches
+                // the tentative-silence flush point, so cut at a frame
+                // boundary once the chunk is oversized.
+                if speech_samples.len() >= CHUNK_HARD_MAX_SECS as usize * 16_000 {
+                    tracing::info!(
+                        chunk_secs = speech_samples.len() / 16_000,
+                        "chunk_hard_flush"
+                    );
+                    committed_samples += speech_samples.len();
+                    let grammar = if cfg.postprocess_config.grammar_correction_enabled {
+                        cfg.post_processor.clone()
+                    } else {
+                        None
+                    };
+                    chunker.flush(
+                        std::mem::take(&mut speech_samples),
+                        transcriber,
+                        grammar,
+                        rt,
+                    );
+                    speculation_pending = false;
+                    speculation_slot.invalidate();
+                    voiced_since_flush = false;
+                }
             }
         } else if in_speech {
             if keyboard::is_option_held() {
@@ -653,10 +713,44 @@ fn record_with_local_vad(
                 tentative_silence_frames
             };
 
+            // At tentative silence with a target-sized buffer, COMMIT the
+            // chunk instead of speculating: flush it for background
+            // transcription (never discarded — see chunker.rs) and keep
+            // recording into a fresh buffer. The seam lands inside a
+            // silence region at a frame boundary, so no word is split.
+            if voice_logged
+                && consecutive_silence >= eff_tentative_frames
+                && speech_samples.len() >= chunk_target_secs() as usize * 16_000
+            {
+                committed_samples += speech_samples.len();
+                let grammar = if cfg.postprocess_config.grammar_correction_enabled {
+                    cfg.post_processor.clone()
+                } else {
+                    None
+                };
+                chunker.flush(
+                    std::mem::take(&mut speech_samples),
+                    transcriber,
+                    grammar,
+                    rt,
+                );
+                speculation_pending = false;
+                speculation_slot.invalidate();
+                midsentence_extended = false;
+                midsentence_decided = false;
+                voiced_since_flush = false;
+            }
+
             // At tentative silence, kick off speculative transcription in the
             // background so the result is ready (or nearly so) by the time we
             // hit final silence. If the user resumes, we discard it above.
-            if voice_logged && !speculation_pending && consecutive_silence >= eff_tentative_frames {
+            // Skipped after a chunk drain until real speech lands in the
+            // fresh buffer — trailing silence isn't worth an STT round trip.
+            if voice_logged
+                && voiced_since_flush
+                && !speculation_pending
+                && consecutive_silence >= eff_tentative_frames
+            {
                 speculation_pending = true;
                 speculation_slot.invalidate();
                 let captured_gen = speculation_slot.current_generation();
@@ -806,8 +900,9 @@ fn record_with_local_vad(
 
         total_frames += 1;
         // One-shot heads-up well before the hard cap cuts the recording.
+        // Includes chunk-committed audio — the live buffer resets per chunk.
         if in_speech && !long_recording_warned {
-            let speech_secs = (speech_samples.len() / 16_000) as u32;
+            let speech_secs = ((committed_samples + speech_samples.len()) / 16_000) as u32;
             if speech_secs >= LONG_RECORDING_WARN_SECS {
                 long_recording_warned = true;
                 tracing::info!(
@@ -835,7 +930,9 @@ fn record_with_local_vad(
     // 30ms frame of the final-silence cut firing.
     let speech_end_at = std::time::Instant::now();
 
-    if speech_samples.is_empty() {
+    let has_chunks = !chunker.is_empty();
+
+    if speech_samples.is_empty() && !has_chunks {
         // Send voice activity ended event if no speech was detected
         event::global_broadcaster().voice_activity_ended();
         // Don't set listening to false here - let it time out naturally
@@ -850,14 +947,20 @@ fn record_with_local_vad(
     }
 
     // Final energy check using appropriate method based on threshold
-    let speech_energy = if use_fast_energy_check {
+    let speech_energy = if speech_samples.is_empty() {
+        0.0
+    } else if use_fast_energy_check {
         fast_normalized_energy(&speech_samples)
     } else {
         normalized_energy(&speech_samples)
     };
 
-    // Only log drops if we actually logged voice detection
-    if speech_energy < cfg.energy_threshold {
+    // Only log drops if we actually logged voice detection. With committed
+    // chunks in flight this gate applies to the TAIL only (it decides
+    // whether the tail is worth transcribing) — a whisper-quiet ending
+    // must never discard ten minutes of already-committed speech.
+    let tail_has_voice = speech_energy >= cfg.energy_threshold;
+    if !has_chunks && !tail_has_voice {
         event::global_broadcaster().voice_activity_ended();
         // Predictive overlay may have flipped to Transcribing during the
         // silence wait — there's no transcription coming on the dropped
@@ -877,6 +980,21 @@ fn record_with_local_vad(
 
     // Guarantee Transcribing overlay (speculation usually already flipped).
     flip_to_transcribing!();
+
+    // Chunked utterance whose tail is pure trailing silence: nothing to
+    // transcribe here — assemble the committed chunks directly.
+    if has_chunks && !tail_has_voice {
+        return finalize_chunked(
+            &chunker,
+            transcriber,
+            String::new(),
+            &crate::stt::TranscriptionResult::default(),
+            committed_samples,
+            speech_energy.max(cfg.energy_threshold),
+            speech_end_at,
+            false,
+        );
+    }
 
     // Try to use the speculative transcription if it was kicked off and
     // wasn't invalidated by a speech resume. Wait if it's still in
@@ -963,6 +1081,22 @@ fn record_with_local_vad(
 
     let raw = result.text.clone();
 
+    // Chunked utterance with a voiced tail: the noise filters below are
+    // tuned to judge a whole short utterance and would here judge only
+    // the tail — route to assembly instead.
+    if has_chunks {
+        return finalize_chunked(
+            &chunker,
+            transcriber,
+            raw,
+            &result,
+            committed_samples + speech_samples.len(),
+            speech_energy.max(cfg.energy_threshold),
+            speech_end_at,
+            speculation_used,
+        );
+    }
+
     // Enhanced noise detection: filter out empty, very short, or low-energy results
     if raw.is_empty() {
         return Ok(RecordResult::DroppedNoise { raw });
@@ -1011,6 +1145,65 @@ fn record_with_local_vad(
     _rt: &tokio::runtime::Handle,
 ) -> Result<RecordResult> {
     Err(anyhow::anyhow!("Audio capture not supported on this platform"))
+}
+
+/// Assemble a chunked utterance: wait for committed chunks, join them in
+/// flush order, and append the (already transcribed) tail text.
+#[cfg(feature = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn finalize_chunked(
+    chunker: &crate::always::chunker::ChunkAccumulator,
+    transcriber: &Arc<dyn Transcriber>,
+    tail_text: String,
+    tail_result: &crate::stt::TranscriptionResult,
+    total_samples: usize,
+    energy: f64,
+    speech_end_at: std::time::Instant,
+    speculation_used: bool,
+) -> Result<RecordResult> {
+    let assembled = chunker.finalize(transcriber);
+    event::global_broadcaster().transcribing_stopped();
+    let tail = tail_text.trim();
+    let mut full_text = assembled.text;
+    if !tail.is_empty() {
+        if full_text.is_empty() {
+            full_text = tail.to_string();
+        } else {
+            full_text.push(' ');
+            full_text.push_str(tail);
+        }
+    }
+    if full_text.is_empty() {
+        return Ok(RecordResult::DroppedNoise { raw: String::new() });
+    }
+    tracing::info!(
+        chunks = assembled.chunk_count,
+        failed_chunks = assembled.failed_chunks,
+        chars = full_text.chars().count(),
+        "chunked_utterance_assembled"
+    );
+    let stt_done_at = std::time::Instant::now();
+    // Synthetic result with EMPTY segments, deliberately: the segment-based
+    // hallucination heuristics are tuned for short single-request
+    // utterances, and the only segment stats available here would describe
+    // the tail — letting them judge a multi-minute joined transcript could
+    // drop it wholesale.
+    let transcription = crate::stt::TranscriptionResult {
+        text: full_text.clone(),
+        duration: total_samples as f64 / 16_000.0,
+        language: tail_result.language.clone(),
+        segments: Vec::new(),
+    };
+    Ok(RecordResult::Speech {
+        text: full_text,
+        energy,
+        transcription,
+        timing: UtteranceTiming {
+            speech_end_at,
+            stt_done_at,
+            speculation_used,
+        },
+    })
 }
 
 /// Fast energy check for very low thresholds using squared values to avoid sqrt

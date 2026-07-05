@@ -445,6 +445,18 @@ fn handle_speech(
                         "skipping correction stack — too short to benefit"
                     );
                     (transformed.clone(), false, false)
+                } else if transformed.chars().count() > GRAMMAR_MAX_CHARS {
+                    // Long chunked dictation: a single blocking LLM pass
+                    // over the joined text would blow the 8s grammar
+                    // timeout. Each chunk was already grammar-corrected
+                    // in the background as it flushed (chunker.rs), so
+                    // paste the join as-is.
+                    tracing::info!(
+                        stage = "long_transcript_grammar_bypass",
+                        chars = transformed.chars().count(),
+                        "skipping blocking grammar — per-chunk corrections already applied"
+                    );
+                    (transformed.clone(), false, false)
                 } else {
                     // Single-paste policy: correct synchronously, then paste the
                     // final text exactly ONCE. The old "paste acoustic now, patch
@@ -810,6 +822,12 @@ pub fn is_short_utterance(text: &str) -> bool {
     let chars = trimmed.chars().count();
     words <= SHORT_UTTERANCE_MAX_WORDS || chars <= SHORT_UTTERANCE_MAX_CHARS
 }
+
+/// Above this size the blocking grammar pass is skipped: the 8s LLM
+/// timeout can't absorb a multi-minute transcript, and chunked dictations
+/// (the only realistic source of text this long) were already corrected
+/// per-chunk while recording (see `chunker.rs`).
+pub const GRAMMAR_MAX_CHARS: usize = 4000;
 
 const AUTO_ENTER_MIN_WORDS: usize = 3;
 

@@ -2,6 +2,7 @@
 
 pub mod audio;
 pub mod auto_enter_countdown;
+pub mod chunker;
 pub mod clipboard_watcher;
 pub mod config;
 pub mod correction;
