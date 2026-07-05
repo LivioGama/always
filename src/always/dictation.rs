@@ -130,12 +130,19 @@ fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
     idx
 }
 
+/// Serializes every test that touches the process-global SESSION —
+/// including tests in OTHER modules (e.g. `correction_request`, whose
+/// cache-key invariant reads the session through `session_text`). Without
+/// it, parallel test threads race on the global and fail spuriously.
+#[cfg(test)]
+pub(crate) static SESSION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Serialize tests in this module — they share the SESSION global.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    use super::SESSION_TEST_LOCK as TEST_LOCK;
 
     #[test]
     fn note_pasted_replaces_with_authoritative_text() {

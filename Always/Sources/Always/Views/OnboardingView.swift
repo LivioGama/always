@@ -15,6 +15,8 @@ struct OnboardingView: View {
     // Permission state
     @State private var micStatus: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .audio)
     @State private var accessibilityStatus: Bool = AXIsProcessTrusted()
+    @State private var inputMonitoringGranted: Bool =
+        IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
 
     // Periodic refresh for accessibility (no push notifications from macOS)
     @State private var permissionRefreshTimer: Timer? = nil
@@ -42,7 +44,7 @@ struct OnboardingView: View {
                     .font(.title)
                     .fontWeight(.bold)
 
-                Text("Let's get you set up in three quick steps")
+                Text("Let's get you set up in four quick steps")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
             }
@@ -76,7 +78,22 @@ struct OnboardingView: View {
                 }
             )
 
-            // Step 3: API Key
+            // Step 3: Input Monitoring (recommended — gates global hotkeys
+            // like ⌃⌥P pause and ⌃⌥V force-paste; dictation works without it)
+            permissionRow(
+                title: "Input Monitoring",
+                subtitle: "Needed for global shortcuts (⌃⌥P pause, ⌃⌥V paste blocked text)",
+                granted: inputMonitoringGranted,
+                trailing: {
+                    if !inputMonitoringGranted {
+                        Button("Grant") { requestInputMonitoring() }
+                        Button("Open Settings") { openInputMonitoringSettings() }
+                            .buttonStyle(.bordered)
+                    }
+                }
+            )
+
+            // Step 4: API Key
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
                     Image(systemName: keyValid == true ? "checkmark.circle.fill" : "circle")
@@ -221,6 +238,22 @@ struct OnboardingView: View {
     private func refreshPermissions() {
         micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         accessibilityStatus = AXIsProcessTrusted()
+        inputMonitoringGranted =
+            IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+    }
+
+    // MARK: - Input Monitoring
+
+    private func requestInputMonitoring() {
+        // Same API as PermissionsManager: registers "Always" under Privacy &
+        // Security → Input Monitoring and fires the one-time prompt.
+        _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+    }
+
+    private func openInputMonitoringSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private func startPermissionRefreshTimer() {

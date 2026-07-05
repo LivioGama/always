@@ -138,7 +138,9 @@ pub fn poll_speech_energy(cfg: &AlwaysConfig) -> Result<bool> {
 /// Non-macOS stub.
 #[cfg(not(feature = "macos"))]
 pub fn poll_speech_energy(_cfg: &AlwaysConfig) -> Result<bool> {
-    Err(anyhow::anyhow!("Audio capture not supported on this platform"))
+    Err(anyhow::anyhow!(
+        "Audio capture not supported on this platform"
+    ))
 }
 
 /// Speech shorter than this is treated as a "short utterance" and gets
@@ -841,7 +843,7 @@ fn record_with_local_vad(
             let adaptive_active = cfg.adaptive_silence_enabled && !is_short && speculation_pending;
             if adaptive_active
                 && !midsentence_decided
-                && consecutive_silence % 2 == 0
+                && consecutive_silence.is_multiple_of(2)
                 && speculation_slot.peek_ready()
             {
                 midsentence_decided = true;
@@ -1144,7 +1146,9 @@ fn record_with_local_vad(
     _transcriber: &Arc<dyn Transcriber>,
     _rt: &tokio::runtime::Handle,
 ) -> Result<RecordResult> {
-    Err(anyhow::anyhow!("Audio capture not supported on this platform"))
+    Err(anyhow::anyhow!(
+        "Audio capture not supported on this platform"
+    ))
 }
 
 /// Assemble a chunked utterance: wait for committed chunks, join them in

@@ -404,7 +404,10 @@ impl OverlayStateReducer {
                 error: _,
             }
             | DaemonEvent::ActiveTranscriberChanged { backend: _ }
-            | DaemonEvent::SttFallbackEngaged { model: _ } => None,
+            | DaemonEvent::SttFallbackEngaged { model: _ }
+            | DaemonEvent::ShortcutListenerStatus {
+                input_monitoring_granted: _,
+            } => None,
 
             DaemonEvent::ProcessingStarted | DaemonEvent::ProcessingStopped => {
                 // Not used in current overlay logic

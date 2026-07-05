@@ -47,7 +47,12 @@ use crate::db;
 /// in `Always/Info.plist`). The daemon refuses to write an override
 /// for this bundle id so the user can never accidentally add Always
 /// to its own resumed-app allowlist.
-pub const ALWAYS_OWN_BUNDLE_IDS: &[&str] = &["com.always", "com.always.v2", "com.always.v3", "com.alwaysapp"];
+pub const ALWAYS_OWN_BUNDLE_IDS: &[&str] = &[
+    "com.always",
+    "com.always.v2",
+    "com.always.v3",
+    "com.alwaysapp",
+];
 
 /// Return true when a bundle id belongs to an Always GUI process.
 pub fn is_own_bundle_id(bundle_id: &str) -> bool {

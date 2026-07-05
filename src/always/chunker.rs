@@ -25,7 +25,7 @@ use anyhow::Result;
 use parking_lot::Mutex;
 
 use crate::always::{audio, event};
-use crate::stt::{TranscriptionResult, Transcriber};
+use crate::stt::{Transcriber, TranscriptionResult};
 
 /// Poll cadence while waiting on an in-flight chunk at finalize.
 const FINALIZE_POLL_MS: u64 = 10;

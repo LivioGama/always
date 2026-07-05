@@ -73,17 +73,48 @@ struct Always: App {
 
 class OnboardingState: ObservableObject {
     @Published var showOnboarding = false
-    
+    private var hostedWindow: NSWindow?
+
     func checkAndShowOnboardingIfNeeded() {
         Task {
             let config = try? await CLIService().getConfig()
             let hasAPIKey = !(config?.groqApiKey?.isEmpty ?? true)
             await MainActor.run {
                 if !hasAPIKey {
-                    showOnboarding = true
+                    self.showOnboarding = true
+                    // Must happen HERE, after the async key check resolved —
+                    // the old call site checked `showOnboarding` synchronously
+                    // right after kicking this Task off, so the window never
+                    // opened for a fresh install.
+                    self.openOnboardingWindow()
                 }
             }
         }
+    }
+
+    @MainActor
+    private func openOnboardingWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = NSApp.windows.first(where: {
+            $0.identifier?.rawValue == "AlwaysOnboarding"
+                || $0.identifier?.rawValue == "onboarding"
+                || $0.title == "Welcome to Always"
+        }) {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        // SwiftUI `Window` scenes aren't instantiated until first opened and
+        // AppKit has no handle to open them — host the view directly.
+        if hostedWindow == nil {
+            let hosting = NSHostingController(rootView: OnboardingView())
+            let window = NSWindow(contentViewController: hosting)
+            window.title = "Welcome to Always"
+            window.identifier = NSUserInterfaceItemIdentifier("AlwaysOnboarding")
+            window.isReleasedWhenClosed = false
+            window.center()
+            hostedWindow = window
+        }
+        hostedWindow?.makeKeyAndOrderFront(nil)
     }
 }
 
@@ -119,14 +150,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         cliService = CLIService()
         NSLog("Always: MenuBarExtra installed")
 
-        // Onboarding gating: if no saved Groq API key exists,
-        // surface the onboarding window. The scene id "onboarding"
-        // must match the `Window(id:)` registration in App.body.
+        // Onboarding gating: if no saved Groq API key exists, the state
+        // object opens the onboarding window itself once the async key
+        // check resolves (see OnboardingState.checkAndShowOnboardingIfNeeded).
         onboardingState?.checkAndShowOnboardingIfNeeded()
-        if onboardingState?.showOnboarding == true,
-           let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "onboarding" }) {
-            window.makeKeyAndOrderFront(nil)
-        }
 
         // Permission flow lives in `PermissionsManager`. It seeds the
         // current status (silent — no prompts) and triggers the system

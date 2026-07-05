@@ -315,9 +315,7 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                 prefs
                     .stt_silence
                     .map(|v| format!("{v}"))
-                    .unwrap_or_else(
-                        || always::always::config::DEFAULT_SILENCE_SECS.to_string()
-                    )
+                    .unwrap_or_else(|| always::always::config::DEFAULT_SILENCE_SECS.to_string())
             );
             println!(
                 "stt_adaptive_silence: {}",

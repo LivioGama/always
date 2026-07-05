@@ -146,6 +146,9 @@ mod tests {
     /// paths share the cache through this equality.
     #[test]
     fn warm_and_paste_paths_produce_identical_keys() {
+        // Serialize against the dictation tests — they mutate the same
+        // process-global SESSION this invariant reads via session_text().
+        let _guard = crate::always::dictation::SESSION_TEST_LOCK.lock();
         crate::always::dictation::clear();
         crate::always::pause::dictation_buffer_clear();
         let warm = build("testing one two three", true);
