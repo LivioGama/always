@@ -407,6 +407,16 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         },
     ];
 
+    let mut initial_events = initial_events;
+    // Daemon-side tap health (Input Monitoring): a startup broadcast would
+    // be lost (no clients yet), so each client gets the current status in
+    // its initial burst.
+    if let Some(granted) = crate::always::keyboard::input_monitoring_status() {
+        initial_events.push(DaemonEvent::ShortcutListenerStatus {
+            input_monitoring_granted: granted,
+        });
+    }
+
     let mut initial_payload = String::new();
     for event in initial_events {
         if let Ok(json_line) = event.to_json_line() {

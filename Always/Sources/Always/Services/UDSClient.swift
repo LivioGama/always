@@ -91,6 +91,10 @@ enum DaemonEventType: String, Codable {
     /// Groq circuit breaker opened — daemon switched to the named local
     /// model so dictation keeps working offline.
     case sttFallbackEngaged = "SttFallbackEngaged"
+    /// Ground truth from the daemon about its shortcut event tap: whether
+    /// Input Monitoring is granted for the daemon process. Sent in every
+    /// initial state burst and on change.
+    case shortcutListenerStatus = "ShortcutListenerStatus"
 }
 
 // Event data structures
@@ -184,6 +188,10 @@ struct LowMicrophoneVolumeData: Codable {
     let energy: Double
 }
 
+struct ShortcutListenerStatusData: Codable {
+    let input_monitoring_granted: Bool
+}
+
 // Models-tab payloads. Defined in `Models/ModelInfo.swift`:
 //   - ModelsListData
 //   - ModelDownloadProgressData
@@ -257,6 +265,8 @@ struct DaemonEvent: Codable {
     let lowMicrophoneVolume: LowMicrophoneVolumeData?
     /// Populated for `GrammarCorrected`.
     let grammarCorrected: GrammarCorrectedData?
+    /// Populated for `ShortcutListenerStatus`.
+    let shortcutListenerStatus: ShortcutListenerStatusData?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -289,6 +299,7 @@ struct DaemonEvent: Codable {
         var activeTranscriber: ActiveTranscriberChangedData? = nil
         var lowMicrophoneVolume: LowMicrophoneVolumeData? = nil
         var grammarCorrected: GrammarCorrectedData? = nil
+        var shortcutListenerStatus: ShortcutListenerStatusData? = nil
 
         switch type {
         case .hello:
@@ -333,6 +344,9 @@ struct DaemonEvent: Codable {
             lowMicrophoneVolume = try container.decodeIfPresent(LowMicrophoneVolumeData.self, forKey: .data)
         case .grammarCorrected:
             grammarCorrected = try container.decodeIfPresent(GrammarCorrectedData.self, forKey: .data)
+        case .shortcutListenerStatus:
+            shortcutListenerStatus = try container.decodeIfPresent(
+                ShortcutListenerStatusData.self, forKey: .data)
         default:
             // Fall-through path: text-bearing or empty events. Keep using
             // the loose dict so existing call sites (e.g. transcript chunk
@@ -361,6 +375,7 @@ struct DaemonEvent: Codable {
         self.activeTranscriber = activeTranscriber
         self.lowMicrophoneVolume = lowMicrophoneVolume
         self.grammarCorrected = grammarCorrected
+        self.shortcutListenerStatus = shortcutListenerStatus
     }
 
     func encode(to encoder: Encoder) throws {
@@ -411,6 +426,8 @@ struct DaemonEvent: Codable {
             try container.encodeIfPresent(lowMicrophoneVolume, forKey: .data)
         case .grammarCorrected:
             try container.encodeIfPresent(grammarCorrected, forKey: .data)
+        case .shortcutListenerStatus:
+            try container.encodeIfPresent(shortcutListenerStatus, forKey: .data)
         default:
             try container.encodeIfPresent(data, forKey: .data)
         }
@@ -438,7 +455,8 @@ struct DaemonEvent: Codable {
         modelError: ModelErrorData? = nil,
         activeTranscriber: ActiveTranscriberChangedData? = nil,
         lowMicrophoneVolume: LowMicrophoneVolumeData? = nil,
-        grammarCorrected: GrammarCorrectedData? = nil
+        grammarCorrected: GrammarCorrectedData? = nil,
+        shortcutListenerStatus: ShortcutListenerStatusData? = nil
     ) {
         self.type = type
         self.data = data
@@ -462,6 +480,7 @@ struct DaemonEvent: Codable {
         self.activeTranscriber = activeTranscriber
         self.lowMicrophoneVolume = lowMicrophoneVolume
         self.grammarCorrected = grammarCorrected
+        self.shortcutListenerStatus = shortcutListenerStatus
     }
 }
 

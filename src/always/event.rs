@@ -51,6 +51,15 @@ pub enum DaemonEvent {
     Hello {
         version: u32,
     },
+    /// Ground truth about the daemon's global-shortcut event tap. The
+    /// GUI's own IOHIDCheckAccess reflects the GUI's TCC attribution —
+    /// this event reports whether the DAEMON's listen-only CGEventTap is
+    /// actually authorized, so the banner can say "shortcuts inactive"
+    /// instead of leaving hotkeys silently dead. Included in every
+    /// client's initial state burst and re-emitted on change.
+    ShortcutListenerStatus {
+        input_monitoring_granted: bool,
+    },
     /// Daemon has started listening for voice input
     ListeningStarted,
     /// Daemon has stopped listening
@@ -619,6 +628,14 @@ impl EventBroadcaster {
         if self.voice_active.swap(false, Ordering::SeqCst) {
             self.send(DaemonEvent::VoiceActivityEnded);
         }
+    }
+
+    /// Report whether the daemon's keyboard event tap is authorized
+    /// (Input Monitoring). See [`DaemonEvent::ShortcutListenerStatus`].
+    pub fn shortcut_listener_status(&self, input_monitoring_granted: bool) {
+        self.send(DaemonEvent::ShortcutListenerStatus {
+            input_monitoring_granted,
+        });
     }
 
     /// Send transcription-filtered event with the human-readable reason.

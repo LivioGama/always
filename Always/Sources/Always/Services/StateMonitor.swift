@@ -120,6 +120,9 @@ class StateMonitor: ObservableObject {
                     FocusedAppMonitor.shared.resyncCurrentAppToDaemon()
                     // Audio state is pushed on property changes; re-pushing on
                     // connect races focus resync and can spuriously master-pause.
+                    // A (re)connect often follows a daemon restart — the moment
+                    // TCC grants may have changed (fresh install, bundle bump).
+                    PermissionsManager.shared.refresh()
                 }
             }
             .store(in: &cancellables)
@@ -557,6 +560,15 @@ class StateMonitor: ObservableObject {
             // Async LLM grammar patch replaced the pasted text — flash a
             // brief confirmation so the user knows their text was silently updated.
             StatusOverlayController.shared.flash(state: .grammarCorrected, duration: 1.5)
+        case .shortcutListenerStatus:
+            // Ground truth from the daemon about its event tap. Routed into
+            // PermissionsManager so the Settings banner can say "shortcuts
+            // inactive" even when the GUI's own TCC check looks fine.
+            if let payload = event.shortcutListenerStatus {
+                PermissionsManager.shared.updateDaemonShortcutStatus(
+                    granted: payload.input_monitoring_granted
+                )
+            }
         case .correctionCaptureResult:
             // Summary outcome of a ⌃⌥X press. The "applied" case
             // is already covered by per-pair `.correctionLogged`

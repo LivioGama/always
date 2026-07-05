@@ -430,18 +430,43 @@ fn handle_master_pause_hotkey() {
 /// system prompt and registers the responsible app in that list so the user can
 /// enable it. It also self-heals after a bundle-id bump (which resets TCC
 /// grants). Safe to call repeatedly — once granted it's a cheap status read.
+/// Tri-state Input Monitoring status for the daemon's event tap:
+/// 0 = unknown (listener not started yet), 1 = granted, 2 = denied.
+/// Read by `uds_server` so every connecting client gets the status in
+/// its initial state burst (a startup broadcast would be lost — no
+/// clients are connected yet when the listener starts).
+static INPUT_MONITORING_STATUS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn input_monitoring_status() -> Option<bool> {
+    match INPUT_MONITORING_STATUS.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "macos")]
+fn set_input_monitoring_status(granted: bool) {
+    INPUT_MONITORING_STATUS.store(
+        if granted { 1 } else { 2 },
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    event::global_broadcaster().shortcut_listener_status(granted);
+}
+
 #[cfg(feature = "macos")]
 fn request_input_monitoring_access() {
-    // Both symbols live in CoreGraphics (linked via the `core-graphics` crate)
-    // and exist since macOS 10.15.
+    // Preflight ONLY (cheap status read, never prompts). The GUI is the
+    // sole requester: it calls IOHIDRequestAccess, which reliably surfaces
+    // "Always" in System Settings on macOS 26 — the daemon's own
+    // CGRequestListenEventAccess did NOT (faceless helper), so that call
+    // was removed. The status is stored + broadcast so the GUI banner can
+    // show "shortcuts inactive" instead of leaving hotkeys silently dead.
     unsafe extern "C" {
         fn CGPreflightListenEventAccess() -> bool;
-        fn CGRequestListenEventAccess() -> bool;
     }
-    let granted = unsafe {
-        // Preflight first so we don't re-trigger the prompt once granted.
-        CGPreflightListenEventAccess() || CGRequestListenEventAccess()
-    };
+    let granted = unsafe { CGPreflightListenEventAccess() };
+    set_input_monitoring_status(granted);
     if granted {
         tracing::info!("input_monitoring_access_granted");
     } else {
@@ -672,6 +697,9 @@ pub fn start_keyboard_listener() -> Result<()> {
             }
         }) {
             tracing::error!(?error, "keyboard_listener_error");
+            // The tap died (or never came up) — report so the GUI banner
+            // can surface it instead of leaving hotkeys silently dead.
+            set_input_monitoring_status(false);
             let _ = tx.send(());
         }
     });

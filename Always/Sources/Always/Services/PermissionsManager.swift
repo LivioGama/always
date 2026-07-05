@@ -23,6 +23,12 @@ final class PermissionsManager: ObservableObject {
     @Published private(set) var micStatus: MicStatus = .notDetermined
     @Published private(set) var accessibilityStatus: AccessibilityStatus = .notTrusted
     @Published private(set) var inputMonitoringStatus: InputMonitoringStatus = .notGranted
+    /// Ground truth from the DAEMON about its shortcut event tap
+    /// (`ShortcutListenerStatus` UDS event). `nil` until the daemon
+    /// reports. Distinct from `inputMonitoringStatus`, which reflects the
+    /// GUI process's own TCC check — the two can disagree when the grant
+    /// is keyed to a different responsible process.
+    @Published private(set) var daemonShortcutsGranted: Bool?
 
     enum MicStatus: Equatable {
         case granted
@@ -136,6 +142,17 @@ final class PermissionsManager: ObservableObject {
         // input-monitoring apps use; `CGRequestListenEventAccess` does not
         // surface the entry on macOS 26.
         return IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+    }
+
+    /// Record the daemon's reported tap status (called by StateMonitor on
+    /// every `ShortcutListenerStatus` event).
+    func updateDaemonShortcutStatus(granted: Bool) {
+        DispatchQueue.main.async {
+            if self.daemonShortcutsGranted != granted {
+                self.logger.info("daemon shortcut tap granted=\(granted, privacy: .public)")
+                self.daemonShortcutsGranted = granted
+            }
+        }
     }
 
     /// Deep-link into System Settings → Privacy & Security pane for a

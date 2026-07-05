@@ -406,13 +406,15 @@ mod stt_unit_tests {
 
     #[test]
     fn backoff_grows_exponentially() {
-        // jitter is 0..=base/4, so attempt-N delay is in [base, 1.25 * base).
+        // jitter is 0..=base/4 INCLUSIVE, so attempt-N delay is in
+        // [base, 1.25 * base] — the ranges must be inclusive at the top
+        // or this test fails 1-in-51 runs when the jitter rolls its max.
         let d0 = backoff_with_jitter(0).as_millis();
         let d1 = backoff_with_jitter(1).as_millis();
         let d2 = backoff_with_jitter(2).as_millis();
-        assert!((200..250).contains(&d0));
-        assert!((400..500).contains(&d1));
-        assert!((800..1000).contains(&d2));
+        assert!((200..=250).contains(&d0));
+        assert!((400..=500).contains(&d1));
+        assert!((800..=1000).contains(&d2));
     }
 
     #[test]

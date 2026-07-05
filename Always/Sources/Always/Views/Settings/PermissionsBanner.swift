@@ -18,6 +18,15 @@ struct PermissionsBanner: View {
     /// onboarding — they already know.
     private var isHidden: Bool {
         perms.micStatus.isOK && perms.accessibilityStatus.isOK && perms.inputMonitoringStatus.isOK
+            && perms.daemonShortcutsGranted != false
+    }
+
+    /// The daemon reports its tap is dead while the GUI's own check looks
+    /// fine — the grant is missing for the responsible process. Only show
+    /// this when the plain Input Monitoring row isn't already visible, so
+    /// the user never sees two rows about the same switch.
+    private var showDaemonShortcutRow: Bool {
+        perms.daemonShortcutsGranted == false && perms.inputMonitoringStatus.isOK
     }
 
     var body: some View {
@@ -65,6 +74,15 @@ struct PermissionsBanner: View {
                     permissionRow(
                         title: "Input Monitoring",
                         detail: "Required for the global keyboard shortcuts (pause ⌃⌥P, auto-enter, force-paste). Click to add Always under Privacy & Security → Input Monitoring, then enable it.",
+                        action: .inputMonitoring,
+                        actionTitle: "Open System Settings"
+                    )
+                }
+
+                if showDaemonShortcutRow {
+                    permissionRow(
+                        title: "Shortcuts inactive",
+                        detail: "The voice daemon reports its keyboard listener is not authorized, so global shortcuts (⌃⌥P, ⌃⌥V, …) are dead. Toggle Always OFF and back ON under Privacy & Security → Input Monitoring, then restart Always.",
                         action: .inputMonitoring,
                         actionTitle: "Open System Settings"
                     )
