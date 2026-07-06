@@ -271,7 +271,7 @@ jobs:
     needs: [build-mac, publish]
     steps:
       - name: Open auto-PR against rtk-ai/homebrew-tap
-        uses: dawidd6/action-homebrew-bump-formula@v7
+        uses: dawidd6/action-homebrew-bump-formula@v8
         with:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           tap: rtk-ai/homebrew-tap
