@@ -100,6 +100,34 @@ private enum OverlayScreenPlacement {
     }
 }
 
+/// User-facing size/visibility of the status HUD ("Listening" /
+/// "Transcribing" / flashes). GUI-side preference in UserDefaults — the
+/// daemon has no say in presentation. Read at every show so a settings
+/// change applies to the next indicator without a restart.
+enum OverlayDisplayMode: String, CaseIterable, Identifiable {
+    case normal
+    case compact
+    case hidden
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .normal: return "Normal"
+        case .compact: return "Compact"
+        case .hidden: return "Hidden"
+        }
+    }
+
+    static let defaultsKey = "overlayDisplayMode"
+
+    static var current: OverlayDisplayMode {
+        OverlayDisplayMode(
+            rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? ""
+        ) ?? .normal
+    }
+}
+
 enum OverlayState: Equatable, Hashable {
     case paused
     case resumed
@@ -237,15 +265,18 @@ enum OverlayState: Equatable, Hashable {
 /// ripple across.
 fileprivate class DotWaveView: NSView {
     private let dotCount = 3
-    private let dotDiameter: CGFloat = 9
-    private let dotSpacing: CGFloat = 7
-    private let amplitude: CGFloat = 6
+    private let dotDiameter: CGFloat
+    private let dotSpacing: CGFloat
+    private let amplitude: CGFloat
     private let period: CFTimeInterval = 0.9
 
     private var dotLayers: [CAShapeLayer] = []
     private var isAnimating = false
 
-    override init(frame frameRect: NSRect) {
+    init(frame frameRect: NSRect, compact: Bool = false) {
+        self.dotDiameter = compact ? 5 : 9
+        self.dotSpacing = compact ? 4 : 7
+        self.amplitude = compact ? 3 : 6
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.masksToBounds = false
@@ -353,11 +384,16 @@ class StatusOverlayView: NSView {
     private let dotWaveView: DotWaveView
     private let label: NSTextField
 
-    fileprivate static let iconSize: CGFloat = 42
-    fileprivate static let cornerRadius: CGFloat = 22
-    fileprivate static let iconLabelSpacing: CGFloat = 10
-    fileprivate static let verticalPadding: CGFloat = 14
-    fileprivate static let horizontalPadding: CGFloat = 20
+    /// Compact mode: a small horizontal pill (icon beside label) instead
+    /// of the volume-HUD block — for users who find the full HUD
+    /// intrusive during constant dictation.
+    private let compact: Bool
+
+    private var iconSize: CGFloat { compact ? 18 : 42 }
+    private var cornerRadius: CGFloat { compact ? 12 : 22 }
+    private var iconLabelSpacing: CGFloat { compact ? 6 : 10 }
+    private var verticalPadding: CGFloat { compact ? 6 : 14 }
+    private var horizontalPadding: CGFloat { compact ? 12 : 20 }
 
     var state: OverlayState = .voiceActivity {
         didSet {
@@ -365,17 +401,18 @@ class StatusOverlayView: NSView {
         }
     }
 
-    override init(frame frameRect: NSRect) {
+    init(frame frameRect: NSRect, compact: Bool = false) {
+        self.compact = compact
         self.blurView = NSVisualEffectView(frame: frameRect)
         self.stackView = NSStackView()
         self.iconContainer = NSView()
         self.iconView = NSImageView()
-        self.dotWaveView = DotWaveView()
+        self.dotWaveView = DotWaveView(frame: .zero, compact: compact)
         self.label = NSTextField(labelWithString: "")
         super.init(frame: frameRect)
 
         wantsLayer = true
-        layer?.cornerRadius = StatusOverlayView.cornerRadius
+        layer?.cornerRadius = cornerRadius
         layer?.masksToBounds = true
 
         // Frosted backdrop, same material the system volume HUD uses.
@@ -388,7 +425,7 @@ class StatusOverlayView: NSView {
         blurView.state = .active
         blurView.alphaValue = 0.92
         blurView.wantsLayer = true
-        blurView.layer?.cornerRadius = StatusOverlayView.cornerRadius
+        blurView.layer?.cornerRadius = cornerRadius
         blurView.layer?.masksToBounds = true
         addSubview(blurView)
 
@@ -400,7 +437,7 @@ class StatusOverlayView: NSView {
         dotWaveView.isHidden = true
         iconContainer.addSubview(dotWaveView)
 
-        label.font = .systemFont(ofSize: 15, weight: .medium)
+        label.font = .systemFont(ofSize: compact ? 12 : 15, weight: .medium)
         label.textColor = .secondaryLabelColor
         label.backgroundColor = .clear
         label.isBezeled = false
@@ -412,9 +449,11 @@ class StatusOverlayView: NSView {
         label.translatesAutoresizingMaskIntoConstraints = false
 
         iconContainer.translatesAutoresizingMaskIntoConstraints = false
-        stackView.orientation = .vertical
-        stackView.alignment = .centerX
-        stackView.spacing = StatusOverlayView.iconLabelSpacing
+        // Compact: horizontal pill (icon beside label); normal: the
+        // volume-HUD vertical block (icon above label).
+        stackView.orientation = compact ? .horizontal : .vertical
+        stackView.alignment = compact ? .centerY : .centerX
+        stackView.spacing = iconLabelSpacing
         stackView.translatesAutoresizingMaskIntoConstraints = false
         stackView.addArrangedSubview(iconContainer)
         stackView.addArrangedSubview(label)
@@ -423,18 +462,18 @@ class StatusOverlayView: NSView {
         NSLayoutConstraint.activate([
             stackView.centerXAnchor.constraint(equalTo: centerXAnchor),
             stackView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            stackView.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: StatusOverlayView.verticalPadding),
-            stackView.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -StatusOverlayView.verticalPadding),
-            stackView.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: StatusOverlayView.horizontalPadding),
-            stackView.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -StatusOverlayView.horizontalPadding),
+            stackView.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: verticalPadding),
+            stackView.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -verticalPadding),
+            stackView.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: horizontalPadding),
+            stackView.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -horizontalPadding),
 
-            iconContainer.widthAnchor.constraint(equalToConstant: StatusOverlayView.iconSize),
-            iconContainer.heightAnchor.constraint(equalToConstant: StatusOverlayView.iconSize),
+            iconContainer.widthAnchor.constraint(equalToConstant: iconSize),
+            iconContainer.heightAnchor.constraint(equalToConstant: iconSize),
 
             iconView.centerXAnchor.constraint(equalTo: iconContainer.centerXAnchor),
             iconView.centerYAnchor.constraint(equalTo: iconContainer.centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: StatusOverlayView.iconSize),
-            iconView.heightAnchor.constraint(equalToConstant: StatusOverlayView.iconSize),
+            iconView.widthAnchor.constraint(equalToConstant: iconSize),
+            iconView.heightAnchor.constraint(equalToConstant: iconSize),
 
             // dotWaveView occupies the same slot as iconView.
             dotWaveView.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
@@ -442,7 +481,7 @@ class StatusOverlayView: NSView {
             dotWaveView.widthAnchor.constraint(equalTo: iconView.widthAnchor),
             dotWaveView.heightAnchor.constraint(equalTo: iconView.heightAnchor),
 
-            label.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -2 * StatusOverlayView.horizontalPadding)
+            label.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -2 * horizontalPadding)
         ])
 
         applyState()
@@ -468,7 +507,7 @@ class StatusOverlayView: NSView {
             dotWaveView.stop()
             dotWaveView.isHidden = true
 
-            let config = NSImage.SymbolConfiguration(pointSize: StatusOverlayView.iconSize, weight: .regular)
+            let config = NSImage.SymbolConfiguration(pointSize: iconSize, weight: .regular)
             let image = NSImage(systemSymbolName: state.iconName, accessibilityDescription: state.rawValue)?
                 .withSymbolConfiguration(config)
             image?.isTemplate = true
@@ -497,6 +536,31 @@ class StatusOverlayWindow: NSPanel {
 
     static let overlayWidth: CGFloat = 230
     static let overlayHeight: CGFloat = 130
+    static let compactWidth: CGFloat = 190
+    static let compactHeight: CGFloat = 40
+
+    /// The display mode the current content view was built for. The mode
+    /// is re-read at every `show`; a change rebuilds the view + resizes.
+    private var builtCompact = false
+
+    private var hudSize: NSSize {
+        builtCompact
+            ? NSSize(width: StatusOverlayWindow.compactWidth, height: StatusOverlayWindow.compactHeight)
+            : NSSize(width: StatusOverlayWindow.overlayWidth, height: StatusOverlayWindow.overlayHeight)
+    }
+
+    /// (Re)build the content view when it doesn't exist yet or the user
+    /// switched between Normal and Compact since it was built.
+    private func ensureContentView() {
+        let wantCompact = OverlayDisplayMode.current == .compact
+        if overlayView == nil || builtCompact != wantCompact {
+            builtCompact = wantCompact
+            let frame = NSRect(origin: .zero, size: hudSize)
+            let view = StatusOverlayView(frame: frame, compact: wantCompact)
+            overlayView = view
+            contentView = view
+        }
+    }
 
     init() {
         super.init(
@@ -537,15 +601,7 @@ class StatusOverlayWindow: NSPanel {
     /// `show` only animates alpha instead of paying view creation, first
     /// layout, and order-in (~30-80ms on first show).
     func prewarmContent() {
-        if overlayView == nil {
-            let frame = NSRect(
-                x: 0, y: 0,
-                width: StatusOverlayWindow.overlayWidth,
-                height: StatusOverlayWindow.overlayHeight
-            )
-            overlayView = StatusOverlayView(frame: frame)
-            contentView = overlayView
-        }
+        ensureContentView()
         alphaValue = 0.0
         orderFrontRegardless()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
@@ -562,14 +618,8 @@ class StatusOverlayWindow: NSPanel {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
 
-            // Create overlay view if needed.
-            if self.overlayView == nil {
-                let frame = NSRect(x: 0, y: 0,
-                                   width: StatusOverlayWindow.overlayWidth,
-                                   height: StatusOverlayWindow.overlayHeight)
-                self.overlayView = StatusOverlayView(frame: frame)
-                self.contentView = self.overlayView
-            }
+            // Create overlay view if needed (or rebuild on mode change).
+            self.ensureContentView()
             self.positionOnActiveScreen()
             self.startFollowingMouse()
 
@@ -633,18 +683,14 @@ class StatusOverlayWindow: NSPanel {
     private func positionOnActiveScreen() {
         guard let screen = OverlayScreenPlacement.screenForMouse() else { return }
         currentScreen = screen
+        let size = hudSize
         let origin = OverlayScreenPlacement.volumeHudOrigin(
             on: screen,
-            width: StatusOverlayWindow.overlayWidth,
-            height: StatusOverlayWindow.overlayHeight
+            width: size.width,
+            height: size.height
         )
         self.setFrame(
-            NSRect(
-                x: origin.x,
-                y: origin.y,
-                width: StatusOverlayWindow.overlayWidth,
-                height: StatusOverlayWindow.overlayHeight
-            ),
+            NSRect(x: origin.x, y: origin.y, width: size.width, height: size.height),
             display: true
         )
     }
@@ -921,6 +967,11 @@ class StatusOverlayController {
     /// If a flash is currently active, defer until the flash completes
     /// so the user actually sees the toggle confirmation.
     func show(state: OverlayState) {
+        // Hidden mode: the user opted out of the HUD entirely.
+        guard OverlayDisplayMode.current != .hidden else {
+            window?.hide()
+            return
+        }
         ensureWindow()
         if isFlashActive() {
             pendingShowState = state
@@ -934,6 +985,10 @@ class StatusOverlayController {
     /// notifications like Pause/Resume or Auto-Enter on/off toggles.
     /// Always lasts the full `duration` regardless of voice activity.
     func flash(state: OverlayState, duration: TimeInterval = 1.5) {
+        guard OverlayDisplayMode.current != .hidden else {
+            window?.hide()
+            return
+        }
         ensureWindow()
         cancelPendingHide()
         window?.show(state: state)
@@ -961,6 +1016,12 @@ class StatusOverlayController {
     /// Phase 1 (0-2s): Show full overlay with idle state
     /// Phase 2 (2s+): Hide main overlay, animate corner widget with play button
     func showIdleTimeoutAnimation(seconds: Int) {
+        // Hidden mode: skip the HUD phase but keep the corner resume
+        // widget — it's a functional control, not a status flash.
+        guard OverlayDisplayMode.current != .hidden else {
+            showIdleResumeWidget()
+            return
+        }
         ensureWindow()
         cancelPendingHide()
         cancelIdleAnimation()

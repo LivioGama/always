@@ -63,7 +63,8 @@ struct MenuBarView: View {
             isConnected: stateMonitor.isDaemonConnected,
             isDegraded: stateMonitor.isDaemonDegraded,
             isPaused: stateMonitor.isPaused,
-            isTranscribing: stateMonitor.isTranscribing
+            isTranscribing: stateMonitor.isTranscribing,
+            isVoiceActive: stateMonitor.isVoiceActivity
         )
     }
 
@@ -290,12 +291,17 @@ enum StatusIconResolver {
         isConnected: Bool,
         isDegraded: Bool,
         isPaused: Bool,
-        isTranscribing: Bool
+        isTranscribing: Bool,
+        isVoiceActive: Bool = false
     ) -> String {
         if isDegraded { return "exclamationmark.triangle.fill" }
         if !isConnected { return "exclamationmark.triangle" }
         if isPaused { return "pause.circle.fill" }
         if isTranscribing { return "waveform.circle.fill" }
+        // Live voice (verified speech in progress): the menu bar itself
+        // signals "hearing you" so the state stays visible even when the
+        // status overlay is set to Compact or Hidden.
+        if isVoiceActive { return "mic.fill" }
         return "waveform"
     }
 }

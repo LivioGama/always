@@ -4,14 +4,43 @@ import AppKit
 struct GeneralPanel: View {
     @ObservedObject var stateMonitor: StateMonitor
     @ObservedObject var focusedApp: FocusedAppMonitor
+    @AppStorage(OverlayDisplayMode.defaultsKey)
+    private var overlayDisplayMode = OverlayDisplayMode.normal.rawValue
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 PermissionsBanner()
+                overlaySection
+                Divider()
                 allowlistSection
             }
             .padding(20)
+        }
+    }
+
+    private var overlaySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Status Overlay").font(.headline)
+            HStack {
+                Text("Listening / transcribing indicator")
+                    .font(.body)
+                    .help(
+                        "The floating indicator shown while you dictate. Compact shrinks it to a small pill; Hidden never shows it — the menu bar icon still reflects listening and transcribing."
+                    )
+                Spacer()
+                Picker("", selection: $overlayDisplayMode) {
+                    ForEach(OverlayDisplayMode.allCases) { mode in
+                        Text(mode.label).tag(mode.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 280)
+            }
+            Text("Takes effect the next time the indicator appears — no restart needed. The menu bar icon always shows the live state (mic while hearing you, waveform circle while transcribing).")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
     }
 
