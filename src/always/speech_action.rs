@@ -331,6 +331,8 @@ mod tests {
             timeout_secs: 30,
             silence_secs: 2.0,
             adaptive_silence_enabled: true,
+            speaker_gate_enabled: false,
+            speaker_gate_threshold: crate::always::config::DEFAULT_SPEAKER_GATE_THRESHOLD,
             auto_enter: false,
             filter_enabled: true,
             energy_threshold: 0.05,

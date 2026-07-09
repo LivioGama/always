@@ -54,7 +54,7 @@ final class AudioOutputMonitor {
         var size = UInt32(MemoryLayout<UInt32>.size)
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
-            mScope: kAudioObjectPropertyScopeOutput,
+            mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
         let status = AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &running)
@@ -64,7 +64,7 @@ final class AudioOutputMonitor {
     private func installListener(on device: AudioDeviceID) {
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
-            mScope: kAudioObjectPropertyScopeOutput,
+            mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in

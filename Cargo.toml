@@ -55,6 +55,15 @@ chrono = { version = "0.4", features = ["clock"] }
 # model file is bundled at `resources/models/silero_vad_v4.onnx` and
 # loaded via `include_bytes!` at runtime — see `always::vad_silero`.
 vad-rs = { version = "0.1.6", git = "https://github.com/cjpais/vad-rs", default-features = false }
+# Speaker verification ("My Voice"). `ort` is pinned to the exact rc that
+# vad-rs pins so cargo unifies them into ONE linked onnxruntime. The
+# fbank crate vendors kaldi-native-fbank's C++ behind a plain `cc` build
+# (no cmake). Feature recipe must match WeSpeaker training: 80 mel bins,
+# 25/10 ms, dither=0, hamming window, int16-scale waveform, utterance
+# CMN — see `always::speaker_embed`.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["download-binaries", "ndarray"] }
+kaldi-fbank-rust-kautism = "0.1.0"
+ndarray = "0.17"
 regex = "1"
 strsim = "0.11"
 parking_lot = "0.12"

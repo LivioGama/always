@@ -97,6 +97,11 @@ enum Commands {
         #[command(subcommand)]
         action: CorrectionsAction,
     },
+    /// "My Voice" speaker enrollment (record, status, enable, disable, clear)
+    Voice {
+        #[command(subcommand)]
+        action: VoiceAction,
+    },
     /// View and manage Always logs
     Logs {
         #[command(flatten)]
@@ -168,6 +173,26 @@ enum VocabAction {
 }
 
 #[derive(Subcommand)]
+enum VoiceAction {
+    /// Record one guided enrollment sample via the running daemon.
+    /// Speak until the daemon reports the sample captured (~5s voice).
+    Record {
+        /// Which sample: normal, lower, or louder
+        step: String,
+    },
+    /// Cancel an in-flight enrollment recording
+    Cancel,
+    /// Show enrollment + gate status from the local profile
+    Status,
+    /// Enable the "only listen to my voice" gate (requires enrollment)
+    Enable,
+    /// Disable the gate (voiceprint is kept)
+    Disable,
+    /// Delete the enrolled voiceprint
+    Clear,
+}
+
+#[derive(Subcommand)]
 enum ConfigAction {
     /// Show current preferences
     Show,
@@ -222,6 +247,7 @@ fn main() -> Result<()> {
         Some(Commands::Config { action }) => handle_config(action),
         Some(Commands::Vocab { action }) => handle_vocab(action),
         Some(Commands::Corrections { action }) => handle_corrections(action),
+        Some(Commands::Voice { action }) => handle_voice(action),
         Some(Commands::TogglePause) => handle_toggle_pause(),
         Some(Commands::ToggleAutoEnter) => handle_toggle_auto_enter(),
         Some(Commands::Logs { args }) => cli::handle_logs(args),
@@ -323,6 +349,22 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .stt_adaptive_silence
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "true".to_string())
+            );
+            println!(
+                "speaker_gate_enabled: {}",
+                prefs
+                    .speaker_gate_enabled
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "false".to_string())
+            );
+            println!(
+                "speaker_gate_threshold: {}",
+                prefs
+                    .speaker_gate_threshold
+                    .map(|v| format!("{v}"))
+                    .unwrap_or_else(
+                        || always::always::config::DEFAULT_SPEAKER_GATE_THRESHOLD.to_string()
+                    )
             );
             println!(
                 "stt_auto_enter: {}",
@@ -673,6 +715,88 @@ fn handle_toggle_auto_enter() -> Result<()> {
 /// Send a single JSON line to the daemon's UDS socket. Caller is
 /// responsible for terminating with `\n`-or-not; we append one.
 /// Times out after 2 s so a stuck daemon doesn't hang the CLI.
+fn handle_voice(action: VoiceAction) -> Result<()> {
+    use always::always::voiceprint;
+    match action {
+        VoiceAction::Record { step } => {
+            let Some(parsed) = voiceprint::EnrollStep::parse(&step) else {
+                anyhow::bail!("unknown step '{step}' — expected: normal, lower, louder");
+            };
+            if !always::always::daemon::is_running() {
+                anyhow::bail!("daemon is not running — start Always first");
+            }
+            send_uds_command(&format!(
+                r#"{{"type":"StartVoiceEnrollment","data":{{"step":"{}"}}}}"#,
+                parsed.as_str()
+            ))?;
+            println!(
+                "Recording queued for step '{}'. Speak in that tone until the daemon \
+                 captures ~5s of voice (watch `always logs --pretty` or the Settings tab).",
+                parsed.as_str()
+            );
+            Ok(())
+        }
+        VoiceAction::Cancel => {
+            send_uds_command(r#"{"type":"CancelVoiceEnrollment"}"#)?;
+            println!("Enrollment cancel requested.");
+            Ok(())
+        }
+        VoiceAction::Status => {
+            // Read the profile from disk directly — status must work even
+            // when the daemon is down.
+            let conn = db::open()?;
+            let prefs = db::get_preferences(&conn)?;
+            let enabled = prefs.speaker_gate_enabled.unwrap_or(false);
+            let threshold = prefs
+                .speaker_gate_threshold
+                .unwrap_or(always::always::config::DEFAULT_SPEAKER_GATE_THRESHOLD);
+            match voiceprint::current() {
+                Some(p) => {
+                    println!("enrolled: {}", p.is_complete());
+                    println!("steps_recorded: {}", p.recorded_steps().join(", "));
+                    println!("model: {}", p.model);
+                    println!("updated_at: {}", p.updated_at);
+                }
+                None => {
+                    println!("enrolled: false");
+                    println!("steps_recorded: (none)");
+                }
+            }
+            println!("gate_enabled: {enabled}");
+            println!("gate_threshold: {threshold}");
+            Ok(())
+        }
+        VoiceAction::Enable => {
+            if !voiceprint::is_enrolled() {
+                anyhow::bail!(
+                    "no complete voiceprint enrolled — record all three steps first \
+                     (always voice record normal|lower|louder)"
+                );
+            }
+            let conn = db::open()?;
+            db::set_preference(&conn, "speaker_gate_enabled", "true")?;
+            // Hot-apply when the daemon is up; harmless if it isn't.
+            let _ = send_uds_command(r#"{"type":"SetVoiceProfileEnabled","data":{"enabled":true}}"#);
+            println!("My Voice gate ENABLED — Always now only listens to the enrolled voice.");
+            Ok(())
+        }
+        VoiceAction::Disable => {
+            let conn = db::open()?;
+            db::set_preference(&conn, "speaker_gate_enabled", "false")?;
+            let _ =
+                send_uds_command(r#"{"type":"SetVoiceProfileEnabled","data":{"enabled":false}}"#);
+            println!("My Voice gate disabled — Always listens to any voice again.");
+            Ok(())
+        }
+        VoiceAction::Clear => {
+            voiceprint::clear()?;
+            let _ = send_uds_command(r#"{"type":"DeleteVoiceProfile"}"#);
+            println!("Voiceprint deleted.");
+            Ok(())
+        }
+    }
+}
+
 fn send_uds_command(json: &str) -> Result<()> {
     use anyhow::Context as _;
     use std::io::Write as _;
@@ -684,10 +808,27 @@ fn send_uds_command(json: &str) -> Result<()> {
     };
     #[cfg(unix)]
     {
+        use std::io::Read as _;
         let mut stream = UnixStream::connect(&sock_path)
             .with_context(|| format!("failed to connect to daemon at {}", sock_path.display()))?;
         stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
         writeln!(stream, "{json}").context("failed to send UDS command")?;
+        // Drain the daemon's initial-state burst briefly instead of
+        // closing immediately. The daemon writes that burst BEFORE it
+        // starts reading commands — a client that hangs up right after
+        // writing makes that burst write fail, and the daemon drops the
+        // connection without ever reading the command we just sent.
+        stream
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .ok();
+        let mut sink = [0u8; 4096];
+        let deadline = std::time::Instant::now() + Duration::from_millis(700);
+        while std::time::Instant::now() < deadline {
+            match stream.read(&mut sink) {
+                Ok(0) | Err(_) => break, // EOF or timeout — command is in
+                Ok(_) => continue,
+            }
+        }
     }
     #[cfg(not(unix))]
     {

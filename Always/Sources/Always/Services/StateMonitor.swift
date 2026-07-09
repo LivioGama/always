@@ -118,8 +118,17 @@ class StateMonitor: ObservableObject {
                     // Re-push what the GUI already knows so listening resumes
                     // without requiring an app switch.
                     FocusedAppMonitor.shared.resyncCurrentAppToDaemon()
-                    // Audio state is pushed on property changes; re-pushing on
-                    // connect races focus resync and can spuriously master-pause.
+                    // Audio state is pushed on property changes, so a fresh
+                    // daemon (restart, or the very first connect racing the
+                    // listener install) never learns the CURRENT playback
+                    // state until it next toggles — which may be never if
+                    // media was already playing. Re-push it, but staggered
+                    // past the focus resync above and the .hello 0.3s
+                    // isInitialSync window so it can't race either into a
+                    // spurious master-pause.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        AudioOutputMonitor.shared.resyncToDaemon()
+                    }
                     // A (re)connect often follows a daemon restart — the moment
                     // TCC grants may have changed (fresh install, bundle bump).
                     PermissionsManager.shared.refresh()
