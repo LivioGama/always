@@ -14,7 +14,8 @@ struct MenuBarStatusLabel: View {
             isConnected: stateMonitor.isDaemonConnected,
             isDegraded: stateMonitor.isDaemonDegraded,
             isPaused: stateMonitor.isPaused,
-            isTranscribing: stateMonitor.isTranscribing
+            isTranscribing: stateMonitor.isTranscribing,
+            isVoiceActive: stateMonitor.isVoiceActivity
         )
     }
 }
