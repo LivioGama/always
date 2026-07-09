@@ -6,7 +6,7 @@ import os.log
 // Wire-format protocol version. MUST match `PROTOCOL_VERSION` in
 // `src/always/event.rs`. Bumping either side without the other will
 // cause the client to refuse the connection.
-let UDS_PROTOCOL_VERSION: UInt32 = 9
+let UDS_PROTOCOL_VERSION: UInt32 = 10
 
 // Event types matching Rust DaemonEvent enum
 enum DaemonEventType: String, Codable {
@@ -95,6 +95,14 @@ enum DaemonEventType: String, Codable {
     /// Input Monitoring is granted for the daemon process. Sent in every
     /// initial state burst and on change.
     case shortcutListenerStatus = "ShortcutListenerStatus"
+    // "My Voice" enrollment lifecycle (v10). Started/SampleCaptured/
+    // Failed carry only string fields, so they decode through the
+    // loose `data` dict; Level and ProfileStatus need typed payloads.
+    case voiceEnrollmentStarted = "VoiceEnrollmentStarted"
+    case voiceEnrollmentLevel = "VoiceEnrollmentLevel"
+    case voiceEnrollmentSampleCaptured = "VoiceEnrollmentSampleCaptured"
+    case voiceEnrollmentFailed = "VoiceEnrollmentFailed"
+    case voiceProfileStatus = "VoiceProfileStatus"
 }
 
 // Event data structures
@@ -192,6 +200,21 @@ struct ShortcutListenerStatusData: Codable {
     let input_monitoring_granted: Bool
 }
 
+// "My Voice" enrollment live meter — ~10 Hz while recording a sample.
+struct VoiceEnrollmentLevelData: Codable {
+    let energy: Double
+    let voiced_ms: UInt32
+    let target_ms: UInt32
+}
+
+// Snapshot of the enrolled voice profile. Sent in the initial state
+// burst and after every mutation (sample captured, delete, toggle).
+struct VoiceProfileStatusData: Codable {
+    let enrolled: Bool
+    let enabled: Bool
+    let steps: [String]
+}
+
 // Models-tab payloads. Defined in `Models/ModelInfo.swift`:
 //   - ModelsListData
 //   - ModelDownloadProgressData
@@ -267,6 +290,10 @@ struct DaemonEvent: Codable {
     let grammarCorrected: GrammarCorrectedData?
     /// Populated for `ShortcutListenerStatus`.
     let shortcutListenerStatus: ShortcutListenerStatusData?
+    /// Populated for `VoiceEnrollmentLevel`.
+    let voiceEnrollmentLevel: VoiceEnrollmentLevelData?
+    /// Populated for `VoiceProfileStatus`.
+    let voiceProfileStatus: VoiceProfileStatusData?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -300,6 +327,8 @@ struct DaemonEvent: Codable {
         var lowMicrophoneVolume: LowMicrophoneVolumeData? = nil
         var grammarCorrected: GrammarCorrectedData? = nil
         var shortcutListenerStatus: ShortcutListenerStatusData? = nil
+        var voiceEnrollmentLevel: VoiceEnrollmentLevelData? = nil
+        var voiceProfileStatus: VoiceProfileStatusData? = nil
 
         switch type {
         case .hello:
@@ -347,6 +376,12 @@ struct DaemonEvent: Codable {
         case .shortcutListenerStatus:
             shortcutListenerStatus = try container.decodeIfPresent(
                 ShortcutListenerStatusData.self, forKey: .data)
+        case .voiceEnrollmentLevel:
+            voiceEnrollmentLevel = try container.decodeIfPresent(
+                VoiceEnrollmentLevelData.self, forKey: .data)
+        case .voiceProfileStatus:
+            voiceProfileStatus = try container.decodeIfPresent(
+                VoiceProfileStatusData.self, forKey: .data)
         default:
             // Fall-through path: text-bearing or empty events. Keep using
             // the loose dict so existing call sites (e.g. transcript chunk
@@ -376,6 +411,8 @@ struct DaemonEvent: Codable {
         self.lowMicrophoneVolume = lowMicrophoneVolume
         self.grammarCorrected = grammarCorrected
         self.shortcutListenerStatus = shortcutListenerStatus
+        self.voiceEnrollmentLevel = voiceEnrollmentLevel
+        self.voiceProfileStatus = voiceProfileStatus
     }
 
     func encode(to encoder: Encoder) throws {
@@ -428,6 +465,10 @@ struct DaemonEvent: Codable {
             try container.encodeIfPresent(grammarCorrected, forKey: .data)
         case .shortcutListenerStatus:
             try container.encodeIfPresent(shortcutListenerStatus, forKey: .data)
+        case .voiceEnrollmentLevel:
+            try container.encodeIfPresent(voiceEnrollmentLevel, forKey: .data)
+        case .voiceProfileStatus:
+            try container.encodeIfPresent(voiceProfileStatus, forKey: .data)
         default:
             try container.encodeIfPresent(data, forKey: .data)
         }
@@ -456,7 +497,9 @@ struct DaemonEvent: Codable {
         activeTranscriber: ActiveTranscriberChangedData? = nil,
         lowMicrophoneVolume: LowMicrophoneVolumeData? = nil,
         grammarCorrected: GrammarCorrectedData? = nil,
-        shortcutListenerStatus: ShortcutListenerStatusData? = nil
+        shortcutListenerStatus: ShortcutListenerStatusData? = nil,
+        voiceEnrollmentLevel: VoiceEnrollmentLevelData? = nil,
+        voiceProfileStatus: VoiceProfileStatusData? = nil
     ) {
         self.type = type
         self.data = data
@@ -481,6 +524,8 @@ struct DaemonEvent: Codable {
         self.lowMicrophoneVolume = lowMicrophoneVolume
         self.grammarCorrected = grammarCorrected
         self.shortcutListenerStatus = shortcutListenerStatus
+        self.voiceEnrollmentLevel = voiceEnrollmentLevel
+        self.voiceProfileStatus = voiceProfileStatus
     }
 }
 

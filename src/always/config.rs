@@ -13,6 +13,10 @@ use crate::stt_dispatch::TranscriberBackendChoice;
 
 // Default configuration values
 const DEFAULT_AUTO_ENTER_DELAY_MS: u32 = 4000;
+/// WeSpeaker ResNet34 same-speaker utterances score ~0.6-0.9 cosine;
+/// different speakers ~0.0-0.3. 0.50 keeps a wide margin both ways
+/// while tolerating short/noisy utterances from the enrolled speaker.
+pub const DEFAULT_SPEAKER_GATE_THRESHOLD: f64 = 0.50;
 /// Raised 0.6 → 0.9: users pause mid-sentence to think, and 0.6s split one
 /// thought into two pastes with per-segment grammar correction. Speculative
 /// STT still hides the transcription cost inside the silence wait, so the
@@ -214,6 +218,14 @@ pub struct AlwaysConfig {
     /// mid-sentence (see `vad.rs::looks_mid_sentence`). Default on;
     /// DB pref `stt_adaptive_silence`.
     pub adaptive_silence_enabled: bool,
+    /// "My Voice" speaker-verification gate. Active only when BOTH
+    /// this flag is on AND a complete voiceprint is enrolled — so the
+    /// default experience is unchanged until the user opts in via
+    /// Settings → My Voice. DB pref `speaker_gate_enabled`.
+    pub speaker_gate_enabled: bool,
+    /// Minimum cosine similarity vs the enrolled voiceprint for an
+    /// utterance to be transcribed. DB pref `speaker_gate_threshold`.
+    pub speaker_gate_threshold: f64,
     pub auto_enter: bool,
     pub filter_enabled: bool,
     pub energy_threshold: f64,
@@ -393,6 +405,11 @@ impl AlwaysConfig {
             // allowing absurdly tiny windows that split normal phrases.
             silence_secs: resolve_silence_secs(silence_secs, &prefs),
             adaptive_silence_enabled: prefs.stt_adaptive_silence.unwrap_or(true),
+            speaker_gate_enabled: prefs.speaker_gate_enabled.unwrap_or(false),
+            speaker_gate_threshold: prefs
+                .speaker_gate_threshold
+                .unwrap_or(DEFAULT_SPEAKER_GATE_THRESHOLD)
+                .clamp(0.30, 0.80),
             // `auto_enter` was already resolved above: CLI flag → DB pref →
             // canonical default. The previous code re-read `prefs.stt_auto_enter`
             // here, which silently undid an explicit CLI override.
@@ -465,6 +482,8 @@ impl Default for AlwaysConfig {
             // (Pause tolerance picker).
             silence_secs: DEFAULT_SILENCE_SECS,
             adaptive_silence_enabled: true,
+            speaker_gate_enabled: false,
+            speaker_gate_threshold: DEFAULT_SPEAKER_GATE_THRESHOLD,
             auto_enter: true,
             filter_enabled: true,
             energy_threshold: 0.012,

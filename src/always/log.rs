@@ -29,6 +29,11 @@ pub enum Event<'a> {
     DroppedNoise {
         raw: &'a str,
     },
+    /// "My Voice" gate rejected the utterance — the speaker's
+    /// embedding scored below the enrolled-voiceprint threshold.
+    DroppedSpeaker {
+        score: f64,
+    },
     PauseToggled {
         paused: bool,
     },
@@ -134,6 +139,12 @@ impl Logger {
                     text = if log_transcripts { Some(raw) } else { None },
                     "dropped_noise"
                 );
+            }
+            Event::DroppedSpeaker { score } => {
+                // Info, not debug: this is the user-visible effect of the
+                // My Voice gate, and threshold calibration needs the
+                // scores in default logs.
+                tracing::info!(score, "dropped_not_enrolled_speaker");
             }
             Event::PauseToggled { paused } => {
                 tracing::info!(paused, "pause_toggled");

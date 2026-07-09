@@ -3,6 +3,7 @@ import SwiftUI
 enum SettingsPanel: String, CaseIterable {
     case general = "General"
     case models = "Models"
+    case myVoice = "My Voice"
     case permissions = "Permissions"
     case behavior = "Behavior"
     case shortcuts = "Shortcuts"
@@ -14,6 +15,7 @@ enum SettingsPanel: String, CaseIterable {
         switch self {
         case .general:    return "app.badge.checkmark"
         case .models:     return "cpu"
+        case .myVoice:    return "person.wave.2"
         case .permissions: return "checkmark.shield"
         case .behavior:   return "slider.horizontal.3"
         case .shortcuts:  return "command"

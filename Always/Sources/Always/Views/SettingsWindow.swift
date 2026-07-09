@@ -135,6 +135,8 @@ struct SettingsWindow: View {
             PermissionsPanel()
         case .vocabulary:
             VocabularyPanel()
+        case .myVoice:
+            MyVoicePanel(stateMonitor: stateMonitor)
         case .history:
             HistoryPanel()
         case .models:

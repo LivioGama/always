@@ -184,6 +184,19 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
             daemon::reconcile_duplicate_processes();
         }
 
+        // "My Voice" enrollment recording, queued by the UDS server.
+        // Runs on THIS thread (the mic pipeline's single-thread
+        // invariant), and deliberately before the pause checks —
+        // recording a voiceprint from Settings must work even while
+        // dictation is paused (that's exactly when users set it up).
+        if let Some(step) = crate::always::enrollment::take_pending() {
+            let cfg_snapshot = active_cfg.read().clone();
+            if let Err(e) = crate::always::enrollment::run_enrollment(&cfg_snapshot, step) {
+                tracing::warn!(error = %e, step = step.as_str(), "enrollment_run_failed");
+            }
+            continue;
+        }
+
         if pause::is_paused() {
             // Wake-on-voice while idle-paused: keep the mic hot enough to
             // detect speech without running the full VAD/transcribe loop.
@@ -201,6 +214,38 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
                 tracing::info!(effective, changed, "idle_wake_on_voice");
                 continue;
             }
+
+            // Wake-on-voice while paused ONLY for system-audio playback
+            // (YouTube, Spotify, etc.). Unlike the idle case above, we do
+            // NOT clear `audio_output_paused` here — the Swift-side
+            // monitor only re-asserts it on a CHANGE, not periodically,
+            // so clearing it would leave the daemon believing playback
+            // stopped and it would keep transcribing the media's own
+            // audio until it actually does. Instead: record+transcribe
+            // exactly one utterance when real speech energy is detected,
+            // then fall back to being paused for the next iteration.
+            if pause::is_audio_output_paused()
+                && !pause::is_master_paused()
+                && !pause::is_mic_conflict_paused()
+                && vad::poll_speech_energy(&active_cfg.read()).unwrap_or(false)
+            {
+                tracing::info!("audio_output_wake_on_voice");
+                let transcriber_snapshot = active.read().clone();
+                if let Err(e) = process_one(
+                    &active_cfg,
+                    &mut log,
+                    &mut last_process,
+                    rt.handle(),
+                    &transcriber_snapshot,
+                ) {
+                    tracing::error!(error = %e, "voice_processing_error");
+                    log.write(Event::Error {
+                        message: &format!("Voice processing error: {:#}", e),
+                    });
+                }
+                continue;
+            }
+
             std::thread::sleep(Duration::from_millis(100));
             continue;
         }
@@ -310,6 +355,12 @@ fn process_one(
         vad::RecordResult::DroppedNoise { raw } => {
             tracing::debug!(raw, "dropped_noise");
             log.write(Event::DroppedNoise { raw: &raw });
+            Ok(())
+        }
+        vad::RecordResult::DroppedSpeaker { score } => {
+            log.write(Event::DroppedSpeaker {
+                score: score as f64,
+            });
             Ok(())
         }
     };

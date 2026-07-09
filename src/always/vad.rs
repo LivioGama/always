@@ -94,8 +94,98 @@ pub enum RecordResult {
     DroppedNoise {
         raw: String,
     },
+    /// "My Voice" gate: the utterance's speaker embedding scored below
+    /// the enrolled-voiceprint threshold — not the enrolled user
+    /// (movie dialogue, music vocals, another person). Discarded
+    /// before any STT spend.
+    DroppedSpeaker {
+        score: f32,
+    },
     Timeout,
 }
+
+/// Resolved "My Voice" gate for one utterance. Present only when the
+/// pref is enabled AND a complete voiceprint is enrolled AND the
+/// embedding model loads — any missing piece silently degrades to
+/// the ungated default behavior.
+struct SpeakerGate {
+    embedder: std::sync::Arc<crate::always::speaker_embed::SpeakerEmbedder>,
+    voiceprint: std::sync::Arc<crate::always::voiceprint::VoiceProfile>,
+    threshold: f32,
+}
+
+fn speaker_gate_ctx(cfg: &AlwaysConfig) -> Option<SpeakerGate> {
+    if !cfg.speaker_gate_enabled {
+        return None;
+    }
+    let profile = crate::always::voiceprint::current()?;
+    if !profile.is_complete() {
+        return None;
+    }
+    let embedder = crate::always::speaker_embed::global()?;
+    Some(SpeakerGate {
+        embedder,
+        voiceprint: profile,
+        threshold: cfg.speaker_gate_threshold as f32,
+    })
+}
+
+/// Score `samples` against the enrolled voiceprint. `None` = could not
+/// verify (embedding failed) — callers fail OPEN so an engine hiccup
+/// never mutes the user.
+fn speaker_gate_score(gate: &SpeakerGate, samples: &[i16]) -> Option<f32> {
+    let started = std::time::Instant::now();
+    match gate.embedder.embed(samples) {
+        Ok(e) => {
+            let score = crate::always::speaker_embed::cosine(&e, &gate.voiceprint.voiceprint);
+            tracing::debug!(
+                score,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                audio_secs = samples.len() as f64 / 16_000.0,
+                "speaker_gate_scored"
+            );
+            Some(score)
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "speaker_gate_embed_failed");
+            None
+        }
+    }
+}
+
+/// Voiced audio needed before the mid-recording (early) speaker check
+/// fires: 2 s of actual voice gives the embedding enough evidence
+/// while still cutting a movie scene off ~2 s in.
+const SPEAKER_GATE_EARLY_SAMPLES: usize = 32_000;
+
+/// Speaker-aware end-of-utterance. Generic VAD keeps the utterance open
+/// as long as ANY speech-like audio continues — background media held
+/// recordings hostage until the user paused the video (observed live:
+/// dictation only pasted after pausing YouTube). Once the user's voice is
+/// verified, the trailing window is re-scored every
+/// `SPEAKER_TAIL_CHECK_EVERY_SAMPLES` of new voiced audio; after
+/// `SPEAKER_TAIL_FAIL_STREAK` consecutive mismatches the utterance is cut
+/// at the last matching boundary and finalized — so the end of dictation
+/// is defined by THE USER going quiet, not by the room going quiet.
+const SPEAKER_TAIL_CHECK_EVERY_SAMPLES: usize = 8_000; // 0.5s of voice
+/// Trailing window scored by each tail check: 1.5s is enough voice for a
+/// stable embedding while keeping the cut ~1.5s behind the user's last
+/// word.
+const SPEAKER_TAIL_WINDOW_SAMPLES: usize = 24_000;
+/// FLOOR on consecutive mismatching windows before the cut. The actual
+/// requirement scales with the user's configured `silence_secs` (see
+/// `speaker_tail_fail_checks` in the record loop) so the pause tolerance
+/// they chose applies to media-covered pauses too — a fixed 2-check
+/// (~1s) cut felt "immediate" against a 2.2s configured window.
+const SPEAKER_TAIL_FAIL_STREAK: usize = 2;
+/// Tail windows are short and often carry media bleed UNDER the user's
+/// live voice, so they score far noisier than full utterances — a mixed
+/// user+media window can dip well below the gate threshold while the
+/// user is genuinely still talking (observed live: mid-sentence cuts
+/// with a video playing). Judge tails against a heavily relaxed
+/// fraction: 0.6 × the default 0.50 = 0.30, still ~6× the measured
+/// media-only tail score (~0.05 through real speakers).
+const SPEAKER_TAIL_THRESHOLD_FACTOR: f32 = 0.6;
 
 pub fn record_utterance(
     cfg: &AlwaysConfig,
@@ -417,7 +507,50 @@ fn record_with_local_vad(
     let mut committed_samples = 0usize;
     let mut voiced_since_flush = true;
 
+    // "My Voice" gate — resolved once per utterance, checked at most
+    // once per utterance (early at ~2s of voice, else at speculation
+    // kickoff, else at final). A failing check returns DroppedSpeaker
+    // immediately, so `speaker_checked == true` below always means
+    // "checked and passed (or unverifiable → fail-open)".
+    let speaker_gate = speaker_gate_ctx(cfg);
+    let mut speaker_checked = false;
+    // Actual voiced audio accumulated (excludes pre-buffer and the
+    // trailing-silence frames that also land in `speech_samples`) —
+    // the embedding needs real voice, not padded silence.
+    let mut voiced_samples = 0usize;
+    // Speaker verification ladder + tail monitor (see SPEAKER_TAIL_*
+    // consts). A check runs every SPEAKER_TAIL_CHECK_EVERY_SAMPLES of
+    // NEW voiced audio: before verification it tries to confirm the
+    // user (and only then announces the listening overlay — media must
+    // never light it up); after verification it watches the trailing
+    // window so the utterance ends when the USER stops talking, not
+    // when the room goes quiet.
+    let mut next_speaker_check = SPEAKER_TAIL_CHECK_EVERY_SAMPLES;
+    let mut tail_fail_streak = 0usize;
+    // The cut requires the user's voice to be absent from the trailing
+    // windows for the user's own configured pause tolerance — one check
+    // per 0.5s of voiced audio, so silence_secs = 2.2 → 5 checks.
+    let speaker_tail_fail_checks = (((cfg.silence_secs * 16_000.0)
+        / SPEAKER_TAIL_CHECK_EVERY_SAMPLES as f64)
+        .ceil() as usize)
+        .max(SPEAKER_TAIL_FAIL_STREAK);
+    // Live-buffer length at the last window that matched the user — a
+    // tail cut truncates here so foreign trailing audio (movie line
+    // after the user's last word) is never sent to STT.
+    let mut confirmed_user_len = 0usize;
+
     loop {
+        // A queued "My Voice" enrollment recording needs the mic and the
+        // event-loop thread — abandon this capture cycle immediately so
+        // the Settings UI's record button responds now, not after a
+        // 30s pre-voice timeout. Anything already buffered is discarded
+        // (the user just clicked "record my voice"; they are not mid-
+        // dictation).
+        if crate::always::enrollment::is_pending() {
+            event::global_broadcaster().voice_activity_ended();
+            flip_to_listening!();
+            return Ok(RecordResult::Silence);
+        }
         // INVARIANT (concurrency): `read_frame` blocks on rec's stdout for up
         // to one full frame while holding GLOBAL_RECORDER. `record_utterance`
         // and `poll_speech_energy` therefore MUST NOT run concurrently on
@@ -552,7 +685,14 @@ fn record_with_local_vad(
                 early_voice_streak = 0;
             }
             if early_voice_streak >= EARLY_VOICE_MIN_FRAMES {
-                announce_voice_activity!();
+                // "My Voice" active: the room making speech-like sound is
+                // not evidence the USER is speaking — announcing here lit
+                // the listening overlay on every movie line / song vocal.
+                // The announcement instead fires at speaker verification
+                // in the voiced branch below.
+                if speaker_gate.is_none() {
+                    announce_voice_activity!();
+                }
                 tentative_voice_silence = 0;
                 early_voice_streak = 0;
             }
@@ -606,8 +746,13 @@ fn record_with_local_vad(
                             event::global_broadcaster().low_microphone_volume_maybe(frame_energy);
                         }
 
-                        // Send voice activity detected event
-                        announce_voice_activity!();
+                        // Send voice activity detected event. With the
+                        // "My Voice" gate active the overlay waits for
+                        // speaker verification instead (see the ladder
+                        // below) — unverified audio must stay invisible.
+                        if speaker_gate.is_none() {
+                            announce_voice_activity!();
+                        }
                         // Clear the idle-auto-paused flag the moment we
                         // see voice. Upstream calls `mark_voice_seen()`
                         // unconditionally below (every confirmed speech
@@ -632,7 +777,13 @@ fn record_with_local_vad(
                         // up the previous text and appends. Without this
                         // cancel, a Return would fire mid-sentence and
                         // split the user's utterance in two.
-                        if pause::countdown_active() {
+                        //
+                        // "My Voice" active: this voice is UNVERIFIED —
+                        // background media was cancelling every countdown
+                        // here, so auto-enter never fired while a video
+                        // played. The cancel instead happens at speaker
+                        // verification (see the ladder below).
+                        if speaker_gate.is_none() && pause::countdown_active() {
                             pause::countdown_request_cancel();
                             tracing::info!("countdown_cancel_on_voice_resume");
                         }
@@ -653,11 +804,111 @@ fn record_with_local_vad(
             if in_speech {
                 speech_samples.extend_from_slice(samples);
                 voiced_since_flush = true;
+                voiced_samples += samples.len();
                 // Same anchor refresh for the case where we were already in
                 // speech (consecutive_speech overflows min_speech_frames
                 // immediately) — keep the watchdog clock pinned to "right
                 // now" for as long as audio is genuinely voice.
                 pause::mark_voice_seen();
+
+                // "My Voice" ladder: one check per 0.5s of NEW voiced
+                // audio. The ~30-50ms of inference stalls the read loop
+                // briefly; rec's 131KB pipe buffer (~4s) absorbs it.
+                //
+                // UNVERIFIED phase: a trailing-window match at the full
+                // threshold verifies the user (typically 0.5-1s in) and
+                // only then announces the listening overlay. Still
+                // unverified at ~2s → decisive whole-utterance check,
+                // ABORT on mismatch — background media dialogue must not
+                // hold the recorder hostage for an entire scene.
+                //
+                // VERIFIED phase: keep scoring the trailing window. The
+                // generic VAD can never end the utterance while media
+                // keeps "talking" (consecutive_silence never grows), so
+                // a mismatch streak is the real end-of-dictation signal:
+                // the user stopped, something else holds the mic. Cut at
+                // the last matching boundary and finalize what they said.
+                if let Some(gate) = &speaker_gate
+                    && voiced_samples >= next_speaker_check
+                {
+                    next_speaker_check = voiced_samples + SPEAKER_TAIL_CHECK_EVERY_SAMPLES;
+                    let tail_len = SPEAKER_TAIL_WINDOW_SAMPLES.min(speech_samples.len());
+                    let window = &speech_samples[speech_samples.len() - tail_len..];
+                    if !speaker_checked {
+                        if let Some(score) = speaker_gate_score(gate, window)
+                            && score >= gate.threshold
+                        {
+                            speaker_checked = true;
+                            confirmed_user_len = speech_samples.len();
+                            tail_fail_streak = 0;
+                            tracing::info!(score, "speaker_gate_verified");
+                            announce_voice_activity!();
+                            // The USER resumed speaking (verified) —
+                            // this is the gated equivalent of the
+                            // countdown cancel in the voice_logged
+                            // block above.
+                            if pause::countdown_active() {
+                                pause::countdown_request_cancel();
+                                tracing::info!("countdown_cancel_on_verified_voice");
+                            }
+                        } else if voiced_samples >= SPEAKER_GATE_EARLY_SAMPLES {
+                            speaker_checked = true;
+                            if let Some(score) = speaker_gate_score(gate, &speech_samples)
+                                && score < gate.threshold
+                            {
+                                tracing::info!(
+                                    score,
+                                    threshold = gate.threshold,
+                                    "speaker_gate_early_reject"
+                                );
+                                event::global_broadcaster().voice_activity_ended();
+                                flip_to_listening!();
+                                return Ok(RecordResult::DroppedSpeaker { score });
+                            }
+                            // Whole-utterance pass (or embed hiccup →
+                            // fail-open): arm the tail monitor + overlay.
+                            confirmed_user_len = speech_samples.len();
+                            tail_fail_streak = 0;
+                            announce_voice_activity!();
+                            if pause::countdown_active() {
+                                pause::countdown_request_cancel();
+                                tracing::info!("countdown_cancel_on_verified_voice");
+                            }
+                        }
+                    } else {
+                        let tail_threshold = gate.threshold * SPEAKER_TAIL_THRESHOLD_FACTOR;
+                        match speaker_gate_score(gate, window) {
+                            Some(score) if score < tail_threshold => {
+                                tail_fail_streak += 1;
+                                tracing::debug!(
+                                    score,
+                                    tail_threshold,
+                                    streak = tail_fail_streak,
+                                    "speaker_gate_tail_mismatch"
+                                );
+                                if tail_fail_streak >= speaker_tail_fail_checks {
+                                    tracing::info!(
+                                        score,
+                                        kept_secs = confirmed_user_len as f64 / 16_000.0,
+                                        trimmed_secs = (speech_samples.len()
+                                            - confirmed_user_len)
+                                            as f64
+                                            / 16_000.0,
+                                        "speaker_gate_tail_cut"
+                                    );
+                                    speech_samples.truncate(confirmed_user_len);
+                                    break;
+                                }
+                            }
+                            // Match (or embed hiccup → fail-open): the
+                            // user is still the one talking.
+                            _ => {
+                                tail_fail_streak = 0;
+                                confirmed_user_len = speech_samples.len();
+                            }
+                        }
+                    }
+                }
 
                 // Per-chunk ceiling: a pause-free monologue never reaches
                 // the tentative-silence flush point, so cut at a frame
@@ -682,6 +933,10 @@ fn record_with_local_vad(
                     speculation_pending = false;
                     speculation_slot.invalidate();
                     voiced_since_flush = false;
+                    // The tail monitor's boundary points into the drained
+                    // buffer — rebase to the fresh (empty) one.
+                    confirmed_user_len = 0;
+                    tail_fail_streak = 0;
                 }
             }
         } else if in_speech {
@@ -741,7 +996,43 @@ fn record_with_local_vad(
                 midsentence_extended = false;
                 midsentence_decided = false;
                 voiced_since_flush = false;
+                // The tail monitor's boundary points into the drained
+                // buffer — rebase to the fresh (empty) one.
+                confirmed_user_len = 0;
+                tail_fail_streak = 0;
             }
+
+            // "My Voice": verify the speaker BEFORE any speculative STT
+            // can leak a stranger's words into the overlay preview.
+            // Short utterances (< 1s of voice) can't be verified yet —
+            // they skip speculation and get re-checked at final.
+            if voice_logged
+                && voiced_since_flush
+                && !speculation_pending
+                && consecutive_silence >= eff_tentative_frames
+                && let Some(gate) = &speaker_gate
+                && !speaker_checked
+                && voiced_samples >= crate::always::speaker_embed::MIN_EMBED_SAMPLES
+            {
+                speaker_checked = true;
+                if let Some(score) = speaker_gate_score(gate, &speech_samples)
+                    && score < gate.threshold
+                {
+                    tracing::info!(
+                        score,
+                        threshold = gate.threshold,
+                        "speaker_gate_tentative_reject"
+                    );
+                    event::global_broadcaster().voice_activity_ended();
+                    flip_to_listening!();
+                    return Ok(RecordResult::DroppedSpeaker { score });
+                }
+                // Verified (or unverifiable → fail-open): arm the tail
+                // monitor in case speech resumes on top of media.
+                confirmed_user_len = speech_samples.len();
+                tail_fail_streak = 0;
+            }
+            let speculation_speaker_ok = speaker_gate.is_none() || speaker_checked;
 
             // At tentative silence, kick off speculative transcription in the
             // background so the result is ready (or nearly so) by the time we
@@ -751,6 +1042,7 @@ fn record_with_local_vad(
             if voice_logged
                 && voiced_since_flush
                 && !speculation_pending
+                && speculation_speaker_ok
                 && consecutive_silence >= eff_tentative_frames
             {
                 speculation_pending = true;
@@ -977,6 +1269,34 @@ fn record_with_local_vad(
         } else {
             // Silent drop - we never logged voice detected, so just return silence
             return Ok(RecordResult::Silence);
+        }
+    }
+
+    // "My Voice" final check: utterances that ended before the early
+    // (~2s) or tentative checks could verify the speaker are checked
+    // here, before any STT spend. Fail CLOSED: a snippet too short to
+    // even embed (< 0.5s of voice) is dropped, not pasted — background
+    // media constantly produces short bursts, and one stranger's
+    // "Okay." landing in the user's editor breaks the entire promise
+    // of the gate. (Observed live: a movie-voice tail transcribed as
+    // "Okay." and pasted under the old fail-open rule.)
+    if let Some(gate) = &speaker_gate
+        && !speaker_checked
+    {
+        if voiced_samples >= crate::always::speaker_embed::MIN_EMBED_SAMPLES {
+            if let Some(score) = speaker_gate_score(gate, &speech_samples)
+                && score < gate.threshold
+            {
+                tracing::info!(score, threshold = gate.threshold, "speaker_gate_final_reject");
+                event::global_broadcaster().voice_activity_ended();
+                flip_to_listening!();
+                return Ok(RecordResult::DroppedSpeaker { score });
+            }
+        } else {
+            tracing::info!(voiced_samples, "speaker_gate_dropped_unverifiable_short");
+            event::global_broadcaster().voice_activity_ended();
+            flip_to_listening!();
+            return Ok(RecordResult::DroppedSpeaker { score: -1.0 });
         }
     }
 

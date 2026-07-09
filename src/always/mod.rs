@@ -10,6 +10,7 @@ pub mod correction_queue;
 pub mod correction_request;
 pub mod daemon;
 pub mod dictation;
+pub mod enrollment;
 pub mod event;
 pub mod event_loop;
 pub mod filter;
@@ -29,6 +30,7 @@ pub mod paste;
 pub mod pause;
 pub mod per_app;
 pub mod postprocess;
+pub mod speaker_embed;
 pub mod speech_action;
 #[cfg(feature = "local-stt")]
 pub mod stt_local;
@@ -39,6 +41,7 @@ pub mod uds_server;
 pub mod vad;
 pub mod vad_silero;
 pub mod vocab;
+pub mod voiceprint;
 
 pub use config::AlwaysConfig;
 pub use event_loop::run;

@@ -39,7 +39,12 @@ static LAST_LOW_MIC_OVERLAY: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(||
 /// now strictly per-app (master pause moved to its own chord) and the
 /// daemon emits [`DaemonEvent::PauseScopeToggled`] so the GUI can flash
 /// which scope was toggled.
-pub const PROTOCOL_VERSION: u32 = 9;
+///
+/// **v10 (2026-07-10):** "My Voice" speaker verification. New
+/// enrollment commands ([`DaemonCommand::StartVoiceEnrollment`] et al.)
+/// and the `VoiceEnrollment*` / [`DaemonEvent::VoiceProfileStatus`]
+/// event family driving the Settings → My Voice tab.
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Event types for daemon-to-GUI communication
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,6 +281,40 @@ pub enum DaemonEvent {
     SttFallbackEngaged {
         model: String,
     },
+    /// "My Voice" enrollment recording started for `step`
+    /// (`normal` | `lower` | `louder`). The daemon is now capturing the
+    /// user's guided sample.
+    VoiceEnrollmentStarted {
+        step: String,
+    },
+    /// Live level meter + progress during an enrollment recording.
+    /// Throttled to ~10 Hz. `voiced_ms` counts actual voiced audio
+    /// accumulated toward `target_ms`.
+    VoiceEnrollmentLevel {
+        energy: f64,
+        voiced_ms: u32,
+        target_ms: u32,
+    },
+    /// One enrollment step's sample was captured and folded into the
+    /// voiceprint. A `VoiceProfileStatus` follows with the new totals.
+    VoiceEnrollmentSampleCaptured {
+        step: String,
+    },
+    /// Enrollment recording failed or was cancelled. `message` is short
+    /// human text ("cancelled", "no speech detected", download errors).
+    VoiceEnrollmentFailed {
+        step: String,
+        message: String,
+    },
+    /// Snapshot of the "My Voice" profile: which steps are recorded,
+    /// whether the profile is complete (`enrolled`), and whether the
+    /// runtime gate pref is on. Included in the initial state burst and
+    /// re-emitted on every mutation.
+    VoiceProfileStatus {
+        enrolled: bool,
+        enabled: bool,
+        steps: Vec<String>,
+    },
 }
 
 /// Upper bound (in chars) on any single user-/network-supplied string
@@ -490,6 +529,26 @@ pub enum DaemonCommand {
     SetLanguage {
         lang: String,
     },
+    /// Settings → My Voice: record the guided sample for `step`
+    /// (`normal` | `lower` | `louder`). The daemon interrupts idle
+    /// listening, records until enough voiced audio accumulates, and
+    /// streams `VoiceEnrollment*` progress events.
+    StartVoiceEnrollment {
+        step: String,
+    },
+    /// Abort an in-flight (or queued) enrollment recording.
+    CancelVoiceEnrollment,
+    /// Delete the enrolled voiceprint entirely. The runtime gate
+    /// degrades to ungated behavior until re-enrollment.
+    DeleteVoiceProfile,
+    /// Flip the "only listen to my voice" gate pref. Persisted to the
+    /// DB and hot-applied to the running config.
+    SetVoiceProfileEnabled {
+        enabled: bool,
+    },
+    /// Client (Settings tab open / reconnect) wants a fresh
+    /// [`DaemonEvent::VoiceProfileStatus`] snapshot.
+    GetVoiceProfileStatus,
 }
 
 impl DaemonCommand {
@@ -767,6 +826,41 @@ impl EventBroadcaster {
         self.send(DaemonEvent::LongRecordingWarning {
             elapsed_secs,
             cap_secs,
+        });
+    }
+
+    pub fn voice_enrollment_started(&self, step: &str) {
+        self.send(DaemonEvent::VoiceEnrollmentStarted {
+            step: step.to_string(),
+        });
+    }
+
+    pub fn voice_enrollment_level(&self, energy: f64, voiced_ms: u32, target_ms: u32) {
+        self.send(DaemonEvent::VoiceEnrollmentLevel {
+            energy,
+            voiced_ms,
+            target_ms,
+        });
+    }
+
+    pub fn voice_enrollment_sample_captured(&self, step: &str) {
+        self.send(DaemonEvent::VoiceEnrollmentSampleCaptured {
+            step: step.to_string(),
+        });
+    }
+
+    pub fn voice_enrollment_failed(&self, step: &str, message: impl Into<String>) {
+        self.send(DaemonEvent::VoiceEnrollmentFailed {
+            step: step.to_string(),
+            message: message.into(),
+        });
+    }
+
+    pub fn voice_profile_status(&self, enrolled: bool, enabled: bool, steps: Vec<String>) {
+        self.send(DaemonEvent::VoiceProfileStatus {
+            enrolled,
+            enabled,
+            steps,
         });
     }
 

@@ -416,6 +416,18 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
             input_monitoring_granted: granted,
         });
     }
+    // "My Voice" profile snapshot so the Settings tab renders correct
+    // state on open without a request round-trip.
+    {
+        let (enrolled, enabled, steps) = crate::always::enrollment::profile_status(
+            ctx.cfg.read().speaker_gate_enabled,
+        );
+        initial_events.push(DaemonEvent::VoiceProfileStatus {
+            enrolled,
+            enabled,
+            steps,
+        });
+    }
 
     let mut initial_payload = String::new();
     for event in initial_events {
@@ -655,6 +667,24 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
             tracing::info!(bundle = ?bundle_id, effective, "uds_focused_app_changed");
         }
         DaemonCommand::NotifySystemAudioState { playing } => {
+            // "My Voice" gate active → the daemon already ignores every
+            // voice but the enrolled user's, so media playback is no
+            // reason to stop listening. Skip the auto-pause entirely
+            // (and make sure no stale one lingers) — this is what lets
+            // dictation keep working while movies/music play.
+            let speaker_gate_active = ctx.cfg.read().speaker_gate_enabled
+                && crate::always::voiceprint::is_enrolled();
+            if speaker_gate_active {
+                let (effective, changed) = pause::set_audio_output_paused(false);
+                if changed {
+                    global_broadcaster().pause_source_changed("audio_output", false, None);
+                    if !effective {
+                        global_broadcaster().resumed();
+                    }
+                }
+                tracing::debug!(playing, "audio_output_ignored_speaker_gate");
+                return;
+            }
             // Audio output started/stopped → flip the audio-output pause
             // SOURCE only. This used to stomp MASTER pause, which meant
             // a pause the user set manually was silently cleared the
@@ -782,6 +812,77 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
         },
         DaemonCommand::SetLanguage { lang } => {
             set_language(ctx, &lang);
+        }
+        DaemonCommand::StartVoiceEnrollment { step } => {
+            match crate::always::voiceprint::EnrollStep::parse(&step) {
+                Some(parsed) => {
+                    if crate::always::enrollment::request_step(parsed) {
+                        tracing::info!(step = %step, "uds_voice_enrollment_queued");
+                    } else {
+                        global_broadcaster().voice_enrollment_failed(
+                            &step,
+                            "another enrollment recording is already in progress",
+                        );
+                    }
+                }
+                None => {
+                    global_broadcaster().voice_enrollment_failed(
+                        &step,
+                        "unknown enrollment step (expected normal, lower, or louder)",
+                    );
+                }
+            }
+        }
+        DaemonCommand::CancelVoiceEnrollment => {
+            crate::always::enrollment::request_cancel();
+            tracing::info!("uds_voice_enrollment_cancel_requested");
+        }
+        DaemonCommand::DeleteVoiceProfile => {
+            match crate::always::voiceprint::clear() {
+                Ok(()) => {
+                    let (enrolled, enabled, steps) = crate::always::enrollment::profile_status(
+                        ctx.cfg.read().speaker_gate_enabled,
+                    );
+                    global_broadcaster().voice_profile_status(enrolled, enabled, steps);
+                    tracing::info!("uds_voice_profile_deleted");
+                }
+                Err(e) => tracing::error!(error = %e, "uds_voice_profile_delete_failed"),
+            }
+        }
+        DaemonCommand::SetVoiceProfileEnabled { enabled } => {
+            ctx.cfg.write().speaker_gate_enabled = enabled;
+            // Persist for the next daemon start.
+            if let Ok(conn) = crate::db::open()
+                && let Err(e) = crate::db::set_preference(
+                    &conn,
+                    "speaker_gate_enabled",
+                    if enabled { "true" } else { "false" },
+                )
+            {
+                tracing::warn!(error = %e, enabled, "persist_speaker_gate_failed");
+            }
+            // The gate supersedes the media auto-pause: clear any stale
+            // audio-output pause on enable so listening resumes right
+            // away even if music is currently playing.
+            if enabled && crate::always::voiceprint::is_enrolled() {
+                let (effective, changed) = pause::set_audio_output_paused(false);
+                if changed {
+                    global_broadcaster().pause_source_changed("audio_output", false, None);
+                    if !effective {
+                        global_broadcaster().resumed();
+                    }
+                }
+            }
+            let (enrolled, _, steps) =
+                crate::always::enrollment::profile_status(enabled);
+            global_broadcaster().voice_profile_status(enrolled, enabled, steps);
+            tracing::info!(enabled, "uds_set_voice_profile_enabled");
+        }
+        DaemonCommand::GetVoiceProfileStatus => {
+            let (enrolled, enabled, steps) = crate::always::enrollment::profile_status(
+                ctx.cfg.read().speaker_gate_enabled,
+            );
+            global_broadcaster().voice_profile_status(enrolled, enabled, steps);
         }
     }
 }

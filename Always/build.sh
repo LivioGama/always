@@ -96,8 +96,20 @@ else
 fi
 
 echo "Code signing app..."
-# Prefer Apple Development identity so TCC grants survive debug rebuilds; else ad-hoc.
+# Signing identity resolution — STABILITY over pedigree. macOS TCC keys
+# Accessibility/Input Monitoring grants to the signature: a real cert
+# gives a designated requirement that survives rebuilds; ad-hoc keys to
+# the per-build cdhash, so EVERY rebuild silently voids every grant and
+# the user gets re-prompted forever. Preference order:
+#   1. Explicit ALWAYS_CODESIGN_IDENTITY
+#   2. "Always Local Signing" — persistent self-signed local dev cert
+#      (create once; grants then survive all local rebuilds)
+#   3. Developer ID / Apple Development certs
+#   4. Ad-hoc (last resort — expect permission re-prompts per build)
 SIGN_IDENTITY="${ALWAYS_CODESIGN_IDENTITY:-}"
+if [ -z "$SIGN_IDENTITY" ]; then
+    SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Always Local Signing\)".*/\1/p' | head -1)"
+fi
 if [ -z "$SIGN_IDENTITY" ]; then
     SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
 fi
