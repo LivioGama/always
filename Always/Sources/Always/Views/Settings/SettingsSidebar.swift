@@ -8,6 +8,7 @@ enum SettingsPanel: String, CaseIterable {
     case behavior = "Behavior"
     case shortcuts = "Shortcuts"
     case vocabulary = "Vocabulary"
+    case snippets = "Snippets"
     case history = "History"
     case about = "About"
 
@@ -20,6 +21,7 @@ enum SettingsPanel: String, CaseIterable {
         case .behavior:   return "slider.horizontal.3"
         case .shortcuts:  return "command"
         case .vocabulary: return "character.book.closed"
+        case .snippets:   return "text.insert"
         case .history:    return "clock.fill"
         case .about:      return "info.circle"
         }

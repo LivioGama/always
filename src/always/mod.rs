@@ -30,6 +30,7 @@ pub mod paste;
 pub mod pause;
 pub mod per_app;
 pub mod postprocess;
+pub mod snippets;
 pub mod speaker_embed;
 pub mod speech_action;
 #[cfg(feature = "local-stt")]

@@ -488,8 +488,22 @@ fn handle_speech(
             // sync (fast); LLM grammar runs async after paste when enabled
             // so the user sees text immediately (~300-800ms sooner).
             let grammar_started = Instant::now();
+            // Voice snippets: a trigger phrase ("grill me") anywhere in
+            // the utterance is replaced with its configured expansion,
+            // surrounding words preserved. Checked before the correction
+            // stack — expansions are user-authored text and must never
+            // be reworded by the grammar LLM.
+            let snippet_expansion = crate::always::snippets::expand(&transformed);
             let (final_text, grammar_cache_hit, grammar_patch_async) =
-                if is_short_utterance(&transformed) {
+                if let Some(expanded) = snippet_expansion {
+                    tracing::info!(
+                        stage = "snippet_expansion",
+                        utterance = %transformed,
+                        expanded_chars = expanded.chars().count(),
+                        "snippet trigger matched — pasting expansion verbatim"
+                    );
+                    (expanded, false, false)
+                } else if is_short_utterance(&transformed) {
                     tracing::info!(
                         stage = "short_utterance_bypass",
                         text = %transformed,
