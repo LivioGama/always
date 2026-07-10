@@ -18,7 +18,11 @@ impl MicrophoneMonitor {
     pub fn new() -> Self {
         Self {
             last_check: Instant::now(),
-            check_interval: Duration::from_millis(3000), // Check every 3 seconds
+            // The CoreAudio process-object probe is an in-process query
+            // (microseconds), so a 1s cadence keeps call detection snappy
+            // without measurable cost. The lsof fallback only runs on
+            // macOS < 14.4 where the probe is unavailable.
+            check_interval: Duration::from_millis(1000),
             last_usage_state: false,
         }
     }
@@ -69,18 +73,288 @@ impl MicrophoneMonitor {
     }
 }
 
+/// CoreAudio process-object probe (macOS 14.4+): asks coreaudiod which
+/// processes are actually running audio *input* right now — the same
+/// source Control Center uses for the orange-dot attribution. Catches
+/// browser calls (Meet in Chrome), Slack huddles, Zoom, FaceTime —
+/// anything that opens a capture stream — with zero subprocesses.
+///
+/// The old `lsof -c /coreaudio/i` probe only ever matched processes
+/// *named* `coreaudio*` (i.e. coreaudiod itself, which was then excluded
+/// as a helper), so mic-conflict auto-pause had never fired once in the
+/// field. It is kept below only as a fallback for macOS < 14.4 where the
+/// process-object properties don't exist.
+#[cfg(target_os = "macos")]
+mod coreaudio_probe {
+    use anyhow::{Result, bail};
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    struct AudioObjectPropertyAddress {
+        selector: u32,
+        scope: u32,
+        element: u32,
+    }
+
+    const fn fourcc(b: &[u8; 4]) -> u32 {
+        ((b[0] as u32) << 24) | ((b[1] as u32) << 16) | ((b[2] as u32) << 8) | (b[3] as u32)
+    }
+
+    const SYSTEM_OBJECT: u32 = 1; // kAudioObjectSystemObject
+    const SCOPE_GLOBAL: u32 = fourcc(b"glob"); // kAudioObjectPropertyScopeGlobal
+    const ELEMENT_MAIN: u32 = 0; // kAudioObjectPropertyElementMain
+    const PROP_PROCESS_OBJECT_LIST: u32 = fourcc(b"prs#"); // kAudioHardwarePropertyProcessObjectList
+    const PROP_PROCESS_PID: u32 = fourcc(b"ppid"); // kAudioProcessPropertyPID
+    const PROP_PROCESS_BUNDLE_ID: u32 = fourcc(b"pbid"); // kAudioProcessPropertyBundleID
+    const PROP_PROCESS_IS_RUNNING_INPUT: u32 = fourcc(b"piri"); // kAudioProcessPropertyIsRunningInput
+    const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+
+    #[link(name = "CoreAudio", kind = "framework")]
+    unsafe extern "C" {
+        fn AudioObjectGetPropertyDataSize(
+            object_id: u32,
+            address: *const AudioObjectPropertyAddress,
+            qualifier_size: u32,
+            qualifier_data: *const c_void,
+            out_size: *mut u32,
+        ) -> i32;
+        fn AudioObjectGetPropertyData(
+            object_id: u32,
+            address: *const AudioObjectPropertyAddress,
+            qualifier_size: u32,
+            qualifier_data: *const c_void,
+            io_size: *mut u32,
+            out_data: *mut c_void,
+        ) -> i32;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFStringGetCString(
+            string: *const c_void,
+            buffer: *mut u8,
+            buffer_size: isize,
+            encoding: u32,
+        ) -> u8;
+        fn CFRelease(cf: *const c_void);
+    }
+
+    unsafe extern "C" {
+        // libproc (part of libSystem — no extra link needed).
+        fn proc_pidpath(pid: i32, buffer: *mut u8, buffer_size: u32) -> i32;
+    }
+
+    /// Always-on system listeners that legitimately run input around the
+    /// clock ("Hey Siri" wake word etc.). Never treat these as a call.
+    const SYSTEM_LISTENER_BUNDLES: &[&str] = &[
+        "com.apple.CoreSpeech",
+        "com.apple.corespeechd",
+        "com.apple.assistantd",
+        "com.apple.siriactionsd",
+        "com.apple.SiriNCService",
+    ];
+
+    /// Our own capture chain: the daemon (`always` / `always-daemon`)
+    /// records through a spawned `rec`/`sox` child, and coreaudiod is
+    /// the audio server itself.
+    const HELPER_BASENAMES: &[&str] = &["always", "always-daemon", "rec", "sox", "coreaudiod"];
+
+    fn addr(selector: u32) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress {
+            selector,
+            scope: SCOPE_GLOBAL,
+            element: ELEMENT_MAIN,
+        }
+    }
+
+    fn get_u32(object: u32, selector: u32) -> Option<u32> {
+        let address = addr(selector);
+        let mut value: u32 = 0;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        let status = unsafe {
+            AudioObjectGetPropertyData(
+                object,
+                &address,
+                0,
+                std::ptr::null(),
+                &mut size,
+                (&raw mut value).cast(),
+            )
+        };
+        (status == 0).then_some(value)
+    }
+
+    fn get_pid(object: u32) -> Option<i32> {
+        let address = addr(PROP_PROCESS_PID);
+        let mut value: i32 = 0;
+        let mut size = std::mem::size_of::<i32>() as u32;
+        let status = unsafe {
+            AudioObjectGetPropertyData(
+                object,
+                &address,
+                0,
+                std::ptr::null(),
+                &mut size,
+                (&raw mut value).cast(),
+            )
+        };
+        (status == 0).then_some(value)
+    }
+
+    fn get_bundle_id(object: u32) -> Option<String> {
+        let address = addr(PROP_PROCESS_BUNDLE_ID);
+        let mut cf: *const c_void = std::ptr::null();
+        let mut size = std::mem::size_of::<*const c_void>() as u32;
+        let status = unsafe {
+            AudioObjectGetPropertyData(
+                object,
+                &address,
+                0,
+                std::ptr::null(),
+                &mut size,
+                (&raw mut cf).cast(),
+            )
+        };
+        if status != 0 || cf.is_null() {
+            return None;
+        }
+        let mut buf = [0u8; 512];
+        let ok = unsafe { CFStringGetCString(cf, buf.as_mut_ptr(), buf.len() as isize, CF_STRING_ENCODING_UTF8) };
+        unsafe { CFRelease(cf) };
+        if ok == 0 {
+            return None;
+        }
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        let s = String::from_utf8_lossy(&buf[..end]).into_owned();
+        (!s.is_empty()).then_some(s)
+    }
+
+    fn pid_basename(pid: i32) -> Option<String> {
+        let mut buf = [0u8; 4096];
+        let len = unsafe { proc_pidpath(pid, buf.as_mut_ptr(), buf.len() as u32) };
+        if len <= 0 {
+            return None;
+        }
+        let path = String::from_utf8_lossy(&buf[..len as usize]).into_owned();
+        path.rsplit('/').next().map(str::to_string)
+    }
+
+    /// Human-facing labels of processes other than Always (and always-on
+    /// system listeners) that are running audio input right now. Empty =
+    /// no call / no foreign capture in progress.
+    pub fn other_input_captors() -> Result<Vec<String>> {
+        let address = addr(PROP_PROCESS_OBJECT_LIST);
+        let mut size: u32 = 0;
+        let status = unsafe {
+            AudioObjectGetPropertyDataSize(SYSTEM_OBJECT, &address, 0, std::ptr::null(), &mut size)
+        };
+        if status != 0 {
+            bail!("process object list size query failed (status {status}) — macOS < 14.4?");
+        }
+        let count = size as usize / std::mem::size_of::<u32>();
+        let mut objects = vec![0u32; count];
+        let status = unsafe {
+            AudioObjectGetPropertyData(
+                SYSTEM_OBJECT,
+                &address,
+                0,
+                std::ptr::null(),
+                &mut size,
+                objects.as_mut_ptr().cast(),
+            )
+        };
+        if status != 0 {
+            bail!("process object list query failed (status {status})");
+        }
+        objects.truncate(size as usize / std::mem::size_of::<u32>());
+
+        let own_pid = std::process::id() as i32;
+        let mut captors = Vec::new();
+        for object in objects {
+            if get_u32(object, PROP_PROCESS_IS_RUNNING_INPUT) != Some(1) {
+                continue;
+            }
+            let pid = get_pid(object).unwrap_or(-1);
+            if pid == own_pid {
+                continue;
+            }
+            let basename = pid_basename(pid);
+            if let Some(name) = &basename
+                && HELPER_BASENAMES.contains(&name.to_lowercase().as_str())
+            {
+                continue;
+            }
+            let bundle = get_bundle_id(object);
+            if let Some(b) = &bundle
+                && SYSTEM_LISTENER_BUNDLES
+                    .iter()
+                    .any(|s| s.eq_ignore_ascii_case(b))
+            {
+                continue;
+            }
+            let label = bundle
+                .or(basename)
+                .unwrap_or_else(|| format!("pid {pid}"));
+            if !captors.contains(&label) {
+                captors.push(label);
+            }
+        }
+        Ok(captors)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn fourcc_matches_sdk_constants() {
+            assert_eq!(PROP_PROCESS_OBJECT_LIST, 0x7072_7323); // 'prs#'
+            assert_eq!(PROP_PROCESS_PID, 0x7070_6964); // 'ppid'
+            assert_eq!(PROP_PROCESS_BUNDLE_ID, 0x7062_6964); // 'pbid'
+            assert_eq!(PROP_PROCESS_IS_RUNNING_INPUT, 0x7069_7269); // 'piri'
+            assert_eq!(SCOPE_GLOBAL, 0x676c_6f62); // 'glob'
+        }
+
+        #[test]
+        fn probe_runs_and_excludes_system_listeners() {
+            // Live query against coreaudiod. Must not error on any
+            // macOS >= 14.4, and always-on Siri listeners must never
+            // surface as captors regardless of machine state.
+            let captors = other_input_captors().expect("process-object probe failed");
+            for label in &captors {
+                assert!(
+                    !SYSTEM_LISTENER_BUNDLES
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case(label)),
+                    "system listener leaked into captors: {label}"
+                );
+            }
+        }
+    }
+}
+
 // Platform-specific implementations
 #[cfg(target_os = "macos")]
 impl MicrophoneMonitor {
-    /// Single lightweight subprocess check for microphone usage.
-    /// Replaces the old 3-subprocess pipeline (system_profiler + lsof + sh/ps).
-    /// Uses one `lsof` call filtered to coreaudiod, excluding our own processes.
+    /// CoreAudio process-object probe, with the legacy lsof scan as a
+    /// fallback for macOS versions without process objects (< 14.4).
     fn check_microphone_usage_macos(&self) -> Result<bool> {
-        let output_str = self.run_mic_lsof()?;
-        Ok(!output_str.is_empty())
+        match coreaudio_probe::other_input_captors() {
+            Ok(captors) => Ok(!captors.is_empty()),
+            Err(e) => {
+                tracing::debug!(error = %e, "coreaudio process probe unavailable — falling back to lsof");
+                let output_str = self.run_mic_lsof()?;
+                Ok(!output_str.is_empty())
+            }
+        }
     }
 
     fn get_microphone_users_macos(&self) -> Result<Vec<String>> {
+        if let Ok(captors) = coreaudio_probe::other_input_captors()
+            && !captors.is_empty()
+        {
+            return Ok(captors);
+        }
         let output_str = self.run_mic_lsof()?;
         if output_str.is_empty() {
             return Ok(Vec::new());
