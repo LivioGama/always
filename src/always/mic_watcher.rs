@@ -19,7 +19,7 @@ use crate::always::log::{Event, Logger};
 use crate::always::mic_monitor::MicrophoneMonitor;
 use crate::always::{config as always_config, event, pause};
 
-const POLL_INTERVAL: Duration = Duration::from_secs(3);
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Spawn the watchdog task. Lives for the daemon lifetime.
 pub fn spawn(rt: &Handle) {
@@ -30,8 +30,9 @@ pub fn spawn(rt: &Handle) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            // `is_microphone_in_use` shells out to lsof (~10-30ms) — at a
-            // 3s cadence this is negligible for the runtime workers.
+            // `is_microphone_in_use` is an in-process CoreAudio query
+            // (microseconds; lsof subprocess only as a pre-14.4
+            // fallback) — negligible for the runtime workers at 1s.
             match monitor.is_microphone_in_use() {
                 Ok(true) if !paused_for_mic => {
                     let users = monitor.get_microphone_users().unwrap_or_default();
