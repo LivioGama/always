@@ -102,8 +102,7 @@ fn record_and_store(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
     // Do it before announcing the recording so the UI's "speak now"
     // cue never fires while we're still fetching.
     speaker_embed::ensure_model().context("speaker model unavailable")?;
-    let embedder =
-        speaker_embed::global().context("speaker embedding engine failed to load")?;
+    let embedder = speaker_embed::global().context("speaker embedding engine failed to load")?;
 
     let vad = SileroVad::new().context("failed to load Silero VAD")?;
     let broadcaster = event::global_broadcaster();
@@ -121,7 +120,8 @@ fn record_and_store(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
         let mut voiced_ms: u32 = 0;
         let mut started = false;
         let mut frames_since_level: u32 = 0;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(MAX_RECORDING_SECS);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(MAX_RECORDING_SECS);
 
         loop {
             if CANCEL.load(Ordering::SeqCst) {
@@ -188,7 +188,7 @@ fn record_and_store(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
             .context("failed to compute voice embedding")?;
         voiceprint::set_step(step, embedding).context("failed to persist voiceprint")?;
     }
-    
+
     #[cfg(not(feature = "macos"))]
     {
         anyhow::bail!("voice enrollment is only supported on macOS");

@@ -530,10 +530,9 @@ fn record_with_local_vad(
     // The cut requires the user's voice to be absent from the trailing
     // windows for the user's own configured pause tolerance — one check
     // per 0.5s of voiced audio, so silence_secs = 2.2 → 5 checks.
-    let speaker_tail_fail_checks = (((cfg.silence_secs * 16_000.0)
-        / SPEAKER_TAIL_CHECK_EVERY_SAMPLES as f64)
-        .ceil() as usize)
-        .max(SPEAKER_TAIL_FAIL_STREAK);
+    let speaker_tail_fail_checks =
+        (((cfg.silence_secs * 16_000.0) / SPEAKER_TAIL_CHECK_EVERY_SAMPLES as f64).ceil() as usize)
+            .max(SPEAKER_TAIL_FAIL_STREAK);
     // Live-buffer length at the last window that matched the user — a
     // tail cut truncates here so foreign trailing audio (movie line
     // after the user's last word) is never sent to STT.
@@ -890,8 +889,7 @@ fn record_with_local_vad(
                                     tracing::info!(
                                         score,
                                         kept_secs = confirmed_user_len as f64 / 16_000.0,
-                                        trimmed_secs = (speech_samples.len()
-                                            - confirmed_user_len)
+                                        trimmed_secs = (speech_samples.len() - confirmed_user_len)
                                             as f64
                                             / 16_000.0,
                                         "speaker_gate_tail_cut"
@@ -1287,7 +1285,11 @@ fn record_with_local_vad(
             if let Some(score) = speaker_gate_score(gate, &speech_samples)
                 && score < gate.threshold
             {
-                tracing::info!(score, threshold = gate.threshold, "speaker_gate_final_reject");
+                tracing::info!(
+                    score,
+                    threshold = gate.threshold,
+                    "speaker_gate_final_reject"
+                );
                 event::global_broadcaster().voice_activity_ended();
                 flip_to_listening!();
                 return Ok(RecordResult::DroppedSpeaker { score });

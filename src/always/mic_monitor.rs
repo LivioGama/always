@@ -219,7 +219,14 @@ mod coreaudio_probe {
             return None;
         }
         let mut buf = [0u8; 512];
-        let ok = unsafe { CFStringGetCString(cf, buf.as_mut_ptr(), buf.len() as isize, CF_STRING_ENCODING_UTF8) };
+        let ok = unsafe {
+            CFStringGetCString(
+                cf,
+                buf.as_mut_ptr(),
+                buf.len() as isize,
+                CF_STRING_ENCODING_UTF8,
+            )
+        };
         unsafe { CFRelease(cf) };
         if ok == 0 {
             return None;
@@ -292,9 +299,7 @@ mod coreaudio_probe {
             {
                 continue;
             }
-            let label = bundle
-                .or(basename)
-                .unwrap_or_else(|| format!("pid {pid}"));
+            let label = bundle.or(basename).unwrap_or_else(|| format!("pid {pid}"));
             if !captors.contains(&label) {
                 captors.push(label);
             }

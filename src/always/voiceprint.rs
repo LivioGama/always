@@ -155,14 +155,16 @@ pub fn set_step(step: EnrollStep, embedding: Vec<f32>) -> Result<Arc<VoiceProfil
             speaker_embed::EMBEDDING_DIM
         );
     }
-    let mut profile = current().map(|p| (*p).clone()).unwrap_or_else(|| VoiceProfile {
-        version: 1,
-        model: speaker_embed::MODEL_FILE.to_string(),
-        steps: BTreeMap::new(),
-        voiceprint: Vec::new(),
-        created_at: now_iso(),
-        updated_at: now_iso(),
-    });
+    let mut profile = current()
+        .map(|p| (*p).clone())
+        .unwrap_or_else(|| VoiceProfile {
+            version: 1,
+            model: speaker_embed::MODEL_FILE.to_string(),
+            steps: BTreeMap::new(),
+            voiceprint: Vec::new(),
+            created_at: now_iso(),
+            updated_at: now_iso(),
+        });
     profile.steps.insert(step.as_str().to_string(), embedding);
     let all: Vec<Vec<f32>> = profile.steps.values().cloned().collect();
     profile.voiceprint = speaker_embed::combine_embeddings(&all)?;

@@ -43,9 +43,7 @@ pub const MIN_EMBED_SAMPLES: usize = 8_000; // 0.5 s @ 16 kHz
 /// Where the model lives on disk (`~/Library/Caches/always/` on macOS
 /// — same dir Silero materialises to).
 pub fn model_path() -> Result<PathBuf> {
-    let dir = dirs::cache_dir()
-        .context("no cache dir")?
-        .join("always");
+    let dir = dirs::cache_dir().context("no cache dir")?.join("always");
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join(MODEL_FILE))
 }
@@ -189,9 +187,7 @@ fn compute_fbank_cmn(samples: &[i16]) -> Result<Vec<f32>> {
     let bins = NUM_MEL_BINS as usize;
     let mut feats = Vec::with_capacity(num_frames as usize * bins);
     for i in 0..num_frames {
-        let frame = fbank
-            .get_frame(i)
-            .context("fbank frame ready-count lied")?;
+        let frame = fbank.get_frame(i).context("fbank frame ready-count lied")?;
         feats.extend_from_slice(frame);
     }
 
@@ -383,7 +379,18 @@ mod tests {
             assert!(ok, "say -v {voice} failed");
             let ok = std::process::Command::new("/opt/homebrew/bin/sox")
                 .arg(&aiff)
-                .args(["-r", "16000", "-c", "1", "-b", "16", "-e", "signed-integer", "-t", "raw"])
+                .args([
+                    "-r",
+                    "16000",
+                    "-c",
+                    "1",
+                    "-b",
+                    "16",
+                    "-e",
+                    "signed-integer",
+                    "-t",
+                    "raw",
+                ])
                 .arg(&raw)
                 .status()
                 .map(|s| s.success())
@@ -399,13 +406,22 @@ mod tests {
         };
 
         let sam_a = e
-            .embed(&tts("Samantha", "The quick brown fox jumps over the lazy dog near the riverbank."))
+            .embed(&tts(
+                "Samantha",
+                "The quick brown fox jumps over the lazy dog near the riverbank.",
+            ))
             .unwrap();
         let sam_b = e
-            .embed(&tts("Samantha", "Yesterday I walked to the market and bought fresh bread and coffee."))
+            .embed(&tts(
+                "Samantha",
+                "Yesterday I walked to the market and bought fresh bread and coffee.",
+            ))
             .unwrap();
         let dan = e
-            .embed(&tts("Daniel", "The quick brown fox jumps over the lazy dog near the riverbank."))
+            .embed(&tts(
+                "Daniel",
+                "The quick brown fox jumps over the lazy dog near the riverbank.",
+            ))
             .unwrap();
 
         let same = cosine(&sam_a, &sam_b);
