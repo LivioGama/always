@@ -496,12 +496,25 @@ fn handle_speech(
             let snippet_expansion = crate::always::snippets::expand(&transformed);
             let (final_text, grammar_cache_hit, grammar_patch_async) =
                 if let Some(expanded) = snippet_expansion {
-                    tracing::info!(
-                        stage = "snippet_expansion",
-                        utterance = %transformed,
-                        expanded_chars = expanded.chars().count(),
-                        "snippet trigger matched — pasting expansion verbatim"
-                    );
+                    let expanded_chars = expanded.chars().count();
+                    if let Some(utterance) = snippet_utterance_for_log(
+                        &transformed,
+                        crate::always::telemetry::should_log_transcripts(),
+                    ) {
+                        tracing::info!(
+                            stage = "snippet_expansion",
+                            utterance = %utterance,
+                            expanded_chars,
+                            "snippet trigger matched — pasting expansion verbatim"
+                        );
+                    } else {
+                        tracing::info!(
+                            stage = "snippet_expansion",
+                            utterance_chars = transformed.chars().count(),
+                            expanded_chars,
+                            "snippet trigger matched — pasting expansion verbatim"
+                        );
+                    }
                     (expanded, false, false)
                 } else if is_short_utterance(&transformed) {
                     tracing::info!(
@@ -900,6 +913,10 @@ fn should_auto_enter_for_text(text: &str) -> bool {
     word_count(text) >= AUTO_ENTER_MIN_WORDS
 }
 
+fn snippet_utterance_for_log(utterance: &str, log_transcripts: bool) -> Option<&str> {
+    log_transcripts.then_some(utterance)
+}
+
 fn word_count(text: &str) -> usize {
     text.split_whitespace().count()
 }
@@ -1120,8 +1137,24 @@ mod tests {
 
     use super::{
         AUTO_ENTER_MIN_WORDS, SHORT_UTTERANCE_MAX_CHARS, SHORT_UTTERANCE_MAX_WORDS,
-        is_short_utterance, should_auto_enter_for_text,
+        is_short_utterance, should_auto_enter_for_text, snippet_utterance_for_log,
     };
+
+    #[test]
+    fn snippet_match_redacts_utterance_when_transcript_logging_is_disabled() {
+        let sensitive_utterance = "grill me about the unreleased acquisition";
+
+        assert_eq!(
+            snippet_utterance_for_log(sensitive_utterance, false),
+            None,
+            "snippet matches must not expose the utterance in default privacy mode"
+        );
+        assert_eq!(
+            snippet_utterance_for_log(sensitive_utterance, true),
+            Some(sensitive_utterance),
+            "explicit transcript logging may include the matched utterance"
+        );
+    }
 
     #[test]
     fn short_utterance_bypass_matches_thresholds() {

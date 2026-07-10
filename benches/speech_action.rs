@@ -47,6 +47,8 @@ fn bench_config() -> AlwaysConfig {
         idle_pause_secs: 0,
         idle_pause_action: IdlePauseAction::default(),
         transcript_stream_enabled: false,
+        speaker_gate_enabled: false,
+        speaker_gate_threshold: 0.5,
         localization: Localization::ENGLISH,
     }
 }

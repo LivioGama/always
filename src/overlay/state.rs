@@ -405,6 +405,11 @@ impl OverlayStateReducer {
             }
             | DaemonEvent::ActiveTranscriberChanged { backend: _ }
             | DaemonEvent::SttFallbackEngaged { model: _ }
+            | DaemonEvent::VoiceEnrollmentStarted { .. }
+            | DaemonEvent::VoiceEnrollmentLevel { .. }
+            | DaemonEvent::VoiceEnrollmentSampleCaptured { .. }
+            | DaemonEvent::VoiceEnrollmentFailed { .. }
+            | DaemonEvent::VoiceProfileStatus { .. }
             | DaemonEvent::ShortcutListenerStatus {
                 input_monitoring_granted: _,
             } => None,

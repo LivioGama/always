@@ -210,6 +210,13 @@ final class AlwaysTests: XCTestCase {
         }
     }
 
+    private func waitForStatusOverlayToHide(timeout: TimeInterval = 2.0) {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while isStatusOverlayVisible(), Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        }
+    }
+
     func testFlashIsNotClobberedByShow() throws {
         try ensureAppKit()
         let controller = StatusOverlayController.shared
@@ -304,7 +311,8 @@ final class AlwaysTests: XCTestCase {
         monitor.isTranscribing = false
         monitor.isVoiceActivity = false
         monitor.isListeningActive = false
-        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.5))
+        waitForStatusOverlayToHide()
+        XCTAssertFalse(isStatusOverlayVisible(), "test must start with the overlay hidden")
 
         let listeningStarted = try JSONDecoder().decode(
             DaemonEvent.self,
@@ -414,7 +422,7 @@ final class AlwaysTests: XCTestCase {
         // `src/always/event.rs` and `tests/uds_protocol_test.rs`. Bumping
         // either side without updating the matching constant on the
         // other side will fail both tests at once.
-        XCTAssertEqual(UDS_PROTOCOL_VERSION, 9)
+        XCTAssertEqual(UDS_PROTOCOL_VERSION, 10)
     }
 
     func testHelloWithMismatchedVersionIsObservable() throws {

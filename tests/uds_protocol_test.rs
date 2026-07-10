@@ -14,7 +14,7 @@ fn protocol_version_matches_swift_client() {
     // one without the other will fail both this test and the Swift
     // `testProtocolVersionMatchesDaemon` mirror.
     assert_eq!(
-        PROTOCOL_VERSION, 9,
+        PROTOCOL_VERSION, 10,
         "protocol version bumped without updating UDSClient.swift?"
     );
 }

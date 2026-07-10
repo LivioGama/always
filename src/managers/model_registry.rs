@@ -478,10 +478,10 @@ impl ModelRegistry {
         let mut models = self.available_models.lock();
         for model in models.values_mut() {
             let model_path = self.models_dir.join(&model.filename);
-            let partial_path = self.models_dir.join(format!("{}.partial", &model.filename));
+            let partial_path = self.models_dir.join(format!("{}.partial", model.filename));
             let extracting_path = self
                 .models_dir
-                .join(format!("{}.extracting", &model.filename));
+                .join(format!("{}.extracting", model.filename));
 
             // Sweep stale extraction temp dirs left over from a crash
             // mid-extract — but only if we're not actively extracting
@@ -557,7 +557,7 @@ impl ModelRegistry {
             .get(model_id)
             .ok_or_else(|| anyhow::anyhow!("unknown model id: {model_id}"))?;
         let path = self.models_dir.join(&info.filename);
-        let partial = self.models_dir.join(format!("{}.partial", &info.filename));
+        let partial = self.models_dir.join(format!("{}.partial", info.filename));
 
         if path.is_dir() {
             fs::remove_dir_all(&path).ok();
@@ -601,7 +601,7 @@ impl ModelRegistry {
         let model_path = self.models_dir.join(&model_info.filename);
         let partial_path = self
             .models_dir
-            .join(format!("{}.partial", &model_info.filename));
+            .join(format!("{}.partial", model_info.filename));
 
         // Already present and trustworthy — nothing to do; clean up any
         // leftover .partial. For directory models "present" alone is not
@@ -776,7 +776,7 @@ impl ModelRegistry {
 
             let temp_extract_dir = self
                 .models_dir
-                .join(format!("{}.extracting", &model_info.filename));
+                .join(format!("{}.extracting", model_info.filename));
             let final_model_dir = self.models_dir.join(&model_info.filename);
 
             if temp_extract_dir.exists() {
