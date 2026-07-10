@@ -277,10 +277,7 @@ mod tests {
     #[test]
     fn expansion_containing_trigger_is_not_rescanned() {
         let entries = vec![entry("loop", "loop loop")];
-        assert_eq!(
-            expand_with("loop", &entries).as_deref(),
-            Some("loop loop")
-        );
+        assert_eq!(expand_with("loop", &entries).as_deref(), Some("loop loop"));
     }
 
     #[test]

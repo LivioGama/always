@@ -14,6 +14,10 @@ jobs:
   rust:
     name: Rust
     runs-on: macos-14
+    env:
+      # kaldi-fbank-rust-kautism bundles C++14 code; newer runners otherwise
+      # invoke Clang with its legacy default and reject `>>`, `{}`, and make_unique.
+      CXXFLAGS: -std=c++14
     steps:
       - uses: actions/checkout@v4
 

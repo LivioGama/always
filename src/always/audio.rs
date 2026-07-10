@@ -493,6 +493,7 @@ pub fn temp_wav_path() -> PathBuf {
 mod tests {
     use super::{create_wav_bytes_i16_mono_16k, temp_wav_path};
 
+    #[cfg(feature = "macos")]
     #[test]
     fn wait_readable_times_out_on_silent_pipe() {
         use std::os::fd::AsRawFd as _;
@@ -516,6 +517,7 @@ mod tests {
         let _ = child.wait();
     }
 
+    #[cfg(feature = "macos")]
     #[test]
     fn wait_readable_returns_true_when_data_or_eof_arrives() {
         use std::os::fd::AsRawFd as _;

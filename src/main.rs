@@ -776,7 +776,8 @@ fn handle_voice(action: VoiceAction) -> Result<()> {
             let conn = db::open()?;
             db::set_preference(&conn, "speaker_gate_enabled", "true")?;
             // Hot-apply when the daemon is up; harmless if it isn't.
-            let _ = send_uds_command(r#"{"type":"SetVoiceProfileEnabled","data":{"enabled":true}}"#);
+            let _ =
+                send_uds_command(r#"{"type":"SetVoiceProfileEnabled","data":{"enabled":true}}"#);
             println!("My Voice gate ENABLED — Always now only listens to the enrolled voice.");
             Ok(())
         }

@@ -16,22 +16,31 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context, Result};
+#[cfg(feature = "macos")]
+use anyhow::Context;
+use anyhow::Result;
 use parking_lot::Mutex;
 
+#[cfg(feature = "macos")]
 use crate::always::audio::{self, FRAME_BYTES, FRAME_MS, FRAME_SAMPLES};
 use crate::always::config::AlwaysConfig;
+use crate::always::event;
+#[cfg(feature = "macos")]
+use crate::always::speaker_embed;
+#[cfg(feature = "macos")]
 use crate::always::vad_silero::SileroVad;
 use crate::always::voiceprint::{self, EnrollStep};
-use crate::always::{event, speaker_embed};
 
 /// Voiced audio required per guided sample. 5s of actual voice gives
 /// the embedding a stable identity while keeping each step short.
+#[cfg(feature = "macos")]
 const TARGET_VOICED_MS: u32 = 5_000;
 /// Hard wall-clock cap per recording — covers "user clicked record and
 /// walked away" without wedging the event loop forever.
+#[cfg(feature = "macos")]
 const MAX_RECORDING_SECS: u64 = 45;
 /// Level-meter throttle (frames): 30ms frames × 3 ≈ 10 Hz.
+#[cfg(feature = "macos")]
 const LEVEL_EVERY_FRAMES: u32 = 3;
 
 static PENDING: Mutex<Option<EnrollStep>> = Mutex::new(None);
@@ -97,13 +106,18 @@ pub fn run_enrollment(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
     result
 }
 
+#[cfg(not(feature = "macos"))]
+fn record_and_store(_cfg: &AlwaysConfig, _step: EnrollStep) -> Result<()> {
+    anyhow::bail!("voice enrollment is only supported on macOS")
+}
+
+#[cfg(feature = "macos")]
 fn record_and_store(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
     // Model download happens lazily on the FIRST enrollment (26.5 MB).
     // Do it before announcing the recording so the UI's "speak now"
     // cue never fires while we're still fetching.
     speaker_embed::ensure_model().context("speaker model unavailable")?;
-    let embedder =
-        speaker_embed::global().context("speaker embedding engine failed to load")?;
+    let embedder = speaker_embed::global().context("speaker embedding engine failed to load")?;
 
     let vad = SileroVad::new().context("failed to load Silero VAD")?;
     let broadcaster = event::global_broadcaster();
@@ -191,6 +205,7 @@ fn record_and_store(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
 /// Same normalized RMS the daemon's energy gates use (see
 /// `vad::normalized_energy`), duplicated in miniature to avoid making
 /// that helper public just for a meter.
+#[cfg(any(feature = "macos", test))]
 fn frame_energy(samples: &[i16]) -> f64 {
     if samples.is_empty() {
         return 0.0;
