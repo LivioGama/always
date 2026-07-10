@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -766,6 +767,86 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
             global_broadcaster().send(DaemonEvent::ActiveTranscriberChanged {
                 backend: active_backend,
             });
+        }
+        DaemonCommand::ApplyTransformStyle { history_id, style } => {
+            let history_store = ctx.cfg.read().history_store.clone();
+            let post_processor = ctx.cfg.read().post_processor.clone();
+            let style_for_log = style.clone();
+            tokio::spawn(async move {
+                let Some(store) = history_store else {
+                    tracing::error!(
+                        history_id,
+                        "history_store_not_available_for_style_transform"
+                    );
+                    return;
+                };
+
+                let Some(pp) = post_processor else {
+                    tracing::error!(
+                        history_id,
+                        "post_processor_not_available_for_style_transform"
+                    );
+                    return;
+                };
+
+                let Some(api_key) = pp.groq_api_key.clone() else {
+                    tracing::error!(history_id, "groq_api_key_not_available_for_style_transform");
+                    return;
+                };
+
+                let model = pp.groq_model().to_string();
+
+                // Parse the style from the wire format
+                let parsed_style =
+                    match crate::always::postprocess::TransformStyle::from_str(&style) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!(error = %e, style = %style, "invalid_transform_style");
+                            return;
+                        }
+                    };
+
+                // Load the history entry to get raw_text
+                let entry = match store.get_by_id(history_id) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::error!(error = %e, history_id, "history_entry_not_found");
+                        return;
+                    }
+                };
+
+                // Apply the style transformation
+                let transformed = match crate::always::postprocess::process_with_style(
+                    &entry.raw_text,
+                    parsed_style,
+                    &api_key,
+                    &model,
+                )
+                .await
+                {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::error!(error = %e, history_id, style = %style, "style_transform_failed");
+                        return;
+                    }
+                };
+
+                // Upsert the result into history_style_variants
+                if let Err(e) =
+                    store.upsert_style_variant(history_id, parsed_style, transformed.clone())
+                {
+                    tracing::error!(error = %e, history_id, style = %style, "style_variant_upsert_failed");
+                    return;
+                };
+
+                // Emit the success event
+                global_broadcaster().send(DaemonEvent::TransformStyleApplied {
+                    history_id,
+                    style,
+                    text: transformed,
+                });
+            });
+            tracing::info!(history_id, style = %style_for_log, "uds_apply_transform_style");
         }
         DaemonCommand::DownloadModel { model_id } => {
             let registry = ctx.registry.clone();

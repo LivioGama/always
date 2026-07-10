@@ -109,82 +109,91 @@ fn record_and_store(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
     let broadcaster = event::global_broadcaster();
     broadcaster.voice_enrollment_started(step.as_str());
 
-    let recorder_arc = audio::RecChild::get_or_spawn()?;
-    let mut frame_buf = [0u8; FRAME_BYTES];
-    let mut sample_buf = [0i16; FRAME_SAMPLES];
-    // Collect everything once voice starts (natural pauses included —
-    // the embedding recipe tolerates them; only VOICED time counts
-    // toward the target).
-    let mut samples: Vec<i16> = Vec::with_capacity(16_000 * 8);
-    let mut voiced_ms: u32 = 0;
-    let mut started = false;
-    let mut frames_since_level: u32 = 0;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(MAX_RECORDING_SECS);
+    #[cfg(feature = "macos")]
+    {
+        let recorder_arc = audio::RecChild::get_or_spawn()?;
+        let mut frame_buf = [0u8; FRAME_BYTES];
+        let mut sample_buf = [0i16; FRAME_SAMPLES];
+        // Collect everything once voice starts (natural pauses included —
+        // the embedding recipe tolerates them; only VOICED time counts
+        // toward the target).
+        let mut samples: Vec<i16> = Vec::with_capacity(16_000 * 8);
+        let mut voiced_ms: u32 = 0;
+        let mut started = false;
+        let mut frames_since_level: u32 = 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(MAX_RECORDING_SECS);
 
-    loop {
-        if CANCEL.load(Ordering::SeqCst) {
-            anyhow::bail!("cancelled");
-        }
-        if std::time::Instant::now() >= deadline {
-            anyhow::bail!(
-                "not enough speech captured ({}s of voice needed)",
-                TARGET_VOICED_MS / 1000
-            );
-        }
-
-        let read = {
-            let mut recorder = recorder_arc.lock();
-            let rec = recorder
-                .as_mut()
-                .ok_or_else(|| anyhow::anyhow!("audio recorder not available"))?;
-            match rec.read_frame(&mut frame_buf) {
-                Ok(n) => n,
-                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    recorder.take();
-                    anyhow::bail!("recorder wedged during enrollment");
-                }
-                Err(e) => return Err(e.into()),
+        loop {
+            if CANCEL.load(Ordering::SeqCst) {
+                anyhow::bail!("cancelled");
             }
-        };
-        if read == 0 {
-            recorder_arc.lock().take();
-            anyhow::bail!("recorder stopped during enrollment");
-        }
-        if read < FRAME_BYTES {
-            continue;
-        }
-        for (i, chunk) in frame_buf.chunks_exact(2).enumerate() {
-            sample_buf[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "not enough speech captured ({}s of voice needed)",
+                    TARGET_VOICED_MS / 1000
+                );
+            }
+
+            let read = {
+                let mut recorder = recorder_arc.lock();
+                let rec = recorder
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("audio recorder not available"))?;
+                match rec.read_frame(&mut frame_buf) {
+                    Ok(n) => n,
+                    Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                        recorder.take();
+                        anyhow::bail!("recorder wedged during enrollment");
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            };
+            if read == 0 {
+                recorder_arc.lock().take();
+                anyhow::bail!("recorder stopped during enrollment");
+            }
+            if read < FRAME_BYTES {
+                continue;
+            }
+            for (i, chunk) in frame_buf.chunks_exact(2).enumerate() {
+                sample_buf[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
+            }
+
+            let voiced = vad
+                .predict(&sample_buf)
+                .map(|p| p >= cfg.silero_threshold)
+                .unwrap_or(false);
+            if voiced {
+                started = true;
+                voiced_ms += FRAME_MS;
+            }
+            if started {
+                samples.extend_from_slice(&sample_buf);
+            }
+
+            frames_since_level += 1;
+            if frames_since_level >= LEVEL_EVERY_FRAMES {
+                frames_since_level = 0;
+                let energy = frame_energy(&sample_buf);
+                broadcaster.voice_enrollment_level(energy, voiced_ms, TARGET_VOICED_MS);
+            }
+
+            if voiced_ms >= TARGET_VOICED_MS {
+                break;
+            }
         }
 
-        let voiced = vad
-            .predict(&sample_buf)
-            .map(|p| p >= cfg.silero_threshold)
-            .unwrap_or(false);
-        if voiced {
-            started = true;
-            voiced_ms += FRAME_MS;
-        }
-        if started {
-            samples.extend_from_slice(&sample_buf);
-        }
-
-        frames_since_level += 1;
-        if frames_since_level >= LEVEL_EVERY_FRAMES {
-            frames_since_level = 0;
-            let energy = frame_energy(&sample_buf);
-            broadcaster.voice_enrollment_level(energy, voiced_ms, TARGET_VOICED_MS);
-        }
-
-        if voiced_ms >= TARGET_VOICED_MS {
-            break;
-        }
+        let embedding = embedder
+            .embed(&samples)
+            .context("failed to compute voice embedding")?;
+        voiceprint::set_step(step, embedding).context("failed to persist voiceprint")?;
+    }
+    
+    #[cfg(not(feature = "macos"))]
+    {
+        anyhow::bail!("voice enrollment is only supported on macOS");
     }
 
-    let embedding = embedder
-        .embed(&samples)
-        .context("failed to compute voice embedding")?;
-    voiceprint::set_step(step, embedding).context("failed to persist voiceprint")?;
     Ok(())
 }
 

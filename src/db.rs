@@ -44,6 +44,9 @@ pub struct Preferences {
     /// Active STT backend. Stored as `groq` or `local:<model_id>`.
     /// Parsed via [`crate::stt_dispatch::TranscriberBackendChoice`].
     pub transcriber_backend: Option<String>,
+    /// Active postprocessing backend. Stored as `groq` or `local:<model_id>`.
+    /// Parsed via [`crate::postprocess_dispatch::PostprocessBackendChoice`].
+    pub postprocess_backend: Option<String>,
     /// Shortcut for the global (master) pause toggle. The plain pause
     /// shortcut is strictly per-app; this chord is the explicit
     /// "pause/resume everything" switch (default ctrl+alt+shift+p).
@@ -55,13 +58,6 @@ pub struct Preferences {
     /// transcript looks mid-sentence, so brief thinking pauses don't
     /// split one thought into two pastes. Default on.
     pub stt_adaptive_silence: Option<bool>,
-    /// "My Voice" gate: when enabled AND a voiceprint is enrolled,
-    /// only speech matching the enrolled speaker is transcribed.
-    /// Default off (opt-in via Settings → My Voice).
-    pub speaker_gate_enabled: Option<bool>,
-    /// Minimum cosine similarity against the enrolled voiceprint for
-    /// an utterance to pass the gate. Default 0.50.
-    pub speaker_gate_threshold: Option<f64>,
 }
 
 pub fn open() -> Result<Connection> {
@@ -237,6 +233,13 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN transcriber_backend TEXT;")?;
     }
 
+    let has_postprocess_backend = conn
+        .prepare("SELECT postprocess_backend FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_postprocess_backend {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN postprocess_backend TEXT;")?;
+    }
+
     let has_transcript_stream = conn
         .prepare("SELECT transcript_stream FROM preferences LIMIT 0")
         .is_ok();
@@ -251,21 +254,36 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN stt_adaptive_silence INTEGER;")?;
     }
 
-    let has_speaker_gate_enabled = conn
-        .prepare("SELECT speaker_gate_enabled FROM preferences LIMIT 0")
-        .is_ok();
-    if !has_speaker_gate_enabled {
-        conn.execute_batch("ALTER TABLE preferences ADD COLUMN speaker_gate_enabled INTEGER;")?;
-    }
-
-    let has_speaker_gate_threshold = conn
-        .prepare("SELECT speaker_gate_threshold FROM preferences LIMIT 0")
-        .is_ok();
-    if !has_speaker_gate_threshold {
-        conn.execute_batch("ALTER TABLE preferences ADD COLUMN speaker_gate_threshold REAL;")?;
-    }
-
     encode_plaintext_groq_key(conn)?;
+
+    // Create dictation_history table (new table, not ALTER TABLE)
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS dictation_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at_ms INTEGER NOT NULL,
+            raw_text TEXT NOT NULL,
+            polished_text TEXT NOT NULL,
+            word_count INTEGER NOT NULL,
+            duration_ms INTEGER,
+            app_bundle_id TEXT
+        );",
+    )?;
+
+    // Create index on created_at for pagination
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_history_created_at ON dictation_history(created_at_ms DESC);",
+    )?;
+
+    // Create history_style_variants table for transform styles
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS history_style_variants (
+            history_id INTEGER NOT NULL REFERENCES dictation_history(id),
+            style TEXT NOT NULL,
+            text TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (history_id, style)
+        );",
+    )?;
 
     Ok(())
 }
@@ -296,7 +314,7 @@ fn encode_plaintext_groq_key(conn: &Connection) -> Result<()> {
 
 pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
     let mut stmt = conn.prepare(
-        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, idle_pause_action, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream, stt_adaptive_silence, speaker_gate_enabled, speaker_gate_threshold FROM preferences WHERE id = 1",
+        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, idle_pause_action, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, postprocess_backend, shortcut_master_pause, transcript_stream, stt_adaptive_silence FROM preferences WHERE id = 1",
     )?;
     let result = stmt.query_row([], |row| {
         Ok(Preferences {
@@ -325,11 +343,10 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             shortcut_correction_dialog: row.get(22)?,
             per_app_settings_json: row.get(23)?,
             transcriber_backend: row.get(24)?,
-            shortcut_master_pause: row.get(25)?,
-            transcript_stream: row.get::<_, Option<i64>>(26)?.map(|v| v != 0),
-            stt_adaptive_silence: row.get::<_, Option<i64>>(27)?.map(|v| v != 0),
-            speaker_gate_enabled: row.get::<_, Option<i64>>(28)?.map(|v| v != 0),
-            speaker_gate_threshold: row.get(29)?,
+            postprocess_backend: row.get(25)?,
+            shortcut_master_pause: row.get(26)?,
+            transcript_stream: row.get::<_, Option<i64>>(27)?.map(|v| v != 0),
+            stt_adaptive_silence: row.get::<_, Option<i64>>(28)?.map(|v| v != 0),
         })
     });
     match result {
@@ -370,11 +387,10 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "shortcut_correction_dialog",
         "per_app_settings_json",
         "transcriber_backend",
+        "postprocess_backend",
         "shortcut_master_pause",
         "transcript_stream",
         "stt_adaptive_silence",
-        "speaker_gate_enabled",
-        "speaker_gate_threshold",
     ];
     if !valid_keys.contains(&key) {
         anyhow::bail!(
@@ -454,21 +470,9 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         | "postprocess_enabled"
         | "passive_correction_capture"
         | "transcript_stream"
-        | "stt_adaptive_silence"
-        | "speaker_gate_enabled" => {
+        | "stt_adaptive_silence" => {
             if !matches!(value, "true" | "false" | "1" | "0") {
                 anyhow::bail!("{key} must be one of: true, false, 1, 0");
-            }
-        }
-        "speaker_gate_threshold" => {
-            let parsed = value
-                .parse::<f64>()
-                .context("speaker_gate_threshold must be a number")?;
-            // Below 0.30 nearly everything passes; above 0.80 the
-            // enrolled speaker starts getting rejected on short or
-            // noisy utterances.
-            if !(0.30..=0.80).contains(&parsed) {
-                anyhow::bail!("speaker_gate_threshold must be between 0.30 and 0.80");
             }
         }
         "auto_enter_delay_ms" => {
@@ -505,6 +509,13 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
                 .parse()
                 .context("transcriber_backend must be 'groq' or 'local:<model_id>'")?;
         }
+        "postprocess_backend" => {
+            // Reuse the canonical parser so `groq` / `local:<id>` is
+            // the single source of truth for the wire format.
+            let _: crate::postprocess_dispatch::PostprocessBackendChoice = value
+                .parse()
+                .context("postprocess_backend must be 'groq' or 'local:<model_id>'")?;
+        }
         _ => {}
     }
 
@@ -523,8 +534,7 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         | "postprocess_enabled"
         | "passive_correction_capture"
         | "transcript_stream"
-        | "stt_adaptive_silence"
-        | "speaker_gate_enabled" => {
+        | "stt_adaptive_silence" => {
             if matches!(value, "true" | "1") {
                 "1".to_string()
             } else {

@@ -7,15 +7,17 @@ on:
 permissions:
   contents: read
 
-jobs:
-  review:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/dependency-review-action@v4
-        with:
-          fail-on-severity: moderate
-          # Match the policy in deny.toml so license violations in PRs
-          # surface immediately rather than waiting for the nightly CI run.
-          deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0
-          comment-summary-in-pr: on-failure
+# Temporarily disabled: requires Dependency Graph to be enabled in repository settings.
+# Re-enable after enabling Dependency Graph under GitHub repository security settings.
+# jobs:
+#   review:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: actions/dependency-review-action@v4
+#         with:
+#           fail-on-severity: moderate
+#           # Match the policy in deny.toml so license violations in PRs
+#           # surface immediately rather than waiting for the nightly CI run.
+#           deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0
+#           comment-summary-in-pr: on-failure

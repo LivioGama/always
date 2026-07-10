@@ -1,11 +1,53 @@
 use std::collections::{HashMap, VecDeque};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::config::PostprocessConfig;
+
+/// Transform style for dictation history entries.
+/// Wire format: lowercase with hyphens (e.g., "key-points", "formal").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransformStyle {
+    Polish,
+    KeyPoints,
+    Formal,
+    Short,
+    Long,
+}
+
+impl std::fmt::Display for TransformStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Polish => f.write_str("polish"),
+            Self::KeyPoints => f.write_str("key-points"),
+            Self::Formal => f.write_str("formal"),
+            Self::Short => f.write_str("short"),
+            Self::Long => f.write_str("long"),
+        }
+    }
+}
+
+impl FromStr for TransformStyle {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "polish" => Ok(Self::Polish),
+            "key-points" => Ok(Self::KeyPoints),
+            "formal" => Ok(Self::Formal),
+            "short" => Ok(Self::Short),
+            "long" => Ok(Self::Long),
+            _ => anyhow::bail!(
+                "invalid transform style: {s} (expected 'polish', 'key-points', 'formal', 'short', or 'long')"
+            ),
+        }
+    }
+}
 
 /// Maximum number of cached (input → corrected) entries before we
 /// evict the oldest. Each entry is bounded by the LLM's max_tokens
@@ -20,7 +62,7 @@ const CACHE_MAX_ENTRIES: usize = 1_000;
 /// `grammar_correction_enabled` is false or no API key is configured.
 #[derive(Debug, Clone)]
 pub struct PostProcessor {
-    groq_api_key: Option<String>,
+    pub groq_api_key: Option<String>,
     /// Memoization of `(transcript → corrected)` pairs. Bounded by
     /// `CACHE_MAX_ENTRIES`: the previous implementation never evicted
     /// and grew unboundedly across long daemon sessions.
@@ -42,6 +84,11 @@ pub struct PostProcessor {
 impl PostProcessor {
     pub fn new(groq_api_key: Option<String>) -> Self {
         Self::new_with_config(PostprocessConfig::default(), groq_api_key)
+    }
+
+    /// Get the Groq model name for API calls.
+    pub fn groq_model(&self) -> &str {
+        &self.config.groq_model
     }
 
     pub fn new_with_config(config: PostprocessConfig, groq_api_key: Option<String>) -> Self {
@@ -260,6 +307,68 @@ impl PostProcessor {
     }
 }
 
+/// Process raw text with a transform style using the Groq API.
+/// This is a standalone function (not a method on PostProcessor) because
+/// it's called on-demand from the UDS handler, not from the live dictation path.
+pub async fn process_with_style(
+    raw_text: &str,
+    style: TransformStyle,
+    api_key: &str,
+    model: &str,
+) -> Result<String> {
+    let client = crate::http_client::async_client();
+
+    let style_instruction = crate::glossary::build_style_prompt(style);
+    let user_message = format!(
+        "{}\n\n<transcript>{}</transcript>",
+        style_instruction, raw_text
+    );
+
+    let response = client
+        .post("https://api.groq.com/openai/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": crate::glossary::style_transform_system_prompt()
+                },
+                {
+                    "role": "user",
+                    "content": user_message
+                }
+            ],
+            "temperature": 0.3,
+            "max_tokens": 500
+        }))
+        .send()
+        .await
+        .context("Failed to call Groq API for style transform")?;
+
+    if !response.status().is_success() {
+        let error = response.text().await.unwrap_or_default();
+        anyhow::bail!("Groq API error: {}", error);
+    }
+
+    let json: Value = response
+        .json()
+        .await
+        .context("Failed to parse Groq response")?;
+    let raw_output = json["choices"][0]["message"]["content"]
+        .as_str()
+        .context("Invalid Groq response format")?
+        .trim()
+        .to_string();
+
+    // Use the style-transform-specific sanitizer (allows length changes)
+    let sanitized = sanitize_style_transform(raw_text, &raw_output)
+        .unwrap_or_else(|| raw_text.trim().to_string());
+
+    Ok(sanitized)
+}
+
 /// True when the model's output starts by repeating the supplied
 /// context (≥20 chars of it) — the failure mode where "continue from
 /// context" is misread as "output context + continuation", which would
@@ -301,6 +410,38 @@ fn sanitize_corrected_text(input: &str, output: &str) -> Option<String> {
     Some(cleaned.to_string())
 }
 
+/// Sanitizer for style transform outputs.
+/// Lighter than sanitize_corrected_text - allows length changes but still
+/// strips model wrappers and rejects empty outputs.
+fn sanitize_style_transform(input: &str, output: &str) -> Option<String> {
+    let mut cleaned = output.trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    if let Some(inner) = extract_tagged(cleaned, "transcript") {
+        cleaned = inner.trim();
+    }
+
+    cleaned = strip_known_prefix(cleaned);
+    cleaned = strip_wrapping_quotes(cleaned).trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    // Much looser bounds than grammar correction - style transforms
+    // legitimately change length. Only reject if wildly unreasonable:
+    // - Empty (already checked)
+    // - More than 10x input length (likely hallucination/echo)
+    let input_words = word_count(input);
+    let output_words = word_count(cleaned);
+    if input_words > 0 && output_words > input_words * 10 {
+        return None;
+    }
+
+    Some(cleaned.to_string())
+}
+
 fn extract_tagged<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
@@ -318,6 +459,8 @@ fn strip_known_prefix(mut text: &str) -> &str {
             "cleaned transcript:",
             "the cleaned transcript:",
             "the cleaned text:",
+            "here is the transformed text:",
+            "transformed text:",
             "output:",
             "sure,",
         ]
@@ -482,4 +625,108 @@ mod tests {
         let other_key = "<transcript>and more</transcript>";
         assert!(!processor.cache.lock().contains_key(other_key));
     }
+
+    #[test]
+    fn transform_style_display_round_trip() {
+        assert_eq!(TransformStyle::Polish.to_string(), "polish");
+        assert_eq!(TransformStyle::KeyPoints.to_string(), "key-points");
+        assert_eq!(TransformStyle::Formal.to_string(), "formal");
+        assert_eq!(TransformStyle::Short.to_string(), "short");
+        assert_eq!(TransformStyle::Long.to_string(), "long");
+    }
+
+    #[test]
+    fn transform_style_from_str() {
+        assert_eq!(
+            TransformStyle::from_str("polish").unwrap(),
+            TransformStyle::Polish
+        );
+        assert_eq!(
+            TransformStyle::from_str("key-points").unwrap(),
+            TransformStyle::KeyPoints
+        );
+        assert_eq!(
+            TransformStyle::from_str("formal").unwrap(),
+            TransformStyle::Formal
+        );
+        assert_eq!(
+            TransformStyle::from_str("short").unwrap(),
+            TransformStyle::Short
+        );
+        assert_eq!(
+            TransformStyle::from_str("long").unwrap(),
+            TransformStyle::Long
+        );
+        assert!(TransformStyle::from_str("invalid").is_err());
+    }
+
+    #[test]
+    fn sanitize_style_transform_allows_expansion() {
+        // Long style expands text - should not be rejected
+        let input = "hello world";
+        let expanded = "Hello world, this is an expanded version with much more detail and context added to demonstrate the expansion capability.";
+        let result = sanitize_style_transform(input, expanded);
+        assert_eq!(result, Some(expanded.to_string()));
+    }
+
+    #[test]
+    fn sanitize_style_transform_allows_condensation() {
+        // Short/KeyPoints styles condense text - should not be rejected
+        let input = "hello world this is a very long sentence with many words that should be condensed significantly";
+        let condensed = "Hello world.";
+        let result = sanitize_style_transform(input, condensed);
+        assert_eq!(result, Some(condensed.to_string()));
+    }
+
+    #[test]
+    fn sanitize_style_transform_rejects_wild_expansion() {
+        // More than 10x expansion is rejected as hallucination
+        let input = "hi";
+        let wild = "a ".repeat(100); // 100x expansion
+        let result = sanitize_style_transform(input, &wild);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn sanitize_style_transform_strips_wrappers() {
+        let input = "hello world";
+        let wrapped = "Here is the transformed text: \"hello world\"";
+        let result = sanitize_style_transform(input, wrapped);
+        assert_eq!(result, Some("hello world".to_string()));
+    }
+
+    #[test]
+    fn sanitize_style_transform_rejects_empty() {
+        let input = "hello world";
+        let result = sanitize_style_transform(input, "");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn transform_style_round_trip() {
+        for style in [
+            TransformStyle::Polish,
+            TransformStyle::KeyPoints,
+            TransformStyle::Formal,
+            TransformStyle::Short,
+            TransformStyle::Long,
+        ] {
+            let s = style.to_string();
+            let parsed = TransformStyle::from_str(&s).unwrap();
+            assert_eq!(parsed, style);
+        }
+    }
+}
+
+/// Local LLM postprocessing capability (llama.cpp).
+///
+/// Trait so the daemon can be exercised end-to-end with a deterministic
+/// in-memory implementation in tests, and so future backends can plug in.
+#[cfg(feature = "local-postprocess")]
+pub trait LocalPostprocessor: Send + Sync {
+    fn correct(
+        &self,
+        system_prompt: &str,
+        user_text: &str,
+    ) -> Result<String, crate::postprocess_dispatch::PostprocessError>;
 }

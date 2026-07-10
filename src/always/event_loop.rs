@@ -165,6 +165,27 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         .unwrap_or(false);
     clipboard_watcher::spawn_if_enabled(rt.handle(), passive_correction_enabled);
 
+    // Initialize history store for persisting dictation history.
+    // Failure is non-fatal — history persistence is opt-in functionality.
+    let history_store = match crate::db::open() {
+        Ok(conn) => {
+            let store = Arc::new(crate::always::history::HistoryStore::new(Arc::new(
+                std::sync::Mutex::new(conn),
+            )));
+            tracing::info!("history_store_initialized");
+            Some(store)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "history_store_init_failed");
+            None
+        }
+    };
+
+    // Update the shared config with the history store
+    if let Some(store) = history_store {
+        active_cfg.write().history_store = Some(store);
+    }
+
     // Idle-pause watchdog. Spawns at most one task; no-op when
     // `idle_pause_secs == 0`. Lives for the daemon lifetime.
     idle_watcher::spawn(rt.handle(), cfg.idle_pause_secs, cfg.idle_pause_action);
@@ -568,6 +589,26 @@ fn handle_speech(
                 processed: &final_text,
                 energy,
             });
+
+            // Persist dictation history (raw + polished) non-blocking.
+            // Clone strings and spawn async insert to avoid paste-path latency.
+            if let Some(ref history_store) = cfg.history_store {
+                let raw_clone = text.to_string();
+                let polished_clone = final_text.clone();
+                let store_clone = Arc::clone(history_store);
+                let app_bundle_id = crate::always::pause::current_app();
+
+                tracing::info!("history_insert_queued");
+                rt.spawn(async move {
+                    tracing::info!("history_insert_starting");
+                    match store_clone.insert(raw_clone, polished_clone, None, app_bundle_id) {
+                        Ok(id) => tracing::info!(history_id = id, "history_insert_success"),
+                        Err(e) => tracing::error!(error = %e, "history_insert_failed"),
+                    }
+                });
+            } else {
+                tracing::warn!("history_store_not_available");
+            }
 
             event::global_broadcaster().transcript_final(final_text.clone());
 

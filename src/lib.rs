@@ -7,5 +7,6 @@ pub mod db;
 pub mod glossary;
 pub mod http_client;
 pub mod managers;
+pub mod postprocess_dispatch;
 pub mod stt;
 pub mod stt_dispatch;

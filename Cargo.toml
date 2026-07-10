@@ -37,6 +37,10 @@ overlay = ["dep:x11", "x11/xlib"]
 # Canary, SenseVoice, GigaAM, and Cohere engines via ONNX Runtime.
 # Enable locally with `cargo build --features local-stt`.
 local-stt = ["dep:transcribe-rs"]
+# Opt-in offline LLM postprocessing via `llama-cpp-2`. Metal-accelerated
+# llama.cpp bindings for local grammar correction and style transforms.
+# Enable locally with `cargo build --features local-postprocess`.
+local-postprocess = ["dep:llama-cpp-2"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -95,11 +99,15 @@ oslog = { version = "0.2", optional = true }
 # macOS: same build flags as Handy 0.8.3 — Metal-accelerated whisper +
 # ONNX Runtime for the non-whisper engines. Pinned to 0.3.3 for parity.
 transcribe-rs = { version = "=0.3.8", features = ["whisper-metal", "onnx"], optional = true }
+# macOS: Metal-accelerated llama.cpp for local LLM postprocessing.
+llama-cpp-2 = { version = "0.1", features = ["metal"], optional = true }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 # Non-macOS targets: generic whisper-cpp build + ONNX. The macOS 26
 # build-break note in the comment above does not apply on Linux.
 transcribe-rs = { version = "=0.3.8", features = ["whisper-cpp", "onnx"], optional = true }
+# Non-macOS: CPU-only llama.cpp for local LLM postprocessing.
+llama-cpp-2 = { version = "0.1", optional = true }
 
 [dev-dependencies]
 assert_cmd = "2"

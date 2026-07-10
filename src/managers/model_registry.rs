@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,7 +35,6 @@ use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tar::Archive;
 use tokio::sync::broadcast;
 
@@ -167,17 +166,7 @@ impl Drop for DownloadCleanup<'_> {
 /// SHA256 verification verdict cache: `(path, file_len, mtime) -> matched`.
 /// Aliased to keep the `ModelRegistry` field readable and satisfy
 /// `clippy::type_complexity` (the CI gate runs `clippy -D warnings`).
-type VerifyCache = Arc<Mutex<HashMap<(PathBuf, u64, SystemTime), bool>>>;
-
-/// On-disk row of the persisted verify cache (`.verify-cache.json`).
-/// `SystemTime` flattens to unix seconds so the JSON stays portable.
-#[derive(Debug, Serialize, Deserialize)]
-struct PersistedVerdict {
-    path: PathBuf,
-    len: u64,
-    mtime_unix_secs: u64,
-    verdict: bool,
-}
+use super::model_download::VerifyCache;
 
 /// Registry of all known local STT models. Constructed once at daemon
 /// startup; cloning is cheap (only `Arc`s).
@@ -224,7 +213,7 @@ impl ModelRegistry {
             cancel_flags: Arc::new(Mutex::new(HashMap::new())),
             extracting_models: Arc::new(Mutex::new(HashSet::new())),
             events_tx,
-            verify_cache: Arc::new(Mutex::new(HashMap::new())),
+            verify_cache: VerifyCache::default(),
         };
 
         // Startup used to block here SHA256-hashing every multi-GB model
@@ -350,46 +339,13 @@ impl ModelRegistry {
     /// Best-effort load of persisted verdicts. A corrupt or missing
     /// cache file is silently discarded — worst case we re-hash.
     fn load_verify_cache(&self) {
-        let Ok(raw) = fs::read_to_string(self.verify_cache_path()) else {
-            return;
-        };
-        let Ok(entries) = serde_json::from_str::<Vec<PersistedVerdict>>(&raw) else {
-            tracing::warn!("model_verify_cache_corrupt_discarding");
-            return;
-        };
-        let mut cache = self.verify_cache.lock();
-        for e in entries {
-            let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(e.mtime_unix_secs);
-            cache.insert((e.path, e.len, mtime), e.verdict);
-        }
-        tracing::info!(entries = cache.len(), "model_verify_cache_loaded");
+        super::model_download::load_verify_cache(&self.verify_cache_path(), &self.verify_cache);
     }
 
     /// Best-effort atomic persist (tmp + rename). Called after every
     /// fresh hash so a crash never costs more than one verdict.
     fn save_verify_cache(&self) {
-        let entries: Vec<PersistedVerdict> = self
-            .verify_cache
-            .lock()
-            .iter()
-            .map(|((path, len, mtime), &verdict)| PersistedVerdict {
-                path: path.clone(),
-                len: *len,
-                mtime_unix_secs: mtime
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0),
-                verdict,
-            })
-            .collect();
-        let Ok(json) = serde_json::to_string(&entries) else {
-            return;
-        };
-        let target = self.verify_cache_path();
-        let tmp = target.with_extension("json.tmp");
-        if fs::write(&tmp, json).is_ok() {
-            let _ = fs::rename(&tmp, &target);
-        }
+        super::model_download::save_verify_cache(&self.verify_cache_path(), &self.verify_cache);
     }
 
     /// Cache-only verdict lookup — never hashes. `None` means "unknown,
@@ -433,7 +389,7 @@ impl ModelRegistry {
             return verdict;
         }
 
-        let verdict = match compute_sha256(path) {
+        let verdict = match super::model_download::compute_sha256(path) {
             Ok(actual) => actual == expected,
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "model_bin_hash_failed");
@@ -926,47 +882,7 @@ fn path_matches_kind(path: &Path, expect_dir: bool) -> bool {
 }
 
 fn verify_sha256(path: &Path, expected: Option<&str>, model_id: &str) -> Result<()> {
-    let Some(expected) = expected else {
-        return Ok(());
-    };
-    match compute_sha256(path) {
-        Ok(actual) if actual == expected => {
-            tracing::info!(model = %model_id, "model_sha256_verified");
-            Ok(())
-        }
-        Ok(actual) => {
-            tracing::warn!(
-                model = %model_id,
-                expected = %expected,
-                actual = %actual,
-                "model_sha256_mismatch"
-            );
-            let _ = fs::remove_file(path);
-            Err(anyhow::anyhow!(
-                "Download verification failed for model {model_id}: file is corrupt. Please retry."
-            ))
-        }
-        Err(e) => {
-            let _ = fs::remove_file(path);
-            Err(anyhow::anyhow!(
-                "Failed to verify download for model {model_id}: {e}. Please retry."
-            ))
-        }
-    }
-}
-
-fn compute_sha256(path: &Path) -> Result<String> {
-    let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 65536];
-    loop {
-        let n = file.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buffer[..n]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    super::model_download::verify_sha256(path, expected, model_id)
 }
 
 fn discover_custom_whisper_models(
@@ -1604,7 +1520,7 @@ mod tests {
             cancel_flags: Arc::new(Mutex::new(HashMap::new())),
             extracting_models: Arc::new(Mutex::new(HashSet::new())),
             events_tx,
-            verify_cache: Arc::new(Mutex::new(HashMap::new())),
+            verify_cache: VerifyCache::default(),
         }
     }
 

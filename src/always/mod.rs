@@ -17,6 +17,7 @@ pub mod filter;
 pub mod filter_config;
 pub mod focus_state;
 pub mod hallucination;
+pub mod history;
 pub mod hud;
 pub mod idle_watcher;
 pub mod keyboard;

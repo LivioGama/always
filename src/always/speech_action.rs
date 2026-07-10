@@ -354,6 +354,7 @@ mod tests {
             idle_pause_action: IdlePauseAction::default(),
             localization: Localization::ENGLISH,
             transcript_stream_enabled: false,
+            history_store: None,
         }
     }
 

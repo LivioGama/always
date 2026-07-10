@@ -267,6 +267,9 @@ pub struct AlwaysConfig {
     /// external consumers (e.g. IRIS tailing the file). Opt-in: persisted
     /// transcripts are privacy-relevant, so this defaults to off.
     pub transcript_stream_enabled: bool,
+    /// History store for persisting dictation history (raw + polished text).
+    /// Wrapped in Arc<Mutex<>> for thread-safe async inserts.
+    pub history_store: Option<Arc<super::history::HistoryStore>>,
 }
 
 #[derive(Debug, Clone)]
@@ -461,6 +464,7 @@ impl AlwaysConfig {
             // CLI/preference) without touching the merge logic.
             localization: Localization::ENGLISH,
             transcript_stream_enabled: resolve_transcript_stream(&prefs),
+            history_store: None, // Will be initialized after DB connection is available
         };
 
         Ok(config)
@@ -505,6 +509,7 @@ impl Default for AlwaysConfig {
             idle_pause_action: IdlePauseAction::default(),
             localization: Localization::ENGLISH,
             transcript_stream_enabled: false,
+            history_store: None,
         }
     }
 }
@@ -681,6 +686,27 @@ fn resolve_transcriber_backend(prefs: &Preferences) -> TranscriberBackendChoice 
         }
     }
     TranscriberBackendChoice::default()
+}
+
+/// Resolve the active postprocessing backend from the prefs DB, with env override.
+/// Order: `ALWAYS_POSTPROCESS_BACKEND` env var → DB pref → default Groq.
+/// An invalid stored value falls back to Groq with a warning rather
+/// than refusing to start the daemon.
+fn resolve_postprocess_backend(
+    prefs: &Preferences,
+) -> crate::postprocess_dispatch::PostprocessBackendChoice {
+    if let Ok(env_val) = std::env::var("ALWAYS_POSTPROCESS_BACKEND")
+        && let Ok(parsed) = env_val.parse()
+    {
+        return parsed;
+    }
+    if let Some(stored) = prefs.postprocess_backend.as_deref() {
+        match stored.parse() {
+            Ok(parsed) => return parsed,
+            Err(e) => tracing::warn!(stored, error = %e, "ignoring_invalid_postprocess_backend"),
+        }
+    }
+    crate::postprocess_dispatch::PostprocessBackendChoice::default()
 }
 
 /// Single source of truth for the silence-window range. The VAD trusts
