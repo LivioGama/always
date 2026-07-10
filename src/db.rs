@@ -58,6 +58,12 @@ pub struct Preferences {
     /// transcript looks mid-sentence, so brief thinking pauses don't
     /// split one thought into two pastes. Default on.
     pub stt_adaptive_silence: Option<bool>,
+    /// "My Voice" speaker-verification gate enabled flag.
+    #[cfg(feature = "kaldi-fbank-rust")]
+    pub speaker_gate_enabled: Option<bool>,
+    /// Minimum cosine similarity threshold for speaker verification.
+    #[cfg(feature = "kaldi-fbank-rust")]
+    pub speaker_gate_threshold: Option<f64>,
 }
 
 pub fn open() -> Result<Connection> {
@@ -252,6 +258,23 @@ fn migrate(conn: &Connection) -> Result<()> {
         .is_ok();
     if !has_stt_adaptive_silence {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN stt_adaptive_silence INTEGER;")?;
+    }
+
+    #[cfg(feature = "kaldi-fbank-rust")]
+    {
+        let has_speaker_gate_enabled = conn
+            .prepare("SELECT speaker_gate_enabled FROM preferences LIMIT 0")
+            .is_ok();
+        if !has_speaker_gate_enabled {
+            conn.execute_batch("ALTER TABLE preferences ADD COLUMN speaker_gate_enabled INTEGER;")?;
+        }
+
+        let has_speaker_gate_threshold = conn
+            .prepare("SELECT speaker_gate_threshold FROM preferences LIMIT 0")
+            .is_ok();
+        if !has_speaker_gate_threshold {
+            conn.execute_batch("ALTER TABLE preferences ADD COLUMN speaker_gate_threshold REAL;")?;
+        }
     }
 
     encode_plaintext_groq_key(conn)?;

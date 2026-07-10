@@ -419,6 +419,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     }
     // "My Voice" profile snapshot so the Settings tab renders correct
     // state on open without a request round-trip.
+    #[cfg(feature = "kaldi-fbank-rust")]
     {
         let (enrolled, enabled, steps) =
             crate::always::enrollment::profile_status(ctx.cfg.read().speaker_gate_enabled);
@@ -672,8 +673,11 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
             // reason to stop listening. Skip the auto-pause entirely
             // (and make sure no stale one lingers) — this is what lets
             // dictation keep working while movies/music play.
+            #[cfg(feature = "kaldi-fbank-rust")]
             let speaker_gate_active =
                 ctx.cfg.read().speaker_gate_enabled && crate::always::voiceprint::is_enrolled();
+            #[cfg(not(feature = "kaldi-fbank-rust"))]
+            let speaker_gate_active = false;
             if speaker_gate_active {
                 let (effective, changed) = pause::set_audio_output_paused(false);
                 if changed {
@@ -893,6 +897,7 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
         DaemonCommand::SetLanguage { lang } => {
             set_language(ctx, &lang);
         }
+        #[cfg(feature = "kaldi-fbank-rust")]
         DaemonCommand::StartVoiceEnrollment { step } => {
             match crate::always::voiceprint::EnrollStep::parse(&step) {
                 Some(parsed) => {
@@ -913,10 +918,12 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
                 }
             }
         }
+        #[cfg(feature = "kaldi-fbank-rust")]
         DaemonCommand::CancelVoiceEnrollment => {
             crate::always::enrollment::request_cancel();
             tracing::info!("uds_voice_enrollment_cancel_requested");
         }
+        #[cfg(feature = "kaldi-fbank-rust")]
         DaemonCommand::DeleteVoiceProfile => match crate::always::voiceprint::clear() {
             Ok(()) => {
                 let (enrolled, enabled, steps) =
@@ -926,6 +933,7 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
             }
             Err(e) => tracing::error!(error = %e, "uds_voice_profile_delete_failed"),
         },
+        #[cfg(feature = "kaldi-fbank-rust")]
         DaemonCommand::SetVoiceProfileEnabled { enabled } => {
             ctx.cfg.write().speaker_gate_enabled = enabled;
             // Persist for the next daemon start.
@@ -954,6 +962,7 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
             global_broadcaster().voice_profile_status(enrolled, enabled, steps);
             tracing::info!(enabled, "uds_set_voice_profile_enabled");
         }
+        #[cfg(feature = "kaldi-fbank-rust")]
         DaemonCommand::GetVoiceProfileStatus => {
             let (enrolled, enabled, steps) =
                 crate::always::enrollment::profile_status(ctx.cfg.read().speaker_gate_enabled);

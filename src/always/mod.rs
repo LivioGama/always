@@ -10,6 +10,7 @@ pub mod correction_queue;
 pub mod correction_request;
 pub mod daemon;
 pub mod dictation;
+#[cfg(feature = "kaldi-fbank-rust")]
 pub mod enrollment;
 pub mod event;
 pub mod event_loop;
@@ -32,6 +33,7 @@ pub mod pause;
 pub mod per_app;
 pub mod postprocess;
 pub mod snippets;
+#[cfg(feature = "kaldi-fbank-rust")]
 pub mod speaker_embed;
 pub mod speech_action;
 #[cfg(feature = "local-stt")]
@@ -43,6 +45,7 @@ pub mod uds_server;
 pub mod vad;
 pub mod vad_silero;
 pub mod vocab;
+#[cfg(feature = "kaldi-fbank-rust")]
 pub mod voiceprint;
 
 pub use config::AlwaysConfig;

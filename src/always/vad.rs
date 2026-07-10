@@ -108,12 +108,14 @@ pub enum RecordResult {
 /// pref is enabled AND a complete voiceprint is enrolled AND the
 /// embedding model loads — any missing piece silently degrades to
 /// the ungated default behavior.
+#[cfg(feature = "kaldi-fbank-rust")]
 struct SpeakerGate {
     embedder: std::sync::Arc<crate::always::speaker_embed::SpeakerEmbedder>,
     voiceprint: std::sync::Arc<crate::always::voiceprint::VoiceProfile>,
     threshold: f32,
 }
 
+#[cfg(feature = "kaldi-fbank-rust")]
 fn speaker_gate_ctx(cfg: &AlwaysConfig) -> Option<SpeakerGate> {
     if !cfg.speaker_gate_enabled {
         return None;
@@ -133,6 +135,7 @@ fn speaker_gate_ctx(cfg: &AlwaysConfig) -> Option<SpeakerGate> {
 /// Score `samples` against the enrolled voiceprint. `None` = could not
 /// verify (embedding failed) — callers fail OPEN so an engine hiccup
 /// never mutes the user.
+#[cfg(feature = "kaldi-fbank-rust")]
 fn speaker_gate_score(gate: &SpeakerGate, samples: &[i16]) -> Option<f32> {
     let started = std::time::Instant::now();
     match gate.embedder.embed(samples) {
@@ -156,6 +159,7 @@ fn speaker_gate_score(gate: &SpeakerGate, samples: &[i16]) -> Option<f32> {
 /// Voiced audio needed before the mid-recording (early) speaker check
 /// fires: 2 s of actual voice gives the embedding enough evidence
 /// while still cutting a movie scene off ~2 s in.
+#[cfg(feature = "kaldi-fbank-rust")]
 const SPEAKER_GATE_EARLY_SAMPLES: usize = 32_000;
 
 /// Speaker-aware end-of-utterance. Generic VAD keeps the utterance open
@@ -167,16 +171,19 @@ const SPEAKER_GATE_EARLY_SAMPLES: usize = 32_000;
 /// `SPEAKER_TAIL_FAIL_STREAK` consecutive mismatches the utterance is cut
 /// at the last matching boundary and finalized — so the end of dictation
 /// is defined by THE USER going quiet, not by the room going quiet.
+#[cfg(feature = "kaldi-fbank-rust")]
 const SPEAKER_TAIL_CHECK_EVERY_SAMPLES: usize = 8_000; // 0.5s of voice
 /// Trailing window scored by each tail check: 1.5s is enough voice for a
 /// stable embedding while keeping the cut ~1.5s behind the user's last
 /// word.
+#[cfg(feature = "kaldi-fbank-rust")]
 const SPEAKER_TAIL_WINDOW_SAMPLES: usize = 24_000;
 /// FLOOR on consecutive mismatching windows before the cut. The actual
 /// requirement scales with the user's configured `silence_secs` (see
 /// `speaker_tail_fail_checks` in the record loop) so the pause tolerance
 /// they chose applies to media-covered pauses too — a fixed 2-check
 /// (~1s) cut felt "immediate" against a 2.2s configured window.
+#[cfg(feature = "kaldi-fbank-rust")]
 const SPEAKER_TAIL_FAIL_STREAK: usize = 2;
 /// Tail windows are short and often carry media bleed UNDER the user's
 /// live voice, so they score far noisier than full utterances — a mixed
@@ -185,6 +192,7 @@ const SPEAKER_TAIL_FAIL_STREAK: usize = 2;
 /// with a video playing). Judge tails against a heavily relaxed
 /// fraction: 0.6 × the default 0.50 = 0.30, still ~6× the measured
 /// media-only tail score (~0.05 through real speakers).
+#[cfg(feature = "kaldi-fbank-rust")]
 const SPEAKER_TAIL_THRESHOLD_FACTOR: f32 = 0.6;
 
 pub fn record_utterance(
@@ -512,7 +520,10 @@ fn record_with_local_vad(
     // kickoff, else at final). A failing check returns DroppedSpeaker
     // immediately, so `speaker_checked == true` below always means
     // "checked and passed (or unverifiable → fail-open)".
+    #[cfg(feature = "kaldi-fbank-rust")]
     let speaker_gate = speaker_gate_ctx(cfg);
+    #[cfg(not(feature = "kaldi-fbank-rust"))]
+    let speaker_gate: Option<()> = None;
     let mut speaker_checked = false;
     // Actual voiced audio accumulated (excludes pre-buffer and the
     // trailing-silence frames that also land in `speech_samples`) —
@@ -525,17 +536,25 @@ fn record_with_local_vad(
     // never light it up); after verification it watches the trailing
     // window so the utterance ends when the USER stops talking, not
     // when the room goes quiet.
+    #[cfg(feature = "kaldi-fbank-rust")]
     let mut next_speaker_check = SPEAKER_TAIL_CHECK_EVERY_SAMPLES;
+    #[cfg(feature = "kaldi-fbank-rust")]
     let mut tail_fail_streak = 0usize;
     // The cut requires the user's voice to be absent from the trailing
     // windows for the user's own configured pause tolerance — one check
     // per 0.5s of voiced audio, so silence_secs = 2.2 → 5 checks.
+    #[cfg(feature = "kaldi-fbank-rust")]
     let speaker_tail_fail_checks =
         (((cfg.silence_secs * 16_000.0) / SPEAKER_TAIL_CHECK_EVERY_SAMPLES as f64).ceil() as usize)
             .max(SPEAKER_TAIL_FAIL_STREAK);
+    #[cfg(not(feature = "kaldi-fbank-rust"))]
+    let speaker_tail_fail_checks = 0usize;
     // Live-buffer length at the last window that matched the user — a
     // tail cut truncates here so foreign trailing audio (movie line
     // after the user's last word) is never sent to STT.
+    #[cfg(feature = "kaldi-fbank-rust")]
+    let mut confirmed_user_len = 0usize;
+    #[cfg(not(feature = "kaldi-fbank-rust"))]
     let mut confirmed_user_len = 0usize;
 
     loop {
@@ -545,6 +564,7 @@ fn record_with_local_vad(
         // 30s pre-voice timeout. Anything already buffered is discarded
         // (the user just clicked "record my voice"; they are not mid-
         // dictation).
+        #[cfg(feature = "kaldi-fbank-rust")]
         if crate::always::enrollment::is_pending() {
             event::global_broadcaster().voice_activity_ended();
             flip_to_listening!();
@@ -827,6 +847,7 @@ fn record_with_local_vad(
                 // a mismatch streak is the real end-of-dictation signal:
                 // the user stopped, something else holds the mic. Cut at
                 // the last matching boundary and finalize what they said.
+                #[cfg(feature = "kaldi-fbank-rust")]
                 if let Some(gate) = &speaker_gate
                     && voiced_samples >= next_speaker_check
                 {
@@ -934,7 +955,10 @@ fn record_with_local_vad(
                     // The tail monitor's boundary points into the drained
                     // buffer — rebase to the fresh (empty) one.
                     confirmed_user_len = 0;
-                    tail_fail_streak = 0;
+                    #[cfg(feature = "kaldi-fbank-rust")]
+                    {
+                        tail_fail_streak = 0;
+                    }
                 }
             }
         } else if in_speech {
@@ -997,13 +1021,17 @@ fn record_with_local_vad(
                 // The tail monitor's boundary points into the drained
                 // buffer — rebase to the fresh (empty) one.
                 confirmed_user_len = 0;
-                tail_fail_streak = 0;
+                #[cfg(feature = "kaldi-fbank-rust")]
+                {
+                    tail_fail_streak = 0;
+                }
             }
 
             // "My Voice": verify the speaker BEFORE any speculative STT
             // can leak a stranger's words into the overlay preview.
             // Short utterances (< 1s of voice) can't be verified yet —
             // they skip speculation and get re-checked at final.
+            #[cfg(feature = "kaldi-fbank-rust")]
             if voice_logged
                 && voiced_since_flush
                 && !speculation_pending
@@ -1030,7 +1058,10 @@ fn record_with_local_vad(
                 confirmed_user_len = speech_samples.len();
                 tail_fail_streak = 0;
             }
+            #[cfg(feature = "kaldi-fbank-rust")]
             let speculation_speaker_ok = speaker_gate.is_none() || speaker_checked;
+            #[cfg(not(feature = "kaldi-fbank-rust"))]
+            let speculation_speaker_ok = true;
 
             // At tentative silence, kick off speculative transcription in the
             // background so the result is ready (or nearly so) by the time we
@@ -1278,6 +1309,7 @@ fn record_with_local_vad(
     // "Okay." landing in the user's editor breaks the entire promise
     // of the gate. (Observed live: a movie-voice tail transcribed as
     // "Okay." and pasted under the old fail-open rule.)
+    #[cfg(feature = "kaldi-fbank-rust")]
     if let Some(gate) = &speaker_gate
         && !speaker_checked
     {
@@ -1298,7 +1330,7 @@ fn record_with_local_vad(
             tracing::info!(voiced_samples, "speaker_gate_dropped_unverifiable_short");
             event::global_broadcaster().voice_activity_ended();
             flip_to_listening!();
-            return Ok(RecordResult::DroppedSpeaker { score: -1.0 });
+            return Ok(RecordResult::Silence);
         }
     }
 

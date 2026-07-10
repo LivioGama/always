@@ -54,7 +54,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "humantime",
- "kaldi-fbank-rust-kautism",
+ "kaldi-fbank-rust",
  "keyring",
  "libc",
  "llama-cpp-2",
@@ -1907,10 +1907,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "kaldi-fbank-rust-kautism"
+name = "kaldi-fbank-rust"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5da613668cc7a27adc681dc17a59d4b1c52be1dbf526fd3d8b6150d8e6f267f1"
+source = "git+https://github.com/darkautism/kaldi-fbank-rust#b9e9da84c856af4737555478f31a512f9dcddbf1"
 dependencies = [
  "cc",
 ]

@@ -210,6 +210,7 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         // invariant), and deliberately before the pause checks —
         // recording a voiceprint from Settings must work even while
         // dictation is paused (that's exactly when users set it up).
+        #[cfg(feature = "kaldi-fbank-rust")]
         if let Some(step) = crate::always::enrollment::take_pending() {
             let cfg_snapshot = active_cfg.read().clone();
             if let Err(e) = crate::always::enrollment::run_enrollment(&cfg_snapshot, step) {

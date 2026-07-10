@@ -22,7 +22,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use kaldi_fbank_rust_kautism::{FbankOptions, OnlineFbank};
+use kaldi_fbank_rust::{FbankOptions, OnlineFbank};
 use ort::session::{Session, builder::GraphOptimizationLevel};
 use ort::value::Value;
 use parking_lot::Mutex;

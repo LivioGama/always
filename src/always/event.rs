@@ -185,6 +185,42 @@ pub enum DaemonEvent {
         elapsed_secs: u32,
         cap_secs: u32,
     },
+    /// "My Voice" speaker verification profile status snapshot.
+    /// Emitted on connection and after any enrollment/deletion/enable/disable.
+    #[cfg(feature = "kaldi-fbank-rust")]
+    VoiceProfileStatus {
+        enrolled: bool,
+        enabled: bool,
+        steps: Vec<String>,
+    },
+    /// Voice enrollment recording started for a specific step.
+    #[cfg(feature = "kaldi-fbank-rust")]
+    VoiceEnrollmentStarted {
+        step: String,
+    },
+    /// Voice enrollment sample captured (progress update).
+    #[cfg(feature = "kaldi-fbank-rust")]
+    VoiceEnrollmentSampleCaptured {
+        step: String,
+    },
+    /// Voice enrollment level update (energy + progress).
+    #[cfg(feature = "kaldi-fbank-rust")]
+    VoiceEnrollmentLevel {
+        energy: f64,
+        voiced_ms: u32,
+        target_voiced_ms: u32,
+    },
+    /// Voice enrollment failed with an error.
+    #[cfg(feature = "kaldi-fbank-rust")]
+    VoiceEnrollmentFailed {
+        step: String,
+        error: String,
+    },
+    /// Voice enrollment completed successfully for a step.
+    #[cfg(feature = "kaldi-fbank-rust")]
+    VoiceEnrollmentCompleted {
+        step: String,
+    },
     /// A watchdog pause source flipped. `source` is `"mic_conflict"` or
     /// `"audio_output"`; `detail` names the offending app when known
     /// ("Zoom"). Lets the UI say WHY it's paused instead of a generic
@@ -504,6 +540,25 @@ pub enum DaemonCommand {
         history_id: i64,
         style: String,
     },
+    /// Start voice enrollment for a specific step ("normal", "lower", "louder").
+    #[cfg(feature = "kaldi-fbank-rust")]
+    StartVoiceEnrollment {
+        step: String,
+    },
+    /// Cancel the active voice enrollment recording.
+    #[cfg(feature = "kaldi-fbank-rust")]
+    CancelVoiceEnrollment,
+    /// Delete the enrolled voice profile (clears all steps).
+    #[cfg(feature = "kaldi-fbank-rust")]
+    DeleteVoiceProfile,
+    /// Enable or disable the "My Voice" speaker verification gate.
+    #[cfg(feature = "kaldi-fbank-rust")]
+    SetVoiceProfileEnabled {
+        enabled: bool,
+    },
+    /// Request the current voice profile status snapshot.
+    #[cfg(feature = "kaldi-fbank-rust")]
+    GetVoiceProfileStatus,
 }
 
 impl DaemonCommand {
@@ -800,6 +855,53 @@ impl EventBroadcaster {
     pub fn correction_dialog_requested(&self, last_transcript: impl Into<String>) {
         self.send(DaemonEvent::CorrectionDialogRequested {
             last_transcript: last_transcript.into(),
+        });
+    }
+
+    #[cfg(feature = "kaldi-fbank-rust")]
+    pub fn voice_profile_status(&self, enrolled: bool, enabled: bool, steps: Vec<String>) {
+        self.send(DaemonEvent::VoiceProfileStatus {
+            enrolled,
+            enabled,
+            steps,
+        });
+    }
+
+    #[cfg(feature = "kaldi-fbank-rust")]
+    pub fn voice_enrollment_started(&self, step: &str) {
+        self.send(DaemonEvent::VoiceEnrollmentStarted {
+            step: step.to_string(),
+        });
+    }
+
+    #[cfg(feature = "kaldi-fbank-rust")]
+    pub fn voice_enrollment_sample_captured(&self, step: &str) {
+        self.send(DaemonEvent::VoiceEnrollmentSampleCaptured {
+            step: step.to_string(),
+        });
+    }
+
+    #[cfg(feature = "kaldi-fbank-rust")]
+    pub fn voice_enrollment_level(&self, energy: f64, voiced_ms: u32, target_voiced_ms: u32) {
+        self.send(DaemonEvent::VoiceEnrollmentLevel {
+            energy,
+            voiced_ms,
+            target_voiced_ms,
+        });
+    }
+
+    #[cfg(feature = "kaldi-fbank-rust")]
+    pub fn voice_enrollment_failed(&self, step: &str, error: String) {
+        self.send(DaemonEvent::VoiceEnrollmentFailed {
+            step: step.to_string(),
+            error,
+        });
+    }
+
+    #[cfg(feature = "kaldi-fbank-rust")]
+    pub fn voice_enrollment_completed(&self, step: &str) {
+        self.send(DaemonEvent::VoiceEnrollmentCompleted {
+            step: step.to_string(),
         });
     }
 }
