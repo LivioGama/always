@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.always.v3</string>
+    <key>CFBundleName</key>
+    <string>Always</string>
+    <key>CFBundleDisplayName</key>
+    <string>Always</string>
+    <key>CFBundleExecutable</key>
+    <string>Always</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleIconFile</key>
+    <string>AlwaysIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleVersion</key>
+    <string>0.0.1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.0.1</string>
+    <key>LSUIElement</key>
+    <false/>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.always.url</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>always</string>
+            </array>
+        </dict>
+    </array>
+    <!-- Keep the GUI alive while the voice daemon runs in the background. -->
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+    <key>NSSupportsSuddenTermination</key>
+    <false/>
+    <key>NSAccessibilityUsageDescription</key>
+    <string>Always needs accessibility access to position the voice indicator near your active text cursor.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Always needs accessibility access to position the voice indicator near your active text field.</string>
+    <!-- Required for mic TCC; bundled always-daemon inherits Always.app attribution. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Always needs microphone access to detect when you speak and transcribe your voice into text.</string>
+    <!-- Sparkle: appcast from release.yml; rotate EdDSA keys per docs/RELEASE.md. -->
+    <key>SUFeedURL</key>
+    <string>https://github.com/rtk-ai/always/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>8KumjXPlWc/w8FhOTjoFHEol/wmueg+tbRUzhJvVpMk=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+</dict>
+</plist>

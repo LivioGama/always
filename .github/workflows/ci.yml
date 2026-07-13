@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: macos-14
+    env:
+      # kaldi-fbank-rust-kautism bundles C++14 code; newer runners otherwise
+      # invoke Clang with its legacy default and reject `>>`, `{}`, and make_unique.
+      CXXFLAGS: -std=c++14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked --all-targets
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage (lcov)
+        run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+          flags: rust
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Install cargo-audit / deny / machete
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny,cargo-machete
+
+      - name: Security audit
+        run: >
+          cargo audit --deny warnings
+          --ignore RUSTSEC-2024-0384
+          --ignore RUSTSEC-2024-0388
+
+      - name: Supply-chain (cargo-deny)
+        run: cargo deny --all-features check
+
+      - name: Unused deps (cargo-machete)
+        run: cargo machete
+
+  linux-build:
+    name: Linux build (CLI-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install ALSA + SQLite headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libsqlite3-dev pkg-config
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-linux-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build with --features linux
+        run: cargo build --no-default-features --features linux --locked
+
+      - name: Run audio-free unit tests
+        # Skip tests that touch macOS-only paths.
+        run: cargo test --no-default-features --features linux --locked --lib --bins -- --skip macos
+
+  swift:
+    name: Swift
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Swift build
+        uses: actions/cache@v4
+        with:
+          path: |
+            Always/.build
+            ~/Library/Caches/org.swift.swiftpm
+          key: ${{ runner.os }}-swiftpm-${{ hashFiles('Always/Package.swift', 'Always/Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-swiftpm-
+
+      - name: Build Swift app
+        run: |
+          cd Always
+          swift build
+
+      - name: Swift tests
+        run: |
+          cd Always
+          swift test

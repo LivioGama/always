@@ -1,59 +1,174 @@
-use std::fs::File;
-use std::io::Write as _;
-use std::path::Path;
-
-use anyhow::Result;
-
-use crate::always::AlwaysConfig;
+use crate::always::telemetry::should_log_transcripts;
+use crate::always::{AlwaysConfig, filter::FilterReason};
 
 pub enum Event<'a> {
-    Start { cfg: &'a AlwaysConfig },
+    Start {
+        cfg: &'a AlwaysConfig,
+    },
+    Stop,
     VoiceDetected,
-    Pasting { raw: &'a str, processed: &'a str, energy: f64 },
-    Filtered { text: &'a str, energy: f64 },
+    Transcribed {
+        text: &'a str,
+        energy: f64,
+    },
+    Pasting {
+        raw: &'a str,
+        processed: &'a str,
+        energy: f64,
+    },
+    Filtered {
+        text: &'a str,
+        energy: f64,
+        reason: FilterReason,
+    },
     Silence,
     Timeout,
-    DroppedLowEnergy { energy: f64 },
-    DroppedNoise { raw: &'a str },
+    DroppedLowEnergy {
+        energy: f64,
+    },
+    DroppedNoise {
+        raw: &'a str,
+    },
+    /// "My Voice" gate rejected the utterance — the speaker's
+    /// embedding scored below the enrolled-voiceprint threshold.
+    DroppedSpeaker {
+        score: f64,
+    },
+    PauseToggled {
+        paused: bool,
+    },
+    AutoEnterToggled {
+        enabled: bool,
+    },
+    ForcePastedFiltered {
+        text: &'a str,
+    },
+    MicrophoneAutoPaused {
+        apps: &'a str,
+    },
+    MicrophoneAutoResumed,
+    Error {
+        message: &'a str,
+    },
 }
 
-pub struct Logger {
-    file: File,
-}
+/// Logger now uses tracing infrastructure instead of file I/O
+/// The Event enum is kept for API compatibility but emission is handled via tracing
+pub struct Logger;
 
 impl Logger {
-    pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        Ok(Self { file })
+    /// Create a new logger (no-op with tracing, kept for API compatibility)
+    pub fn open(_path: &std::path::Path) -> anyhow::Result<Self> {
+        // With tracing, log file management is handled by the telemetry module
+        Ok(Self)
     }
 
+    /// Emit an event using structured tracing
     pub fn write(&mut self, event: Event<'_>) {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        let message = match event {
-            Event::Start { cfg } => format!(
-                "START threshold:{} silence:{}s filter:{}",
-                cfg.energy_threshold, cfg.silence_secs, cfg.filter_enabled
-            ),
-            Event::VoiceDetected => "VOICE DETECTED".to_string(),
-            Event::Pasting { raw, processed, energy } => {
-                format!("TRANSCRIPT {raw} (energy: {energy:.4})\n[{ts}] PASTING    {processed}")
+        match event {
+            Event::Start { cfg } => {
+                tracing::info!(
+                    energy_threshold = cfg.energy_threshold,
+                    silence_secs = cfg.silence_secs,
+                    filter_enabled = cfg.filter_enabled,
+                    auto_enter = cfg.auto_enter,
+                    "daemon_started"
+                );
             }
-            Event::Filtered { text, energy } => {
-                format!("FILTERED  {text} (energy: {energy:.4})")
+            Event::Stop => {
+                tracing::info!("daemon_stopped");
             }
-            Event::Silence => "SILENCE".to_string(),
-            Event::Timeout => "TIMEOUT".to_string(),
+            Event::VoiceDetected => {
+                tracing::info!("voice_detected");
+            }
+            Event::Transcribed { text, energy } => {
+                let log_transcripts = should_log_transcripts();
+                tracing::info!(
+                    chars = text.len(),
+                    energy,
+                    text = if log_transcripts { Some(text) } else { None },
+                    "transcription_received"
+                );
+            }
+            Event::Pasting {
+                raw,
+                processed,
+                energy,
+            } => {
+                let log_transcripts = should_log_transcripts();
+                tracing::info!(
+                    chars = raw.len(),
+                    energy,
+                    processed_chars = processed.len(),
+                    raw_text = if log_transcripts { Some(raw) } else { None },
+                    processed_text = if log_transcripts {
+                        Some(processed)
+                    } else {
+                        None
+                    },
+                    "transcription_pasted"
+                );
+            }
+            Event::Filtered {
+                text,
+                energy,
+                reason,
+            } => {
+                let log_transcripts = should_log_transcripts();
+                tracing::info!(
+                    chars = text.len(),
+                    energy,
+                    reason = reason.to_log_string(),
+                    text = if log_transcripts { Some(text) } else { None },
+                    "transcription_filtered"
+                );
+            }
+            Event::Silence => {
+                tracing::debug!("silence_detected");
+            }
+            Event::Timeout => {
+                tracing::debug!("recording_timeout");
+            }
             Event::DroppedLowEnergy { energy } => {
-                format!("DROPPED   (low energy: {energy:.4})")
+                tracing::debug!(energy, "dropped_low_energy");
             }
-            Event::DroppedNoise { raw } => format!("DROPPED   (noise) {raw:?}"),
-        };
-        let _ = writeln!(self.file, "[{ts}] {message}");
+            Event::DroppedNoise { raw } => {
+                let log_transcripts = should_log_transcripts();
+                tracing::debug!(
+                    chars = raw.len(),
+                    text = if log_transcripts { Some(raw) } else { None },
+                    "dropped_noise"
+                );
+            }
+            Event::DroppedSpeaker { score } => {
+                // Info, not debug: this is the user-visible effect of the
+                // My Voice gate, and threshold calibration needs the
+                // scores in default logs.
+                tracing::info!(score, "dropped_not_enrolled_speaker");
+            }
+            Event::PauseToggled { paused } => {
+                tracing::info!(paused, "pause_toggled");
+            }
+            Event::AutoEnterToggled { enabled } => {
+                tracing::info!(enabled, "auto_enter_toggled");
+            }
+            Event::ForcePastedFiltered { text } => {
+                let log_transcripts = should_log_transcripts();
+                tracing::info!(
+                    chars = text.len(),
+                    text = if log_transcripts { Some(text) } else { None },
+                    "force_pasted_filtered"
+                );
+            }
+            Event::MicrophoneAutoPaused { apps } => {
+                tracing::info!(apps, "microphone_auto_paused");
+            }
+            Event::MicrophoneAutoResumed => {
+                tracing::info!("microphone_auto_resumed");
+            }
+            Event::Error { message } => {
+                tracing::error!(message, "daemon_error");
+            }
+        }
     }
 }
