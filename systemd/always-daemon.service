@@ -1,0 +1,23 @@
+[Unit]
+Description=Always Voice-to-Text Daemon
+After=network.target sound.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/always run
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Audio access
+DeviceAllow=/dev/snd rw
+
+[Install]
+WantedBy=default.target
