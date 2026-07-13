@@ -14,3 +14,13 @@ build/
 *.log
 *.jsonl
 glossary.json
+.gitnexus
+Always/.build/
+Always/.swiftpm/
+.filtering_evolution_history.md
+Always.app/
+Always/Always.app/
+
+# JetBrains IDE config
+.idea/
+

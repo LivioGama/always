@@ -1,3 +1,16 @@
+# Linux daemon-only deployment.
+#
+# Notes:
+#   * Audio capture requires the host's `/dev/snd` device — that is the
+#     ONLY mount the container needs.
+#   * GUI overlay + global keyboard shortcuts are macOS-only; the Linux
+#     image runs CLI-only. Toggle pause / auto-enter via:
+#         docker exec always-voice-daemon always toggle pause
+#   * `privileged: true` was previously set for X11; no longer needed
+#     and removed to reduce blast radius.
+#
+# Configure GROQ_API_KEY in `.env` next to this file.
+
 services:
   always:
     build:
@@ -7,16 +20,17 @@ services:
     restart: unless-stopped
     environment:
       - RUST_LOG=info
-      - ALWAYS_CONFIG_DIR=/app/data
+      - ALWAYS_CONFIG_DIR=/home/always/.config/always
       - GROQ_API_KEY=${GROQ_API_KEY}
-      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
-    volumes:
-      - always_data:/app/data
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw
-    network_mode: host
+    # Audio device only — no X11, no privileged mode.
     devices:
       - /dev/snd:/dev/snd
-    privileged: true
+    volumes:
+      - always_config:/home/always/.config/always
+      - always_cache:/home/always/.cache/always
+    # `host` networking keeps the UDS socket reachable from a host-side
+    # CLI. Drop to `bridge` if you only run the daemon in-container.
+    network_mode: host
     command: ["always", "run"]
     healthcheck:
       test: ["CMD", "always", "status"]
@@ -26,5 +40,7 @@ services:
       start_period: 10s
 
 volumes:
-  always_data:
+  always_config:
+    driver: local
+  always_cache:
     driver: local
