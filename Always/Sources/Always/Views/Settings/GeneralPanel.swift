@@ -4,6 +4,7 @@ import AppKit
 struct GeneralPanel: View {
     @ObservedObject var stateMonitor: StateMonitor
     @ObservedObject var focusedApp: FocusedAppMonitor
+    @Binding var config: Config
     @AppStorage(OverlayDisplayMode.defaultsKey)
     private var overlayDisplayMode = OverlayDisplayMode.normal.rawValue
 
@@ -11,12 +12,46 @@ struct GeneralPanel: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 PermissionsBanner()
+                soundCuesSection
+                Divider()
                 overlaySection
                 Divider()
                 allowlistSection
             }
             .padding(20)
         }
+    }
+
+    private var soundCuesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: config.audibleStatusSound == "off" ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.title3)
+                    .foregroundColor(config.audibleStatusSound == "off" ? .secondary : .accentColor)
+                    .frame(width: 24)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Sound")
+                        .font(.headline)
+                    Text("Play distinct sounds for listening, transcribing, success, and failure.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                Picker("", selection: $config.audibleStatusSound) {
+                    Text("Off").tag("off")
+                    Text("Low").tag("low")
+                    Text("Medium").tag("medium")
+                    Text("High").tag("high")
+                }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 260)
+            }
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.08))
+        .cornerRadius(6)
     }
 
     private var overlaySection: some View {

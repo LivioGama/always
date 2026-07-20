@@ -984,8 +984,8 @@ class StatusOverlayController {
     /// Show the overlay briefly then auto-hide. Used for transient
     /// notifications like Pause/Resume or Auto-Enter on/off toggles.
     /// Always lasts the full `duration` regardless of voice activity.
-    func flash(state: OverlayState, duration: TimeInterval = 1.5) {
-        guard OverlayDisplayMode.current != .hidden else {
+    func flash(state: OverlayState, duration: TimeInterval = 1.5, forceVisible: Bool = false) {
+        guard forceVisible || OverlayDisplayMode.current != .hidden else {
             window?.hide()
             return
         }

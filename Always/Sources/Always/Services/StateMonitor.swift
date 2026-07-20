@@ -269,6 +269,7 @@ class StateMonitor: ObservableObject {
             let cooldown_ms: UInt32
             let silero_threshold: Float
             let adaptive_silence: Bool
+            let audible_status_sound: String
         }
         let payload = Payload(
             auto_enter_delay_ms: UInt32(max(0, config.autoEnterDelayMs)),
@@ -276,7 +277,8 @@ class StateMonitor: ObservableObject {
             silence_secs: config.sttSilence,
             cooldown_ms: UInt32(max(0, config.sttCooldownMs)),
             silero_threshold: config.sileroThreshold,
-            adaptive_silence: config.sttAdaptiveSilence
+            adaptive_silence: config.sttAdaptiveSilence,
+            audible_status_sound: config.audibleStatusSound
         )
         udsClient.sendCommandWithData("ApplyRuntimePreferences", payload)
     }
@@ -541,7 +543,11 @@ class StateMonitor: ObservableObject {
             cancelVoiceLease()
             cancelTranscribingLease()
             let message = event.data?["message"] ?? "Transcription failed"
-            StatusOverlayController.shared.flash(state: .transcriptionFailed(message: message), duration: 3.0)
+            StatusOverlayController.shared.flash(
+                state: .transcriptionFailed(message: message),
+                duration: 3.0,
+                forceVisible: true
+            )
         case .sttFallbackEngaged:
             // Groq is unreachable — the daemon degraded to a local model.
             // One-shot notice per daemon run: dictation keeps working,

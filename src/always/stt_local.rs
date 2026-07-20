@@ -16,7 +16,25 @@
 //! transcribe-rs accepts samples directly.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+/// Warmup / keep-alive audio: 0.5s of silence @16kHz. Running one throwaway
+/// inference forces the ONNX graph + Apple-Neural-Engine execution provider to
+/// compile/warm so the user's next REAL utterance doesn't pay a multi-second
+/// cold-start (measured: 5087ms on the first utterance after a restart / long
+/// idle vs ~300ms warm).
+const WARMUP_SAMPLES: usize = 8_000;
+/// Master switch for the background keep-alive thread. Disabled: re-warming
+/// grew the ONNX arena and latency climbed over a session. The boot warmup is
+/// kept; frequent dictation keeps the model hot without a background warmer.
+const KEEPALIVE_ENABLED: bool = false;
+/// Keep the model warm this long after the last real utterance, then let it go
+/// cold (the user has walked away — no point burning the ANE). While active,
+/// a background thread re-warms on `KEEPALIVE_EVERY`.
+const KEEPALIVE_ACTIVE_WINDOW_SECS: u64 = 600;
+/// How often the keep-alive thread re-warms while within the active window.
+const KEEPALIVE_EVERY_SECS: u64 = 20;
 
 use anyhow::{Context, Result};
 use transcribe_rs::{
@@ -58,12 +76,16 @@ enum LoadedEngine {
 /// `Mutex` — only one utterance at a time is in flight in the daemon
 /// today, so contention is zero in practice.
 pub struct LocalTranscriber {
-    engine: Mutex<LoadedEngine>,
+    engine: Arc<Mutex<LoadedEngine>>,
     /// Optional ISO 639-1 language hint passed to multi-lingual engines.
     /// `None` means "auto" — let the engine auto-detect (Whisper /
     /// SenseVoice) or, for engines that bake the language into the decode
     /// prompt (Canary / Cohere), fall back to the engine's own default.
     language: Option<String>,
+    /// Wall-clock of the last REAL transcription. The keep-alive thread uses
+    /// it to decide whether the user is still actively dictating (re-warm) or
+    /// has walked away (let the model go cold).
+    last_used: Arc<Mutex<Instant>>,
 }
 
 impl LocalTranscriber {
@@ -71,13 +93,74 @@ impl LocalTranscriber {
     /// `models_dir.join(model.filename)` — file for Whisper engines,
     /// directory for ONNX engines.
     pub fn load(engine_type: EngineType, path: &Path, language: Option<String>) -> Result<Self> {
-        let engine = build_engine(engine_type, path)
+        let mut engine = build_engine(engine_type, path)
             .with_context(|| format!("loading {engine_type:?} model from {}", path.display()))?;
+
+        // Warm the freshly-loaded model NOW so the first real utterance is fast.
+        let started = Instant::now();
+        match run_engine(&mut engine, &vec![0.0f32; WARMUP_SAMPLES], language.clone()) {
+            Ok(_) => tracing::info!(
+                warm_ms = started.elapsed().as_millis() as u64,
+                "local_stt_warmup_done"
+            ),
+            Err(e) => tracing::warn!(error = %e, "local_stt_warmup_failed"),
+        }
+
+        let engine = Arc::new(Mutex::new(engine));
+        let last_used = Arc::new(Mutex::new(Instant::now()));
+        // Keep-alive DISABLED: repeatedly warming grew the ONNX arena per
+        // inference, so latency climbed over a session (703ms → 4400ms). The
+        // one-shot boot warmup above already compiles the graph, and frequent
+        // real dictation keeps the model hot on its own; only a multi-minute
+        // idle risks a cold-ish first utterance, which is far better than a
+        // progressive slowdown during active use.
+        if KEEPALIVE_ENABLED {
+            spawn_keepalive(
+                Arc::clone(&engine),
+                Arc::clone(&last_used),
+                language.clone(),
+            );
+        }
+
         Ok(Self {
-            engine: Mutex::new(engine),
+            engine,
             language,
+            last_used,
         })
     }
+}
+
+/// Background thread that keeps the ANE/ONNX graph warm between utterances
+/// while the user is actively dictating, so intermittent speech (pause to
+/// think, glance away, come back) doesn't hit a cold-start on every resume.
+/// Uses `try_lock` so it NEVER blocks a real transcription, and stops warming
+/// once the user has been idle past the active window (they walked away).
+fn spawn_keepalive(
+    engine: Arc<Mutex<LoadedEngine>>,
+    last_used: Arc<Mutex<Instant>>,
+    language: Option<String>,
+) {
+    std::thread::Builder::new()
+        .name("stt-keepalive".into())
+        .spawn(move || {
+            let warm = vec![0.0f32; WARMUP_SAMPLES];
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(KEEPALIVE_EVERY_SECS));
+                let idle = last_used
+                    .lock()
+                    .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(u64::MAX);
+                if idle > KEEPALIVE_ACTIVE_WINDOW_SECS {
+                    continue; // user walked away — let it go cold, save the ANE
+                }
+                // try_lock: skip silently if a real transcription holds the
+                // engine — the keep-alive must never add contention.
+                if let Ok(mut guard) = engine.try_lock() {
+                    let _ = run_engine(&mut guard, &warm, language.clone());
+                }
+            }
+        })
+        .ok();
 }
 
 fn build_engine(engine_type: EngineType, path: &Path) -> Result<LoadedEngine> {
@@ -145,6 +228,12 @@ impl Transcriber for LocalTranscriber {
         // header understates its data chunk can't push the engine past the
         // duration ceiling.
         samples.truncate(MAX_LOCAL_STT_SECS * 16_000);
+
+        // Mark activity so the keep-alive thread keeps the model warm for the
+        // user's next utterance instead of letting it go cold between phrases.
+        if let Ok(mut t) = self.last_used.lock() {
+            *t = Instant::now();
+        }
 
         let mut engine = self
             .engine

@@ -32,6 +32,10 @@ const FINALIZE_POLL_MS: u64 = 10;
 /// Heartbeat cadence for the GUI's transcribing lease during finalize.
 const HEARTBEAT_SECS: u64 = 2;
 
+#[cfg(test)]
+static TEST_PAUSE_AFTER_RAW_PUBLISH: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>> =
+    std::sync::Mutex::new(None);
+
 /// One committed chunk. `audio` is retained until the transcription
 /// succeeds so a failed chunk can be retried / spilled, never dropped.
 struct ChunkSlot {
@@ -122,13 +126,27 @@ impl ChunkAccumulator {
 
             match outcome {
                 Ok(result) => {
-                    // Success: the audio has served its purpose.
-                    *slot.audio.lock() = None;
                     let raw = result.text.trim().to_string();
                     if !raw.is_empty() {
                         // Rolling preview on the overlay while the user
                         // keeps talking.
                         event::global_broadcaster().transcript_chunk(raw.clone());
+                    }
+                    // Publish raw text immediately. Per-chunk grammar can
+                    // take longer than the user keeps speaking; waiting for
+                    // it before setting `result` made finalize time out and
+                    // paste `[audio saved: chunk N]` even though Whisper had
+                    // already returned usable text.
+                    *slot.result.lock() = Some(Ok(ChunkText {
+                        raw: raw.clone(),
+                        corrected: None,
+                    }));
+                    // Success: the audio has served its purpose. Drop it only
+                    // after a usable raw result is visible to finalize.
+                    *slot.audio.lock() = None;
+                    #[cfg(test)]
+                    if let Some(rx) = TEST_PAUSE_AFTER_RAW_PUBLISH.lock().unwrap().take() {
+                        let _ = rx.recv_timeout(Duration::from_secs(2));
                     }
                     // Per-chunk grammar correction, paid for during the
                     // recording instead of at finalize. Best-effort: any
@@ -148,7 +166,12 @@ impl ChunkAccumulator {
                         corrected = corrected.is_some(),
                         "chunk_transcribed"
                     );
-                    *slot.result.lock() = Some(Ok(ChunkText { raw, corrected }));
+                    if let Some(corrected) = corrected {
+                        let mut result = slot.result.lock();
+                        if let Some(Ok(text)) = result.as_mut() {
+                            text.corrected = Some(corrected);
+                        }
+                    }
                 }
                 Err(err) => {
                     tracing::error!(chunk = index, error = %err, "chunk_transcription_failed");
@@ -362,6 +385,25 @@ mod tests {
         acc.flush(vec![0i16; 16_000], &t, None, rt.handle());
         let joined = acc.finalize(&t);
         assert_eq!(joined.text, "recovered text");
+        assert_eq!(joined.failed_chunks, 0);
+    }
+
+    #[test]
+    fn raw_chunk_is_available_before_postprocess_finishes() {
+        let rt = rt();
+        let t = mock(vec!["raw text ready"], vec![]);
+        let mut acc = ChunkAccumulator::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        *TEST_PAUSE_AFTER_RAW_PUBLISH.lock().unwrap() = Some(rx);
+
+        acc.flush(vec![0i16; 16_000], &t, None, rt.handle());
+
+        let started = Instant::now();
+        let joined = acc.finalize(&t);
+        let _ = tx.send(());
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(joined.text, "raw text ready");
         assert_eq!(joined.failed_chunks, 0);
     }
 

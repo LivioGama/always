@@ -71,7 +71,8 @@ final class AlwaysTests: XCTestCase {
             "shortcutCorrectionDialog": "ctrl+alt+w",
             "postprocessEnabled": true,
             "idlePauseSecs": 600,
-            "idlePauseAction": "pause"
+            "idlePauseAction": "pause",
+            "audibleStatusSound": "off"
         }
         """
         let data = json.data(using: .utf8)!
@@ -86,6 +87,7 @@ final class AlwaysTests: XCTestCase {
         XCTAssertEqual(config.sileroThreshold, 0.5)
         XCTAssertEqual(config.shortcutPause, "ctrl+alt+p")
         XCTAssertEqual(config.idlePauseSecs, 600)
+        XCTAssertEqual(config.audibleStatusSound, "off")
     }
 
     // Regression: the CLI's `config show` output uses `auto_enter_delay_ms`
@@ -102,6 +104,7 @@ final class AlwaysTests: XCTestCase {
         silero_threshold: 0.5
         idle_pause_secs: 600
         idle_pause_action: pause
+            audible_status_sound: high
         postprocess_enabled: true
         """
         guard let config = Config.fromCLI(output: cliOutput) else {
@@ -112,6 +115,7 @@ final class AlwaysTests: XCTestCase {
         XCTAssertTrue(config.sttAutoEnter)
         XCTAssertEqual(config.idlePauseSecs, 600)
         XCTAssertEqual(config.idlePauseAction, "pause")
+        XCTAssertEqual(config.audibleStatusSound, "high")
     }
 
     func testDaemonStatusModel() throws {

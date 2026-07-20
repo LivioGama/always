@@ -116,7 +116,15 @@ struct ClientGuard;
 impl Drop for ClientGuard {
     fn drop(&mut self) {
         let prev = CONNECTED_CLIENTS.fetch_sub(1, Ordering::Relaxed);
-        tracing::info!(clients = prev - 1, "uds_client_disconnected");
+        let remaining = prev - 1;
+        tracing::info!(clients = remaining, "uds_client_disconnected");
+        // Safety net: if the last client vanished (e.g. a controller crashed
+        // without sending SetConsumeMode{false}), drop consume mode so normal
+        // dictation + pasting resume for whoever connects next.
+        if remaining == 0 && crate::always::pause::is_consume_mode() {
+            crate::always::pause::set_consume_mode(false);
+            tracing::info!("consume_mode_cleared_on_last_disconnect");
+        }
     }
 }
 
@@ -575,6 +583,13 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
             }
             tracing::info!(enabled, "uds_set_auto_enter");
         }
+        DaemonCommand::SetConsumeMode { enabled } => {
+            // Route to stream consumers (Iris) instead of pasting. No pause
+            // recompute needed — the capture loop and paste path read
+            // `is_consume_mode()` directly.
+            pause::set_consume_mode(enabled);
+            tracing::info!(enabled, "uds_set_consume_mode");
+        }
         DaemonCommand::ApplyRuntimePreferences {
             auto_enter_delay_ms,
             energy_threshold,
@@ -582,6 +597,7 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
             cooldown_ms,
             silero_threshold,
             adaptive_silence,
+            audible_status_sound,
         } => {
             apply_runtime_preferences(
                 ctx,
@@ -591,6 +607,7 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
                 cooldown_ms,
                 silero_threshold,
                 adaptive_silence,
+                audible_status_sound,
             );
         }
         DaemonCommand::ApproveCorrection { id } => handle_approve_correction(&id),
@@ -944,6 +961,7 @@ fn switch_active_backend(ctx: &ModelCommandCtx, choice: TranscriberBackendChoice
 /// Hot-reload fields the main loop reads from [`AlwaysConfig`] each
 /// utterance. DB persistence is handled by the Mac app before this
 /// command is sent.
+#[allow(clippy::too_many_arguments)]
 fn apply_runtime_preferences(
     ctx: &ModelCommandCtx,
     auto_enter_delay_ms: u32,
@@ -952,6 +970,7 @@ fn apply_runtime_preferences(
     cooldown_ms: u32,
     silero_threshold: f32,
     adaptive_silence: Option<bool>,
+    audible_status_sound: Option<String>,
 ) {
     let mut cfg = ctx.cfg.write();
     cfg.auto_enter_delay_ms = auto_enter_delay_ms.min(60_000);
@@ -965,6 +984,13 @@ fn apply_runtime_preferences(
     if let Some(adaptive) = adaptive_silence {
         cfg.adaptive_silence_enabled = adaptive;
     }
+    if let Some(setting) = audible_status_sound
+        .as_deref()
+        .and_then(|value| value.parse().ok())
+    {
+        cfg.audible_status_sound = setting;
+        crate::always::status_sound::set_setting(setting);
+    }
     tracing::info!(
         auto_enter_delay_ms = cfg.auto_enter_delay_ms,
         energy_threshold = cfg.energy_threshold,
@@ -972,6 +998,7 @@ fn apply_runtime_preferences(
         cooldown_ms = cfg.cooldown_ms,
         silero_threshold = cfg.silero_threshold,
         adaptive_silence = cfg.adaptive_silence_enabled,
+        audible_status_sound = cfg.audible_status_sound.as_str(),
         "uds_apply_runtime_preferences"
     );
 }
