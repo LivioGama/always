@@ -436,6 +436,16 @@ pub enum DaemonCommand {
     SetAutoEnter {
         enabled: bool,
     },
+    /// "Consume mode" — route transcription to the daemon's stream consumers
+    /// (any UDS client / the transcript-stream file) INSTEAD of the
+    /// clipboard+paste+enter path. This is the generic hook that lets an
+    /// external controller drive Always for its own use case: while enabled
+    /// the daemon transcribes regardless of per-app/master pause (there is no
+    /// focused app to paste into) and suppresses all pasting. Cleared when the
+    /// last client disconnects so normal dictation resumes. Idempotent.
+    SetConsumeMode {
+        enabled: bool,
+    },
     /// Hot-reload sensitivity + auto-enter delay without restart.
     ApplyRuntimePreferences {
         auto_enter_delay_ms: u32,
@@ -446,6 +456,9 @@ pub enum DaemonCommand {
         /// Optional so payloads from older GUI builds still decode.
         #[serde(default)]
         adaptive_silence: Option<bool>,
+        /// Optional so payloads from older GUI builds still decode.
+        #[serde(default)]
+        audible_status_sound: Option<String>,
     },
     /// Approve a pending correction in the queue and apply it to the
     /// glossary. The daemon emits `CorrectionLogged` on success.
@@ -615,7 +628,11 @@ impl EventBroadcaster {
     /// Send transcribing started event. Always broadcast (re-emits double
     /// as a keep-alive heartbeat for the GUI's stale-state watchdog).
     pub fn transcribing_started(&self) {
-        self.transcribing_active.store(true, Ordering::SeqCst);
+        if !self.transcribing_active.swap(true, Ordering::SeqCst) {
+            crate::always::status_sound::cue(
+                crate::always::status_sound::StatusSound::Transcribing,
+            );
+        }
         self.send(DaemonEvent::TranscribingStarted);
     }
 
@@ -634,6 +651,7 @@ impl EventBroadcaster {
 
     /// Send transcript final event
     pub fn transcript_final(&self, text: String) {
+        crate::always::status_sound::cue(crate::always::status_sound::StatusSound::Success);
         self.send(DaemonEvent::TranscriptFinal { text });
     }
 
@@ -677,7 +695,9 @@ impl EventBroadcaster {
     /// Send voice activity detected event. Always broadcast (re-emits
     /// double as a keep-alive heartbeat for the GUI's stale-state watchdog).
     pub fn voice_activity_detected(&self) {
-        self.voice_active.store(true, Ordering::SeqCst);
+        if !self.voice_active.swap(true, Ordering::SeqCst) {
+            crate::always::status_sound::cue(crate::always::status_sound::StatusSound::Listening);
+        }
         self.send(DaemonEvent::VoiceActivityDetected);
     }
 
@@ -707,6 +727,7 @@ impl EventBroadcaster {
     /// Send a transcription-failed event (Groq/STT error) so the GUI can
     /// flash a red error overlay instead of leaving a stuck "Processing…".
     pub fn transcription_failed(&self, kind: impl Into<String>, message: impl Into<String>) {
+        crate::always::status_sound::cue(crate::always::status_sound::StatusSound::Failure);
         self.send(DaemonEvent::TranscriptionFailed {
             kind: kind.into(),
             message: message.into(),
@@ -903,6 +924,25 @@ pub fn global_broadcaster() -> &'static EventBroadcaster {
 mod tests {
     use super::*;
 
+    #[test]
+    fn set_consume_mode_command_parses_from_iris_wire_format() {
+        // The exact JSON Iris writes to the socket. Must decode to the command.
+        let on =
+            DaemonCommand::from_json_line(r#"{"type":"SetConsumeMode","data":{"enabled":true}}"#)
+                .expect("enable must parse");
+        assert!(matches!(
+            on,
+            DaemonCommand::SetConsumeMode { enabled: true }
+        ));
+        let off =
+            DaemonCommand::from_json_line(r#"{"type":"SetConsumeMode","data":{"enabled":false}}"#)
+                .expect("disable must parse");
+        assert!(matches!(
+            off,
+            DaemonCommand::SetConsumeMode { enabled: false }
+        ));
+    }
+
     fn drain(rx: &mut broadcast::Receiver<DaemonEvent>) -> Vec<DaemonEvent> {
         let mut out = Vec::new();
         while let Ok(ev) = rx.try_recv() {
@@ -962,5 +1002,20 @@ mod tests {
         assert!(matches!(events[0], DaemonEvent::TranscribingStarted));
         assert!(matches!(events[1], DaemonEvent::TranscribingStopped));
         assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn transcript_chunks_do_not_change_lifecycle_state() {
+        let b = EventBroadcaster::new();
+        let mut rx = b.subscribe();
+        b.transcript_chunk("first rolling chunk".to_string());
+        b.transcript_chunk("second rolling chunk".to_string());
+        b.transcribing_stopped();
+        b.voice_activity_ended();
+
+        let events = drain(&mut rx);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], DaemonEvent::TranscriptChunk { .. }));
+        assert!(matches!(events[1], DaemonEvent::TranscriptChunk { .. }));
     }
 }

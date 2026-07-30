@@ -49,6 +49,7 @@ fn bench_config() -> AlwaysConfig {
         transcript_stream_enabled: false,
         speaker_gate_enabled: false,
         speaker_gate_threshold: 0.5,
+        audible_status_sound: Default::default(),
         localization: Localization::ENGLISH,
     }
 }

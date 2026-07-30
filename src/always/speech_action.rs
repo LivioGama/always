@@ -150,20 +150,35 @@ pub fn classify_transcription(
         return SpeechAction::InCooldown;
     }
 
-    let filter_result = filter::should_accept_with_reason(text, cfg);
-    if !matches!(filter_result, filter::FilterReason::None) {
+    // Deterministic CONTENT filtering (hard phrase filter + hallucination
+    // heuristics) is REMOTE-model cleanup only — see
+    // `AlwaysConfig::content_filtering_enabled`. On local models the system
+    // never judges content: it inserts raw verbatim what was said. We keep
+    // only an empty-guard below (nothing was said → nothing to paste), which
+    // is not a content judgment.
+    if cfg.content_filtering_enabled() {
+        let filter_result = filter::should_accept_with_reason(text, cfg);
+        if !matches!(filter_result, filter::FilterReason::None) {
+            return SpeechAction::Rejected {
+                reason: filter_result.to_log_string(),
+            };
+        }
+
+        if let Some(reason) = crate::always::hallucination::is_hallucination(transcription) {
+            return SpeechAction::Hallucinated {
+                reason: reason.to_string(),
+            };
+        }
+    }
+
+    // Empty / whitespace-only → nothing to insert. Not a content judgment;
+    // there is simply no speech to paste. Everything with real text passes.
+    if text.trim().is_empty() {
         return SpeechAction::Rejected {
-            reason: filter_result.to_log_string(),
+            reason: "empty".to_string(),
         };
     }
 
-    if let Some(reason) = crate::always::hallucination::is_hallucination(transcription) {
-        return SpeechAction::Hallucinated {
-            reason: reason.to_string(),
-        };
-    }
-
-    let _ = cfg; // `cfg` reserved for future per-utterance decisions
     SpeechAction::Paste {
         text: text.to_string(),
     }
@@ -354,6 +369,7 @@ mod tests {
             idle_pause_action: IdlePauseAction::default(),
             localization: Localization::ENGLISH,
             transcript_stream_enabled: false,
+            audible_status_sound: crate::always::status_sound::StatusSoundSetting::default(),
         }
     }
 
@@ -442,6 +458,108 @@ mod tests {
             }
             other => panic!("expected Rejected, got {:?}", other),
         }
+    }
+
+    // ----------------------------------------------------------------------
+    // Local backend = RAW verbatim. No deterministic content judgment.
+    // Regression guard for the lost 5-minute dictation: a stutter run
+    // ("o o o o", "uh uh uh uh") inside otherwise-valid long speech was
+    // classified as a hallucination and the ENTIRE utterance discarded.
+    // ----------------------------------------------------------------------
+
+    fn local_config() -> AlwaysConfig {
+        let mut cfg = test_config();
+        cfg.transcriber_backend = crate::stt_dispatch::TranscriberBackendChoice::Local {
+            model_id: "parakeet-tdt-0.6b-v2".to_string(),
+        };
+        cfg
+    }
+
+    /// The actual text that was lost (representative slice with the two
+    /// repeated runs that tripped `hallucination::is_hallucination`). On the
+    /// local backend it MUST pass through verbatim.
+    const LOST_STUTTER_TEXT: &str = "So, I want a table exactly what happens when I start \
+        speaking and all, so we can o o o o o o o o o optimize uh uh uh uh uh uh uh uh exactly \
+        what happens from when I start speaking through always to when text gets inserted and \
+        what takes how much time, so we can like optimize the process as much as we can";
+
+    #[test]
+    fn classify_local_backend_passes_stutter_verbatim() {
+        let cfg = local_config();
+        let now = Instant::now();
+        let action = classify_transcription(
+            &cfg,
+            LOST_STUTTER_TEXT,
+            &empty_transcription(LOST_STUTTER_TEXT),
+            now,
+            now - Duration::from_secs(10),
+        );
+        match action {
+            SpeechAction::Paste { text } => assert_eq!(
+                text, LOST_STUTTER_TEXT,
+                "local backend must insert raw verbatim — no content filtering"
+            ),
+            other => panic!("expected verbatim Paste on local, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classify_groq_backend_still_filters_stutter() {
+        // The Groq path keeps the heuristic pre-pass (an LLM does the real
+        // cleanup there). Same input is still caught — proving we only
+        // changed the LOCAL behavior, not Groq's.
+        let cfg = test_config(); // Groq
+        let now = Instant::now();
+        let action = classify_transcription(
+            &cfg,
+            LOST_STUTTER_TEXT,
+            &empty_transcription(LOST_STUTTER_TEXT),
+            now,
+            now - Duration::from_secs(10),
+        );
+        assert!(
+            matches!(action, SpeechAction::Hallucinated { .. }),
+            "groq path should still run the heuristic pre-pass, got {:?}",
+            action
+        );
+    }
+
+    #[test]
+    fn classify_local_backend_pastes_single_short_word() {
+        // "no too short" — the user can say just "hi" and it must insert.
+        let cfg = local_config();
+        let now = Instant::now();
+        for word in ["hi", "yes", "ok", "no"] {
+            let action = classify_transcription(
+                &cfg,
+                word,
+                &empty_transcription(word),
+                now,
+                now - Duration::from_secs(10),
+            );
+            match action {
+                SpeechAction::Paste { text } => assert_eq!(text, word),
+                other => panic!("short word `{word}` must paste on local, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn classify_local_backend_rejects_only_empty() {
+        let cfg = local_config();
+        let now = Instant::now();
+        let action = classify_transcription(
+            &cfg,
+            "   ",
+            &empty_transcription("   "),
+            now,
+            now - Duration::from_secs(10),
+        );
+        assert!(
+            matches!(action, SpeechAction::Rejected { .. }),
+            "whitespace-only has nothing to paste, got {:?}",
+            action
+        );
     }
 
     // ----------------------------------------------------------------------

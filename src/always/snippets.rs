@@ -117,6 +117,25 @@ fn expand_with(transcript: &str, entries: &[Entry]) -> Option<String> {
         return None;
     }
 
+    // Fast path: the common utterance contains NO snippet trigger word.
+    // A match requires ALL of some trigger's tokens to appear consecutively,
+    // so "at least one trigger word is present" is a necessary precondition —
+    // checking it with a cheap word-membership scan lets us bail before the
+    // per-word tokenize + O(words × entries) match loop below, and never
+    // skips a real hit. Normalization mirrors `words_with_spans`/`trigger_tokens`
+    // (unicode lowercase, split on non-alphanumeric).
+    let trigger_words: std::collections::HashSet<&str> = tokenized
+        .iter()
+        .flat_map(|(tokens, _)| tokens.iter().map(String::as_str))
+        .collect();
+    let has_trigger = transcript
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .any(|w| trigger_words.contains(w.to_lowercase().as_str()));
+    if !has_trigger {
+        return None;
+    }
+
     let words = words_with_spans(transcript);
     let mut out = String::new();
     let mut cursor = 0; // byte position in transcript consumed so far

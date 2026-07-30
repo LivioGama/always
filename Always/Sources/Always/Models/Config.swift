@@ -51,6 +51,8 @@ struct Config: Codable {
     var idlePauseSecs: Int
     /// Action on idle timeout: "pause" or "pause_and_mute".
     var idlePauseAction: String
+    /// Status sound setting: off, low, medium, or high.
+    var audibleStatusSound: String
     /// Language code for transcription ("auto", "en", "fr", etc.) or nil if not set.
     var lang: String?
 
@@ -74,6 +76,7 @@ struct Config: Codable {
         perAppSettingsJson: nil,
         idlePauseSecs: 600,
         idlePauseAction: "pause",
+        audibleStatusSound: "off",
         lang: nil
     )
 
@@ -146,6 +149,10 @@ struct Config: Codable {
                 case "idle_pause_action":
                     if value == "pause" || value == "pause_and_mute" {
                         config.idlePauseAction = value
+                    }
+                case "audible_status_sound":
+                    if ["off", "low", "medium", "high"].contains(value) {
+                        config.audibleStatusSound = value
                     }
                 case "lang":
                     config.lang = value.isEmpty || value.contains("(not set)") ? nil : value

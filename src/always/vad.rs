@@ -132,7 +132,20 @@ fn speaker_gate_allows_transcription(requested: bool, score: Option<f32>, thresh
     !requested || speaker_gate_allows_score(score, threshold)
 }
 
+/// Speaker-gate enforcement. `true` = "My Voice" is enforced: an utterance that
+/// doesn't verify as the enrolled user is dropped (and its trailing foreign
+/// audio trimmed). This is what keeps Always listening ONLY to the user — a
+/// YouTube video / another person in the room must NOT be transcribed or pasted.
+/// (A brief fail-open experiment set this false and let every voice through;
+/// that was wrong. The genuine data-loss was the hallucination filter, fixed
+/// elsewhere.) The threshold is `cfg.speaker_gate_threshold` (a pref); lower it
+/// if the user's own voice sits too close to the cutoff, rather than disabling.
+const SPEAKER_GATE_ENFORCE_DROP: bool = true;
+
 fn speaker_gate_allows_stt(requested: bool, speaker_verified: bool) -> bool {
+    // "Only me": when the gate is requested, STT/speculation/preview must wait
+    // until the enrolled user is verified, so a foreign voice never even
+    // transcribes or streams a preview.
     !requested || speaker_verified
 }
 
@@ -141,7 +154,7 @@ fn speaker_gate_should_reject_unavailable(
     ready: bool,
     voiced_samples: usize,
 ) -> bool {
-    requested && !ready && voiced_samples >= SPEAKER_GATE_EARLY_SAMPLES
+    SPEAKER_GATE_ENFORCE_DROP && requested && !ready && voiced_samples >= SPEAKER_GATE_EARLY_SAMPLES
 }
 
 fn speaker_gate_ctx(cfg: &AlwaysConfig) -> SpeakerGateContext {
@@ -333,9 +346,11 @@ const LONG_RECORDING_WARN_SECS: u32 = 1500;
 /// accumulates toward an API payload limit.
 const MAX_SPEECH_SECS: u32 = 1800;
 /// Flush the live buffer as a committed chunk at the next tentative
-/// silence once it holds at least this much speech. 90s ≈ 2.9MB WAV —
-/// far below Groq's 25MB cap, big enough that chunk seams are rare.
-const CHUNK_TARGET_SECS: u32 = 90;
+/// silence once it holds at least this much speech. This is deliberately
+/// short: Groq's API is file-based, so "live" transcription means keeping
+/// small committed chunks in flight while the user keeps talking, then
+/// pasting once after the final relaxed pause.
+const CHUNK_TARGET_SECS: u32 = 6;
 
 /// `CHUNK_TARGET_SECS` with a test override: `ALWAYS_CHUNK_TARGET_SECS`
 /// lets an end-to-end test exercise the chunk path with seconds of audio
@@ -348,10 +363,36 @@ fn chunk_target_secs() -> u32 {
         .unwrap_or(CHUNK_TARGET_SECS)
 }
 /// Absolute per-chunk ceiling: flush at a frame boundary even mid-speech
-/// if the user talks continuously for this long without a 0.2s dip.
-/// Whisper tolerates a clean-frame cut; 2.5 min of literally pause-free
-/// speech is vanishingly rare.
-const CHUNK_HARD_MAX_SECS: u32 = 150;
+/// if the user talks continuously for this long without a tentative dip.
+/// This keeps uninterrupted monologues from becoming one large final STT
+/// call; natural-silence chunking above handles the common case.
+const CHUNK_HARD_MAX_SECS: u32 = 15;
+/// First-speculation cadence, used in EVERY mode (not just consume mode):
+/// fire the speculative transcription at a brief inter-phrase pause (~240ms
+/// = 8 × 30ms frames) so a stream consumer sees text land as the user
+/// speaks / can react to a leading wake word, instead of waiting for the
+/// slower normal tentative mark. Only the PREVIEW (`TranscriptChunk`) timing
+/// is affected — the final cut still uses the full silence window, so
+/// dictation-finalization/paste latency is unchanged.
+const CONSUME_STREAM_TENTATIVE_FRAMES: usize = 8;
+/// Consume-mode LIVE streaming: while the user is talking continuously (no
+/// pause to trigger the tentative-silence speculation above), re-transcribe
+/// the growing buffer this often so previews land mid-sentence. Groq calls
+/// are file-based (~0.7-1.5s each) and `speculation_pending` serialises them,
+/// so this interval is measured from kickoff and the effective cadence
+/// self-limits to ≈ one Groq round-trip. Kept well below that latency so a
+/// new preview fires the instant the previous one lands — i.e. as fast as
+/// Groq can answer. Only active in consume mode.
+const CONSUME_STREAM_INTERVAL_MS: u64 = 200;
+/// Minimum voiced audio before the first live preview fires (~0.25s), so even
+/// a short utterance streams at least one preview before the final.
+const CONSUME_STREAM_MIN_SAMPLES: usize = 4_000;
+/// Cap each live preview to the last ~10s of audio. The preview re-transcribes
+/// on the SAME single STT engine as the final; letting it grow unbounded meant
+/// a long chunk's preview held the engine for seconds and stalled the final
+/// transcription (a major source of consume-mode/Iris latency). 10s shows the
+/// recent words while keeping every preview cheap; the final is always complete.
+const CONSUME_STREAM_PREVIEW_MAX_SAMPLES: usize = 10 * 16_000;
 /// Adaptive mid-sentence extension: when the speculative transcript ends
 /// mid-thought (no terminator, or a trailing connector word), the final
 /// silence window is stretched by this factor so a thinking pause doesn't
@@ -403,24 +444,15 @@ fn record_with_local_vad(
     // Short-utterance cutoff. Computed once; activated per-iteration
     // when `speech_samples` duration is still under SHORT_SPEECH_MS.
     let short_silence_frames = ((SHORT_SILENCE_MS as f64) / FRAME_MS as f64).ceil() as usize;
-    // Tentative kickoff at 50% of the short window — earlier than the
-    // 85% used for normal utterances because the speech itself is so
-    // brief that even a misfired speculation is cheap to retry.
-    let short_tentative_frames = (short_silence_frames / 2).max(1);
     // Two-stage end-of-utterance detection (Option B):
-    // - At `tentative_silence_frames`, kick off a SPECULATIVE transcription in a
+    // - At `eff_tentative_frames` (always the fast ~240ms cadence — see its
+    //   computation below), kick off a SPECULATIVE transcription in a
     //   background thread using the audio captured so far.
     // - Continue recording until `silence_frames` (final).
     // - If speech resumes during the tentative window, discard the speculation.
     // - At final, if speculation is still valid (no resume), use its result —
     //   transcription has been running in parallel during the silence wait, so
     //   the user gets snappy paste with no extra latency cost.
-    // Tentative at 20% of final window — starts Whisper while the user
-    // is still in the trailing-silence wait, but we still require the
-    // full `silence_secs` of quiet before finalizing. Wrong guesses are
-    // discarded if speech resumes. This only moves the preview/STT kickoff;
-    // it does not shorten the hard final silence limit.
-    let tentative_silence_frames = tentative_silence_frames(silence_frames);
     // Pre-buffer: keep 200ms of audio before speech detection to catch first words.
     // 50ms was too short — first syllable of "Run the program" was dropped. 200ms
     // gives enough headroom for VAD onset latency without bloating speech_samples.
@@ -539,6 +571,14 @@ fn record_with_local_vad(
     // discarded if speech resumes before final silence.
     let speculation_slot = SpeculationSlot::new();
     let mut speculation_pending = false;
+    // Consume-mode live streaming: a lightweight PREVIEW stream that runs
+    // WHILE the user is still speaking (the tentative speculation above only
+    // fires at a pause). Independent of the speculation slot / final path — it
+    // only re-transcribes the growing buffer and emits a `TranscriptChunk`.
+    // The atomic serialises the background transcribes (one Groq round-trip at
+    // a time) and is cleared by the thread on completion.
+    let preview_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut last_preview_at: Option<std::time::Instant> = None;
     // Adaptive mid-sentence extension: latched once per silence run when
     // the speculative transcript looks unfinished; reset on speech resume.
     // `decided` records that the speculative text was inspected (either
@@ -722,7 +762,16 @@ fn record_with_local_vad(
         // loose for snappiness; the streak is the transient
         // discriminator (see EARLY_VOICE_MIN_FRAMES) and the 150ms
         // retraction below covers anything that still slips through.
-        if !in_speech && !voice_activity_announced {
+        //
+        // Skipped entirely when the "My Voice" gate is active
+        // (`speaker_gate_requested`): those users enabled the feature
+        // precisely so that other people and background media do not
+        // register, and an announce-before-verify makes the overlay blink
+        // on every non-user voice for the 40ms-4s until the gate rejects
+        // it. With the gate on, the announce comes from
+        // `speaker_gate_verified` / whole-utterance pass below instead —
+        // slightly later, but only ever for the enrolled user.
+        if !in_speech && !voice_activity_announced && !speaker_gate_requested {
             if early_voice_frame_ok(
                 frame_energy,
                 last_prob,
@@ -734,14 +783,14 @@ fn record_with_local_vad(
                 early_voice_streak = 0;
             }
             if early_voice_streak >= EARLY_VOICE_MIN_FRAMES {
-                // "My Voice" active: the room making speech-like sound is
-                // not evidence the USER is speaking — announcing here lit
-                // the listening overlay on every movie line / song vocal.
-                // The announcement instead fires at speaker verification
-                // in the voiced branch below.
-                if !speaker_gate_requested {
-                    announce_voice_activity!();
-                }
+                // Show the listening overlay IMMEDIATELY on voice onset.
+                // Without a speaker gate there is nothing to verify against,
+                // so waiting would only add 0.2-4.3s of dead time before the
+                // mic icon appears (measured live) — the single biggest
+                // "it's not fast" complaint. A frame streak that never
+                // becomes speech still retracts the overlay via the
+                // early-voice false-start path below.
+                announce_voice_activity!();
                 tentative_voice_silence = 0;
                 early_voice_streak = 0;
             }
@@ -761,6 +810,19 @@ fn record_with_local_vad(
 
         if is_speech {
             tentative_voice_silence = 0;
+            // Mid-utterance "still thinking" pause: the user had already
+            // gone quiet for a bit and then kept talking, so this pause
+            // never reached the final cutoff. Logged (not just discarded)
+            // so silence_secs can eventually be tuned from the user's own
+            // observed pause lengths instead of a guess — see
+            // `midsentence_decision` for the sibling signal (content-based
+            // extension hit rate).
+            if in_speech && consecutive_silence > 0 {
+                tracing::info!(
+                    pause_ms = consecutive_silence as u32 * FRAME_MS,
+                    "speech_resumed_after_pause"
+                );
+            }
             // Speech resumed: discard any pending speculation (its audio snapshot
             // is now stale because more speech will be appended).
             if speculation_pending {
@@ -918,7 +980,9 @@ fn record_with_local_vad(
                         } else if voiced_samples >= SPEAKER_GATE_EARLY_SAMPLES {
                             speaker_checked = true;
                             let score = speaker_gate_score(gate, &speech_samples);
-                            if !speaker_gate_allows_score(score, gate.threshold) {
+                            if SPEAKER_GATE_ENFORCE_DROP
+                                && !speaker_gate_allows_score(score, gate.threshold)
+                            {
                                 let score = score.unwrap_or(-1.0);
                                 tracing::info!(
                                     score,
@@ -953,7 +1017,9 @@ fn record_with_local_vad(
                                 streak = tail_fail_streak,
                                 "speaker_gate_tail_mismatch"
                             );
-                            if tail_fail_streak >= speaker_tail_fail_checks {
+                            if SPEAKER_GATE_ENFORCE_DROP
+                                && tail_fail_streak >= speaker_tail_fail_checks
+                            {
                                 tracing::info!(
                                     score = ?score,
                                     kept_secs = confirmed_user_len as f64 / 16_000.0,
@@ -969,6 +1035,50 @@ fn record_with_local_vad(
                     }
                 }
 
+                // Consume-mode LIVE preview: while the user is mid-sentence
+                // (this is the voiced branch — no pause needed), re-transcribe
+                // the growing buffer on an interval and emit it as a preview so
+                // a stream consumer sees text land as it's spoken. Serialised
+                // by `preview_pending`; the effective cadence self-limits to a
+                // single Groq round-trip. Preview only — the final still comes
+                // from the speculation/chunker path, unchanged.
+                if crate::always::pause::is_consume_mode()
+                    && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
+                    && speech_samples.len() >= CONSUME_STREAM_MIN_SAMPLES
+                    && !preview_pending.load(std::sync::atomic::Ordering::Relaxed)
+                    && last_preview_at.is_none_or(|t| {
+                        t.elapsed() >= std::time::Duration::from_millis(CONSUME_STREAM_INTERVAL_MS)
+                    })
+                {
+                    last_preview_at = Some(std::time::Instant::now());
+                    preview_pending.store(true, std::sync::atomic::Ordering::Relaxed);
+                    flip_to_transcribing!();
+                    // Cap to the last N seconds so a long chunk's preview stays
+                    // cheap and can't monopolize the single STT engine ahead of
+                    // the final transcription.
+                    let preview_len = CONSUME_STREAM_PREVIEW_MAX_SAMPLES.min(speech_samples.len());
+                    let audio_snapshot =
+                        speech_samples[speech_samples.len() - preview_len..].to_vec();
+                    let transcriber_for_preview = Arc::clone(transcriber);
+                    let flag = Arc::clone(&preview_pending);
+                    std::thread::spawn(move || {
+                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                            || -> Result<crate::stt::TranscriptionResult> {
+                                let wav = audio::create_wav_bytes_i16_mono_16k(&audio_snapshot)?;
+                                transcriber_for_preview
+                                    .transcribe_from_bytes(wav)
+                                    .map_err(anyhow::Error::from)
+                            },
+                        ));
+                        if let Ok(Ok(ref r)) = outcome
+                            && !r.text.is_empty()
+                        {
+                            event::global_broadcaster().transcript_chunk(r.text.clone());
+                        }
+                        flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                    });
+                }
+
                 // Per-chunk ceiling: a pause-free monologue never reaches
                 // the tentative-silence flush point, so cut at a frame
                 // boundary once the chunk is oversized.
@@ -980,7 +1090,7 @@ fn record_with_local_vad(
                         "chunk_hard_flush"
                     );
                     committed_samples += speech_samples.len();
-                    let grammar = if cfg.postprocess_config.grammar_correction_enabled {
+                    let grammar = if cfg.postprocess_available() {
                         cfg.post_processor.clone()
                     } else {
                         None
@@ -1025,11 +1135,20 @@ fn record_with_local_vad(
             } else {
                 silence_frames
             };
-            let eff_tentative_frames = if is_short {
-                short_tentative_frames
-            } else {
-                tentative_silence_frames
-            };
+            // Always fire the first speculative round at the fast (~240ms)
+            // cadence, not just in consume mode. This only moves up WHEN the
+            // background peek transcription kicks off (`transcript_chunk`
+            // preview) — the actual final-silence cut below is unchanged, so
+            // dictation's paste latency is unaffected. It exists because a
+            // stream consumer (e.g. Iris's wake-word redirect) watches these
+            // early previews to decide whether to intercept the utterance
+            // BEFORE the final paste commits; waiting until the old
+            // ~20% (normal) / ~50% (short-utterance) tentative mark left
+            // too thin a margin for that round trip and made the redirect
+            // race the paste — sometimes losing it even when the wake word
+            // was spoken and transcribed correctly.
+            let eff_tentative_frames =
+                CONSUME_STREAM_TENTATIVE_FRAMES.min(eff_silence_frames.saturating_sub(1).max(1));
 
             // At tentative silence with a target-sized buffer, COMMIT the
             // chunk instead of speculating: flush it for background
@@ -1042,7 +1161,7 @@ fn record_with_local_vad(
                 && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
             {
                 committed_samples += speech_samples.len();
-                let grammar = if cfg.postprocess_config.grammar_correction_enabled {
+                let grammar = if cfg.postprocess_available() {
                     cfg.post_processor.clone()
                 } else {
                     None
@@ -1077,7 +1196,7 @@ fn record_with_local_vad(
                 && voiced_samples >= crate::always::speaker_embed::MIN_EMBED_SAMPLES
             {
                 let score = speaker_gate_score(gate, &speech_samples);
-                if !speaker_gate_allows_score(score, gate.threshold) {
+                if SPEAKER_GATE_ENFORCE_DROP && !speaker_gate_allows_score(score, gate.threshold) {
                     let score = score.unwrap_or(-1.0);
                     tracing::info!(
                         score,
@@ -1119,7 +1238,7 @@ fn record_with_local_vad(
                 // For the speculative grammar warm below: the post-processor
                 // and runtime handle must be owned by the thread (the `cfg`
                 // borrow can't cross it).
-                let grammar_warm = if cfg.postprocess_config.grammar_correction_enabled {
+                let grammar_warm = if cfg.postprocess_available() {
                     cfg.post_processor.clone()
                 } else {
                     None
@@ -1352,7 +1471,7 @@ fn record_with_local_vad(
                 .then(|| speaker_gate_score(gate, &speech_samples))
                 .flatten()
         });
-        if !speaker_gate_allows_transcription(true, score, threshold) {
+        if SPEAKER_GATE_ENFORCE_DROP && !speaker_gate_allows_transcription(true, score, threshold) {
             if speaker_gate.is_none() {
                 tracing::warn!("speaker_gate_unavailable_reject");
             } else if voiced_samples < crate::always::speaker_embed::MIN_EMBED_SAMPLES {
@@ -1397,7 +1516,10 @@ fn record_with_local_vad(
     let speculation = if speculation_pending {
         let started_wait = std::time::Instant::now();
         let audio_secs = speech_samples.len() as f64 / 16_000.0;
-        let max_wait = std::time::Duration::from_secs_f64((audio_secs * 0.5).clamp(10.0, 60.0));
+        // Floor lowered 10s → 2s: a local re-transcribe costs ~300ms, so waiting
+        // a full 10s for a stalled speculative result before falling back is
+        // pure dead time. 2s is plenty for a healthy speculation to land.
+        let max_wait = std::time::Duration::from_secs_f64((audio_secs * 0.5).clamp(2.0, 60.0));
         let mut taken: Option<Result<crate::stt::TranscriptionResult>> = None;
         let mut last_heartbeat = std::time::Instant::now();
         loop {
@@ -1439,16 +1561,34 @@ fn record_with_local_vad(
             // The blocking transcription below can run tens of seconds
             // for long audio — heartbeat from a helper thread so the
             // GUI's transcribing lease can't expire mid-call.
+            //
+            // CRITICAL LATENCY FIX: the heartbeat must poll the stop flag
+            // frequently. The previous version slept a full `from_secs(2)`
+            // as its FIRST action, so `join()` below blocked until that 2s
+            // sleep expired even though local parakeet finishes in
+            // ~100-300ms — injecting a flat ~2000ms tax on EVERY
+            // non-speculative utterance (measured: a 33-char clip logged
+            // stt_wait_ms=2005, identical to a 936-char one — proof it was
+            // the timer, not compute). We keep the 2s heartbeat CADENCE but
+            // tick the sleep in 50ms slices so `join()` returns within ~50ms
+            // of transcription completing.
             let heartbeat_stop = Arc::new(AtomicBool::new(false));
             let heartbeat_handle = {
                 let stop = Arc::clone(&heartbeat_stop);
                 std::thread::spawn(move || {
+                    const TICK: std::time::Duration = std::time::Duration::from_millis(50);
+                    const BEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+                    let mut since_beat = std::time::Duration::ZERO;
                     while !stop.load(Ordering::Relaxed) {
-                        std::thread::sleep(std::time::Duration::from_secs(2));
-                        if stop.load(Ordering::Relaxed) {
-                            break;
+                        std::thread::sleep(TICK);
+                        since_beat += TICK;
+                        if since_beat >= BEAT_EVERY {
+                            since_beat = std::time::Duration::ZERO;
+                            if stop.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            event::global_broadcaster().transcribing_started();
                         }
-                        event::global_broadcaster().transcribing_started();
                     }
                 })
             };
@@ -1672,14 +1812,6 @@ fn normal_silence_frames(cfg: &AlwaysConfig) -> usize {
     ((secs * 1000.0) / FRAME_MS as f64).ceil() as usize
 }
 
-fn tentative_silence_frames(final_silence_frames: usize) -> usize {
-    // 1/4 of the window (was 1/3): with the 0.9s default the speculative
-    // STT now starts ~225ms into the silence, raising the odds the result
-    // (and the adaptive peek below) is home before the final cut. Wrong
-    // guesses are discarded on speech resume and are cheap.
-    (final_silence_frames / 4).max(1)
-}
-
 /// Extended final-silence window used once `looks_mid_sentence` fires:
 /// FACTOR × the configured window, capped at +MIDSENTENCE_MAX_EXTRA_SECS.
 fn extended_silence_frames(final_silence_frames: usize) -> usize {
@@ -1721,13 +1853,15 @@ fn looks_mid_sentence(loc: &crate::always::localization::Localization, text: &st
 #[cfg(test)]
 mod tests {
     use super::{
-        early_voice_frame_ok, extended_silence_frames, fast_energy_check, fast_normalized_energy,
-        looks_mid_sentence, normal_silence_frames, normalized_energy, speaker_gate_allows_score,
-        speaker_gate_allows_stt, speaker_gate_allows_transcription,
+        chunk_target_secs, early_voice_frame_ok, extended_silence_frames, fast_energy_check,
+        fast_normalized_energy, looks_mid_sentence, normal_silence_frames, normalized_energy,
+        speaker_gate_allows_score, speaker_gate_allows_stt, speaker_gate_allows_transcription,
         speaker_gate_dependencies_ready, speaker_gate_should_reject_unavailable,
-        tentative_silence_frames, voice_activity_energy_threshold,
+        voice_activity_energy_threshold,
     };
     use crate::always::AlwaysConfig;
+
+    static CHUNK_TARGET_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn normalized_energy_handles_empty_input() {
@@ -1821,20 +1955,34 @@ mod tests {
     }
 
     #[test]
-    fn tentative_silence_starts_before_final_cutoff() {
-        // 1/4 of the window (30 frames = 0.9s default → kickoff at 7
-        // frames ≈ 210ms of silence).
-        assert_eq!(tentative_silence_frames(30), 7);
-        assert_eq!(tentative_silence_frames(1), 1);
-    }
-
-    #[test]
     fn extended_silence_doubles_but_caps() {
         // 0.9s default → 30 frames → doubled to 60 (1.8s), under the
         // +1.5s (50 frame) cap... 30+50=80 > 60, so factor wins.
         assert_eq!(extended_silence_frames(30), 60);
         // Large user window (3s → 100 frames): cap wins, 100+50=150 < 200.
         assert_eq!(extended_silence_frames(100), 150);
+    }
+
+    #[test]
+    fn chunk_target_defaults_to_liveish_chunks() {
+        let _guard = CHUNK_TARGET_ENV_LOCK
+            .lock()
+            .expect("CHUNK_TARGET_ENV_LOCK poisoned");
+        unsafe { std::env::remove_var("ALWAYS_CHUNK_TARGET_SECS") };
+
+        assert_eq!(chunk_target_secs(), 6);
+    }
+
+    #[test]
+    fn chunk_target_env_override_is_floored() {
+        let _guard = CHUNK_TARGET_ENV_LOCK
+            .lock()
+            .expect("CHUNK_TARGET_ENV_LOCK poisoned");
+        unsafe { std::env::set_var("ALWAYS_CHUNK_TARGET_SECS", "1") };
+
+        assert_eq!(chunk_target_secs(), 3);
+
+        unsafe { std::env::remove_var("ALWAYS_CHUNK_TARGET_SECS") };
     }
 
     #[test]
@@ -1940,7 +2088,9 @@ mod tests {
     }
 
     #[test]
-    fn speaker_gate_stt_policy_blocks_unverified_and_bounds_unavailable() {
+    fn speaker_gate_enforces_only_me() {
+        // Enforcement ON: unverified speech is blocked from STT so a foreign
+        // voice (media / other person) never transcribes or pastes.
         assert!(speaker_gate_allows_stt(false, false));
         assert!(speaker_gate_allows_stt(true, true));
         assert!(!speaker_gate_allows_stt(true, false));

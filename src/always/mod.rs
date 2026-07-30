@@ -33,6 +33,7 @@ pub mod postprocess;
 pub mod snippets;
 pub mod speaker_embed;
 pub mod speech_action;
+pub mod status_sound;
 #[cfg(feature = "local-stt")]
 pub mod stt_local;
 pub mod telemetry;

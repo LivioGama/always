@@ -18,7 +18,7 @@
 //! semantics ("am I effectively paused right now?") didn't change.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use parking_lot::Mutex;
@@ -52,6 +52,37 @@ static NO_GUI_PAUSED: AtomicBool = AtomicBool::new(false);
 /// overrides change. Starts `true` so a fresh launch is paused-by-default
 /// until the user resumes either globally or for a specific app.
 static EFFECTIVE_PAUSED: AtomicBool = AtomicBool::new(true);
+
+/// Consumer source: an external controller asked the daemon (via
+/// `DaemonCommand::SetConsumeMode`) to route transcription to its stream
+/// consumers instead of the paste path. While set, the capture loop ignores
+/// every pause source (there is no focused app to leak into — nothing is
+/// pasted) and the paste path is skipped entirely. Cleared when the last
+/// client disconnects.
+static CONSUME_MODE_LEASES: AtomicUsize = AtomicUsize::new(0);
+
+/// Acquire this connection's consume-mode lease. Each UDS client owns at
+/// most one lease, so a disconnect can only undo the routing it enabled.
+pub fn acquire_consume_mode(lease: &AtomicBool) {
+    if !lease.swap(true, Ordering::AcqRel) {
+        CONSUME_MODE_LEASES.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// Release this connection's consume-mode lease. Safe to call repeatedly
+/// from the reader shutdown path and its connection guard.
+pub fn release_consume_mode(lease: &AtomicBool) {
+    if lease.swap(false, Ordering::AcqRel) {
+        CONSUME_MODE_LEASES.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Is the daemon routing transcription to its stream consumers instead of
+/// pasting? When true, the capture loop runs regardless of pause state and no
+/// text is ever pasted.
+pub fn is_consume_mode() -> bool {
+    CONSUME_MODE_LEASES.load(Ordering::Acquire) > 0
+}
 
 /// Recompute the effective pause state from MASTER + per-app rules.
 /// Returns `(new_effective, changed)`. Callers broadcast `Paused` /
@@ -230,6 +261,26 @@ pub fn is_no_gui_paused() -> bool {
 /// state transition (so you CAN force dictation while music plays).
 pub fn is_any_global_pause() -> bool {
     is_master_paused() || is_audio_output_paused() || is_mic_conflict_paused()
+}
+
+/// Should the capture loop stop recording/transcribing right now?
+///
+/// Outside consume mode this is just `is_paused()`. In consume mode
+/// (routing to a stream consumer like Iris — no focused-app paste
+/// target) per-app/idle/audio-output pause are irrelevant and capture
+/// keeps running... EXCEPT for two sources that must win even then:
+/// the user's explicit mute (master pause) and a real call (mic
+/// conflict — another app holds the mic). Without this, muting or
+/// being on a Zoom/FaceTime call has no effect while a stream consumer
+/// is listening — mute "does nothing" and a call goes untranscribed.
+pub fn should_gate_capture() -> bool {
+    if !is_paused() {
+        return false;
+    }
+    if !is_consume_mode() {
+        return true;
+    }
+    is_master_paused() || is_mic_conflict_paused()
 }
 
 /// Clear every global pause source (user + watchdogs) at once. Used by
@@ -525,6 +576,7 @@ mod tests {
         MIC_CONFLICT_PAUSED.store(false, Ordering::Relaxed);
         IDLE_AUTO_PAUSED.store(false, Ordering::Relaxed);
         EFFECTIVE_PAUSED.store(true, Ordering::Relaxed);
+        CONSUME_MODE_LEASES.store(0, Ordering::Relaxed);
         *CURRENT_APP.lock() = None;
         per_app::set_cache_for_test(HashMap::new());
     }
@@ -666,5 +718,74 @@ mod tests {
         let (effective, _) = set_current_app_and_recompute(Some(own_bundle_id.to_string()));
         assert!(effective);
         assert!(is_paused());
+    }
+
+    // --- should_gate_capture: consume mode must still honor mute + real calls ---
+
+    #[test]
+    fn consume_mode_ignores_idle_and_audio_output_pause() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        reset_pause_state_for_test();
+        let lease = AtomicBool::new(false);
+        acquire_consume_mode(&lease);
+
+        set_idle_auto_paused(true);
+        recompute_effective();
+        assert!(
+            !should_gate_capture(),
+            "idle pause is irrelevant to a stream consumer — no paste target to protect"
+        );
+        set_idle_auto_paused(false);
+
+        let (_, _) = set_audio_output_paused(true);
+        assert!(
+            !should_gate_capture(),
+            "audio-output pause is irrelevant to a stream consumer"
+        );
+    }
+
+    #[test]
+    fn consume_mode_still_honors_explicit_mute() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        reset_pause_state_for_test();
+        let lease = AtomicBool::new(false);
+        acquire_consume_mode(&lease);
+        assert!(!should_gate_capture(), "unmuted, unpaused — capture runs");
+
+        let (_, _) = set_paused(true);
+        assert!(
+            should_gate_capture(),
+            "pressing mute (master pause) must silence capture even while a stream consumer is listening"
+        );
+
+        let (_, _) = set_paused(false);
+        assert!(!should_gate_capture(), "unmuting resumes capture");
+    }
+
+    #[test]
+    fn consume_mode_still_honors_mic_conflict() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        reset_pause_state_for_test();
+        let lease = AtomicBool::new(false);
+        acquire_consume_mode(&lease);
+
+        let (_, _) = set_mic_conflict_paused(true);
+        assert!(
+            should_gate_capture(),
+            "a real call (another app holding the mic) must silence capture even while a stream consumer is listening"
+        );
+
+        let (_, _) = set_mic_conflict_paused(false);
+        assert!(!should_gate_capture(), "call ending resumes capture");
+    }
+
+    #[test]
+    fn non_consume_mode_gates_on_any_pause_as_before() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        reset_pause_state_for_test();
+        assert!(!is_consume_mode());
+        set_current_app(Some("com.example.editor".into()));
+        assert!(recompute_effective().0, "fresh app, no allowlist — paused");
+        assert!(should_gate_capture());
     }
 }

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::localization::Localization;
 use super::postprocess::PostProcessor;
+use super::status_sound::StatusSoundSetting;
 use crate::db;
 use crate::db::Preferences;
 use crate::stt_dispatch::TranscriberBackendChoice;
@@ -267,6 +268,8 @@ pub struct AlwaysConfig {
     /// external consumers (e.g. IRIS tailing the file). Opt-in: persisted
     /// transcripts are privacy-relevant, so this defaults to off.
     pub transcript_stream_enabled: bool,
+    /// Status sounds for the four sleep-coding states. Off by default.
+    pub audible_status_sound: StatusSoundSetting,
 }
 
 #[derive(Debug, Clone)]
@@ -461,9 +464,48 @@ impl AlwaysConfig {
             // CLI/preference) without touching the merge logic.
             localization: Localization::ENGLISH,
             transcript_stream_enabled: resolve_transcript_stream(&prefs),
+            audible_status_sound: prefs
+                .audible_status_sound
+                .as_deref()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_default(),
         };
 
         Ok(config)
+    }
+
+    /// True when the LLM grammar/glossary postprocess pass should run for
+    /// the current utterance.
+    ///
+    /// Requires grammar correction enabled + a usable API key (see
+    /// [`PostProcessor::can_correct`]) AND the Groq STT backend active.
+    /// Local models must stay fully offline and near-instant, so
+    /// postprocess never fires while `transcriber_backend` is `Local` —
+    /// regardless of the saved `postprocess_enabled` preference, which
+    /// keeps applying normally the moment the user switches back to Groq.
+    pub fn postprocess_available(&self) -> bool {
+        matches!(self.transcriber_backend, TranscriberBackendChoice::Groq)
+            && self
+                .post_processor
+                .as_ref()
+                .is_some_and(|pp| pp.can_correct())
+    }
+
+    /// Whether deterministic CONTENT filtering (hard phrase filter +
+    /// hallucination heuristics) may reject a transcript.
+    ///
+    /// Only the remote Groq path — where an LLM does the real,
+    /// context-aware cleanup — is allowed to make content judgments, and
+    /// even there the heuristics are just a coarse pre-pass. On LOCAL
+    /// models there is no LLM in the loop and the deterministic rules are
+    /// brittle: a natural stutter run ("uh uh uh", "o o o o") was counted
+    /// as a hallucination and DISCARDED a whole 5-minute dictation. Local
+    /// dictation is therefore RAW verbatim — the system transcribes and
+    /// inserts exactly what was said, and never judges the content. The
+    /// user is the authority on what they meant to say. Identity (the
+    /// speaker/voiceprint gate) is separate and still applies.
+    pub fn content_filtering_enabled(&self) -> bool {
+        matches!(self.transcriber_backend, TranscriberBackendChoice::Groq)
     }
 }
 
@@ -505,6 +547,7 @@ impl Default for AlwaysConfig {
             idle_pause_action: IdlePauseAction::default(),
             localization: Localization::ENGLISH,
             transcript_stream_enabled: false,
+            audible_status_sound: StatusSoundSetting::default(),
         }
     }
 }
@@ -734,6 +777,60 @@ mod tests {
         assert_eq!(resolve_silence_secs(Some(20.0), &prefs), SILENCE_SECS_MAX);
         // User-configured values in range pass through untouched.
         assert_eq!(resolve_silence_secs(Some(0.8), &prefs), 0.8);
+    }
+
+    /// Local backend must never trigger the LLM postprocess pass, even
+    /// with grammar correction enabled and a working API key — local
+    /// models are the "no internet, still instant" path, and a stray
+    /// Groq round-trip would defeat that.
+    #[test]
+    fn postprocess_unavailable_on_local_backend_even_with_working_key() {
+        let mut cfg = AlwaysConfig {
+            post_processor: Some(Arc::new(PostProcessor::new(Some(
+                "test-key-never-used".to_string(),
+            )))),
+            transcriber_backend: TranscriberBackendChoice::Groq,
+            ..Default::default()
+        };
+        assert!(cfg.postprocess_available());
+
+        cfg.transcriber_backend = TranscriberBackendChoice::Local {
+            model_id: "parakeet-tdt-0.6b-v2".to_string(),
+        };
+        assert!(!cfg.postprocess_available());
+    }
+
+    /// Switching back to Groq restores postprocess with no extra state
+    /// to reconcile — `postprocess_enabled` itself is untouched by the
+    /// backend switch.
+    #[test]
+    fn postprocess_available_resumes_when_switching_back_to_groq() {
+        let mut cfg = AlwaysConfig {
+            post_processor: Some(Arc::new(PostProcessor::new(Some(
+                "test-key-never-used".to_string(),
+            )))),
+            transcriber_backend: TranscriberBackendChoice::Local {
+                model_id: "parakeet-tdt-0.6b-v2".to_string(),
+            },
+            ..Default::default()
+        };
+        assert!(!cfg.postprocess_available());
+
+        cfg.transcriber_backend = TranscriberBackendChoice::Groq;
+        assert!(cfg.postprocess_available());
+    }
+
+    /// No API key (or grammar correction off) still blocks postprocess
+    /// on the Groq backend — the backend gate is additive, not a
+    /// replacement for the existing `can_correct` checks.
+    #[test]
+    fn postprocess_unavailable_on_groq_without_api_key() {
+        let cfg = AlwaysConfig {
+            post_processor: Some(Arc::new(PostProcessor::new(None))),
+            transcriber_backend: TranscriberBackendChoice::Groq,
+            ..Default::default()
+        };
+        assert!(!cfg.postprocess_available());
     }
 }
 
