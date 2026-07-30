@@ -460,6 +460,10 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "false".to_string())
             );
+            println!(
+                "audible_status_sound: {}",
+                prefs.audible_status_sound.as_deref().unwrap_or("off")
+            );
         }
         ConfigAction::Set { key, value } => {
             // Store API keys in the preferences DB. Keychain access prompts

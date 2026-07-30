@@ -62,6 +62,8 @@ pub struct Preferences {
     /// Minimum cosine similarity against the enrolled voiceprint for
     /// an utterance to pass the gate. Default 0.50.
     pub speaker_gate_threshold: Option<f64>,
+    /// Status sound setting: off, low, medium, or high.
+    pub audible_status_sound: Option<String>,
 }
 
 pub fn open() -> Result<Connection> {
@@ -265,6 +267,41 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN speaker_gate_threshold REAL;")?;
     }
 
+    let has_legacy_audible_status_cues = conn
+        .prepare("SELECT audible_status_cues FROM preferences LIMIT 0")
+        .is_ok();
+    let has_legacy_audible_status_cue_volume = conn
+        .prepare("SELECT audible_status_cue_volume FROM preferences LIMIT 0")
+        .is_ok();
+    let has_audible_status_sound = conn
+        .prepare("SELECT audible_status_sound FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_audible_status_sound {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN audible_status_sound TEXT;")?;
+    }
+    if has_legacy_audible_status_cues {
+        if has_legacy_audible_status_cue_volume {
+            conn.execute_batch(
+                "UPDATE preferences
+                 SET audible_status_sound = CASE
+                     WHEN COALESCE(audible_status_cues, 0) != 0
+                         THEN COALESCE(audible_status_cue_volume, 'medium')
+                     ELSE 'off'
+                 END
+                 WHERE audible_status_sound IS NULL;",
+            )?;
+        } else {
+            conn.execute_batch(
+                "UPDATE preferences
+                 SET audible_status_sound = CASE
+                     WHEN COALESCE(audible_status_cues, 0) != 0 THEN 'medium'
+                     ELSE 'off'
+                 END
+                 WHERE audible_status_sound IS NULL;",
+            )?;
+        }
+    }
+
     encode_plaintext_groq_key(conn)?;
 
     Ok(())
@@ -296,7 +333,7 @@ fn encode_plaintext_groq_key(conn: &Connection) -> Result<()> {
 
 pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
     let mut stmt = conn.prepare(
-        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, idle_pause_action, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream, stt_adaptive_silence, speaker_gate_enabled, speaker_gate_threshold FROM preferences WHERE id = 1",
+        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, idle_pause_action, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream, stt_adaptive_silence, speaker_gate_enabled, speaker_gate_threshold, audible_status_sound FROM preferences WHERE id = 1",
     )?;
     let result = stmt.query_row([], |row| {
         Ok(Preferences {
@@ -330,6 +367,7 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             stt_adaptive_silence: row.get::<_, Option<i64>>(27)?.map(|v| v != 0),
             speaker_gate_enabled: row.get::<_, Option<i64>>(28)?.map(|v| v != 0),
             speaker_gate_threshold: row.get(29)?,
+            audible_status_sound: row.get(30)?,
         })
     });
     match result {
@@ -375,6 +413,7 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "stt_adaptive_silence",
         "speaker_gate_enabled",
         "speaker_gate_threshold",
+        "audible_status_sound",
     ];
     if !valid_keys.contains(&key) {
         anyhow::bail!(
@@ -492,6 +531,9 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
                 anyhow::bail!("idle_pause_action must be one of: pause, pause_and_mute");
             }
         }
+        "audible_status_sound" => {
+            let _: crate::always::status_sound::StatusSoundSetting = value.parse()?;
+        }
         "per_app_settings_json" => {
             if !value.is_empty() {
                 let _: serde_json::Value = serde_json::from_str(value)
@@ -518,6 +560,10 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
     let sql = format!("UPDATE preferences SET {key} = ?1 WHERE id = 1");
     let normalized = match key {
         "groq_api_key" => encode_secret(value),
+        "audible_status_sound" => value
+            .parse::<crate::always::status_sound::StatusSoundSetting>()?
+            .as_str()
+            .to_string(),
         "stt_trim_silence"
         | "stt_auto_enter"
         | "postprocess_enabled"
@@ -622,5 +668,44 @@ mod secret_encoding_tests {
     #[test]
     fn empty_groq_secret_reads_as_missing() {
         assert_eq!(decode_secret(Some(String::new())), None);
+    }
+}
+
+#[cfg(test)]
+mod audible_status_sound_tests {
+    use super::{get_preferences, migrate, set_preference};
+    use rusqlite::Connection;
+
+    fn memory_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn audible_status_sound_defaults_unset() {
+        let conn = memory_db();
+        let prefs = get_preferences(&conn).unwrap();
+
+        assert_eq!(prefs.audible_status_sound, None);
+    }
+
+    #[test]
+    fn audible_status_sound_accepts_and_canonicalizes_levels() {
+        let conn = memory_db();
+
+        set_preference(&conn, "audible_status_sound", "loud").unwrap();
+        let prefs = get_preferences(&conn).unwrap();
+
+        assert_eq!(prefs.audible_status_sound.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn audible_status_sound_rejects_unknown_levels() {
+        let conn = memory_db();
+
+        let err = set_preference(&conn, "audible_status_sound", "silent").unwrap_err();
+
+        assert!(err.to_string().contains("off, low, medium, high"));
     }
 }

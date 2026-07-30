@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 #[cfg(unix)]
@@ -110,13 +113,18 @@ fn validate_command(line: &str) -> Result<()> {
     Ok(())
 }
 
-/// RAII guard that decrements connected client count on drop.
-struct ClientGuard;
+/// RAII guard for a UDS connection. It releases a consume-mode lease owned by
+/// this connection before decrementing the connection count.
+struct ClientGuard {
+    consume_lease: Arc<AtomicBool>,
+}
 
 impl Drop for ClientGuard {
     fn drop(&mut self) {
+        pause::release_consume_mode(&self.consume_lease);
         let prev = CONNECTED_CLIENTS.fetch_sub(1, Ordering::Relaxed);
-        tracing::info!(clients = prev - 1, "uds_client_disconnected");
+        let remaining = prev - 1;
+        tracing::info!(clients = remaining, "uds_client_disconnected");
     }
 }
 
@@ -344,7 +352,10 @@ fn spawn_registry_event_bridge(registry: ModelRegistry) {
 #[cfg(unix)]
 async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     CONNECTED_CLIENTS.fetch_add(1, Ordering::Relaxed);
-    let _guard = ClientGuard;
+    let consume_lease = Arc::new(AtomicBool::new(false));
+    let _guard = ClientGuard {
+        consume_lease: Arc::clone(&consume_lease),
+    };
     tracing::info!(
         clients = CONNECTED_CLIENTS.load(Ordering::Relaxed),
         "uds_client_connected"
@@ -461,6 +472,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     // DaemonCommand. Executing them here (inside the daemon process) is what
     // makes the resulting events reach all UDS subscribers.
     let ctx_for_reader = ctx.clone();
+    let consume_lease_for_reader = Arc::clone(&consume_lease);
     tokio::spawn(async move {
         let mut reader = reader;
         let mut line = String::new();
@@ -491,7 +503,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
                     }
 
                     match DaemonCommand::from_json_line(trimmed) {
-                        Ok(cmd) => execute_command(cmd, &ctx_for_reader),
+                        Ok(cmd) => execute_command(cmd, &ctx_for_reader, &consume_lease_for_reader),
                         Err(e) => {
                             tracing::error!(error = %e, "uds_parse_command_failed: {command}", command = trimmed)
                         }
@@ -503,6 +515,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
                 }
             }
         }
+        pause::release_consume_mode(&consume_lease_for_reader);
     });
 
     // Send events to client
@@ -529,7 +542,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     Ok(())
 }
 
-fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
+fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &AtomicBool) {
     match cmd {
         DaemonCommand::TogglePause => {
             // toggle_pause flips MASTER and returns (effective, changed).
@@ -575,6 +588,14 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
             }
             tracing::info!(enabled, "uds_set_auto_enter");
         }
+        DaemonCommand::SetConsumeMode { enabled } => {
+            if enabled {
+                pause::acquire_consume_mode(consume_lease);
+            } else {
+                pause::release_consume_mode(consume_lease);
+            }
+            tracing::info!(enabled, "uds_set_consume_mode");
+        }
         DaemonCommand::ApplyRuntimePreferences {
             auto_enter_delay_ms,
             energy_threshold,
@@ -582,6 +603,7 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
             cooldown_ms,
             silero_threshold,
             adaptive_silence,
+            audible_status_sound,
         } => {
             apply_runtime_preferences(
                 ctx,
@@ -591,6 +613,7 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
                 cooldown_ms,
                 silero_threshold,
                 adaptive_silence,
+                audible_status_sound,
             );
         }
         DaemonCommand::ApproveCorrection { id } => handle_approve_correction(&id),
@@ -944,6 +967,7 @@ fn switch_active_backend(ctx: &ModelCommandCtx, choice: TranscriberBackendChoice
 /// Hot-reload fields the main loop reads from [`AlwaysConfig`] each
 /// utterance. DB persistence is handled by the Mac app before this
 /// command is sent.
+#[allow(clippy::too_many_arguments)]
 fn apply_runtime_preferences(
     ctx: &ModelCommandCtx,
     auto_enter_delay_ms: u32,
@@ -952,6 +976,7 @@ fn apply_runtime_preferences(
     cooldown_ms: u32,
     silero_threshold: f32,
     adaptive_silence: Option<bool>,
+    audible_status_sound: Option<String>,
 ) {
     let mut cfg = ctx.cfg.write();
     cfg.auto_enter_delay_ms = auto_enter_delay_ms.min(60_000);
@@ -965,6 +990,13 @@ fn apply_runtime_preferences(
     if let Some(adaptive) = adaptive_silence {
         cfg.adaptive_silence_enabled = adaptive;
     }
+    if let Some(setting) = audible_status_sound
+        .as_deref()
+        .and_then(|value| value.parse().ok())
+    {
+        cfg.audible_status_sound = setting;
+        crate::always::status_sound::set_setting(setting);
+    }
     tracing::info!(
         auto_enter_delay_ms = cfg.auto_enter_delay_ms,
         energy_threshold = cfg.energy_threshold,
@@ -972,6 +1004,7 @@ fn apply_runtime_preferences(
         cooldown_ms = cfg.cooldown_ms,
         silero_threshold = cfg.silero_threshold,
         adaptive_silence = cfg.adaptive_silence_enabled,
+        audible_status_sound = cfg.audible_status_sound.as_str(),
         "uds_apply_runtime_preferences"
     );
 }

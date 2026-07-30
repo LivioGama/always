@@ -113,6 +113,7 @@ struct SettingsWindow: View {
         .onChange(of: config.postprocessEnabled) { _, _ in saveConfig() }
         .onChange(of: config.idlePauseSecs) { _, _ in saveConfig() }
         .onChange(of: config.idlePauseAction) { _, _ in saveConfig() }
+        .onChange(of: config.audibleStatusSound) { _, _ in saveConfig() }
     }
 
     @ViewBuilder
@@ -121,7 +122,8 @@ struct SettingsWindow: View {
         case .general:
             GeneralPanel(
                 stateMonitor: stateMonitor,
-                focusedApp: focusedApp
+                focusedApp: focusedApp,
+                config: $config
             )
         case .behavior:
             BehaviorPanel(
@@ -198,6 +200,7 @@ struct SettingsWindow: View {
                 _ = try await cliService.setConfig(key: "postprocess_enabled", value: String(config.postprocessEnabled))
                 _ = try await cliService.setConfig(key: "idle_pause_secs", value: String(config.idlePauseSecs))
                 _ = try await cliService.setConfig(key: "idle_pause_action", value: config.idlePauseAction)
+                _ = try await cliService.setConfig(key: "audible_status_sound", value: config.audibleStatusSound)
                 await MainActor.run {
                     stateMonitor.applyRuntimePreferences(from: config)
                 }

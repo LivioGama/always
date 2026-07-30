@@ -18,6 +18,8 @@
 //! its WAV is written to `~/.always/failed-chunks/` with a placeholder in
 //! the joined text.
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -31,6 +33,10 @@ use crate::stt::{Transcriber, TranscriptionResult};
 const FINALIZE_POLL_MS: u64 = 10;
 /// Heartbeat cadence for the GUI's transcribing lease during finalize.
 const HEARTBEAT_SECS: u64 = 2;
+
+#[cfg(test)]
+static TEST_PAUSE_AFTER_RAW_PUBLISH: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>> =
+    std::sync::Mutex::new(None);
 
 /// One committed chunk. `audio` is retained until the transcription
 /// succeeds so a failed chunk can be retried / spilled, never dropped.
@@ -122,13 +128,27 @@ impl ChunkAccumulator {
 
             match outcome {
                 Ok(result) => {
-                    // Success: the audio has served its purpose.
-                    *slot.audio.lock() = None;
                     let raw = result.text.trim().to_string();
                     if !raw.is_empty() {
                         // Rolling preview on the overlay while the user
                         // keeps talking.
                         event::global_broadcaster().transcript_chunk(raw.clone());
+                    }
+                    // Publish raw text immediately. Per-chunk grammar can
+                    // take longer than the user keeps speaking; waiting for
+                    // it before setting `result` made finalize time out and
+                    // paste `[audio saved: chunk N]` even though Whisper had
+                    // already returned usable text.
+                    *slot.result.lock() = Some(Ok(ChunkText {
+                        raw: raw.clone(),
+                        corrected: None,
+                    }));
+                    // Success: the audio has served its purpose. Drop it only
+                    // after a usable raw result is visible to finalize.
+                    *slot.audio.lock() = None;
+                    #[cfg(test)]
+                    if let Some(rx) = TEST_PAUSE_AFTER_RAW_PUBLISH.lock().unwrap().take() {
+                        let _ = rx.recv_timeout(Duration::from_secs(2));
                     }
                     // Per-chunk grammar correction, paid for during the
                     // recording instead of at finalize. Best-effort: any
@@ -148,7 +168,12 @@ impl ChunkAccumulator {
                         corrected = corrected.is_some(),
                         "chunk_transcribed"
                     );
-                    *slot.result.lock() = Some(Ok(ChunkText { raw, corrected }));
+                    if let Some(corrected) = corrected {
+                        let mut result = slot.result.lock();
+                        if let Some(Ok(text)) = result.as_mut() {
+                            text.corrected = Some(corrected);
+                        }
+                    }
                 }
                 Err(err) => {
                     tracing::error!(chunk = index, error = %err, "chunk_transcription_failed");
@@ -260,17 +285,17 @@ impl ChunkAccumulator {
             return placeholder;
         };
         let dir = failed_chunks_dir();
-        if let Err(err) = std::fs::create_dir_all(&dir) {
+        if let Err(err) = create_private_dir(&dir) {
             tracing::error!(error = %err, "failed_chunks_dir_create_failed");
             return placeholder;
         }
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
+            .map(|d| d.as_nanos())
             .unwrap_or(0);
         let path = dir.join(format!("chunk-{stamp}-{}.wav", slot.index + 1));
         match audio::create_wav_bytes_i16_mono_16k(&audio_samples)
-            .and_then(|wav| std::fs::write(&path, wav).map_err(Into::into))
+            .and_then(|wav| write_private_file(&path, &wav))
         {
             Ok(()) => {
                 tracing::warn!(chunk = slot.index, path = %path.display(), "chunk_audio_spilled");
@@ -281,6 +306,30 @@ impl ChunkAccumulator {
         }
         placeholder
     }
+}
+
+fn create_private_dir(dir: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(path, bytes)?;
+    Ok(())
 }
 
 fn failed_chunks_dir() -> std::path::PathBuf {
@@ -337,6 +386,29 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn failed_audio_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("always-chunker-private-{}", std::process::id()));
+        let path = dir.join("failed.wav");
+        create_private_dir(&dir).unwrap();
+        write_private_file(&path, b"private audio").unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn chunks_join_in_flush_order() {
         let rt = rt();
@@ -362,6 +434,25 @@ mod tests {
         acc.flush(vec![0i16; 16_000], &t, None, rt.handle());
         let joined = acc.finalize(&t);
         assert_eq!(joined.text, "recovered text");
+        assert_eq!(joined.failed_chunks, 0);
+    }
+
+    #[test]
+    fn raw_chunk_is_available_before_postprocess_finishes() {
+        let rt = rt();
+        let t = mock(vec!["raw text ready"], vec![]);
+        let mut acc = ChunkAccumulator::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        *TEST_PAUSE_AFTER_RAW_PUBLISH.lock().unwrap() = Some(rx);
+
+        acc.flush(vec![0i16; 16_000], &t, None, rt.handle());
+
+        let started = Instant::now();
+        let joined = acc.finalize(&t);
+        let _ = tx.send(());
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(joined.text, "raw text ready");
         assert_eq!(joined.failed_chunks, 0);
     }
 

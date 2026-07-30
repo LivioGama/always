@@ -29,6 +29,16 @@ pub type ActiveTranscriber = Arc<RwLock<Arc<dyn Transcriber>>>;
 /// server so Settings changes apply without a daemon restart.
 pub type ActiveConfig = Arc<RwLock<AlwaysConfig>>;
 
+/// Whether the daemon should re-fetch the speaker-gate model at startup.
+/// True only when the gate is enabled AND a voiceprint is enrolled (so
+/// the gate WILL be requested and, without the model, fail closed) AND
+/// the model is currently absent. When the gate is off or no voiceprint
+/// exists, the gate is never requested, so a missing model is harmless
+/// and we must NOT spend 26 MB of bandwidth chasing it.
+fn should_refetch_speaker_model(gate_enabled: bool, enrolled: bool, model_present: bool) -> bool {
+    gate_enabled && enrolled && !model_present
+}
+
 pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     let _pid = daemon::PidGuard::install()?;
     let mut log = Logger::open(&cfg.log_path)?;
@@ -44,6 +54,32 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
 
     // Initialize the auto-enter state from config
     pause::init_auto_enter(cfg.auto_enter);
+    crate::always::status_sound::set_setting(cfg.audible_status_sound);
+
+    // Self-heal the speaker-gate model after a cache wipe. macOS can
+    // purge ~/Library/Caches between runs; Silero re-materialises from
+    // embedded bytes every boot, but the 26 MB WeSpeaker voiceprint
+    // model is download-only (fetched at enrollment) and is NOT restored
+    // on startup. Missing, the gate loads as "unavailable" and — because
+    // it fails CLOSED — drops EVERY utterance as "not enrolled"
+    // (score -1.0), silently bricking capture until the user re-enrolls.
+    // If the gate is on and a voiceprint is enrolled but the model is
+    // gone, re-fetch it in the background: best-effort, never blocking
+    // capture startup, and idempotent (ensure_model is a no-op when the
+    // file is already present with the right checksum).
+    if should_refetch_speaker_model(
+        cfg.speaker_gate_enabled,
+        crate::always::voiceprint::is_enrolled(),
+        crate::always::speaker_embed::model_present(),
+    ) {
+        std::thread::spawn(|| {
+            tracing::warn!("speaker_model_missing_at_startup_refetching");
+            match crate::always::speaker_embed::ensure_model() {
+                Ok(_) => tracing::info!("speaker_model_restored"),
+                Err(e) => tracing::warn!(error = %e, "speaker_model_refetch_failed"),
+            }
+        });
+    }
 
     // Create shared config early so UDS server can start immediately
     let active_cfg: ActiveConfig = Arc::new(RwLock::new(cfg.clone()));
@@ -197,7 +233,12 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
             continue;
         }
 
-        if pause::is_paused() {
+        // See `pause::should_gate_capture` — in consume mode per-app/idle/
+        // audio-output pause are irrelevant (no focused-app paste target),
+        // but a real call (mic conflict) or the user's explicit mute (master
+        // pause) must still silence capture even while a stream consumer
+        // (Iris) is listening.
+        if pause::should_gate_capture() {
             // Wake-on-voice while idle-paused: keep the mic hot enough to
             // detect speech without running the full VAD/transcribe loop.
             if pause::is_idle_auto_paused()
@@ -550,10 +591,7 @@ fn handle_speech(
                     // into one LLM message. The speculative warm in `vad.rs`
                     // builds the identical request, so the cache key matches
                     // and the LLM cost is usually already paid.
-                    let llm_available = cfg
-                        .post_processor
-                        .as_ref()
-                        .is_some_and(|pp| pp.can_correct());
+                    let llm_available = cfg.postprocess_available();
                     let req = crate::always::correction_request::build(&transformed, llm_available);
                     let (corrected, cache_hit) = apply_grammar_blocking_request(&req, cfg, rt);
                     (corrected, cache_hit, false)
@@ -583,6 +621,27 @@ fn handle_speech(
             });
 
             event::global_broadcaster().transcript_final(final_text.clone());
+
+            // Route to Iris: the transcript has already been broadcast over UDS
+            // (TranscriptChunk previews during speech + TranscriptFinal above).
+            // Route it to the file stream too, then STOP — no clipboard, no
+            // paste, no Enter. Nothing is inserted into any app.
+            // A persisted stream setting is not proof that a controller is
+            // connected. Only a live per-connection consume lease may suppress
+            // paste; otherwise a controller crash could silently drop a wake
+            // word instead of dictating it normally.
+            if pause::is_consume_mode() {
+                if cfg.transcript_stream_enabled {
+                    transcript_stream::append(&final_text);
+                }
+                pause::dictation_buffer_clear();
+                event::global_broadcaster().voice_activity_ended();
+                tracing::info!(
+                    chars = final_text.chars().count(),
+                    "consume_mode_routed_to_stream"
+                );
+                return Ok(());
+            }
 
             // Resume-merge path: if the auto-enter countdown is still
             // active from the previous utterance, the user paused only
@@ -683,17 +742,16 @@ fn handle_speech(
                 daemon::reconcile_duplicate_processes();
             }
 
-            // Snapshot the user's clipboard BEFORE we overwrite it with the
-            // transcript, so the synchronous / no-grammar paste paths can
-            // restore it after the Cmd+V is consumed (guarded — see the
-            // restore call below). Best-effort: if pbpaste fails we simply
-            // skip the restore rather than abort the paste. Plain-text only;
-            // non-text flavors aren't preserved (documented in paste.rs).
-            // The clipboard payload we are about to write — kept so the
-            // guarded restore can confirm nothing else clobbered it since.
-            let prev_clipboard = paste::read_clipboard_text().ok();
-            let written_clipboard = paste_clipboard.clone();
+            // Inserted (dictation) text is LEFT on the clipboard on purpose —
+            // the user wants every pasted utterance to land in their clipboard
+            // history. So we no longer snapshot/restore the prior clipboard
+            // here. (Consume-mode / Iris-routed utterances returned above and
+            // never reach this copy, so Iris speech never touches the
+            // clipboard — see the `is_consume_mode()` early return.)
             let paste_started = Instant::now();
+            // Keep a copy of the payload we're about to write for `note_pasted`
+            // below (`paste_clipboard` itself is moved into copy_to_clipboard).
+            let written_clipboard = paste_clipboard.clone();
 
             // NOTE: the paste-in-flight lock is held from `try_begin_paste()`
             // above. Every early-return below MUST release it via
@@ -701,11 +759,6 @@ fn handle_speech(
             // utterances drop as "in_flight"). A bare `?` here previously
             // leaked the lock when pbcopy failed.
             let copy_result = paste::copy_to_clipboard(paste_clipboard);
-            // Capture the pasteboard changeCount immediately after our own
-            // write: the restore below only fires while the count still
-            // matches, so any later clipboard write (even an identical
-            // string, even non-text flavors) cancels the restore.
-            let write_token = paste::pasteboard_change_count();
             if let Err(err) = copy_result {
                 tracing::warn!(error = %err, "clipboard_copy_failed");
                 log.write(Event::Error {
@@ -783,35 +836,17 @@ fn handle_speech(
             std::thread::sleep(Duration::from_millis(100));
 
             if grammar_patch_async {
-                // TODO(clipboard-restore): the async-grammar path ends with
-                // `replace_via_undo` INSIDE `spawn_grammar_patch` (undo +
-                // copy(corrected) + Cmd+V), which is the LAST clipboard op
-                // for this utterance. The guarded restore must run after
-                // that final repaste and re-check against the *corrected*
-                // clipboard payload, not `written_clipboard`. Threading the
-                // snapshot through and re-guarding correctly there is more
-                // intricate than the synchronous case, so the clipboard
-                // restore for the async-grammar path is deliberately
-                // deferred. The synchronous + no-grammar path below restores.
+                // The async-grammar path ends with `replace_via_undo` INSIDE
+                // `spawn_grammar_patch` (undo + copy(corrected) + Cmd+V), so
+                // the corrected transcript is what's left on the clipboard —
+                // exactly what we want in the user's clipboard history. No
+                // restore, matching the synchronous path below.
                 spawn_grammar_patch(rt, cfg, final_text.clone(), pasted_at, pasted_to_app);
             } else {
                 pause::end_paste();
-                // Synchronous / no-grammar path: this was the last clipboard
-                // op for the utterance. Give the target app time to consume
-                // the Cmd+V, then restore the user's prior clipboard — but
-                // only if our transcript is still on the pasteboard (i.e.
-                // the user/another app didn't copy something fresh in the
-                // meantime). See `restore_clipboard_if_unchanged`.
-                if let Some(prev) = prev_clipboard {
-                    std::thread::sleep(Duration::from_millis(150));
-                    if let Err(err) = paste::restore_clipboard_if_unchanged(
-                        &prev,
-                        &written_clipboard,
-                        write_token,
-                    ) {
-                        tracing::warn!(error = %err, "clipboard_restore_failed");
-                    }
-                }
+                // Synchronous / no-grammar path: leave the pasted transcript on
+                // the clipboard so it enters the user's clipboard history. We
+                // intentionally do NOT restore the prior clipboard here.
             }
 
             let auto_enter_effective =
@@ -907,7 +942,11 @@ pub fn is_short_utterance(text: &str) -> bool {
 /// per-chunk while recording (see `chunker.rs`).
 pub const GRAMMAR_MAX_CHARS: usize = 4000;
 
-const AUTO_ENTER_MIN_WORDS: usize = 3;
+// One word is enough. The user dictates single-word commands ("yes", "run",
+// "send") and expects Return to fire — suppressing auto-enter below 3 words
+// left one-word utterances stranded without a newline. `>= 1` still excludes
+// the empty/whitespace case (word_count 0).
+const AUTO_ENTER_MIN_WORDS: usize = 1;
 
 fn should_auto_enter_for_text(text: &str) -> bool {
     word_count(text) >= AUTO_ENTER_MIN_WORDS
@@ -921,6 +960,11 @@ fn word_count(text: &str) -> usize {
     text.split_whitespace().count()
 }
 
+/// Mirrors Iris's JS-side wake-word matcher (`AlwaysEventClient`, default
+/// word "iris"): true when the leading token is exactly the wake word,
+/// case-insensitively, followed by nothing / a space / a comma. Used only
+/// as a race-guard heuristic (see the call site in `handle_speech`) — the
+/// authoritative routing decision remains `pause::is_consume_mode()`.
 /// Stage 2 — blocking LLM grammar cleanup over a prepared
 /// [`CorrectionRequest`] (tier-1 acoustic text + deferred glossary
 /// candidates + dictation-session context). Returns the corrected text
@@ -932,7 +976,7 @@ fn apply_grammar_blocking_request(
     rt: &Handle,
 ) -> (String, bool) {
     let fallback = req.acoustic_text.clone();
-    if cfg.postprocess_config.grammar_correction_enabled
+    if cfg.postprocess_available()
         && let Some(ref pp) = cfg.post_processor
     {
         let started = Instant::now();
@@ -1137,8 +1181,26 @@ mod tests {
 
     use super::{
         AUTO_ENTER_MIN_WORDS, SHORT_UTTERANCE_MAX_CHARS, SHORT_UTTERANCE_MAX_WORDS,
-        is_short_utterance, should_auto_enter_for_text, snippet_utterance_for_log,
+        is_short_utterance, should_auto_enter_for_text, should_refetch_speaker_model,
+        snippet_utterance_for_log,
     };
+
+    #[test]
+    fn refetches_speaker_model_only_when_gate_requested_and_model_absent() {
+        // The exact outage: gate on + voiceprint enrolled + model wiped
+        // from the cache → must re-fetch (else it fails closed and drops
+        // every utterance as "not enrolled", score -1.0).
+        assert!(should_refetch_speaker_model(true, true, false));
+
+        // Model already present → nothing to do (no wasted 26 MB fetch).
+        assert!(!should_refetch_speaker_model(true, true, true));
+
+        // Gate off, or no voiceprint enrolled → the gate is never
+        // requested, so a missing model is harmless; do NOT fetch.
+        assert!(!should_refetch_speaker_model(false, true, false));
+        assert!(!should_refetch_speaker_model(true, false, false));
+        assert!(!should_refetch_speaker_model(false, false, false));
+    }
 
     #[test]
     fn snippet_match_redacts_utterance_when_transcript_logging_is_disabled() {
@@ -1201,16 +1263,19 @@ mod tests {
     }
 
     #[test]
-    fn auto_enter_requires_three_or_more_words() {
+    fn auto_enter_fires_for_one_or_more_words() {
+        // Empty / whitespace-only never auto-enters (nothing was said).
         assert!(!should_auto_enter_for_text(""));
         assert!(!should_auto_enter_for_text("   "));
-        assert!(!should_auto_enter_for_text("hello"));
-        assert!(!should_auto_enter_for_text("hello there"));
 
+        // A single word IS enough — the user dictates one-word commands and
+        // expects Return to fire.
+        assert!(should_auto_enter_for_text("hello"));
+        assert!(should_auto_enter_for_text("yes"));
+        assert!(should_auto_enter_for_text("hello there"));
         assert!(should_auto_enter_for_text("hello over there"));
         assert!(should_auto_enter_for_text("  hello over there  "));
-        assert!(should_auto_enter_for_text("one two three four"));
 
-        assert_eq!(AUTO_ENTER_MIN_WORDS, 3);
+        assert_eq!(AUTO_ENTER_MIN_WORDS, 1);
     }
 }
