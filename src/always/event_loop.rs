@@ -622,30 +622,15 @@ fn handle_speech(
 
             event::global_broadcaster().transcript_final(final_text.clone());
 
-            // Wake-word direct routing: a final that leads with the wake word
-            // ("Iris, …") is itself a routing signal — send it to Iris instead
-            // of pasting into the focused field.
-            //
-            // This must NOT depend on a stream consumer (Iris) flipping consume
-            // mode from an early `TranscriptChunk` preview: batch STT (Whisper)
-            // emits no streaming partials, so Iris never sees the wake word
-            // before the final and can't flip consume mode in time — the
-            // utterance then gets typed into whatever field is focused. So the
-            // DAEMON honors the wake word directly here. (When streaming STT is
-            // active, Iris's preview-based flip still works and simply lands as
-            // `is_consume_mode()` being true below — both paths converge.)
-            //
-            // Only intercept when the transcript stream is actually enabled
-            // (Iris is listening); otherwise fall through to normal dictation.
-            let wake_routed = cfg.transcript_stream_enabled
-                && !pause::is_consume_mode()
-                && starts_with_wake_word(&final_text);
-
             // Route to Iris: the transcript has already been broadcast over UDS
             // (TranscriptChunk previews during speech + TranscriptFinal above).
             // Route it to the file stream too, then STOP — no clipboard, no
             // paste, no Enter. Nothing is inserted into any app.
-            if pause::is_consume_mode() || wake_routed {
+            // A persisted stream setting is not proof that a controller is
+            // connected. Only a live per-connection consume lease may suppress
+            // paste; otherwise a controller crash could silently drop a wake
+            // word instead of dictating it normally.
+            if pause::is_consume_mode() {
                 if cfg.transcript_stream_enabled {
                     transcript_stream::append(&final_text);
                 }
@@ -653,7 +638,6 @@ fn handle_speech(
                 event::global_broadcaster().voice_activity_ended();
                 tracing::info!(
                     chars = final_text.chars().count(),
-                    wake_routed,
                     "consume_mode_routed_to_stream"
                 );
                 return Ok(());
@@ -981,14 +965,6 @@ fn word_count(text: &str) -> usize {
 /// case-insensitively, followed by nothing / a space / a comma. Used only
 /// as a race-guard heuristic (see the call site in `handle_speech`) — the
 /// authoritative routing decision remains `pause::is_consume_mode()`.
-fn starts_with_wake_word(text: &str) -> bool {
-    const WAKE_WORD: &str = "iris";
-    let t = text.trim().to_lowercase();
-    t == WAKE_WORD
-        || t.starts_with(&format!("{WAKE_WORD} "))
-        || t.starts_with(&format!("{WAKE_WORD},"))
-}
-
 /// Stage 2 — blocking LLM grammar cleanup over a prepared
 /// [`CorrectionRequest`] (tier-1 acoustic text + deferred glossary
 /// candidates + dictation-session context). Returns the corrected text
@@ -1206,7 +1182,7 @@ mod tests {
     use super::{
         AUTO_ENTER_MIN_WORDS, SHORT_UTTERANCE_MAX_CHARS, SHORT_UTTERANCE_MAX_WORDS,
         is_short_utterance, should_auto_enter_for_text, should_refetch_speaker_model,
-        snippet_utterance_for_log, starts_with_wake_word,
+        snippet_utterance_for_log,
     };
 
     #[test]
@@ -1224,26 +1200,6 @@ mod tests {
         assert!(!should_refetch_speaker_model(false, true, false));
         assert!(!should_refetch_speaker_model(true, false, false));
         assert!(!should_refetch_speaker_model(false, false, false));
-    }
-
-    #[test]
-    fn wake_word_matches_leading_iris_case_insensitively() {
-        assert!(starts_with_wake_word("iris"));
-        assert!(starts_with_wake_word("Iris"));
-        assert!(starts_with_wake_word("IRIS can you hear me"));
-        assert!(starts_with_wake_word("Iris, pause whatever is playing."));
-        assert!(
-            starts_with_wake_word("  iris what time is it"),
-            "trims leading whitespace"
-        );
-    }
-
-    #[test]
-    fn wake_word_rejects_non_leading_or_prefix_matches() {
-        assert!(!starts_with_wake_word("Hi, Iris, can you hear me?"));
-        assert!(!starts_with_wake_word("Irish coffee sounds good"));
-        assert!(!starts_with_wake_word("can you hear me Iris"));
-        assert!(!starts_with_wake_word(""));
     }
 
     #[test]

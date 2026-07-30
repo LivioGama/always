@@ -18,6 +18,8 @@
 //! its WAV is written to `~/.always/failed-chunks/` with a placeholder in
 //! the joined text.
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -283,17 +285,17 @@ impl ChunkAccumulator {
             return placeholder;
         };
         let dir = failed_chunks_dir();
-        if let Err(err) = std::fs::create_dir_all(&dir) {
+        if let Err(err) = create_private_dir(&dir) {
             tracing::error!(error = %err, "failed_chunks_dir_create_failed");
             return placeholder;
         }
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
+            .map(|d| d.as_nanos())
             .unwrap_or(0);
         let path = dir.join(format!("chunk-{stamp}-{}.wav", slot.index + 1));
         match audio::create_wav_bytes_i16_mono_16k(&audio_samples)
-            .and_then(|wav| std::fs::write(&path, wav).map_err(Into::into))
+            .and_then(|wav| write_private_file(&path, &wav))
         {
             Ok(()) => {
                 tracing::warn!(chunk = slot.index, path = %path.display(), "chunk_audio_spilled");
@@ -304,6 +306,30 @@ impl ChunkAccumulator {
         }
         placeholder
     }
+}
+
+fn create_private_dir(dir: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(path, bytes)?;
+    Ok(())
 }
 
 fn failed_chunks_dir() -> std::path::PathBuf {
@@ -358,6 +384,29 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_audio_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("always-chunker-private-{}", std::process::id()));
+        let path = dir.join("failed.wav");
+        create_private_dir(&dir).unwrap();
+        write_private_file(&path, b"private audio").unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

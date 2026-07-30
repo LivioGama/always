@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 #[cfg(unix)]
@@ -110,21 +113,18 @@ fn validate_command(line: &str) -> Result<()> {
     Ok(())
 }
 
-/// RAII guard that decrements connected client count on drop.
-struct ClientGuard;
+/// RAII guard for a UDS connection. It releases a consume-mode lease owned by
+/// this connection before decrementing the connection count.
+struct ClientGuard {
+    consume_lease: Arc<AtomicBool>,
+}
 
 impl Drop for ClientGuard {
     fn drop(&mut self) {
+        pause::release_consume_mode(&self.consume_lease);
         let prev = CONNECTED_CLIENTS.fetch_sub(1, Ordering::Relaxed);
         let remaining = prev - 1;
         tracing::info!(clients = remaining, "uds_client_disconnected");
-        // Safety net: if the last client vanished (e.g. a controller crashed
-        // without sending SetConsumeMode{false}), drop consume mode so normal
-        // dictation + pasting resume for whoever connects next.
-        if remaining == 0 && crate::always::pause::is_consume_mode() {
-            crate::always::pause::set_consume_mode(false);
-            tracing::info!("consume_mode_cleared_on_last_disconnect");
-        }
     }
 }
 
@@ -352,7 +352,10 @@ fn spawn_registry_event_bridge(registry: ModelRegistry) {
 #[cfg(unix)]
 async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     CONNECTED_CLIENTS.fetch_add(1, Ordering::Relaxed);
-    let _guard = ClientGuard;
+    let consume_lease = Arc::new(AtomicBool::new(false));
+    let _guard = ClientGuard {
+        consume_lease: Arc::clone(&consume_lease),
+    };
     tracing::info!(
         clients = CONNECTED_CLIENTS.load(Ordering::Relaxed),
         "uds_client_connected"
@@ -469,6 +472,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     // DaemonCommand. Executing them here (inside the daemon process) is what
     // makes the resulting events reach all UDS subscribers.
     let ctx_for_reader = ctx.clone();
+    let consume_lease_for_reader = Arc::clone(&consume_lease);
     tokio::spawn(async move {
         let mut reader = reader;
         let mut line = String::new();
@@ -499,7 +503,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
                     }
 
                     match DaemonCommand::from_json_line(trimmed) {
-                        Ok(cmd) => execute_command(cmd, &ctx_for_reader),
+                        Ok(cmd) => execute_command(cmd, &ctx_for_reader, &consume_lease_for_reader),
                         Err(e) => {
                             tracing::error!(error = %e, "uds_parse_command_failed: {command}", command = trimmed)
                         }
@@ -511,6 +515,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
                 }
             }
         }
+        pause::release_consume_mode(&consume_lease_for_reader);
     });
 
     // Send events to client
@@ -537,7 +542,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     Ok(())
 }
 
-fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
+fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &AtomicBool) {
     match cmd {
         DaemonCommand::TogglePause => {
             // toggle_pause flips MASTER and returns (effective, changed).
@@ -584,10 +589,11 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx) {
             tracing::info!(enabled, "uds_set_auto_enter");
         }
         DaemonCommand::SetConsumeMode { enabled } => {
-            // Route to stream consumers (Iris) instead of pasting. No pause
-            // recompute needed — the capture loop and paste path read
-            // `is_consume_mode()` directly.
-            pause::set_consume_mode(enabled);
+            if enabled {
+                pause::acquire_consume_mode(consume_lease);
+            } else {
+                pause::release_consume_mode(consume_lease);
+            }
             tracing::info!(enabled, "uds_set_consume_mode");
         }
         DaemonCommand::ApplyRuntimePreferences {

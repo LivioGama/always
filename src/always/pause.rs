@@ -18,7 +18,7 @@
 //! semantics ("am I effectively paused right now?") didn't change.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use parking_lot::Mutex;
@@ -59,18 +59,29 @@ static EFFECTIVE_PAUSED: AtomicBool = AtomicBool::new(true);
 /// every pause source (there is no focused app to leak into — nothing is
 /// pasted) and the paste path is skipped entirely. Cleared when the last
 /// client disconnects.
-static CONSUME_MODE: AtomicBool = AtomicBool::new(false);
+static CONSUME_MODE_LEASES: AtomicUsize = AtomicUsize::new(0);
 
-/// Enable/disable consume mode (route to stream consumers, suppress paste).
-pub fn set_consume_mode(enabled: bool) {
-    CONSUME_MODE.store(enabled, Ordering::Relaxed);
+/// Acquire this connection's consume-mode lease. Each UDS client owns at
+/// most one lease, so a disconnect can only undo the routing it enabled.
+pub fn acquire_consume_mode(lease: &AtomicBool) {
+    if !lease.swap(true, Ordering::AcqRel) {
+        CONSUME_MODE_LEASES.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// Release this connection's consume-mode lease. Safe to call repeatedly
+/// from the reader shutdown path and its connection guard.
+pub fn release_consume_mode(lease: &AtomicBool) {
+    if lease.swap(false, Ordering::AcqRel) {
+        CONSUME_MODE_LEASES.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Is the daemon routing transcription to its stream consumers instead of
 /// pasting? When true, the capture loop runs regardless of pause state and no
 /// text is ever pasted.
 pub fn is_consume_mode() -> bool {
-    CONSUME_MODE.load(Ordering::Relaxed)
+    CONSUME_MODE_LEASES.load(Ordering::Acquire) > 0
 }
 
 /// Recompute the effective pause state from MASTER + per-app rules.
@@ -565,7 +576,7 @@ mod tests {
         MIC_CONFLICT_PAUSED.store(false, Ordering::Relaxed);
         IDLE_AUTO_PAUSED.store(false, Ordering::Relaxed);
         EFFECTIVE_PAUSED.store(true, Ordering::Relaxed);
-        CONSUME_MODE.store(false, Ordering::Relaxed);
+        CONSUME_MODE_LEASES.store(0, Ordering::Relaxed);
         *CURRENT_APP.lock() = None;
         per_app::set_cache_for_test(HashMap::new());
     }
@@ -715,7 +726,8 @@ mod tests {
     fn consume_mode_ignores_idle_and_audio_output_pause() {
         let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
         reset_pause_state_for_test();
-        set_consume_mode(true);
+        let lease = AtomicBool::new(false);
+        acquire_consume_mode(&lease);
 
         set_idle_auto_paused(true);
         recompute_effective();
@@ -736,7 +748,8 @@ mod tests {
     fn consume_mode_still_honors_explicit_mute() {
         let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
         reset_pause_state_for_test();
-        set_consume_mode(true);
+        let lease = AtomicBool::new(false);
+        acquire_consume_mode(&lease);
         assert!(!should_gate_capture(), "unmuted, unpaused — capture runs");
 
         let (_, _) = set_paused(true);
@@ -753,7 +766,8 @@ mod tests {
     fn consume_mode_still_honors_mic_conflict() {
         let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
         reset_pause_state_for_test();
-        set_consume_mode(true);
+        let lease = AtomicBool::new(false);
+        acquire_consume_mode(&lease);
 
         let (_, _) = set_mic_conflict_paused(true);
         assert!(

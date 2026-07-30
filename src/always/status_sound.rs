@@ -1,11 +1,8 @@
 use std::str::FromStr;
-use std::sync::{
-    LazyLock, Mutex,
-    atomic::{AtomicU8, Ordering},
-};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 static AUDIBLE_STATUS_SOUND: AtomicU8 = AtomicU8::new(StatusSoundSetting::Off as u8);
-static PLAYBACK_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static PLAYBACK_IN_FLIGHT: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusSound {
@@ -101,30 +98,18 @@ fn play(sound: StatusSound) {
     let path = sound_path(sound);
     let setting = setting();
     let volume = setting.afplay_volume();
+    if PLAYBACK_IN_FLIGHT
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
     std::thread::spawn(move || {
-        let _guard = PLAYBACK_LOCK.lock().ok();
-        if setting == StatusSoundSetting::High {
-            let _ = play_with_ducked_output(path, volume);
-        } else {
-            let _ = play_file(path, volume);
-        }
+        // `afplay -v` affects only this cue. Never mutate global macOS output
+        // volume: user or system changes made during a cue must persist.
+        let _ = play_file(path, volume);
+        PLAYBACK_IN_FLIGHT.store(0, Ordering::Release);
     });
-}
-
-#[cfg(target_os = "macos")]
-fn play_with_ducked_output(path: &str, volume: &str) -> std::io::Result<std::process::ExitStatus> {
-    let original = current_output_volume();
-    if let Some(original) = original {
-        let ducked = ducked_output_volume(original);
-        if ducked < original {
-            let _ = set_output_volume(ducked);
-        }
-    }
-    let result = play_file(path, volume);
-    if let Some(original) = original {
-        let _ = set_output_volume(original);
-    }
-    result
 }
 
 #[cfg(target_os = "macos")]
@@ -133,42 +118,6 @@ fn play_file(path: &str, volume: &str) -> std::io::Result<std::process::ExitStat
         .arg("-v")
         .arg(volume)
         .arg(path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-}
-
-fn ducked_output_volume(original: u8) -> u8 {
-    if original > 45 {
-        35
-    } else if original > 20 {
-        original.saturating_sub(12)
-    } else {
-        original
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn current_output_volume() -> Option<u8> {
-    let output = std::process::Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg("output volume of (get volume settings)")
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()?.trim().parse().ok()
-}
-
-#[cfg(target_os = "macos")]
-fn set_output_volume(volume: u8) -> std::io::Result<std::process::ExitStatus> {
-    std::process::Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg(format!("set volume output volume {volume}"))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -245,9 +194,8 @@ mod tests {
     }
 
     #[test]
-    fn ducked_volume_is_lower_but_not_silent() {
-        assert_eq!(ducked_output_volume(80), 35);
-        assert_eq!(ducked_output_volume(35), 23);
-        assert_eq!(ducked_output_volume(15), 15);
+    fn cue_playback_gate_starts_idle() {
+        PLAYBACK_IN_FLIGHT.store(0, Ordering::Relaxed);
+        assert_eq!(PLAYBACK_IN_FLIGHT.load(Ordering::Relaxed), 0);
     }
 }
