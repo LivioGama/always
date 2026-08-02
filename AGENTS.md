@@ -43,6 +43,30 @@ This project is indexed by GitNexus as **always** (4305 symbols, 10532 relations
 
 <!-- gitnexus:end -->
 
+# Always Project Rules
+
+## Rebuild After Changes
+
+**MUST use the official rebuild script after making code changes that need testing.**
+
+After modifying Rust or Swift code, run:
+```bash
+./scripts/dev-rebuild.sh
+```
+
+This script:
+- Kills the Always app and daemon
+- Builds the Rust backend with local-stt feature
+- Builds the Swift app bundle
+- Deploys to /Applications/Always.app
+- Launches the app
+
+**Why**: Ensures the full stack is rebuilt and deployed consistently. Manual `cargo build` + `swift build` can miss steps or leave stale processes running.
+
+**Options**:
+- `./scripts/dev-rebuild.sh release` - Release build instead of debug
+- `./scripts/dev-rebuild.sh --no-daemon` - Skip daemon restart (Swift-only changes)
+
 # GitNexus Index-Powered Development
 
 ## Golden Rule: Think in Processes, Not Files
