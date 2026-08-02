@@ -76,6 +76,7 @@ struct SettingsSidebar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .focusable(false)
         .padding(.horizontal, 8)
     }
 
