@@ -15,6 +15,10 @@ final class ModelManagerClient: ObservableObject {
 
     private let logger = Logger(subsystem: "com.always.app", category: "models")
 
+    private enum CacheKeys {
+        static let models = "cached_models"
+    }
+
     /// Latest catalog snapshot from the daemon. Empty until the first
     /// `ModelsList` event arrives (the client sends a `ListModels`
     /// command on every UDS reconnect to trigger one).
@@ -51,6 +55,8 @@ final class ModelManagerClient: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     private init() {
+        loadCachedModels()
+
         observer = NotificationCenter.default.addObserver(
             forName: .daemonEvent,
             object: nil,
@@ -80,6 +86,27 @@ final class ModelManagerClient: ObservableObject {
             NotificationCenter.default.removeObserver(observer)
         }
     }
+
+    // MARK: Cache management
+
+    private func loadCachedModels() {
+        guard let data = UserDefaults.standard.data(forKey: CacheKeys.models),
+              let decoded = try? JSONDecoder().decode([ModelInfo].self, from: data) else {
+            return
+        }
+        models = decoded
+        logger.info("Loaded \(decoded.count) models from cache")
+    }
+
+    private func saveCachedModels() {
+        guard let encoded = try? JSONEncoder().encode(models) else {
+            logger.error("Failed to encode models for caching")
+            return
+        }
+        UserDefaults.standard.set(encoded, forKey: CacheKeys.models)
+    }
+
+    // MARK: Commands (UI → daemon)
 
     /// Active model id when the backend is local — `nil` for the
     /// remote Groq path.
@@ -162,6 +189,7 @@ final class ModelManagerClient: ObservableObject {
         case .modelsList:
             if let list = event.modelsList {
                 models = list.models
+                saveCachedModels()
                 // A model that's now confirmed on disk is fully done —
                 // clear ALL in-progress state so the row settles into the
                 // Downloaded section with a Use button.
