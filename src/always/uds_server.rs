@@ -356,6 +356,12 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     let _guard = ClientGuard {
         consume_lease: Arc::clone(&consume_lease),
     };
+    
+    // Increase socket buffer size to handle larger initial payloads
+    if let Err(e) = stream.set_send_buffer_size(1024 * 1024) {
+        tracing::warn!(error = %e, "failed to increase send buffer size");
+    }
+    
     tracing::info!(
         clients = CONNECTED_CLIENTS.load(Ordering::Relaxed),
         "uds_client_connected"
