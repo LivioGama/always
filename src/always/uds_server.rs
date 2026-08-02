@@ -438,12 +438,6 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
             steps,
         });
     }
-    // Models catalog snapshot so the Settings tab renders the full
-    // catalog immediately without a request round-trip.
-    {
-        let models = ctx.registry.list();
-        initial_events.push(DaemonEvent::ModelsList { models });
-    }
 
     let mut initial_payload = String::new();
     for event in initial_events {
@@ -462,7 +456,16 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         })
         .await
         {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                // Initial state sent successfully, now send ModelsList separately
+                // to avoid buffer overflow with large payloads
+                let models = ctx.registry.list();
+                let models_event = DaemonEvent::ModelsList { models };
+                if let Ok(models_json) = models_event.to_json_line() {
+                    let _ = writer.write_all(models_json.as_bytes()).await;
+                    let _ = writer.flush().await;
+                }
+            }
             Ok(Err(e)) => {
                 tracing::error!(error = %e, "uds_send_initial_state_failed");
                 return Ok(());
