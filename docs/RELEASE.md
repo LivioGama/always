@@ -14,7 +14,7 @@ secrets.
 | `APPLE_ID` | Apple ID email for notarization. |
 | `APPLE_TEAM_ID` | Apple Developer Team ID (e.g. `ZV4JCJ669Y`). |
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password from appleid.apple.com. |
-| `HOMEBREW_TAP_TOKEN` | Fine-grained PAT with `contents:write` on `rtk-ai/homebrew-tap`. |
+| `HOMEBREW_TAP_TOKEN` | Fine-grained PAT with `contents:write` on `LivioGama/homebrew-tap`. |
 | `SPARKLE_ED_PRIVATE_KEY` | Private EdDSA key used by Sparkle's `sign_update` when generating `appcast.xml`. |
 
 CI coverage upload also uses `CODECOV_TOKEN`. It is intentionally not a
@@ -46,7 +46,7 @@ release preflight secret because the Codecov upload is non-blocking
    * Builds + tarballs the Linux CLI daemon.
    * Computes `SHA256SUMS`.
    * Drafts a GitHub Release with all artifacts.
-   * Opens an auto-PR to `rtk-ai/homebrew-tap` to bump the formula.
+   * Opens an auto-PR to `LivioGama/homebrew-tap` to bump the formula.
    * Generates SLSA Level 3 provenance via the
      `slsa-framework/slsa-github-generator` reusable workflow.
 
@@ -54,7 +54,7 @@ release preflight secret because the Codecov upload is non-blocking
    ```bash
    # Cosign verification (replace with the real cert identity)
    cosign verify-blob \
-     --certificate-identity 'https://github.com/rtk-ai/always/.github/workflows/release.yml@refs/tags/vX.Y.Z' \
+     --certificate-identity 'https://github.com/LivioGama/always/.github/workflows/release.yml@refs/tags/vX.Y.Z' \
      --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
      --signature always-X.Y.Z.dmg.sig \
      --certificate always-X.Y.Z.dmg.pem \
@@ -63,7 +63,7 @@ release preflight secret because the Codecov upload is non-blocking
    # SLSA provenance
    slsa-verifier verify-artifact \
      --provenance-path always-X.Y.Z.intoto.jsonl \
-     --source-uri github.com/rtk-ai/always \
+     --source-uri github.com/LivioGama/always \
      --source-tag vX.Y.Z \
      always-X.Y.Z.dmg
    ```

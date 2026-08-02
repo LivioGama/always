@@ -9,7 +9,7 @@
 #     --device /dev/snd \
 #     -e GROQ_API_KEY=… \
 #     -v $HOME/.config/always:/root/.config/always \
-#     ghcr.io/rtk-ai/always:latest run
+#     ghcr.io/LivioGama/always:latest run
 #
 # Multi-stage; final image is debian-slim + runtime deps only.
 

@@ -4,7 +4,7 @@ version = "0.0.1"
 edition = "2024"
 description = "Always-on voice activation daemon — Groq STT with intelligent transcription"
 license = "Apache-2.0"
-repository = "https://github.com/rtk-ai/always"
+repository = "https://github.com/LivioGama/always"
 keywords = ["stt", "voice", "speech", "cli", "groq"]
 categories = ["command-line-utilities", "multimedia::audio"]
 

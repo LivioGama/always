@@ -270,11 +270,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-mac, publish]
     steps:
-      - name: Open auto-PR against rtk-ai/homebrew-tap
+      - name: Open auto-PR against LivioGama/homebrew-tap
         uses: dawidd6/action-homebrew-bump-formula@v7
         with:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          tap: rtk-ai/homebrew-tap
+          tap: LivioGama/homebrew-tap
           formula: always
           tag: ${{ env.RELEASE_TAG }}
           revision: ${{ needs.build-mac.outputs.release_sha }}

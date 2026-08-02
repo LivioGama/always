@@ -47,7 +47,7 @@
     <string>Always needs microphone access to detect when you speak and transcribe your voice into text.</string>
     <!-- Sparkle: appcast from release.yml; rotate EdDSA keys per docs/RELEASE.md. -->
     <key>SUFeedURL</key>
-    <string>https://github.com/rtk-ai/always/releases/latest/download/appcast.xml</string>
+    <string>https://github.com/LivioGama/always/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>8KumjXPlWc/w8FhOTjoFHEol/wmueg+tbRUzhJvVpMk=</string>
     <key>SUEnableAutomaticChecks</key>

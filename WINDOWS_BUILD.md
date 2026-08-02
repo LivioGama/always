@@ -30,7 +30,7 @@ Always is a voice-to-text daemon that runs on Windows. The daemon CLI builds on 
 ### 1. Clone the Repository
 
 ```powershell
-git clone https://github.com/rtk-ai/always.git
+git clone https://github.com/LivioGama/always.git
 cd always
 ```
 
@@ -237,7 +237,7 @@ Register-ScheduledTask -TaskName "Always Daemon" -Trigger $trigger -Action $acti
 
 Settings are stored in Windows Registry (via `keyring` crate):
 ```
-HKEY_CURRENT_USER\Software\rtk-ai\always\
+HKEY_CURRENT_USER\Software\LivioGama\always\
 ```
 
 Or view via CLI:
@@ -303,9 +303,9 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for details.
 
 ## Support
 
-- **Issues**: https://github.com/rtk-ai/always/issues
-- **Discussions**: https://github.com/rtk-ai/always/discussions
-- **Documentation**: https://github.com/rtk-ai/always/tree/main/docs
+- **Issues**: https://github.com/LivioGama/always/issues
+- **Discussions**: https://github.com/LivioGama/always/discussions
+- **Documentation**: https://github.com/LivioGama/always/tree/main/docs
 
 ---
 
