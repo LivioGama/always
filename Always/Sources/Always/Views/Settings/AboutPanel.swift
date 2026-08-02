@@ -5,7 +5,7 @@ struct AboutPanel: View {
     private var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
     }
-    let repositoryURL = "https://github.com/rtk-ai/always"
+    let repositoryURL = "https://github.com/LivioGama/always"
     let license = "Apache-2.0"
 
     var body: some View {

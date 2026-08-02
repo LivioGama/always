@@ -6,9 +6,9 @@
 
 Speak. It pastes. Anywhere. Every app.
 
-[![CI](https://github.com/rtk-ai/always/actions/workflows/ci.yml/badge.svg)](https://github.com/rtk-ai/always/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/rtk-ai/always)](https://github.com/rtk-ai/always/releases/latest)
-[![License](https://img.shields.io/github/license/rtk-ai/always)](LICENSE)
+[![CI](https://github.com/LivioGama/always/actions/workflows/ci.yml/badge.svg)](https://github.com/LivioGama/always/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/LivioGama/always)](https://github.com/LivioGama/always/releases/latest)
+[![License](https://img.shields.io/github/license/LivioGama/always)](LICENSE)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)](#installation)
 [![Linux](https://img.shields.io/badge/Linux-CLI--only-orange?logo=linux)](#installation)
 
@@ -79,10 +79,10 @@ That's it. That's the loop. Background daemon, native menubar overlay that flash
 
 ```bash
 # Homebrew tap (when v1.0 ships)
-brew install --cask rtk-ai/tap/always
+brew install --cask LivioGama/tap/always
 
 # Or download the signed + notarized DMG from Releases:
-# https://github.com/rtk-ai/always/releases/latest
+# https://github.com/LivioGama/always/releases/latest
 ```
 
 Requires **macOS 14 (Sonoma) or newer** on Apple Silicon. The bundle is ~30 MB. Sparkle auto-update keeps you on the latest version.
@@ -90,8 +90,8 @@ Requires **macOS 14 (Sonoma) or newer** on Apple Silicon. The bundle is ~30 MB. 
 ### From source
 
 ```bash
-cargo install --git https://github.com/rtk-ai/always always
-cargo install --git https://github.com/rtk-ai/always always --no-default-features --features linux
+cargo install --git https://github.com/LivioGama/always always
+cargo install --git https://github.com/LivioGama/always always --no-default-features --features linux
 ```
 
 The source install ships **only the `always` daemon binary**. The Mac menubar app + overlay live in the `Always.app` bundle — install the cask above to get them.
@@ -103,7 +103,7 @@ The daemon builds and runs on Linux with `--features linux`, but global keyboard
 ```bash
 docker compose up
 # or:
-cargo install --git https://github.com/rtk-ai/always always --no-default-features --features linux
+cargo install --git https://github.com/LivioGama/always always --no-default-features --features linux
 ```
 
 See `Dockerfile` for the official image.
@@ -368,8 +368,8 @@ PRs welcome. Bug reports welcome. Star the repo if you're using it daily — tha
 
 **Built by humans who got tired of typing.**
 
-[Issues](https://github.com/rtk-ai/always/issues) ·
-[Discussions](https://github.com/rtk-ai/always/discussions) ·
-[Releases](https://github.com/rtk-ai/always/releases)
+[Issues](https://github.com/LivioGama/always/issues) ·
+[Discussions](https://github.com/LivioGama/always/discussions) ·
+[Releases](https://github.com/LivioGama/always/releases)
 
 </div>

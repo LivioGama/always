@@ -38,7 +38,7 @@ cat > appcast.xml <<XML
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
   <channel>
     <title>Always — AppCast</title>
-    <link>https://github.com/rtk-ai/always</link>
+    <link>https://github.com/LivioGama/always</link>
     <description>Latest signed releases of the Always macOS app.</description>
     <language>en</language>
     <item>
@@ -49,7 +49,7 @@ cat > appcast.xml <<XML
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <description><![CDATA[See full release notes at <a href="${ALWAYS_RELEASE_NOTES_URL}">${ALWAYS_RELEASE_NOTES_URL}</a>.]]></description>
       <enclosure
-        url="https://github.com/rtk-ai/always/releases/download/v${ALWAYS_VERSION}/${DMG_BASENAME}"
+        url="https://github.com/LivioGama/always/releases/download/v${ALWAYS_VERSION}/${DMG_BASENAME}"
         length="${DMG_SIZE_BYTES}"
         type="application/octet-stream"
         ${SIGNATURE} />

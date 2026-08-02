@@ -20,7 +20,7 @@ If you discover a security vulnerability, please report it responsibly.
 Use GitHub's private security advisory feature (preferred — encrypted in
 transit and tracked alongside the fix):
 
-1. Go to the **Security** tab of the [`rtk-ai/always`](https://github.com/rtk-ai/always) repository
+1. Go to the **Security** tab of the [`LivioGama/always`](https://github.com/LivioGama/always) repository
 2. Click **Report a vulnerability**
 3. Follow the prompts to submit a private report
 

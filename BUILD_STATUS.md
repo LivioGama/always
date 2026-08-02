@@ -232,4 +232,4 @@ See `CONTRIBUTING.md` for guidelines.
 ---
 
 **Last Updated**: 2026-06-28  
-**Maintainer**: https://github.com/rtk-ai/always
+**Maintainer**: https://github.com/LivioGama/always
