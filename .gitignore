@@ -20,6 +20,7 @@ Always/.swiftpm/
 .filtering_evolution_history.md
 Always.app/
 Always/Always.app/
+.rust_build_timestamp
 
 # JetBrains IDE config
 .idea/
