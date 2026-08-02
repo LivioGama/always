@@ -356,6 +356,32 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     let _guard = ClientGuard {
         consume_lease: Arc::clone(&consume_lease),
     };
+
+    // Increase the socket send buffer to handle larger initial payloads.
+    // `tokio::net::UnixStream` exposes no setter for this (unlike TcpStream),
+    // so go through the raw fd. A failure is non-fatal: the payload is also
+    // chunked, the bigger buffer only avoids the extra round-trips.
+    {
+        use std::os::fd::AsRawFd;
+        let size: libc::c_int = 1024 * 1024;
+        let rc = unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                std::ptr::from_ref(&size).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            tracing::warn!(
+                error = %std::io::Error::last_os_error(),
+                "failed to increase send buffer size"
+            );
+        }
+    }
+
+
     tracing::info!(
         clients = CONNECTED_CLIENTS.load(Ordering::Relaxed),
         "uds_client_connected"
