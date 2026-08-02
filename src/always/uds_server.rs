@@ -452,35 +452,58 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         }
     }
 
+    // Send initial state in chunks to avoid socket buffer overflow
     if !initial_payload.is_empty() {
-        // Bound the initial burst by a timeout: a client that connects but
-        // never reads would otherwise wedge this task forever and keep
-        // CONNECTED_CLIENTS > 0, defeating the orphan watchdog.
-        match tokio::time::timeout(WRITE_TIMEOUT, async {
-            writer.write_all(initial_payload.as_bytes()).await?;
-            writer.flush().await
-        })
-        .await
-        {
-            Ok(Ok(())) => {
-                // Initial state sent successfully, now send ModelsList separately
-                // to avoid buffer overflow with large payloads
-                let models = ctx.registry.list();
-                let models_event = DaemonEvent::ModelsList { models };
-                if let Ok(models_json) = models_event.to_json_line() {
-                    let _ = writer.write_all(models_json.as_bytes()).await;
-                    let _ = writer.flush().await;
+        const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
+        let mut pos = 0;
+        
+        while pos < initial_payload.len() {
+            let end = std::cmp::min(pos + CHUNK_SIZE, initial_payload.len());
+            let chunk = &initial_payload[pos..end];
+            
+            // Find the last complete line in this chunk
+            let write_end = if let Some(last_newline) = chunk.rfind('\n') {
+                pos + last_newline + 1
+            } else {
+                // No newline found, write the whole chunk
+                end
+            };
+            
+            if write_end <= pos {
+                // Couldn't find a complete line, write what we have
+                if let Err(e) = tokio::time::timeout(WRITE_TIMEOUT, async {
+                    writer.write_all(initial_payload[pos..].as_bytes()).await?;
+                    writer.flush().await
+                })
+                .await
+                {
+                    tracing::error!(error = %e, "uds_send_initial_state_failed");
+                    return Ok(());
                 }
+                break;
             }
-            Ok(Err(e)) => {
+            
+            let write_chunk = &initial_payload[pos..write_end];
+            if let Err(e) = tokio::time::timeout(WRITE_TIMEOUT, async {
+                writer.write_all(write_chunk.as_bytes()).await?;
+                writer.flush().await
+            })
+            .await
+            {
                 tracing::error!(error = %e, "uds_send_initial_state_failed");
                 return Ok(());
             }
-            Err(_elapsed) => {
-                tracing::warn!("uds_send_initial_state_timeout: dropping unresponsive client");
-                return Ok(());
-            }
+            
+            pos = write_end;
         }
+    }
+
+    // Send ModelsList separately after initial state
+    let models = ctx.registry.list();
+    let models_event = DaemonEvent::ModelsList { models };
+    if let Ok(models_json) = models_event.to_json_line() {
+        let _ = writer.write_all(models_json.as_bytes()).await;
+        let _ = writer.flush().await;
     }
 
     // Read commands from the client in a separate task. Each line is a JSON
