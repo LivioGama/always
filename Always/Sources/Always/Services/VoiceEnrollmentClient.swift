@@ -18,6 +18,13 @@ final class VoiceEnrollmentClient: ObservableObject {
 
     private let logger = Logger(subsystem: "com.always.app", category: "voice-enrollment")
 
+    // UserDefaults keys for caching enrollment status
+    private enum CacheKeys {
+        static let recordedSteps = "voiceEnrollmentRecordedSteps"
+        static let isEnrolled = "voiceEnrollmentIsEnrolled"
+        static let isEnabled = "voiceEnrollmentIsEnabled"
+    }
+
     /// The guided steps, in display order. Raw values match the wire
     /// format (`EnrollStep` in the daemon).
     enum Step: String, CaseIterable, Identifiable {
@@ -71,8 +78,12 @@ final class VoiceEnrollmentClient: ObservableObject {
 
     private var observer: NSObjectProtocol?
     private var cancellables = Set<AnyCancellable>()
+    private var statusRequestTime: Date?
 
     private init() {
+        // Load cached status immediately for instant UI display
+        loadCachedStatus()
+
         observer = NotificationCenter.default.addObserver(
             forName: .daemonEvent,
             object: nil,
@@ -103,9 +114,33 @@ final class VoiceEnrollmentClient: ObservableObject {
         }
     }
 
+    // MARK: Cache management
+
+    private func loadCachedStatus() {
+        let defaults = UserDefaults.standard
+        if let stepsData = defaults.data(forKey: CacheKeys.recordedSteps),
+           let steps = try? JSONDecoder().decode([String].self, from: stepsData) {
+            recordedSteps = Set(steps)
+        }
+        isEnrolled = defaults.bool(forKey: CacheKeys.isEnrolled)
+        isEnabled = defaults.bool(forKey: CacheKeys.isEnabled)
+        logger.info("Loaded cached voice enrollment status: enrolled=\(self.isEnrolled, privacy: .public), enabled=\(self.isEnabled, privacy: .public), steps=\(self.recordedSteps.count, privacy: .public)")
+    }
+
+    private func saveCachedStatus() {
+        let defaults = UserDefaults.standard
+        if let stepsData = try? JSONEncoder().encode(Array(recordedSteps)) {
+            defaults.set(stepsData, forKey: CacheKeys.recordedSteps)
+        }
+        defaults.set(isEnrolled, forKey: CacheKeys.isEnrolled)
+        defaults.set(isEnabled, forKey: CacheKeys.isEnabled)
+    }
+
     // MARK: Commands (UI → daemon)
 
     func requestStatus() {
+        statusRequestTime = Date()
+        logger.info("VoiceProfileStatus requested at \(self.statusRequestTime!.timeIntervalSince1970, privacy: .public)")
         StateMonitor.shared.sendCommand("GetVoiceProfileStatus")
     }
 
@@ -128,12 +163,18 @@ final class VoiceEnrollmentClient: ObservableObject {
 
     func setEnabled(_ enabled: Bool) {
         isEnabled = enabled // optimistic; VoiceProfileStatus confirms
+        saveCachedStatus() // cache optimistic update
         StateMonitor.shared.sendCommandWithData(
             "SetVoiceProfileEnabled", ["enabled": enabled]
         )
     }
 
     func deleteProfile() {
+        // Optimistically clear cache
+        recordedSteps = []
+        isEnrolled = false
+        isEnabled = false
+        saveCachedStatus()
         StateMonitor.shared.sendCommand("DeleteVoiceProfile")
     }
 
@@ -147,6 +188,15 @@ final class VoiceEnrollmentClient: ObservableObject {
                 recordedSteps = Set(status.steps)
                 isEnrolled = status.enrolled
                 isEnabled = status.enabled
+
+                // Save to cache for instant display on next launch
+                saveCachedStatus()
+
+                if let requestTime = statusRequestTime {
+                    let delayMs = Date().timeIntervalSince(requestTime) * 1000
+                    logger.info("VoiceProfileStatus received after \(delayMs, privacy: .public)ms")
+                    statusRequestTime = nil
+                }
             }
         case .voiceEnrollmentStarted:
             if let raw = event.data?["step"], let step = Step(rawValue: raw) {
@@ -162,11 +212,15 @@ final class VoiceEnrollmentClient: ObservableObject {
                     : 0
             }
         case .voiceEnrollmentSampleCaptured:
+            // Optimistically add the step to recordedSteps
+            // The actual list will be confirmed by VoiceProfileStatus
+            if let step = recordingStep {
+                recordedSteps.insert(step.rawValue)
+                saveCachedStatus()
+            }
             recordingStep = nil
             level = 0
             progress = 0
-            // recordedSteps updates via the VoiceProfileStatus that
-            // immediately follows.
         case .voiceEnrollmentFailed:
             recordingStep = nil
             level = 0

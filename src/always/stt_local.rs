@@ -18,6 +18,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use std::pin::Pin;
 
 /// Warmup / keep-alive audio: 0.5s of silence @16kHz. Running one throwaway
 /// inference forces the ONNX graph + Apple-Neural-Engine execution provider to
@@ -52,7 +53,8 @@ use transcribe_rs::{
 };
 
 use crate::managers::model_registry::EngineType;
-use crate::stt::{SttError, Transcriber, TranscriptionResult};
+use crate::stt::{SttError, Transcriber, TranscriptionResult, StreamingTranscriptionResult};
+use futures::stream::Stream;
 
 /// One loaded local engine. The variants mirror Handy's
 /// `managers/transcription.rs::LoadedEngine` byte-for-byte so we keep
@@ -86,13 +88,20 @@ pub struct LocalTranscriber {
     /// it to decide whether the user is still actively dictating (re-warm) or
     /// has walked away (let the model go cold).
     last_used: Arc<Mutex<Instant>>,
+    /// Whether this model supports streaming transcription.
+    supports_streaming: bool,
 }
 
 impl LocalTranscriber {
     /// Load a downloaded model from disk. `path` is the registry's
     /// `models_dir.join(model.filename)` — file for Whisper engines,
     /// directory for ONNX engines.
-    pub fn load(engine_type: EngineType, path: &Path, language: Option<String>) -> Result<Self> {
+    pub fn load(
+        engine_type: EngineType,
+        path: &Path,
+        language: Option<String>,
+        supports_streaming: bool,
+    ) -> Result<Self> {
         let mut engine = build_engine(engine_type, path)
             .with_context(|| format!("loading {engine_type:?} model from {}", path.display()))?;
 
@@ -126,6 +135,7 @@ impl LocalTranscriber {
             engine,
             language,
             last_used,
+            supports_streaming,
         })
     }
 }
@@ -196,6 +206,9 @@ fn build_engine(engine_type: EngineType, path: &Path) -> Result<LoadedEngine> {
             CohereModel::load(path, &Quantization::Int8)
                 .map_err(|e| anyhow::anyhow!("cohere load failed: {e}"))?,
         ),
+        EngineType::Nemotron => {
+            return Err(anyhow::anyhow!("Nemotron engine not yet implemented in transcribe-rs"))
+        }
     })
 }
 
@@ -259,6 +272,34 @@ impl Transcriber for LocalTranscriber {
             language: self.language.clone().unwrap_or_default(),
             segments: vec![],
         })
+    }
+
+    fn transcribe_streaming(
+        &self,
+        audio: Vec<u8>,
+    ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>> {
+        if self.supports_streaming {
+            tracing::info!("local_stt_streaming_enabled");
+            // TODO: Implement actual streaming for streaming-capable models.
+            // For now, fall back to non-streaming behavior with a single final result.
+            // This is a placeholder that can be extended to use transcribe-rs's
+            // streaming API when available for the specific engine type.
+        } else {
+            tracing::debug!("local_stt_streaming_not_supported");
+        }
+
+        // For now, all models use non-streaming behavior.
+        // Streaming models (MoonshineStreaming, etc.) can be extended here
+        // to use their streaming APIs.
+        let result = match self.transcribe_from_bytes(audio) {
+            Ok(r) => Ok(StreamingTranscriptionResult {
+                text: r.text,
+                is_final: true,
+                is_interim: false,
+            }),
+            Err(e) => Err(e),
+        };
+        Box::pin(futures::stream::once(async move { result }))
     }
 }
 

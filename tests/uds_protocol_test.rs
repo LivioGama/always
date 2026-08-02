@@ -14,7 +14,7 @@ fn protocol_version_matches_swift_client() {
     // one without the other will fail both this test and the Swift
     // `testProtocolVersionMatchesDaemon` mirror.
     assert_eq!(
-        PROTOCOL_VERSION, 10,
+        PROTOCOL_VERSION, 11,
         "protocol version bumped without updating UDSClient.swift?"
     );
 }
@@ -48,6 +48,18 @@ fn transcript_final_serializes_with_text_payload() {
     assert_eq!(
         json,
         r#"{"type":"TranscriptFinal","data":{"text":"git status"}}"#
+    );
+}
+
+#[test]
+fn transcription_interim_serializes_with_text_payload() {
+    let ev = DaemonEvent::TranscriptionInterim {
+        text: "hello".to_string(),
+    };
+    let json = serde_json::to_string(&ev).unwrap();
+    assert_eq!(
+        json,
+        r#"{"type":"TranscriptionInterim","data":{"text":"hello"}}"#
     );
 }
 

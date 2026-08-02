@@ -27,6 +27,9 @@ class StateMonitor: ObservableObject {
     /// Most recent speculative (streaming) transcript preview. Set when
     /// a TranscriptChunk arrives; cleared when a new utterance starts.
     @Published var partialTranscript: String = ""
+    /// Whether the current active model supports streaming transcription.
+    /// Cached from ModelManagerClient to avoid actor isolation issues.
+    @Published var currentModelSupportsStreaming: Bool = false
     /// Connection state to daemon. UI can show "Reconnecting…" if degraded.
     @Published var isDaemonConnected: Bool = false
     @Published var isDaemonDegraded: Bool = false
@@ -336,11 +339,33 @@ class StateMonitor: ObservableObject {
             $isMasterPaused.map { _ in () }.eraseToAnyPublisher(),
             $isIdleAutoPaused.map { _ in () }.eraseToAnyPublisher(),
             $isDaemonConnected.map { _ in () }.eraseToAnyPublisher(),
+            $partialTranscript.map { _ in () }.eraseToAnyPublisher(),
         ]
         Publishers.MergeMany(inputs)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.updateOverlay() }
             .store(in: &cancellables)
+
+        // Subscribe to ModelManagerClient to track streaming support
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            ModelManagerClient.shared.$models
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in self?.updateStreamingSupport() }
+                .store(in: &self.cancellables)
+            ModelManagerClient.shared.$activeBackend
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in self?.updateStreamingSupport() }
+                .store(in: &self.cancellables)
+            // Initial update
+            self.updateStreamingSupport()
+        }
+    }
+
+    /// Update the cached streaming support flag from ModelManagerClient.
+    @MainActor
+    private func updateStreamingSupport() {
+        currentModelSupportsStreaming = ModelManagerClient.shared.activeModelSupportsStreaming
     }
 
     private func updateOverlay() {
@@ -352,11 +377,21 @@ class StateMonitor: ObservableObject {
         // Activity-only model: the overlay represents something happening
         // (you speaking or the daemon transcribing), not "daemon is alive".
         if isTranscribing {
-            let elapsed = transcribingSince.map { Date().timeIntervalSince($0) } ?? 0
-            if elapsed >= transcribingElapsedThreshold {
-                StatusOverlayController.shared.show(state: .transcribingElapsed(seconds: Int(elapsed)))
+            // Check if the current model supports streaming and we have partial text
+            let supportsStreaming = currentModelSupportsStreaming
+            let hasPartialText = !partialTranscript.isEmpty
+
+            if supportsStreaming && hasPartialText {
+                // Show the partial transcript with interim styling
+                StatusOverlayController.shared.show(state: .transcribingWithText(text: partialTranscript, isInterim: true))
             } else {
-                StatusOverlayController.shared.show(state: .transcribing)
+                // Fall back to standard transcribing badge
+                let elapsed = transcribingSince.map { Date().timeIntervalSince($0) } ?? 0
+                if elapsed >= transcribingElapsedThreshold {
+                    StatusOverlayController.shared.show(state: .transcribingElapsed(seconds: Int(elapsed)))
+                } else {
+                    StatusOverlayController.shared.show(state: .transcribing)
+                }
             }
         } else if isVoiceActivity {
             StatusOverlayController.shared.show(state: .voiceActivity)
@@ -516,6 +551,18 @@ class StateMonitor: ObservableObject {
             cancelVoiceLease()
             cancelTranscribingLease()
             stopTranscribingTicker()
+
+            // Optionally show the final reshaped text in the overlay briefly
+            if let text = event.data?["text"], !text.isEmpty,
+               currentModelSupportsStreaming {
+                let reshaped = TextReshaper.reshape(text)
+                // Show the final text briefly before hiding
+                StatusOverlayController.shared.show(state: .transcribingWithText(text: reshaped, isInterim: false))
+                // Auto-hide after a short delay
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    StatusOverlayController.shared.hide()
+                }
+            }
         case .voiceActivityDetected:
             isVoiceActivity = true
             armVoiceLease()

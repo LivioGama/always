@@ -134,6 +134,7 @@ enum OverlayState: Equatable, Hashable {
     case autoEnterOn
     case autoEnterOff
     case transcribing
+    case transcribingWithText(text: String, isInterim: Bool)
     case processing
     case voiceActivity
     case filtered(reason: String)
@@ -174,6 +175,8 @@ enum OverlayState: Equatable, Hashable {
         switch self {
         case .voiceActivity, .transcribing, .transcribingElapsed, .autoEnterCountdown:
             return true
+        case .transcribingWithText:
+            return true
         default:
             return false
         }
@@ -186,6 +189,7 @@ enum OverlayState: Equatable, Hashable {
         case .autoEnterOn: return "Auto-Enter On"
         case .autoEnterOff: return "Auto-Enter Off"
         case .transcribing: return "Transcribing"
+        case .transcribingWithText(let text, _): return text
         case .processing: return "Processing"
         case .voiceActivity: return "Listening"
         case .filtered(let reason): return reason.isEmpty ? "Filtered" : "Filtered · \(reason)"
@@ -213,6 +217,7 @@ enum OverlayState: Equatable, Hashable {
         case .autoEnterOn: return "checkmark.circle.fill"
         case .autoEnterOff: return "circle"
         case .transcribing: return "waveform.circle.fill"
+        case .transcribingWithText: return "waveform.circle.fill"
         case .processing: return "waveform.circle"
         case .voiceActivity: return "waveform"
         case .filtered: return "xmark.octagon.fill"
@@ -239,6 +244,7 @@ enum OverlayState: Equatable, Hashable {
         case .autoEnterOn: return .systemGreen
         case .autoEnterOff: return .systemGray
         case .transcribing: return .systemPurple
+        case .transcribingWithText: return .systemPurple
         case .processing: return .systemBlue
         case .voiceActivity: return .systemRed
         case .filtered: return .systemPink
@@ -496,7 +502,20 @@ class StatusOverlayView: NSView {
     private func applyState() {
         label.stringValue = state.rawValue
 
-        if StatusOverlayView.waveStates.contains(state) {
+        // Handle visual distinction for interim vs final text
+        if case .transcribingWithText(_, let isInterim) = state {
+            // Interim text: slightly lower opacity to indicate it's provisional
+            label.alphaValue = isInterim ? 0.75 : 1.0
+        } else {
+            label.alphaValue = 1.0
+        }
+
+        var shouldShowWave = StatusOverlayView.waveStates.contains(state)
+        if case .transcribingWithText = state {
+            shouldShowWave = true
+        }
+
+        if shouldShowWave {
             // Ongoing state — show animated dot wave instead of static icon.
             iconView.isHidden = true
             iconView.image = nil

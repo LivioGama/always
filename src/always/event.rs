@@ -44,7 +44,13 @@ static LAST_LOW_MIC_OVERLAY: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(||
 /// enrollment commands ([`DaemonCommand::StartVoiceEnrollment`] et al.)
 /// and the `VoiceEnrollment*` / [`DaemonEvent::VoiceProfileStatus`]
 /// event family driving the Settings → My Voice tab.
-pub const PROTOCOL_VERSION: u32 = 10;
+///
+/// **v11 (2026-07-15):** Streaming transcription support. New
+/// [`DaemonEvent::TranscriptionInterim`] and [`DaemonEvent::TranscriptionFinal`]
+/// for streaming transcribers that emit progressive interim results
+/// followed by final committed text. The existing `TranscriptChunk` /
+/// `TranscriptFinal` remain for non-streaming chunk-based transcription.
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// Event types for daemon-to-GUI communication
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,8 +87,16 @@ pub enum DaemonEvent {
     TranscriptChunk {
         text: String,
     },
-    /// Final transcript result
+    /// Final transcript result (non-streaming / chunk-based)
     TranscriptFinal {
+        text: String,
+    },
+    /// Interim transcription result from a streaming transcriber.
+    /// This text is provisional and may change as more audio is processed.
+    /// Used by streaming engines (e.g., MoonshineStreaming, streaming APIs)
+    /// to provide progressive updates to the UI before finalization.
+    /// Distinct from `TranscriptChunk` which is used for chunk-based previews.
+    TranscriptionInterim {
         text: String,
     },
     /// Grammar correction was applied — carries before/after for overlay feedback
@@ -376,6 +390,9 @@ impl DaemonEvent {
             DaemonEvent::TranscriptFinal { text } => {
                 cap_field(text).map(|text| DaemonEvent::TranscriptFinal { text })
             }
+            DaemonEvent::TranscriptionInterim { text } => {
+                cap_field(text).map(|text| DaemonEvent::TranscriptionInterim { text })
+            }
             DaemonEvent::GrammarCorrected { before, after } => {
                 let cb = cap_field(before);
                 let ca = cap_field(after);
@@ -653,6 +670,13 @@ impl EventBroadcaster {
     pub fn transcript_final(&self, text: String) {
         crate::always::status_sound::cue(crate::always::status_sound::StatusSound::Success);
         self.send(DaemonEvent::TranscriptFinal { text });
+    }
+
+    /// Send interim transcription result from a streaming transcriber.
+    /// This text is provisional and may change as more audio is processed.
+    /// Used by streaming engines to provide progressive updates to the UI.
+    pub fn transcription_interim(&self, text: String) {
+        self.send(DaemonEvent::TranscriptionInterim { text });
     }
 
     /// Notify the UI that async grammar correction replaced the pasted text

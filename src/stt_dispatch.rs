@@ -8,16 +8,18 @@
 //! active model from the Settings UI), so the rest of the codebase
 //! stays backend-agnostic.
 
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use futures::stream::Stream;
 use parking_lot::{Condvar, Mutex};
 
 use crate::always::AlwaysConfig;
 use crate::managers::model_registry::ModelRegistry;
-use crate::stt::{GroqTranscriber, SttError, Transcriber, TranscriptionResult};
+use crate::stt::{GroqTranscriber, SttError, StreamingTranscriptionResult, Transcriber, TranscriptionResult};
 
 /// Placeholder installed at daemon boot so the UDS server can bind before
 /// the (potentially seconds-long) model load completes. Unlike a plain
@@ -86,6 +88,22 @@ impl Transcriber for PendingTranscriber {
                 "transcriber still initializing after timeout — model load may have failed"
             ))),
         }
+    }
+
+    fn transcribe_streaming(
+        &self,
+        audio: Vec<u8>,
+    ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>> {
+        let real = match self.wait_for_ready() {
+            Some(r) => Arc::clone(&r),
+            None => {
+                let err = SttError::Other(anyhow::anyhow!(
+                    "transcriber still initializing after timeout — model load may have failed"
+                ));
+                return Box::pin(futures::stream::once(async move { Err(err) }));
+            }
+        };
+        real.transcribe_streaming(audio)
     }
 }
 
@@ -186,6 +204,17 @@ impl Transcriber for FallbackTranscriber {
                 Err(primary_err)
             }
         }
+    }
+
+    fn transcribe_streaming(
+        &self,
+        audio: Vec<u8>,
+    ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>> {
+        // For fallback, delegate to the primary's streaming implementation.
+        // If the primary fails with a fallback-worthy error, we could try
+        // the local engine, but for simplicity we just forward the primary's
+        // stream and let the caller handle errors.
+        Arc::clone(&self.primary).transcribe_streaming(audio)
     }
 }
 
@@ -297,9 +326,10 @@ fn wrap_with_local_fallback(
     };
     let engine = info.engine_type;
     let model_id = info.id.clone();
+    let supports_streaming = info.supports_streaming;
     tracing::info!(model = %model_id, "stt_fallback_armed");
     let loader: LocalLoader = Box::new(move || {
-        let t = LocalTranscriber::load(engine, &path, lang.clone())
+        let t = LocalTranscriber::load(engine, &path, lang.clone(), supports_streaming)
             .with_context(|| format!("loading fallback local engine {engine:?}"))?;
         Ok(Arc::new(t) as Arc<dyn Transcriber>)
     });
@@ -374,7 +404,7 @@ fn build_local(
     } else {
         Some(cfg.lang.clone())
     };
-    let t = LocalTranscriber::load(info.engine_type, &path, lang)
+    let t = LocalTranscriber::load(info.engine_type, &path, lang, info.supports_streaming)
         .with_context(|| format!("loading local engine for model {}", info.id))?;
     tracing::info!(
         backend = "local",
@@ -466,6 +496,21 @@ mod tests {
                 None => Ok(ok_result("remote text")),
             }
         }
+
+        fn transcribe_streaming(
+            &self,
+            audio: Vec<u8>,
+        ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>> {
+            let result = match self.transcribe_from_bytes(audio) {
+                Ok(r) => Ok(StreamingTranscriptionResult {
+                    text: r.text,
+                    is_final: true,
+                    is_interim: false,
+                }),
+                Err(e) => Err(e),
+            };
+            Box::pin(futures::stream::once(async move { result }))
+        }
     }
 
     struct StaticLocal(&'static str);
@@ -473,6 +518,21 @@ mod tests {
     impl Transcriber for StaticLocal {
         fn transcribe_from_bytes(&self, _audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
             Ok(ok_result(self.0))
+        }
+
+        fn transcribe_streaming(
+            &self,
+            audio: Vec<u8>,
+        ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>> {
+            let result = match self.transcribe_from_bytes(audio) {
+                Ok(r) => Ok(StreamingTranscriptionResult {
+                    text: r.text,
+                    is_final: true,
+                    is_interim: false,
+                }),
+                Err(e) => Err(e),
+            };
+            Box::pin(futures::stream::once(async move { result }))
         }
     }
 
