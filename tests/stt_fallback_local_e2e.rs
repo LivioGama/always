@@ -12,11 +12,13 @@
 //! ```
 #![cfg(feature = "local-stt")]
 
+use std::pin::Pin;
 use std::process::Command;
 use std::sync::Arc;
 
-use always::stt::{SttError, Transcriber, TranscriptionResult};
+use always::stt::{SttError, StreamingTranscriptionResult, Transcriber, TranscriptionResult};
 use always::stt_dispatch::FallbackTranscriber;
+use futures::stream::Stream;
 
 struct BreakerAlwaysOpen;
 
@@ -25,6 +27,16 @@ impl Transcriber for BreakerAlwaysOpen {
         Err(SttError::Unavailable {
             remaining_ms: 60_000,
         })
+    }
+
+    fn transcribe_streaming(
+        &self,
+        _audio: Vec<u8>,
+    ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>> {
+        let err = SttError::Unavailable {
+            remaining_ms: 60_000,
+        };
+        Box::pin(futures::stream::once(async move { Err(err) }))
     }
 }
 
@@ -73,7 +85,12 @@ fn open_breaker_transcribes_with_real_local_model() {
         Arc::new(BreakerAlwaysOpen),
         info.id.clone(),
         Box::new(move || {
-            let local = always::always::stt_local::LocalTranscriber::load(engine, &path, None)?;
+            let local = always::always::stt_local::LocalTranscriber::load(
+                engine,
+                &path,
+                None,
+                info.supports_streaming,
+            )?;
             Ok(Arc::new(local) as Arc<dyn Transcriber>)
         }),
     );

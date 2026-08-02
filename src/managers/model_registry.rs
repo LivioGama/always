@@ -201,18 +201,25 @@ impl ModelRegistry {
     /// Build the registry from the hardcoded catalog + whatever is
     /// already on disk. Creates the models directory if missing.
     pub fn new() -> Result<Self> {
+        let total_start = Instant::now();
+
         let models_dir = default_models_dir()?;
         fs::create_dir_all(&models_dir)
             .with_context(|| format!("create models dir at {}", models_dir.display()))?;
+        let dir_create_ms = total_start.elapsed().as_millis() as u64;
 
         let mut catalog = HashMap::new();
         populate_catalog(&mut catalog);
+        let catalog_populate_ms = total_start.elapsed().as_millis() as u64 - dir_create_ms;
 
         // Custom user-supplied .bin files in the models directory show
         // up as "Custom" entries in the UI. Mirrors Handy's behavior.
-        if let Err(e) = discover_custom_whisper_models(&models_dir, &mut catalog) {
+        let custom_discover_ms = if let Err(e) = discover_custom_whisper_models(&models_dir, &mut catalog) {
             tracing::warn!(error = %e, "model_registry_custom_discovery_failed");
-        }
+            0
+        } else {
+            total_start.elapsed().as_millis() as u64 - dir_create_ms - catalog_populate_ms
+        };
 
         // 16 listeners is plenty — UDS clients, the dispatch hot-swap
         // task, future UI watchers. Slow consumers receive `Lagged`
@@ -236,7 +243,11 @@ impl ModelRegistry {
         // background thread. Activation still hashes via `model_path`,
         // so nothing unverified can ever be loaded.
         registry.load_verify_cache();
+        let cache_load_ms = total_start.elapsed().as_millis() as u64 - dir_create_ms - catalog_populate_ms - custom_discover_ms;
+
         registry.refresh_disk_status_provisional();
+        let provisional_ms = total_start.elapsed().as_millis() as u64 - dir_create_ms - catalog_populate_ms - custom_discover_ms - cache_load_ms;
+
         let background = registry.clone();
         std::thread::Builder::new()
             .name("model-verify".into())
@@ -252,6 +263,18 @@ impl ModelRegistry {
                 let _ = background.events_tx.send(ModelEvent::DiskStatusRefreshed);
             })
             .context("spawn model-verify thread")?;
+
+        let total_ms = total_start.elapsed().as_millis() as u64;
+        tracing::info!(
+            total_ms,
+            dir_create_ms,
+            catalog_populate_ms,
+            custom_discover_ms,
+            cache_load_ms,
+            provisional_ms,
+            "model_registry_new_complete"
+        );
+
         Ok(registry)
     }
 

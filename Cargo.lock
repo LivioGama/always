@@ -52,6 +52,7 @@ dependencies = [
  "criterion",
  "dirs",
  "flate2",
+ "futures",
  "futures-util",
  "humantime",
  "kaldi-fbank-rust-kautism",

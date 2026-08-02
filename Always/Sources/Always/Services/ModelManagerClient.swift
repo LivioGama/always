@@ -91,6 +91,17 @@ final class ModelManagerClient: ObservableObject {
         return nil
     }
 
+    /// Whether the current active model supports streaming transcription.
+    /// Groq supports streaming; local models depend on their engine type.
+    var activeModelSupportsStreaming: Bool {
+        if activeBackend == "groq" { return true }
+        guard let modelId = activeModelId else { return false }
+        if let model = models.first(where: { $0.id == modelId }) {
+            return model.supports_streaming
+        }
+        return false
+    }
+
     /// Convenience for the View: split into the two sections Handy
     /// renders ("Downloaded Models" + "Available to Download").
     var downloadedModels: [ModelInfo] {

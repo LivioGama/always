@@ -12,12 +12,14 @@
 //! `serial_test` would be ideal here; absent it, each test resets the
 //! breaker state up front and uses unique fixtures so tests do not race.
 
+use std::pin::Pin;
 use std::sync::LazyLock;
 
+use futures::Stream;
 use tokio::sync::Mutex;
 
 use always::stt::{
-    SttError, TranscriptionResult, reset_circuit_breaker_for_test, transcribe_from_bytes,
+    SttError, StreamingTranscriptionResult, TranscriptionResult, reset_circuit_breaker_for_test, transcribe_from_bytes,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -238,6 +240,18 @@ async fn open_breaker_degrades_to_local_fallback_instead_of_dropping() {
                 text: "offline transcript".into(),
                 ..Default::default()
             })
+        }
+
+        fn transcribe_streaming(
+            &self,
+            _audio: Vec<u8>,
+        ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>> {
+            let result = Ok(StreamingTranscriptionResult {
+                text: "offline transcript".into(),
+                is_final: true,
+                is_interim: false,
+            });
+            Box::pin(futures::stream::once(async move { result }))
         }
     }
 

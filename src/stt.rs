@@ -16,12 +16,14 @@
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::pin::Pin;
 
 use rand::Rng;
 use reqwest::StatusCode;
 use reqwest::blocking::multipart as blocking_multipart;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use futures::stream::Stream;
 
 const GROQ_TRANSCRIPTIONS_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 pub const GROQ_MODEL_NAME: &str = "whisper-large-v3-turbo";
@@ -139,6 +141,23 @@ pub struct TranscriptionResult {
     pub language: String,
     #[serde(default)]
     pub segments: Vec<TranscriptionSegment>,
+}
+
+/// Streaming transcription result with progressive updates.
+///
+/// Streaming ASR returns interim (partial) and final results as audio chunks
+/// are processed. This type represents a single update in the stream.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct StreamingTranscriptionResult {
+    /// Current partial or final text.
+    #[serde(default)]
+    pub text: String,
+    /// Whether this result is final (no further updates for this segment).
+    #[serde(default)]
+    pub is_final: bool,
+    /// Whether this result is interim (partial, may change).
+    #[serde(default)]
+    pub is_interim: bool,
 }
 
 fn now_ms() -> u64 {
@@ -350,6 +369,21 @@ pub fn transcribe_from_bytes(
 /// Whisper, Deepgram, etc.) can plug in without touching `event_loop`.
 pub trait Transcriber: Send + Sync {
     fn transcribe_from_bytes(&self, audio: Vec<u8>) -> Result<TranscriptionResult, SttError>;
+
+    /// Stream transcription results progressively.
+    ///
+    /// Returns a stream of [`StreamingTranscriptionResult`] updates.
+    /// Backends that don't support streaming should yield a single final
+    /// result with `is_final = true`.
+    ///
+    /// This is an async method to support backends that may need to
+    /// perform I/O or yield control while processing audio chunks.
+    ///
+    /// The returned stream must be 'static (not borrow from self).
+    fn transcribe_streaming(
+        &self,
+        audio: Vec<u8>,
+    ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>>;
 }
 
 /// Production [`Transcriber`] backed by the Groq Whisper API. Holds the
@@ -370,6 +404,23 @@ impl GroqTranscriber {
 impl Transcriber for GroqTranscriber {
     fn transcribe_from_bytes(&self, audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
         transcribe_from_bytes(audio, &self.api_key)
+    }
+
+    fn transcribe_streaming(
+        &self,
+        audio: Vec<u8>,
+    ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>> {
+        // Groq doesn't support streaming, so we wrap the non-streaming result
+        // in a single-element stream with is_final = true.
+        let result = match self.transcribe_from_bytes(audio) {
+            Ok(r) => Ok(StreamingTranscriptionResult {
+                text: r.text,
+                is_final: true,
+                is_interim: false,
+            }),
+            Err(e) => Err(e),
+        };
+        Box::pin(futures::stream::once(async move { result }))
     }
 }
 
@@ -452,10 +503,12 @@ mod stt_unit_tests {
 pub mod mock {
     //! Test double for [`Transcriber`].
 
-    use super::{SttError, Transcriber, TranscriptionResult};
+    use super::{SttError, Transcriber, TranscriptionResult, StreamingTranscriptionResult};
     use parking_lot::Mutex;
     use std::collections::VecDeque;
     use std::sync::Arc;
+    use std::pin::Pin;
+    use futures::stream::Stream;
 
     /// A queueing transcriber. Returns successive scripted outcomes; once
     /// exhausted it returns the trailing `default` outcome (or an error
@@ -494,6 +547,22 @@ pub mod mock {
                     "MockTranscriber queue exhausted"
                 )))
             })
+        }
+
+        fn transcribe_streaming(
+            &self,
+            audio: Vec<u8>,
+        ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>> {
+            // MockTranscriber doesn't support streaming, so we wrap the non-streaming result.
+            let result = match self.transcribe_from_bytes(audio) {
+                Ok(r) => Ok(StreamingTranscriptionResult {
+                    text: r.text,
+                    is_final: true,
+                    is_interim: false,
+                }),
+                Err(e) => Err(e),
+            };
+            Box::pin(futures::stream::once(async move { result }))
         }
     }
 
