@@ -438,6 +438,12 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
             steps,
         });
     }
+    // Models catalog snapshot so the Settings tab renders the full
+    // catalog immediately without a request round-trip.
+    {
+        let models = ctx.registry.list();
+        initial_events.push(DaemonEvent::ModelsList { models });
+    }
 
     let mut initial_payload = String::new();
     for event in initial_events {
