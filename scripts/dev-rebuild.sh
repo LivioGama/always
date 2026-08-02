@@ -7,17 +7,22 @@
 #   scripts/dev-rebuild.sh                # debug build (default — transcripts visible)
 #   scripts/dev-rebuild.sh release        # release build (transcripts hidden)
 #   scripts/dev-rebuild.sh --no-daemon    # skip daemon restart (for Swift-only changes)
+#   scripts/dev-rebuild.sh --force-daemon # force daemon restart even if Rust unchanged
 #   ALWAYS_REBUILD_SILENT=1 scripts/dev-rebuild.sh   # mute sounds
 
 set -euo pipefail
 
 # Parse arguments
 SKIP_DAEMON=false
+FORCE_DAEMON=false
 PROFILE="debug"
 for arg in "$@"; do
     case "$arg" in
         --no-daemon)
             SKIP_DAEMON=true
+            ;;
+        --force-daemon)
+            FORCE_DAEMON=true
             ;;
         release)
             PROFILE="release"
@@ -44,27 +49,59 @@ trap 'play "$SOUND_FAIL"; echo "✗ rebuild failed"' ERR
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-echo "▶ killing Always..."
-play "$SOUND_KILL"
-pkill -9 -f "Always.app" 2>/dev/null || true
-pkill -9 -f "/Applications/Always.app" 2>/dev/null || true
-# Stale project-dir bundle can steal LaunchServices resolution.
-pkill -9 -f "Documents/always/Always/Always.app" 2>/dev/null || true
+# Check if Rust source files changed (to avoid unnecessary daemon restarts)
+RUST_CHANGED=false
+if [ "$FORCE_DAEMON" = false ] && [ "$SKIP_DAEMON" = false ]; then
+    # Check if there are uncommitted changes in src/ directory
+    if git diff --quiet src/ 2>/dev/null; then
+        # No uncommitted changes, check if HEAD changed since last build
+        # We use a timestamp file to track the last Rust build
+        RUST_BUILD_MARKER="$REPO_ROOT/.rust_build_timestamp"
+        CARGO_LOCK="$REPO_ROOT/Cargo.lock"
+        if [ -f "$RUST_BUILD_MARKER" ] && [ -f "$CARGO_LOCK" ]; then
+            # If Cargo.lock is newer than the marker, Rust dependencies changed
+            if [ "$CARGO_LOCK" -nt "$RUST_BUILD_MARKER" ]; then
+                RUST_CHANGED=true
+                echo "  (Cargo.lock updated - Rust rebuild required)"
+            fi
+        else
+            # Marker doesn't exist, assume first build
+            RUST_CHANGED=true
+        fi
+    else
+        # Uncommitted changes in src/, need rebuild
+        RUST_CHANGED=true
+        echo "  (Rust source changed - daemon restart required)"
+    fi
+fi
 
-# Kill the Rust daemon too (unless --no-daemon flag is set)
-# The GUI's applicationWillTerminate handler usually does this, but a hard
-# pkill on Always.app skips it, so the daemon outlives the rebuild and the
-# next launch hits a stale UDS socket / pid file. Send SIGTERM first
-# (lets PidGuard::Drop fire), then SIGKILL if still alive.
-if [ "$SKIP_DAEMON" = false ]; then
-    for _pat in "always-daemon run" "always run"; do
-      pkill -TERM -f "$_pat" 2>/dev/null || true
-    done
-    sleep 0.5   # PidGuard::Drop + socket cleanup
-    for _pat in "always-daemon run" "always run"; do
-      pkill -KILL -f "$_pat" 2>/dev/null || true
-    done
-    sleep 0.2   # let processes actually die before rebuild
+# Only kill daemon if Rust changed or explicitly requested
+if [ "$RUST_CHANGED" = true ] || [ "$FORCE_DAEMON" = true ]; then
+    echo "▶ killing Always..."
+    play "$SOUND_KILL"
+    pkill -9 -f "Always.app" 2>/dev/null || true
+    pkill -9 -f "/Applications/Always.app" 2>/dev/null || true
+    # Stale project-dir bundle can steal LaunchServices resolution.
+    pkill -9 -f "Documents/always/Always/Always.app" 2>/dev/null || true
+
+    # Kill the Rust daemon too (unless --no-daemon flag is set)
+    # The GUI's applicationWillTerminate handler usually does this, but a hard
+    # pkill on Always.app skips it, so the daemon outlives the rebuild and the
+    # next launch hits a stale UDS socket / pid file. Send SIGTERM first
+    # (lets PidGuard::Drop fire), then SIGKILL if still alive.
+    if [ "$SKIP_DAEMON" = false ]; then
+        for _pat in "always-daemon run" "always run"; do
+          pkill -TERM -f "$_pat" 2>/dev/null || true
+        done
+        sleep 0.5   # PidGuard::Drop + socket cleanup
+        for _pat in "always-daemon run" "always run"; do
+          pkill -KILL -f "$_pat" 2>/dev/null || true
+        done
+        sleep 0.2   # let processes actually die before rebuild
+    fi
+else
+    echo "▶ skipping daemon restart (Rust unchanged)"
+    SKIP_DAEMON=true
 fi
 
 echo "▶ cargo build ($PROFILE)..."
@@ -81,6 +118,8 @@ else
         release) env -u CARGO_INCREMENTAL GGML_CCACHE=OFF cargo build --release --lib --bin always --features local-stt ;;
         *) echo "unknown profile: $PROFILE (use 'debug' or 'release')"; exit 2 ;;
     esac
+    # Update timestamp marker after successful Rust build
+    touch "$REPO_ROOT/.rust_build_timestamp"
 fi
 play "$SOUND_COMPILED"
 

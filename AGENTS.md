@@ -55,17 +55,24 @@ After modifying Rust or Swift code, run:
 ```
 
 This script:
-- Kills the Always app and daemon
+- Kills the Always app and daemon (only if Rust changed)
 - Builds the Rust backend with local-stt feature
 - Builds the Swift app bundle
 - Deploys to /Applications/Always.app
 - Launches the app
 
-**Why**: Ensures the full stack is rebuilt and deployed consistently. Manual `cargo build` + `swift build` can miss steps or leave stale processes running.
+**Smart daemon restart**: The script automatically detects if Rust source code changed:
+- If only Swift files changed → daemon is NOT killed/restarted (faster rebuild)
+- If Rust files changed → daemon is killed and restarted (required for changes to take effect)
+- Use `--force-daemon` flag to force daemon restart even if Rust unchanged
+- Use `--no-daemon` flag to skip daemon restart (for Swift-only changes)
+
+**Why**: Ensures the full stack is rebuilt and deployed consistently. Manual `cargo build` + `swift build` can miss steps or leave stale processes running. The smart restart avoids unnecessary daemon kills for Swift-only changes.
 
 **Options**:
 - `./scripts/dev-rebuild.sh release` - Release build instead of debug
 - `./scripts/dev-rebuild.sh --no-daemon` - Skip daemon restart (Swift-only changes)
+- `./scripts/dev-rebuild.sh --force-daemon` - Force daemon restart even if Rust unchanged
 
 # GitNexus Index-Powered Development
 
