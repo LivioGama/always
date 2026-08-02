@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Always — Voice-to-Text Daemon</title>
+    <meta name="description" content="Always-on voice activation daemon that doesn't get in your way. Speak and your text appears anywhere.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #1a1a2e;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 2rem;
+        }
+
+        header {
+            padding: 2rem 0;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: 0 2px 20px rgba(0, 0, 0, 0.1);
+        }
+
+        nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            font-size: 1.5rem;
+            font-weight: 800;
+            color: #667eea;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .logo-icon {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 1.2rem;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 2rem;
+            list-style: none;
+        }
+
+        .nav-links a {
+            text-decoration: none;
+            color: #333;
+            font-weight: 500;
+            transition: color 0.3s;
+        }
+
+        .nav-links a:hover {
+            color: #667eea;
+        }
+
+        .hero {
+            padding: 8rem 0 6rem;
+            text-align: center;
+            color: white;
+        }
+
+        .hero h1 {
+            font-size: 4rem;
+            font-weight: 800;
+            margin-bottom: 1.5rem;
+            line-height: 1.1;
+            text-shadow: 0 4px 30px rgba(0, 0, 0, 0.3);
+        }
+
+        .hero p {
+            font-size: 1.5rem;
+            margin-bottom: 3rem;
+            opacity: 0.9;
+            max-width: 700px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .cta-buttons {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 1rem 2rem;
+            border-radius: 50px;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all 0.3s;
+            font-size: 1.1rem;
+        }
+
+        .btn-primary {
+            background: white;
+            color: #667eea;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 25px rgba(0, 0, 0, 0.3);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            border: 2px solid white;
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.3);
+            transform: translateY(-2px);
+        }
+
+        .features {
+            padding: 6rem 0;
+            background: white;
+        }
+
+        .features h2 {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 4rem;
+            color: #1a1a2e;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+        }
+
+        .feature-card {
+            padding: 2rem;
+            border-radius: 20px;
+            background: #f8f9fa;
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+        }
+
+        .feature-icon {
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 15px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.8rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .feature-card h3 {
+            font-size: 1.3rem;
+            margin-bottom: 1rem;
+            color: #1a1a2e;
+        }
+
+        .feature-card p {
+            color: #666;
+            line-height: 1.6;
+        }
+
+        .screenshots {
+            padding: 6rem 0;
+            background: #f8f9fa;
+        }
+
+        .screenshots h2 {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 4rem;
+            color: #1a1a2e;
+        }
+
+        .screenshots-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 2rem;
+        }
+
+        .screenshot-card {
+            background: white;
+            border-radius: 20px;
+            overflow: hidden;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+        }
+
+        .screenshot-card img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .screenshot-caption {
+            padding: 1.5rem;
+        }
+
+        .screenshot-caption h3 {
+            margin-bottom: 0.5rem;
+            color: #1a1a2e;
+        }
+
+        .screenshot-caption p {
+            color: #666;
+        }
+
+        .stats {
+            padding: 6rem 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 3rem;
+            text-align: center;
+        }
+
+        .stat-item h3 {
+            font-size: 3rem;
+            font-weight: 800;
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-item p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+
+        .installation {
+            padding: 6rem 0;
+            background: white;
+        }
+
+        .installation h2 {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 4rem;
+            color: #1a1a2e;
+        }
+
+        .install-methods {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+        }
+
+        .install-card {
+            padding: 2rem;
+            border-radius: 20px;
+            border: 2px solid #e9ecef;
+            transition: border-color 0.3s;
+        }
+
+        .install-card:hover {
+            border-color: #667eea;
+        }
+
+        .install-card h3 {
+            margin-bottom: 1rem;
+            color: #1a1a2e;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .install-card pre {
+            background: #1a1a2e;
+            color: #a8b2d1;
+            padding: 1rem;
+            border-radius: 10px;
+            overflow-x: auto;
+            margin-top: 1rem;
+            font-size: 0.9rem;
+        }
+
+        .install-card code {
+            font-family: 'Monaco', 'Consolas', monospace;
+        }
+
+        footer {
+            padding: 3rem 0;
+            background: #1a1a2e;
+            color: white;
+            text-align: center;
+        }
+
+        footer p {
+            opacity: 0.7;
+        }
+
+        footer a {
+            color: #667eea;
+            text-decoration: none;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-left: 0.5rem;
+        }
+
+        .badge-macos {
+            background: #007AFF;
+            color: white;
+        }
+
+        .badge-linux {
+            background: #E95420;
+            color: white;
+        }
+
+        .badge-windows {
+            background: #0078D4;
+            color: white;
+        }
+
+        @media (max-width: 768px) {
+            .hero h1 {
+                font-size: 2.5rem;
+            }
+
+            .hero p {
+                font-size: 1.2rem;
+            }
+
+            .nav-links {
+                display: none;
+            }
+
+            .screenshots-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <nav>
+                <a href="#" class="logo">
+                    <div class="logo-icon">A</div>
+                    Always
+                </a>
+                <ul class="nav-links">
+                    <li><a href="#features">Features</a></li>
+                    <li><a href="#screenshots">Screenshots</a></li>
+                    <li><a href="#installation">Installation</a></li>
+                    <li><a href="https://github.com/LivioGama/always">GitHub</a></li>
+                </ul>
+            </nav>
+        </div>
+    </header>
+
+    <section class="hero">
+        <div class="container">
+            <h1>The voice-to-text daemon<br>that doesn't get in your way</h1>
+            <p>Speak. It pastes. Anywhere. Every app. No hotkeys, no windows, no friction.</p>
+            <div class="cta-buttons">
+                <a href="#installation" class="btn btn-primary">Get Started</a>
+                <a href="https://github.com/LivioGama/always" class="btn btn-secondary">View on GitHub</a>
+            </div>
+        </div>
+    </section>
+
+    <section class="features" id="features">
+        <div class="container">
+            <h2>Why Always?</h2>
+            <div class="features-grid">
+                <div class="feature-card">
+                    <div class="feature-icon">🎯</div>
+                    <h3>Always-On</h3>
+                    <p>No push-to-talk, no app to open. The daemon listens 24/7 with intelligent VAD, invoking Whisper only when speech actually happens.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">⚡</div>
+                    <h3>Lightning Fast</h3>
+                    <p>End-to-end latency under 700ms with speculative transcription. Your text appears before you even finish speaking.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🎯</div>
+                    <h3>Zero-Config Paste</h3>
+                    <p>Pastes wherever your cursor is via Core Graphics keyboard events — works in any macOS app including Xcode and JetBrains.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🧠</div>
+                    <h3>Smart Filtering</h3>
+                    <p>Three-layer filter pipeline catches garbage like "thanks for watching" and "[Music]" that Whisper occasionally invents.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🎤</div>
+                    <h3>Speaker Verification</h3>
+                    <p>Teach Always your voice with three quick samples. Dictation responds ONLY to you — movies and others are ignored.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">📚</div>
+                    <h3>Custom Glossary</h3>
+                    <p>Import project-specific vocabulary from macOS Text Replacements, SuperWhisper, and MacWhisper. Auto-corrects mistranscriptions.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="screenshots" id="screenshots">
+        <div class="container">
+            <h2>Interface</h2>
+            <div class="screenshots-grid">
+                <div class="screenshot-card">
+                    <img src="always_overlay.png" alt="Always Voice Overlay">
+                    <div class="screenshot-caption">
+                        <h3>Voice Overlay</h3>
+                        <p>Minimal status indicator shows when Always is listening and transcribing</p>
+                    </div>
+                </div>
+                <div class="screenshot-card">
+                    <img src="always_settings.png" alt="Always Settings Panel">
+                    <div class="screenshot-caption">
+                        <h3>Settings Panel</h3>
+                        <p>Configure sensitivity, vocabulary, API keys, and voice verification</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="stats">
+        <div class="container">
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <h3>~650ms</h3>
+                    <p>End-to-end latency</p>
+                </div>
+                <div class="stat-item">
+                    <h3>~25MB</h3>
+                    <p>RAM at idle</p>
+                </div>
+                <div class="stat-item">
+                    <h3>~30MB</h3>
+                    <p>Bundle size</p>
+                </div>
+                <div class="stat-item">
+                    <h3>100%</h3>
+                    <p>Open source</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="installation" id="installation">
+        <div class="container">
+            <h2>Installation</h2>
+            <div class="install-methods">
+                <div class="install-card">
+                    <h3>🍎 macOS <span class="badge badge-macos">Recommended</span></h3>
+                    <p>Homebrew tap (coming soon)</p>
+                    <pre><code>brew install --cask LivioGama/tap/always</code></pre>
+                    <p style="margin-top: 1rem; font-size: 0.9rem;">Or download the signed + notarized DMG from <a href="https://github.com/LivioGama/always/releases/latest" style="color: #667eea;">GitHub Releases</a></p>
+                </div>
+                <div class="install-card">
+                    <h3>🐧 Linux <span class="badge badge-linux">CLI Only</span></h3>
+                    <p>From source</p>
+                    <pre><code>cargo install --git https://github.com/LivioGama/always always --no-default-features --features linux</code></pre>
+                    <p style="margin-top: 1rem; font-size: 0.9rem;">Keyboard/clipboard features are stubs on Linux</p>
+                </div>
+                <div class="install-card">
+                    <h3>🪟 Windows <span class="badge badge-windows">CLI Only</span></h3>
+                    <p>From source</p>
+                    <pre><code>cargo install --git https://github.com/LivioGama/always always --no-default-features --features windows</code></pre>
+                    <p style="margin-top: 1rem; font-size: 0.9rem;">Keyboard/clipboard features are stubs on Windows</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <footer>
+        <div class="container">
+            <p>Always — Voice-to-text daemon that doesn't get in your way</p>
+            <p style="margin-top: 1rem;">
+                <a href="https://github.com/LivioGama/always">GitHub</a> · 
+                <a href="https://github.com/LivioGama/always/issues">Issues</a> · 
+                <a href="https://github.com/LivioGama/always/discussions">Discussions</a>
+            </p>
+            <p style="margin-top: 1rem; font-size: 0.9rem;">Apache-2.0 License · Made with ❤️ by <a href="https://github.com/LivioGama">LivioGama</a></p>
+        </div>
+    </footer>
+</body>
+</html>
