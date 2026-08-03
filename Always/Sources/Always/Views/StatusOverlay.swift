@@ -636,6 +636,7 @@ class StatusOverlayWindow: NSPanel {
     func show(state: OverlayState, instant: Bool = false) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            if case .voiceActivity = state { overlayTimingLog("show-main") }
 
             // Create overlay view if needed (or rebuild on mode change).
             self.ensureContentView()
@@ -653,6 +654,20 @@ class StatusOverlayWindow: NSPanel {
                 self.alphaValue = 0.0
             }
             self.orderFrontRegardless()
+            // A show cancels any hide that was waiting out the minimum,
+            // and restarts the clock.
+            self.pendingHide?.cancel()
+            self.pendingHide = nil
+            self.shownAt = Date()
+            if case .voiceActivity = state {
+                let f = self.frame
+                let onScreen = NSScreen.screens.contains { $0.frame.intersects(f) }
+                overlayTimingLog(
+                    "onscreen visible=\(self.isVisible) alpha=\(self.alphaValue) "
+                        + "frame=\(Int(f.origin.x)),\(Int(f.origin.y)) "
+                        + "\(Int(f.width))x\(Int(f.height)) onAScreen=\(onScreen)"
+                )
+            }
             if snapIn {
                 self.alphaValue = 1.0
             } else {
@@ -670,11 +685,59 @@ class StatusOverlayWindow: NSPanel {
         fadeOut(duration: 0.4)
     }
 
+    /// Shortest time the overlay stays on screen once shown.
+    ///
+    /// `StateMonitor.updateOverlay()` re-evaluates on EVERY published
+    /// change it observes — pause flags, connection state, partial
+    /// transcript, listening state — and anything that isn't voice or
+    /// transcription resolves to `hide()`. Measured live, a single
+    /// utterance produced the badge and then **fourteen hide calls
+    /// within 6ms**, so the window was ordered front with alpha 1.0 on a
+    /// real screen and torn down again 1-40ms later. To the user that is
+    /// simply "the overlay never appeared", or appeared at random when
+    /// one happened to survive.
+    ///
+    /// Fixing every publisher that can spuriously re-evaluate is a
+    /// larger job; guaranteeing the badge is legible once shown is not,
+    /// and is correct regardless: a status indicator that renders for
+    /// 40ms is a bug no matter which publisher caused it.
+    private static let minimumVisible: TimeInterval = 0.6
+
+    /// When the overlay was last ordered front, for `minimumVisible`.
+    private var shownAt: Date?
+    /// A hide deferred because the overlay had not yet been visible long
+    /// enough. Cancelled if a show arrives first.
+    private var pendingHide: DispatchWorkItem?
+
     /// Fade the window's alpha to 0 over `duration` seconds, then hide.
     /// Calling show() during the fade restores alpha to 1 (see show()).
     func fadeOut(duration: TimeInterval = 0.4) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self, self.isVisible else { return }
+
+            // Too soon: defer rather than flash. A single deferred hide
+            // is kept, so a burst of calls collapses into one.
+            if let shownAt = self.shownAt {
+                let visibleFor = Date().timeIntervalSince(shownAt)
+                if visibleFor < Self.minimumVisible {
+                    guard self.pendingHide == nil else { return }
+                    let remaining = Self.minimumVisible - visibleFor
+                    overlayTimingLog(
+                        "HIDE deferred \(Int(remaining * 1000))ms (shown only \(Int(visibleFor * 1000))ms)"
+                    )
+                    let work = DispatchWorkItem { [weak self] in
+                        guard let self = self else { return }
+                        self.pendingHide = nil
+                        self.fadeOut(duration: duration)
+                    }
+                    self.pendingHide = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + remaining, execute: work)
+                    return
+                }
+            }
+            self.pendingHide?.cancel()
+            self.pendingHide = nil
+            overlayTimingLog("HIDE begins (fade \(duration)s)")
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = duration
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
@@ -1137,5 +1200,44 @@ class StatusOverlayController {
         flashEndsAt = nil
         pendingShowState = nil
         cancelIdleAnimation()
+    }
+}
+
+/// Temporary diagnostic: append a timestamped stage marker to
+/// `~/Library/Logs/Always/overlay-timing.log`.
+///
+/// The daemon decides to show the overlay and delivers that decision to
+/// a connected client in ~9ms (measured), yet the badge was observed
+/// appearing seconds later or not at all. That gap is entirely inside
+/// this app, and nothing in os_log survives to `log show` for this
+/// subsystem, so the hops are timed straight to a file: `recv` when the
+/// event is decoded off the socket queue, `show-main` when the show
+/// block actually gets to run on the main queue, and `onscreen` once the
+/// window is ordered front. A large recv→show-main gap means the main
+/// thread was busy; a large show-main→onscreen gap means AppKit was.
+/// Off unless `ALWAYS_OVERLAY_TIMING=1`. The overlay fires on every
+/// utterance and on the daemon's 2s keep-alive, so an always-on file
+/// write would append forever for no one's benefit. Kept in the tree
+/// because it is what found the 40ms-flash bug and is the only
+/// instrument that spans both processes.
+private let overlayTimingEnabled =
+    ProcessInfo.processInfo.environment["ALWAYS_OVERLAY_TIMING"] == "1"
+
+func overlayTimingLog(_ stage: String) {
+    guard overlayTimingEnabled else { return }
+    let now = Date()
+    let fmt = DateFormatter()
+    fmt.dateFormat = "HH:mm:ss.SSS"
+    let line = "\(fmt.string(from: now)) \(stage)\n"
+    let dir = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/Always", isDirectory: true)
+    let url = dir.appendingPathComponent("overlay-timing.log")
+    guard let data = line.data(using: .utf8) else { return }
+    if let handle = try? FileHandle(forWritingTo: url) {
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
+    } else {
+        try? data.write(to: url)
     }
 }

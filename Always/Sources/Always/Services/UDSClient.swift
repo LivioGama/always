@@ -958,6 +958,9 @@ class UDSClient: ObservableObject {
     private func handleEvent(_ event: DaemonEvent) {
         // Any event (incl. Heartbeat) proves the daemon is alive.
         lastEventTime = Date()
+        if event.type == .voiceActivityDetected {
+            overlayTimingLog("recv")
+        }
         logger.debug("handleEvent - type: \(event.type.rawValue, privacy: .public)")
 
         // Hello carries the wire-format protocol version. If it doesn't

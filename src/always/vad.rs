@@ -330,7 +330,14 @@ pub fn record_utterance(
 /// overlay through the normal reject paths, so the exposure is a brief
 /// flash in the seconds right after you speak, not a standing hole in
 /// the gate.
-const SPEAKER_TRUST_WINDOW_MS: u64 = 10_000;
+/// 10s was measured against real usage and was far too short: the gaps
+/// between the user's own sentences ran 13s, 20s, 88s, 143s while they
+/// read or thought, so nearly every sentence landed outside the window
+/// and paid full verification again (4137ms on one measured utterance).
+/// Five minutes covers a working session; the cost is that for that long
+/// after the user speaks, media or another voice can flash the badge
+/// before being rejected.
+const SPEAKER_TRUST_WINDOW_MS: u64 = 300_000;
 
 /// Monotonic clock base for the trust window. `Instant` cannot live in
 /// an atomic, so verification times are stored as milliseconds since
