@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **always** (4305 symbols, 10532 relationships, 285 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **always** (4794 symbols, 11926 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -232,6 +232,40 @@ The overlay system depends on TWO binaries that must be in sync:
 Local development uses the **debug** profile so `cfg!(debug_assertions)` is `true` and `should_log_transcripts()` returns `true` automatically — actual transcribed text shows in `always logs --pretty` without setting `ALWAYS_LOG_TRANSCRIPTS=1`. Release builds hide transcripts by default for privacy.
 
 `build.sh` auto-picks the newest of `target/release/always` and `target/debug/always`. Force a profile with `ALWAYS_BUILD_PROFILE=release|debug ./build.sh`.
+
+### 🚨 HARD RULE — nothing is "done" until the new build is RUNNING
+
+**Every change to any `.rs` or `.swift` file MUST end with `scripts/dev-rebuild.sh`
+completing successfully, before you report the work as finished.**
+
+Not "deployed". Not "built". **Running.** These are different claims and only the
+last one lets a human test what you did.
+
+- Do NOT say done / fixed / shipped / ready while the old process is still alive.
+- Do NOT hand back a change that only exists in `/Applications` but is not executing.
+- Do NOT rely on `open -a Always` alone: if the app is already running, `open`
+  just re-focuses the live instance and your new binary never executes.
+- A Swift-only change still requires the full script. The GUI must be restarted
+  to load it, and nothing else does that.
+
+The script now proves this itself: after launching it compares each process's
+start time against its binary's mtime and **exits non-zero** with
+`✗ REBUILD NOT LIVE` if a process predates the code it was built from. If you see
+that, the change is NOT testable — fix it before saying anything else.
+
+To check by hand at any time:
+
+```bash
+stat -f "%Sm %N" -t "%H:%M:%S" /Applications/Always.app/Contents/MacOS/Always
+ps -o pid,lstart,comm -p $(pgrep -f "Always.app/Contents/MacOS/Always$" | head -1)
+# the process start time MUST be later than the binary mtime
+```
+
+**Why this rule exists:** a Swift-only fix was built, deployed, and reported as
+shipped while the GUI had been running since 100 minutes earlier — the script's
+kill step was gated on Rust having changed, so nothing was killed and `open`
+re-focused the stale instance. The user tested a build that was never running and
+correctly reported "I see no change". Hours were lost on both sides.
 
 ### Simple Workflow (Do This Every Time)
 

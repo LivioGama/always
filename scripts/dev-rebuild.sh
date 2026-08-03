@@ -75,8 +75,19 @@ if [ "$FORCE_DAEMON" = false ] && [ "$SKIP_DAEMON" = false ]; then
     fi
 fi
 
-# Only kill daemon if Rust changed or explicitly requested
-if [ "$RUST_CHANGED" = true ] || [ "$FORCE_DAEMON" = true ]; then
+# ALWAYS kill, even for a Swift-only change.
+#
+# This used to be gated on `RUST_CHANGED || FORCE_DAEMON`. A Swift-only
+# rebuild therefore killed nothing, and the `open` at the end merely
+# re-focused the instance that was still running — so the freshly built
+# GUI sat in /Applications, never executed, while the script printed
+# "✓ done". Measured in a real session: binaries written at 22:46:56, GUI
+# still running from 21:07:02. Every Swift fix "shipped" in that window
+# was untestable, and the user reasonably concluded nothing had changed.
+#
+# Restarting the daemon when only Swift moved costs about two seconds.
+# Handing someone a build that is not running costs an hour.
+if true; then
     echo "▶ killing Always..."
     play "$SOUND_KILL"
     pkill -9 -f "Always.app" 2>/dev/null || true
@@ -142,6 +153,55 @@ echo "▶ launching Always..."
 # Use explicit path, not `open -a Always` (name lookup can resolve
 # to a stale LaunchServices entry).
 open /Applications/Always.app
-sleep 1.5
+sleep 3
+
+# Prove the new build is the one running.
+#
+# "Deployed" and "running" are different claims, and this script used to
+# only ever make the first one while printing a checkmark that read like
+# the second. A process whose start time predates the binary it was
+# built from is running STALE code, and saying "done" in that state
+# sends someone off to test a build that does not exist on their machine.
+verify_running() {
+    local label="$1" pattern="$2" binary="$3"
+    local pid
+    pid=$(pgrep -f "$pattern" | head -1)
+    if [ -z "$pid" ]; then
+        echo "✗ $label is NOT running after launch"
+        return 1
+    fi
+    # `etimes` is a Linux-only ps keyword; macOS ps rejects it and this
+    # check silently passed on garbage. `lstart` is the portable-on-macOS
+    # answer: an absolute start time, converted with BSD `date -j -f`.
+    local lstart started mtime
+    lstart=$(ps -o lstart= -p "$pid")
+    started=$(date -j -f "%a %b %e %T %Y" "$lstart" +%s 2>/dev/null || echo "")
+    mtime=$(stat -f %m "$binary")
+    if [ -z "$started" ] || [ -z "$mtime" ]; then
+        echo "✗ $label (pid $pid): could not read start time or binary mtime — treating as unverified"
+        return 1
+    fi
+    if [ "$started" -lt "$mtime" ]; then
+        echo "✗ $label (pid $pid) started $(( mtime - started ))s BEFORE its binary was built"
+        echo "  → you are running STALE code; the launch did not replace the old process"
+        return 1
+    fi
+    echo "  ✓ $label (pid $pid) is running the build just made"
+    return 0
+}
+
+echo "▶ verifying the running processes match the build..."
+VERIFY_OK=true
+verify_running "GUI" "Always.app/Contents/MacOS/Always$" \
+    "/Applications/Always.app/Contents/MacOS/Always" || VERIFY_OK=false
+verify_running "daemon" "always-daemon run" \
+    "/Applications/Always.app/Contents/MacOS/always-daemon" || VERIFY_OK=false
+
+if [ "$VERIFY_OK" != true ]; then
+    play "$SOUND_FAIL"
+    echo "✗ REBUILD NOT LIVE — do not test, and do not report this as shipped."
+    exit 1
+fi
+
 play "$SOUND_UP"
-echo "✓ done"
+echo "✓ done — new build verified running"

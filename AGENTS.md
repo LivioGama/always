@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **always** (4305 symbols, 10532 relationships, 285 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **always** (4794 symbols, 11926 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -45,34 +45,56 @@ This project is indexed by GitNexus as **always** (4305 symbols, 10532 relations
 
 # Always Project Rules
 
-## Rebuild After Changes
+## 🚨 Rebuild After Changes — nothing is "done" until the new build is RUNNING
 
-**MUST use the official rebuild script after making code changes that need testing.**
+**Every change to any `.rs` or `.swift` file MUST end with `scripts/dev-rebuild.sh`
+completing successfully, before the work is reported as finished.**
 
-After modifying Rust or Swift code, run:
+Not "deployed". Not "built". **Running.** Those are different claims, and only the
+last one lets a human test what you did.
+
 ```bash
 ./scripts/dev-rebuild.sh
 ```
 
-This script:
-- Kills the Always app and daemon (only if Rust changed)
-- Builds the Rust backend with local-stt feature
-- Builds the Swift app bundle
-- Deploys to /Applications/Always.app
-- Launches the app
+The script kills the app AND the daemon (unconditionally — a Swift-only change
+still needs the GUI restarted to load it), builds Rust with the `local-stt`
+feature, builds and bundles the Swift app, deploys to `/Applications/Always.app`,
+relaunches, and then **verifies the running processes are the ones just built**.
 
-**Smart daemon restart**: The script automatically detects if Rust source code changed:
-- If only Swift files changed → daemon is NOT killed/restarted (faster rebuild)
-- If Rust files changed → daemon is killed and restarted (required for changes to take effect)
-- Use `--force-daemon` flag to force daemon restart even if Rust unchanged
-- Use `--no-daemon` flag to skip daemon restart (for Swift-only changes)
+### The verification is the point
 
-**Why**: Ensures the full stack is rebuilt and deployed consistently. Manual `cargo build` + `swift build` can miss steps or leave stale processes running. The smart restart avoids unnecessary daemon kills for Swift-only changes.
+After launching, the script compares each process's start time against its
+binary's mtime and **exits non-zero** with `✗ REBUILD NOT LIVE` if a process
+predates the code it was built from. If you see that, the change is NOT testable.
+Fix it before saying anything else — never report the work as shipped.
+
+Check by hand any time:
+
+```bash
+stat -f "%Sm %N" -t "%H:%M:%S" /Applications/Always.app/Contents/MacOS/Always
+ps -o pid,lstart,comm -p $(pgrep -f "Always.app/Contents/MacOS/Always$" | head -1)
+# process start time MUST be later than the binary mtime
+```
+
+### Never do these
+
+- Do NOT say done / fixed / shipped / ready while the old process is still alive.
+- Do NOT rely on `open -a Always` alone. If the app is already running, `open`
+  re-focuses the live instance and the new binary never executes.
+- Do NOT skip the script for a "small" Swift change. That is exactly the case
+  that broke.
+
+**Why this rule exists**: the kill step used to be gated on Rust having changed.
+A Swift-only fix was therefore built, deployed, and reported as shipped while the
+GUI had been running since 100 minutes earlier — `open` simply re-focused the
+stale instance. The user tested a build that was never running and correctly
+reported "I see no change". Hours were lost on both sides.
 
 **Options**:
 - `./scripts/dev-rebuild.sh release` - Release build instead of debug
-- `./scripts/dev-rebuild.sh --no-daemon` - Skip daemon restart (Swift-only changes)
-- `./scripts/dev-rebuild.sh --force-daemon` - Force daemon restart even if Rust unchanged
+- `./scripts/dev-rebuild.sh --no-daemon` - Skip daemon restart (use sparingly; the
+  GUI is still restarted and verified)
 
 # GitNexus Index-Powered Development
 
