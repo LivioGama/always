@@ -126,6 +126,63 @@ fn collect_user_glossary_terms(entries: &[Entry]) -> Vec<String> {
     out
 }
 
+/// Remove the vocabulary bias prompt if the model echoed it back into
+/// the transcript.
+///
+/// Whisper-family models take the bias prompt as an `initial_prompt` and
+/// are well known for regurgitating it verbatim — most often on short,
+/// quiet, or low-confidence audio, where there is little real speech to
+/// condition on. The user then sees their own glossary pasted or shown
+/// in the overlay: "Common tools and products: .claude/worktrees, Claude
+/// Code, hardcoded, …" — a long comma-separated list appearing at the
+/// end of an utterance.
+///
+/// Stripping is exact, not heuristic: we hold the very string we sent,
+/// so we look for that, and for a truncated tail of it (the model often
+/// stops mid-list). Anything not derived from our own prompt is left
+/// untouched — this must never eat real speech.
+pub fn strip_bias_prompt_echo(text: &str) -> String {
+    let Some(prompt) = whisper_bias_prompt() else {
+        return text.to_string();
+    };
+    strip_prompt_echo_with(text, prompt)
+}
+
+/// Testable core of [`strip_bias_prompt_echo`].
+fn strip_prompt_echo_with(text: &str, prompt: &str) -> String {
+    let prefix = "Common tools and products:";
+    let mut out = text.to_string();
+
+    // Whole prompt echoed anywhere in the transcript.
+    while let Some(at) = out.find(prompt) {
+        out.replace_range(at..at + prompt.len(), " ");
+    }
+
+    // Truncated echo: the model started reciting the list and stopped.
+    // Everything from our prefix to the end of that run is ours, so drop
+    // it — but only when what follows really is the head of our list,
+    // never on a coincidental mention of the phrase in real speech.
+    if let Some(at) = out.find(prefix) {
+        let tail = &out[at + prefix.len()..];
+        let tail_head: String = tail.chars().take(40).collect();
+        let prompt_body = prompt[prefix.len()..].trim_start();
+        let body_head: String = prompt_body.chars().take(40).collect();
+        let overlap = tail_head
+            .trim_start()
+            .chars()
+            .zip(body_head.chars())
+            .take_while(|(a, b)| a == b)
+            .count();
+        // A handful of matching characters is coincidence; a couple of
+        // dozen is our list.
+        if overlap >= 12 {
+            out.truncate(at);
+        }
+    }
+
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn build_whisper_bias_prompt(entries: &[Entry]) -> Option<String> {
     if entries.is_empty() {
         return None;
@@ -397,6 +454,37 @@ mod tests {
         assert!(prompt.contains("# Rules"));
         // No empty `# Known mistranscriptions to fix` heading.
         assert!(!prompt.contains("# Known mistranscriptions"));
+    }
+
+    #[test]
+    fn strips_a_fully_echoed_bias_prompt() {
+        let prompt = "Common tools and products: Raycast, IntelliJ IDEA, VLC.";
+        let echoed = format!("Send the file now. {prompt}");
+        assert_eq!(
+            strip_prompt_echo_with(&echoed, prompt),
+            "Send the file now."
+        );
+    }
+
+    #[test]
+    fn strips_a_truncated_echo() {
+        // The model started reciting the glossary and stopped mid-list —
+        // the shape the user actually saw in the overlay.
+        let prompt = "Common tools and products: Raycast, IntelliJ IDEA, VLC.";
+        let echoed = "Okay let's go. Common tools and products: Raycast, IntelliJ";
+        assert_eq!(strip_prompt_echo_with(echoed, prompt), "Okay let's go.");
+    }
+
+    #[test]
+    fn leaves_real_speech_alone() {
+        let prompt = "Common tools and products: Raycast, IntelliJ IDEA, VLC.";
+        // No echo at all.
+        let clean = "Let's talk about the common tools and products we ship.";
+        assert_eq!(strip_prompt_echo_with(clean, prompt), clean);
+        // The phrase genuinely spoken, followed by unrelated words —
+        // must NOT be treated as our list and truncated away.
+        let spoken = "Common tools and products: whatever the team decided yesterday.";
+        assert_eq!(strip_prompt_echo_with(spoken, prompt), spoken);
     }
 
     #[test]

@@ -177,13 +177,32 @@ impl FallbackTranscriber {
     }
 }
 
+/// Drop an echoed vocabulary bias prompt from a transcription result.
+///
+/// Applied here rather than at each call site because every transcript
+/// the daemon produces — final, speculative, chunked, and the consume
+/// mode preview — flows through this one wrapper, and the prompt echo
+/// showed up in all of them. See [`crate::glossary::strip_bias_prompt_echo`].
+fn strip_prompt_echo(mut result: TranscriptionResult) -> TranscriptionResult {
+    let cleaned = crate::glossary::strip_bias_prompt_echo(&result.text);
+    if cleaned != result.text {
+        tracing::info!(
+            before_chars = result.text.chars().count(),
+            after_chars = cleaned.chars().count(),
+            "stripped_echoed_bias_prompt"
+        );
+        result.text = cleaned;
+    }
+    result
+}
+
 impl Transcriber for FallbackTranscriber {
     fn transcribe_from_bytes(&self, audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
         // The primary consumes the buffer, so keep a copy in case the
         // breaker is open — ~1 MB per utterance, cheap next to the call.
         let copy = audio.clone();
         let primary_err = match self.primary.transcribe_from_bytes(audio) {
-            Ok(r) => return Ok(r),
+            Ok(r) => return Ok(strip_prompt_echo(r)),
             Err(e) if e.should_fall_back() => e,
             Err(e) => return Err(e),
         };
@@ -193,7 +212,7 @@ impl Transcriber for FallbackTranscriber {
         match local.transcribe_from_bytes(copy) {
             Ok(r) => {
                 tracing::info!(model = %self.model_id, "stt_fallback_used");
-                Ok(r)
+                Ok(strip_prompt_echo(r))
             }
             Err(local_err) => {
                 tracing::warn!(
