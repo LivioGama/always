@@ -101,6 +101,15 @@ pub enum RecordResult {
     DroppedSpeaker {
         score: f32,
     },
+    /// Another app (SuperWhisper, Zoom, FaceTime, …) took the microphone
+    /// while this utterance was being captured. Recording stops on the
+    /// spot so the two apps never transcribe the same speech, but the
+    /// words captured up to that point are still transcribed and
+    /// reported — they are just never pasted, because the other app is
+    /// about to paste its own take of the same audio.
+    PreemptedByMicConflict {
+        text: String,
+    },
     Timeout,
 }
 
@@ -198,9 +207,10 @@ fn speaker_gate_score(gate: &SpeakerGate, samples: &[i16]) -> Option<f32> {
     let started = std::time::Instant::now();
     match gate.embedder.embed(samples) {
         Ok(e) => {
-            let score = crate::always::speaker_embed::cosine(&e, &gate.voiceprint.voiceprint);
+            let (score, matched) = best_voiceprint_match(&e, &gate.voiceprint);
             tracing::debug!(
                 score,
+                matched,
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 audio_secs = samples.len() as f64 / 16_000.0,
                 "speaker_gate_scored"
@@ -212,6 +222,52 @@ fn speaker_gate_score(gate: &SpeakerGate, samples: &[i16]) -> Option<f32> {
             None
         }
     }
+}
+
+/// Best cosine similarity between `embedding` and the enrolled profile,
+/// taken over the combined voiceprint AND each individual enrollment
+/// style. Returns the score plus which target won, for the logs.
+///
+/// Enrollment records three deliberately different styles (normal,
+/// lower, louder) and stores each embedding, but the combined
+/// voiceprint is their normalised sum — a centroid that is not equal to
+/// any of them. Scoring against the centroid alone therefore caps what
+/// the user can ever reach: measured on a real profile, a flawless
+/// re-recording of the "louder" style tops out at 0.87, and the styles
+/// sit as far as 0.66 from each other. Every genuine utterance paid
+/// that gap, which pushed the first (shortest, noisiest) check below
+/// threshold and delayed the listening overlay by whole seconds while
+/// the ladder retried.
+///
+/// Taking the max costs one dot product per style over 256 floats and
+/// never scores BELOW the old behaviour, since the centroid stays in
+/// the candidate set.
+fn best_voiceprint_match(
+    embedding: &[f32],
+    profile: &crate::always::voiceprint::VoiceProfile,
+) -> (f32, &'static str) {
+    use crate::always::speaker_embed::cosine;
+    let mut best = cosine(embedding, &profile.voiceprint);
+    let mut matched = "combined";
+    for (step, step_embedding) in &profile.steps {
+        // A profile written by a different model is rejected before the
+        // gate is built, but a truncated/partial step would still be a
+        // dimension mismatch — skip rather than score garbage.
+        if step_embedding.len() != embedding.len() {
+            continue;
+        }
+        let score = cosine(embedding, step_embedding);
+        if score > best {
+            best = score;
+            matched = match step.as_str() {
+                "normal" => "normal",
+                "lower" => "lower",
+                "louder" => "louder",
+                _ => "step",
+            };
+        }
+    }
+    (best, matched)
 }
 
 /// Voiced audio needed before the mid-recording (early) speaker check
@@ -259,6 +315,63 @@ pub fn record_utterance(
 
 /// Single-frame energy probe used while idle-paused so the user can wake
 /// listening by speaking without manually lifting pause.
+/// How long a successful "My Voice" verification keeps the instant-badge
+/// path open.
+///
+/// With the gate on, the overlay waits for proof: 60 ms to confirm the
+/// audio is speech, then 500 ms to collect the minimum the voiceprint
+/// model will score (`MIN_EMBED_SAMPLES`), and another half-second for
+/// every check that misses. That is ~0.6 s at best, paid at the start of
+/// EVERY sentence, which reads as sluggish during continuous dictation.
+///
+/// Within this window of a confirmed match, the badge appears on voice
+/// onset instead — you just proved who you are, so the next sentence
+/// does not re-prove it from scratch. A mismatch still retracts the
+/// overlay through the normal reject paths, so the exposure is a brief
+/// flash in the seconds right after you speak, not a standing hole in
+/// the gate.
+const SPEAKER_TRUST_WINDOW_MS: u64 = 10_000;
+
+/// Monotonic clock base for the trust window. `Instant` cannot live in
+/// an atomic, so verification times are stored as milliseconds since
+/// this point.
+#[cfg(feature = "macos")]
+static TRUST_EPOCH: std::sync::LazyLock<std::time::Instant> =
+    std::sync::LazyLock::new(std::time::Instant::now);
+
+/// Milliseconds-since-`TRUST_EPOCH` of the last confirmed match, offset
+/// by 1 so that 0 means "never verified".
+#[cfg(feature = "macos")]
+static LAST_VERIFIED_AT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Record that the enrolled user was just confirmed, opening the
+/// instant-badge window. Called from every path that verifies a match,
+/// including the tail re-checks, so a long utterance keeps it fresh.
+#[cfg(feature = "macos")]
+fn mark_speaker_verified() {
+    let now = TRUST_EPOCH.elapsed().as_millis() as u64;
+    LAST_VERIFIED_AT_MS.store(now.saturating_add(1), Ordering::Relaxed);
+}
+
+/// Whether a confirmed match is recent enough to skip re-proving.
+#[cfg(feature = "macos")]
+fn speaker_trust_active() -> bool {
+    let stored = LAST_VERIFIED_AT_MS.load(Ordering::Relaxed);
+    trust_window_open(stored, TRUST_EPOCH.elapsed().as_millis() as u64, SPEAKER_TRUST_WINDOW_MS)
+}
+
+/// Pure core of [`speaker_trust_active`], split out so the window logic
+/// is testable without waiting on a real clock. `stored` is the offset
+/// encoding: 0 means never verified.
+fn trust_window_open(stored: u64, now_ms: u64, window_ms: u64) -> bool {
+    let Some(last) = stored.checked_sub(1) else {
+        return false;
+    };
+    // A clock that appears to run backwards (should not happen with a
+    // monotonic source) must not grant unbounded trust.
+    now_ms >= last && now_ms - last <= window_ms
+}
+
 #[cfg(feature = "macos")]
 pub fn poll_speech_energy(cfg: &AlwaysConfig) -> Result<bool> {
     let recorder_arc = audio::RecChild::get_or_spawn()?;
@@ -497,6 +610,11 @@ fn record_with_local_vad(
     let mut voice_activity_announced = false;
     let mut voice_activity_announced_at: Option<std::time::Instant> = None;
     let mut last_voice_heartbeat: Option<std::time::Instant> = None;
+    // First frame of this utterance that looked like speech — the
+    // reference point for the measured onset→badge latency. Declared
+    // before `announce_voice_activity!` because macro_rules hygiene
+    // binds the locals a macro reads at its DEFINITION site.
+    let mut first_voice_at: Option<std::time::Instant> = None;
     let mut early_voice_streak = 0usize;
     let mut long_recording_warned = false;
     let mut total_frames = 0usize;
@@ -547,6 +665,15 @@ fn record_with_local_vad(
                 {
                     last_voice_heartbeat = Some(std::time::Instant::now());
                 }
+                // Measured onset→badge latency. Previously only
+                // derivable from constants, because `voice_detected` is
+                // logged late (first frame past the energy check) and
+                // understated the wait the user actually feels.
+                tracing::info!(
+                    latency_ms = first_voice_at.map(|t| t.elapsed().as_millis() as u64),
+                    trusted = speaker_trust_active(),
+                    "listening_overlay_shown"
+                );
                 event::global_broadcaster().voice_activity_detected();
             }
         }};
@@ -617,6 +744,10 @@ fn record_with_local_vad(
     // when the room goes quiet.
     let mut next_speaker_check = SPEAKER_TAIL_CHECK_EVERY_SAMPLES;
     let mut tail_fail_streak = 0usize;
+    // Set when the mic-conflict watchdog fired mid-capture; turns the
+    // finalized utterance into `PreemptedByMicConflict` so the caller
+    // keeps the text but skips the paste.
+    let mut mic_conflict_preempted = false;
     // The cut requires the user's voice to be absent from the trailing
     // windows for the user's own configured pause tolerance — one check
     // per 0.5s of voiced audio, so silence_secs = 2.2 → 5 checks.
@@ -639,6 +770,31 @@ fn record_with_local_vad(
             event::global_broadcaster().voice_activity_ended();
             flip_to_listening!();
             return Ok(RecordResult::Silence);
+        }
+        // Another app grabbed the microphone (the mic-conflict watchdog
+        // polls every 1s). Stop capturing THIS instant rather than at the
+        // top of the next event-loop iteration: `record_utterance` blocks
+        // for up to `timeout_secs` waiting for voice, so the loop-level
+        // gate in `event_loop` cannot see the flag until the wait ends —
+        // which is how the user ended up with the same sentence
+        // transcribed twice, once by each app.
+        //
+        // Only the mic-conflict source aborts mid-capture. The other
+        // pause sources deliberately keep running here: `event_loop`
+        // calls `process_one` WHILE audio-output-paused for its
+        // wake-on-voice path, and aborting on `should_gate_capture()`
+        // would cancel exactly the utterance that path exists to record.
+        //
+        // `break` (not an early return) so whatever was already spoken
+        // still flows through the normal transcribe path below — the
+        // words are kept and reported, just never pasted.
+        if pause::is_mic_conflict_paused() {
+            tracing::info!(
+                voiced_samples,
+                "capture_preempted_by_mic_conflict"
+            );
+            mic_conflict_preempted = true;
+            break;
         }
         // INVARIANT (concurrency): `read_frame` blocks on rec's stdout for up
         // to one full frame while holding GLOBAL_RECORDER. `record_utterance`
@@ -771,7 +927,25 @@ fn record_with_local_vad(
         // it. With the gate on, the announce comes from
         // `speaker_gate_verified` / whole-utterance pass below instead —
         // slightly later, but only ever for the enrolled user.
-        if !in_speech && !voice_activity_announced && !speaker_gate_requested {
+        if is_speech && first_voice_at.is_none() {
+            first_voice_at = Some(std::time::Instant::now());
+        }
+        // The gate normally holds the badge back until the speaker is
+        // confirmed. Inside the trust window a match was confirmed
+        // seconds ago, so the badge goes up on onset instead — see
+        // SPEAKER_TRUST_WINDOW_MS.
+        //
+        // Deliberately NOT gated on `!in_speech`. It used to be, and
+        // that silently voided the fast path: `in_speech` latches after
+        // `onset_ms` (60 ms = 2 frames), so on any utterance with a
+        // crisp onset this block stopped running before the streak
+        // could reach EARLY_VOICE_MIN_FRAMES, and the badge fell back to
+        // waiting for full verification. Measured live: one such
+        // utterance took 4073 ms to show the badge despite `trusted`
+        // being true. Once `in_speech` is set the streak requirement is
+        // already satisfied by definition, so the transient guard the
+        // streak provides is not lost.
+        if !voice_activity_announced && (!speaker_gate_requested || speaker_trust_active()) {
             if early_voice_frame_ok(
                 frame_energy,
                 last_prob,
@@ -968,6 +1142,7 @@ fn record_with_local_vad(
                             confirmed_user_len = speech_samples.len();
                             tail_fail_streak = 0;
                             tracing::info!(score, "speaker_gate_verified");
+                            mark_speaker_verified();
                             announce_voice_activity!();
                             // The USER resumed speaking (verified) —
                             // this is the gated equivalent of the
@@ -997,6 +1172,7 @@ fn record_with_local_vad(
                             // and overlay.
                             confirmed_user_len = speech_samples.len();
                             tail_fail_streak = 0;
+                            mark_speaker_verified();
                             announce_voice_activity!();
                             if pause::countdown_active() {
                                 pause::countdown_request_cancel();
@@ -1009,6 +1185,10 @@ fn record_with_local_vad(
                         if speaker_gate_allows_score(score, tail_threshold) {
                             tail_fail_streak = 0;
                             confirmed_user_len = speech_samples.len();
+                            // Keep the window fresh across a long
+                            // utterance, so the sentence AFTER a
+                            // two-minute dictation is still instant.
+                            mark_speaker_verified();
                         } else {
                             tail_fail_streak += 1;
                             tracing::debug!(
@@ -1502,7 +1682,8 @@ fn record_with_local_vad(
             speech_energy.max(cfg.energy_threshold),
             speech_end_at,
             false,
-        );
+        )
+        .map(|r| apply_mic_conflict_preemption(r, mic_conflict_preempted));
     }
 
     // Try to use the speculative transcription if it was kicked off and
@@ -1624,7 +1805,8 @@ fn record_with_local_vad(
             speech_energy.max(cfg.energy_threshold),
             speech_end_at,
             speculation_used,
-        );
+        )
+        .map(|r| apply_mic_conflict_preemption(r, mic_conflict_preempted));
     }
 
     // Enhanced noise detection: filter out empty, very short, or low-energy results
@@ -1654,16 +1836,38 @@ fn record_with_local_vad(
         return Ok(RecordResult::DroppedNoise { raw });
     }
 
-    Ok(RecordResult::Speech {
-        text: raw,
-        energy: speech_energy,
-        transcription: result,
-        timing: UtteranceTiming {
-            speech_end_at,
-            stt_done_at,
-            speculation_used,
+    Ok(apply_mic_conflict_preemption(
+        RecordResult::Speech {
+            text: raw,
+            energy: speech_energy,
+            transcription: result,
+            timing: UtteranceTiming {
+                speech_end_at,
+                stt_done_at,
+                speculation_used,
+            },
         },
-    })
+        mic_conflict_preempted,
+    ))
+}
+
+/// Turn a finalized utterance into [`RecordResult::PreemptedByMicConflict`]
+/// when another app took the microphone mid-capture. The transcript is
+/// carried through so the words are not lost, but the variant tells the
+/// caller not to paste: the app that took the mic is about to paste its
+/// own transcript of the very same speech.
+///
+/// Non-speech outcomes (silence, noise, a speaker-gate drop) pass
+/// through unchanged — there is nothing to keep and nothing to suppress.
+#[cfg(feature = "macos")]
+fn apply_mic_conflict_preemption(result: RecordResult, preempted: bool) -> RecordResult {
+    if !preempted {
+        return result;
+    }
+    match result {
+        RecordResult::Speech { text, .. } => RecordResult::PreemptedByMicConflict { text },
+        other => other,
+    }
 }
 
 /// Non-macOS stub.
@@ -2032,6 +2236,123 @@ mod tests {
         assert!(!early_voice_frame_ok(0.001, 0.60, 0.0072, 0.5));
         // Both → yes.
         assert!(early_voice_frame_ok(0.02, 0.40, 0.0072, 0.5));
+    }
+
+    #[test]
+    fn trust_window_opens_on_verification_and_closes_on_time() {
+        use super::trust_window_open;
+        const W: u64 = 10_000;
+
+        // Never verified: the badge must wait for proof.
+        assert!(!trust_window_open(0, 50_000, W));
+
+        // Verified at t=40s (stored offset +1).
+        let stored = 40_000 + 1;
+        assert!(trust_window_open(stored, 40_000, W), "same instant");
+        assert!(trust_window_open(stored, 49_999, W), "just inside");
+        assert!(trust_window_open(stored, 50_000, W), "exactly at the edge");
+        assert!(!trust_window_open(stored, 50_001, W), "just outside");
+        assert!(!trust_window_open(stored, 500_000, W), "long after");
+
+        // A clock reading before the stored verification must not grant
+        // trust — otherwise an underflow would make it permanent.
+        assert!(!trust_window_open(stored, 10_000, W));
+    }
+
+    #[cfg(feature = "macos")]
+    #[test]
+    fn scoring_uses_the_closest_enrolled_style_not_just_the_blend() {
+        use super::best_voiceprint_match;
+        use crate::always::speaker_embed::combine_embeddings;
+        use crate::always::voiceprint::VoiceProfile;
+        use std::collections::BTreeMap;
+
+        // Two deliberately different styles, as enrollment produces.
+        // Already unit-length, so they stand in for real embeddings.
+        let normal = vec![1.0f32, 0.0, 0.0];
+        let louder = vec![0.0f32, 1.0, 0.0];
+        let combined = combine_embeddings(&[normal.clone(), louder.clone()]).unwrap();
+
+        let mut steps = BTreeMap::new();
+        steps.insert("normal".to_string(), normal.clone());
+        steps.insert("louder".to_string(), louder.clone());
+        let profile = VoiceProfile {
+            version: 1,
+            model: "test".to_string(),
+            steps,
+            voiceprint: combined.clone(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        // Speaking in exactly one enrolled style: against the blend this
+        // caps at ~0.707, which is the delay-causing ceiling. Against the
+        // matching style it is a perfect 1.0.
+        let blend_only = crate::always::speaker_embed::cosine(&normal, &combined);
+        assert!(
+            blend_only < 0.75,
+            "blend should visibly penalise a single style, got {blend_only}"
+        );
+        let (best, matched) = best_voiceprint_match(&normal, &profile);
+        assert!(best > 0.99, "matching style should score ~1.0, got {best}");
+        assert_eq!(matched, "normal");
+        assert!(best > blend_only);
+
+        // Never worse than the old centroid-only behaviour.
+        let midway = vec![std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2, 0.0];
+        let (best_mid, _) = best_voiceprint_match(&midway, &profile);
+        assert!(best_mid >= crate::always::speaker_embed::cosine(&midway, &combined) - 1e-6);
+
+        // An unrelated voice stays far away — the max does not smuggle
+        // impostors past the threshold.
+        let impostor = vec![0.0f32, 0.0, 1.0];
+        let (best_impostor, _) = best_voiceprint_match(&impostor, &profile);
+        assert!(
+            best_impostor < 0.1,
+            "impostor must stay low, got {best_impostor}"
+        );
+    }
+
+    #[cfg(feature = "macos")]
+    #[test]
+    fn mic_conflict_keeps_the_words_but_suppresses_the_paste() {
+        use super::{RecordResult, UtteranceTiming, apply_mic_conflict_preemption};
+
+        let speech = || RecordResult::Speech {
+            text: "half a sentence".to_string(),
+            energy: 0.05,
+            transcription: crate::stt::TranscriptionResult::default(),
+            timing: UtteranceTiming {
+                speech_end_at: std::time::Instant::now(),
+                stt_done_at: std::time::Instant::now(),
+                speculation_used: false,
+            },
+        };
+
+        // No conflict: the utterance stays on the paste path untouched.
+        assert!(matches!(
+            apply_mic_conflict_preemption(speech(), false),
+            RecordResult::Speech { .. }
+        ));
+
+        // Conflict: same words, but off the paste path.
+        match apply_mic_conflict_preemption(speech(), true) {
+            RecordResult::PreemptedByMicConflict { text } => {
+                assert_eq!(text, "half a sentence", "the words must survive the cut");
+            }
+            _ => panic!("expected PreemptedByMicConflict"),
+        }
+
+        // Nothing was said before the cut — nothing to keep, nothing to
+        // suppress; a drop stays a drop.
+        assert!(matches!(
+            apply_mic_conflict_preemption(RecordResult::Silence, true),
+            RecordResult::Silence
+        ));
+        assert!(matches!(
+            apply_mic_conflict_preemption(RecordResult::DroppedSpeaker { score: 0.1 }, true),
+            RecordResult::DroppedSpeaker { .. }
+        ));
     }
 
     #[test]

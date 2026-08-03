@@ -235,6 +235,13 @@ fn render_event(json: &Value) -> Option<String> {
         }
         "dropped_low_energy" => format!("· dropped (low energy {})", field_str(fields, "energy")),
         "dropped_noise" => format!("· dropped (noise, {} chars)", field_str(fields, "chars")),
+        "preempted_by_mic_conflict" => match field_str(fields, "text").as_str() {
+            "" => format!(
+                "🎙️  Another app took the mic — kept {} chars, did not paste",
+                field_str(fields, "chars")
+            ),
+            text => format!("🎙️  Another app took the mic — not pasted: \"{text}\""),
+        },
         "pause_toggled" => {
             if field_str(fields, "paused") == "true" {
                 "⏸  Paused".to_string()

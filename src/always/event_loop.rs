@@ -11,8 +11,8 @@ use crate::always::speech_action::{
     paste_dedupe_window,
 };
 use crate::always::{
-    AlwaysConfig, auto_enter_countdown, clipboard_watcher, daemon, event, filter, idle_watcher,
-    keyboard, mic_watcher, paste, pause, per_app, transcript_stream, uds_server, vad,
+    AlwaysConfig, audio, auto_enter_countdown, clipboard_watcher, daemon, event, filter,
+    idle_watcher, keyboard, mic_watcher, paste, pause, per_app, transcript_stream, uds_server, vad,
 };
 use crate::managers::model_registry::ModelRegistry;
 use crate::stt::Transcriber;
@@ -213,6 +213,9 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
 
     let mut last_process = Instant::now() - Duration::from_secs(10);
     let mut last_dup_check = Instant::now();
+    // True once capture has been gated, until the stale audio that piled
+    // up in `rec`'s buffer during the gate has been drained.
+    let mut was_gated = false;
 
     loop {
         if last_dup_check.elapsed() >= Duration::from_secs(30) {
@@ -239,6 +242,10 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         // pause) must still silence capture even while a stream consumer
         // (Iris) is listening.
         if pause::should_gate_capture() {
+            // Remember that capture was silenced, so the audio `rec`
+            // queues up meanwhile is dropped rather than transcribed
+            // when listening resumes (see the drain below).
+            was_gated = true;
             // Wake-on-voice while idle-paused: keep the mic hot enough to
             // detect speech without running the full VAD/transcribe loop.
             if pause::is_idle_auto_paused()
@@ -293,6 +300,32 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
 
         // Note: Removed auto_enter config reload that was causing race conditions
         // Auto-enter state is now managed consistently through keyboard shortcuts and settings UI
+
+        // Coming back from a gated stretch (mic taken by another app,
+        // user muted, idle-paused): `rec` kept capturing the whole time
+        // and nobody was reading it, so its buffer now holds audio from
+        // exactly the period Always was supposed to ignore. Throw it
+        // away before the first read, or that backlog gets transcribed
+        // and pasted the moment listening resumes.
+        //
+        // Only after a gate — during normal back-to-back dictation the
+        // audio queued while the previous utterance transcribed is the
+        // user continuing to talk, and must be kept.
+        if was_gated {
+            was_gated = false;
+            if let Ok(recorder_arc) = audio::RecChild::get_or_spawn() {
+                let mut recorder = recorder_arc.lock();
+                if let Some(rec) = recorder.as_mut() {
+                    // Logged even at 0.0: a gate that queued nothing is
+                    // itself worth seeing (it means `rec` got no samples
+                    // while the other app held the device), and silence
+                    // here previously made a working drain look like a
+                    // drain that never ran.
+                    let dropped_secs = rec.drain_pending();
+                    tracing::info!(dropped_secs, "stale_audio_dropped_after_pause");
+                }
+            }
+        }
 
         // Take a cheap snapshot of the active transcriber per utterance —
         // if the user swaps models mid-session, the next loop iteration
@@ -402,6 +435,15 @@ fn process_one(
             log.write(Event::DroppedSpeaker {
                 score: score as f64,
             });
+            Ok(())
+        }
+        vad::RecordResult::PreemptedByMicConflict { text } => {
+            // Deliberately NOT routed through `handle_speech`: that is
+            // the paste path, and the app that took the mic is pasting
+            // its own transcript of this same speech. Recording the text
+            // here is the whole point of the variant — the words are
+            // kept, the keystrokes are not sent.
+            log.write(Event::PreemptedByMicConflict { text: &text });
             Ok(())
         }
     };

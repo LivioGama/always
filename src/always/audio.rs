@@ -264,6 +264,40 @@ impl RecChild {
         }
     }
 
+    /// Throw away every byte `rec` has queued up, and report how many
+    /// seconds of audio that was.
+    ///
+    /// `rec` never stops capturing — it runs for the daemon's lifetime
+    /// with a 131 KB buffer (~4 s at 16 kHz mono i16), and the kernel
+    /// pipe holds more on top. So while capture is gated (mic taken by
+    /// another app, user muted, idle-paused) nobody drains that pipe and
+    /// it fills with audio from exactly the period Always was supposed
+    /// to be deaf. Without this, the first read after resuming returns
+    /// that backlog and Always transcribes and pastes speech that
+    /// belonged to the other app — the "I unblocked the mic and it
+    /// pasted anyway" bug.
+    ///
+    /// Non-blocking by construction: `wait_readable(fd, 0)` polls with a
+    /// zero timeout, so this returns as soon as the pipe runs dry and
+    /// can never stall the event loop. A dead recorder (EOF) ends the
+    /// loop too — diagnosing that is `read_frame`'s job, not this one.
+    pub fn drain_pending(&mut self) -> f64 {
+        use std::os::fd::AsRawFd as _;
+
+        let fd = self.stdout.as_raw_fd();
+        let mut scratch = [0u8; FRAME_BYTES];
+        let mut dropped_bytes = 0usize;
+        while wait_readable(fd, 0).unwrap_or(false) {
+            match self.stdout.read(&mut scratch) {
+                Ok(0) => break, // EOF — recorder died; leave it to read_frame
+                Ok(n) => dropped_bytes += n,
+                Err(_) => break,
+            }
+        }
+        // 16 kHz mono i16 = 32 000 bytes per second.
+        dropped_bytes as f64 / 32_000.0
+    }
+
     pub fn read_frame(&mut self, buf: &mut [u8; FRAME_BYTES]) -> io::Result<usize> {
         use std::os::fd::AsRawFd as _;
 

@@ -34,6 +34,12 @@ pub enum Event<'a> {
     DroppedSpeaker {
         score: f64,
     },
+    /// Another app took the microphone mid-utterance. The words captured
+    /// before the cut were transcribed and are recorded here, but never
+    /// pasted — the other app pastes its own take of the same speech.
+    PreemptedByMicConflict {
+        text: &'a str,
+    },
     PauseToggled {
         paused: bool,
     },
@@ -145,6 +151,16 @@ impl Logger {
                 // My Voice gate, and threshold calibration needs the
                 // scores in default logs.
                 tracing::info!(score, "dropped_not_enrolled_speaker");
+            }
+            Event::PreemptedByMicConflict { text } => {
+                // Info, not debug: the user asked for these words and got
+                // no paste, so the log is the only place they survive.
+                let log_transcripts = should_log_transcripts();
+                tracing::info!(
+                    chars = text.chars().count(),
+                    text = if log_transcripts { Some(text) } else { None },
+                    "preempted_by_mic_conflict"
+                );
             }
             Event::PauseToggled { paused } => {
                 tracing::info!(paused, "pause_toggled");
