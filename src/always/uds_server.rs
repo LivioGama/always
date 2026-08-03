@@ -576,8 +576,27 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         pause::release_consume_mode(&consume_lease_for_reader);
     });
 
-    // Send events to client
-    while let Ok(event) = rx.recv().await {
+    // Send events to client.
+    //
+    // A broadcast receiver returns `Lagged` when the client fell further
+    // behind than the channel's capacity. That is NOT a fatal condition —
+    // it means some events were missed — but this loop used to be
+    // `while let Ok(event) = rx.recv().await`, which treated it as the
+    // end of the stream: the loop exited, `handle_client` returned, and
+    // the socket closed. From the app's side the daemon had simply
+    // vanished mid-session, so it reconnected, re-handshook and re-read
+    // the whole initial state before events resumed — seconds during
+    // which nothing reached the overlay, which is exactly the "the badge
+    // takes about two seconds" report. Skip the gap and keep serving.
+    loop {
+        let event = match rx.recv().await {
+            Ok(event) => event,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                tracing::warn!(skipped, "uds_event_stream_lagged");
+                continue;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        };
         let json_line = match event.to_json_line() {
             Ok(line) => line,
             Err(e) => {

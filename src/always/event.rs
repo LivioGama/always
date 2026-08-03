@@ -604,7 +604,13 @@ pub struct EventBroadcaster {
 impl EventBroadcaster {
     /// Create a new event broadcaster
     pub fn new() -> Self {
-        let (tx, _rx) = broadcast::channel(100);
+        // Capacity is a burst buffer, not a queue depth target. 100 was
+        // small enough to overflow on ordinary bursts — a model-catalog
+        // refresh, a rapid pause/resume, an utterance's worth of chunk
+        // events — and every overflow cost the GUI its event stream (see
+        // the `Lagged` handling in `uds_server::handle_client`). The
+        // events are small; the extra headroom is a few KB.
+        let (tx, _rx) = broadcast::channel(1024);
         Self {
             tx,
             voice_active: Arc::new(AtomicBool::new(false)),

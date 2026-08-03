@@ -956,7 +956,17 @@ fn record_with_local_vad(
             } else {
                 early_voice_streak = 0;
             }
-            if early_voice_streak >= EARLY_VOICE_MIN_FRAMES {
+            // `in_speech` is a STRONGER signal than the early-voice
+            // streak — it already required `onset_ms` of Silero-confirmed
+            // speech — so it is safe to announce on, and necessary:
+            // the early-voice gate uses its own, higher energy bar
+            // (EARLY_VOICE_ENERGY_RATIO of the activity threshold), and a
+            // softly-started sentence can be `in_speech` for a long time
+            // while that bar keeps rejecting frames. Measured live with
+            // trust active: 4019 ms and 11978 ms from first speech to
+            // badge, because the announce sat waiting for a streak that
+            // never came and fell through to full verification.
+            if early_voice_streak >= EARLY_VOICE_MIN_FRAMES || in_speech {
                 // Show the listening overlay IMMEDIATELY on voice onset.
                 // Without a speaker gate there is nothing to verify against,
                 // so waiting would only add 0.2-4.3s of dead time before the
