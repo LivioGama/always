@@ -95,10 +95,20 @@ final class ModelManagerClient: ObservableObject {
         return nil
     }
 
-    /// Whether the current active model supports streaming transcription.
-    /// Groq supports streaming; local models depend on their engine type.
+    /// Whether the current active model produces live partial text.
+    ///
+    /// Groq is deliberately NOT treated as streaming. The API returns one
+    /// finished transcript per utterance and the daemon emits no
+    /// `TranscriptChunk` for it, so claiming otherwise produced exactly
+    /// the behaviour the user reported: the overlay enabled its live-text
+    /// path, no partial ever arrived so it sat on "Listening" for the
+    /// whole sentence, and then `TranscriptFinal` fired a 1.5s flash of
+    /// text at the very end — a preview of something already pasted,
+    /// arriving after it was any use.
+    ///
+    /// Only a model whose catalog entry declares `supports_streaming`
+    /// gets the live-text treatment.
     var activeModelSupportsStreaming: Bool {
-        if activeBackend == "groq" { return true }
         guard let modelId = activeModelId else { return false }
         if let model = models.first(where: { $0.id == modelId }) {
             return model.supports_streaming
