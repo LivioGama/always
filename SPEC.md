@@ -153,10 +153,10 @@ results. A model that returns one finished transcript per utterance must not
 claim streaming — doing so produces a useless flash of text *after* the words
 have already been pasted.
 
-❓ Today no active configuration streams: the cloud backend returns whole
-transcripts, and the streaming-capable local model was removed (§8). Live text
-is therefore unavailable in practice. Product decision needed on whether to make
-a streaming local model the default.
+Live text requires a streaming engine to be **active**, not merely available. The
+cloud backend returns one finished transcript per utterance and must not be
+marked as streaming. `MoonshineStreaming` models do stream and render partial
+text as the user speaks.
 
 ---
 
@@ -244,10 +244,30 @@ offline; the cloud backend is faster to start and needs an API key.
   back silently but are logged.
 - Switching models takes effect on the next utterance.
 
-❓ NVIDIA Nemotron 3.5 ASR was removed: no loader existed, the declared size was
-600 MB against a 2258 MB download, there was no checksum, and the URL pointed at
-an archive format the local runtime cannot read. It was also marked
-*recommended*. If it is wanted, all four must be fixed.
+**Streaming models available:** `moonshine-tiny-streaming-en`,
+`moonshine-small-streaming-en`, `moonshine-medium-streaming-en`. These are the
+only engines that produce live partial text (§5). English only.
+
+### 8.1 NVIDIA Nemotron 3.5 ASR — why it is absent
+
+Removed because it could not run, and it cannot be restored by fixing metadata.
+Investigated with the following results:
+
+- **No engine exists.** `transcribe-rs 0.3.8` (pinned) and `0.3.11` (latest)
+  both ship exactly six ONNX engines — canary, cohere, gigaam, moonshine,
+  parakeet, sense_voice. Upgrading does not help.
+- **The published ONNX exports do not fit the closest loader.** Parakeet expects
+  a `nemo128.onnx` feature preprocessor and `vocab.txt`; the exports ship
+  `encoder.onnx` / `decoder.onnx` / `joint.onnx` / `vocab.json` with no
+  preprocessor. Parakeet's loader also targets the offline transducer, while
+  Nemotron-streaming carries cache state its I/O signature does not match.
+- The original catalogue entry was additionally wrong in three ways: it declared
+  600 MB against a 2258 MB download, carried no checksum, and pointed at a
+  `.nemo` archive the runtime cannot read — while being marked *recommended*.
+
+Supporting it means **writing a new engine**: feature extractor, streaming
+transducer with cache tensors, and a JSON-vocab tokenizer. That is a feature,
+not a metadata fix. Until then, listing it would violate **I8**.
 
 ---
 
@@ -331,7 +351,10 @@ non-zero if not.
    exchange for an instant indicator?
 2. Auto-Enter with no delay — should a grace period be the default?
 3. Silence window at 1.4 s — long enough for natural thinking pauses?
-4. Should a streaming local model become the default so live text works?
+4. ~~Should a streaming local model become the default so live text works?~~
+   **Resolved 2026-08-04:** `moonshine-small-streaming-en` downloaded and made
+   active, so the overlay's live-text path has something to render. English
+   only — revisit if multilingual dictation matters more than live text.
 5. Mic conflict discards the interrupted sentence rather than pasting it — right
    call?
 6. Nemotron — fix and restore, or leave out?
