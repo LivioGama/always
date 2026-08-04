@@ -245,29 +245,40 @@ offline; the cloud backend is faster to start and needs an API key.
 - Switching models takes effect on the next utterance.
 
 **Streaming models available:** `moonshine-tiny-streaming-en`,
-`moonshine-small-streaming-en`, `moonshine-medium-streaming-en`. These are the
-only engines that produce live partial text (§5). English only.
+`moonshine-small-streaming-en`, `moonshine-medium-streaming-en`, `nemotron-3.5-asr-streaming-0.6b`.
+These engines produce live partial text (§5). Moonshine models are English only;
+Nemotron 3.5 supports 40 language-locales with auto language detection.
 
-### 8.1 NVIDIA Nemotron 3.5 ASR — why it is absent
+### 8.1 NVIDIA Nemotron 3.5 ASR — implementation notes
 
-Removed because it could not run, and it cannot be restored by fixing metadata.
-Investigated with the following results:
+Nemotron 3.5 ASR Streaming 0.6B is implemented via the `parakeet-rs` crate (0.3.6,
+pinned for ort 2.0.0-rc.12 compatibility). It provides multilingual streaming ASR
+with 40 language-locales, auto language detection, and punctuation.
 
-- **No engine exists.** `transcribe-rs 0.3.8` (pinned) and `0.3.11` (latest)
-  both ship exactly six ONNX engines — canary, cohere, gigaam, moonshine,
-  parakeet, sense_voice. Upgrading does not help.
-- **The published ONNX exports do not fit the closest loader.** Parakeet expects
-  a `nemo128.onnx` feature preprocessor and `vocab.txt`; the exports ship
-  `encoder.onnx` / `decoder.onnx` / `joint.onnx` / `vocab.json` with no
-  preprocessor. Parakeet's loader also targets the offline transducer, while
-  Nemotron-streaming carries cache state its I/O signature does not match.
-- The original catalogue entry was additionally wrong in three ways: it declared
-  600 MB against a 2258 MB download, carried no checksum, and pointed at a
-  `.nemo` archive the runtime cannot read — while being marked *recommended*.
+**Model files:** The ONNX export from HuggingFace (pantinor/nemotron-3.5-asr-streaming-0.6b-onnx)
+includes:
+- `encoder.onnx` + `encoder.onnx.data` (~2.4 GB)
+- `decoder_joint.onnx` (93 MB)
+- `tokenizer.model` (0.4 MB)
 
-Supporting it means **writing a new engine**: feature extractor, streaming
-transducer with cache tensors, and a JSON-vocab tokenizer. That is a feature,
-not a metadata fix. Until then, listing it would violate **I8**.
+Total size: ~2500 MB. The model is a directory (not a single file) and requires
+the `local-stt` feature to be enabled.
+
+**Implementation details:**
+- Loaded via `parakeet_rs::Nemotron::from_pretrained(path, None)`
+- Non-streaming transcription uses `transcribe_audio(&samples)`
+- Streaming transcription uses `transcribe_chunk(&audio_chunk)` with 560ms chunks (8960 samples @ 16kHz)
+- The loader auto-detects English-only vs multilingual variants from the encoder ONNX graph
+- Multilingual variant optionally accepts a target language code (e.g., "es-ES", "ja-JP") via `set_target_lang()`
+
+**Why it was previously absent:**
+The original implementation attempt failed because:
+- `transcribe-rs` did not include a Nemotron engine
+- The published ONNX exports did not fit transcribe-rs's Parakeet loader
+- The catalogue entry had incorrect metadata (600 MB vs 2258 MB download, no checksum, pointed at .nemo archive)
+
+The solution was to use `parakeet-rs` instead, which provides a dedicated Nemotron
+implementation compatible with the ONNX Runtime this project already depends on.
 
 ---
 

@@ -35,8 +35,9 @@ overlay = ["dep:x11", "x11/xlib"]
 # `whisper-cpp` feature fails. On other targets we fall back to
 # `whisper-cpp + onnx`. The `onnx` feature unlocks Parakeet, Moonshine,
 # Canary, SenseVoice, GigaAM, and Cohere engines via ONNX Runtime.
+# `parakeet-rs` adds Nemotron 3.5 multilingual streaming support.
 # Enable locally with `cargo build --features local-stt`.
-local-stt = ["dep:transcribe-rs"]
+local-stt = ["dep:transcribe-rs", "dep:parakeet-rs"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -85,6 +86,10 @@ tar = "0.4"
 flate2 = "1"
 futures-util = "0.3"
 futures = "0.3"
+# Nemotron 3.5 multilingual streaming ASR via parakeet-rs. Pinned to 0.3.6
+# for ort 2.0.0-rc.12 compatibility (0.3.7 requires rc.13, which conflicts
+# with transcribe-rs and vad-rs pins).
+parakeet-rs = { version = "=0.3.6", optional = true }
 # Optional, gated by the `macos` feature.
 core-graphics = { version = "0.24", optional = true }
 rdev = { version = "0.5", optional = true }

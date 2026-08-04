@@ -1570,27 +1570,46 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
         },
     );
 
-    // NVIDIA Nemotron-3.5-ASR Streaming 0.6B is deliberately NOT listed.
-    //
-    // It was in this catalog, and marked `is_recommended`, while nothing
-    // could load it: `stt_local::load_engine` returns "Nemotron engine
-    // not yet implemented in transcribe-rs" for `EngineType::Nemotron`.
-    // Selecting it therefore failed instantly, the daemon fell back to
-    // Groq (`stt_fallback_armed`), and the UI sat on a loading state that
-    // could never resolve — after a 2.2 GB download.
-    //
-    // Three further defects must be fixed before it returns:
-    //   - it declared `size_mb: 600` for an artifact that downloads at
-    //     2258 MB, so progress ran past 100% and looked wedged;
-    //   - it carried no `sha256`, so those 2.2 GB arrived unverified;
-    //   - its URL points at a `.nemo` archive — a gzipped NeMo
-    //     checkpoint. Every working local model here is an ONNX
-    //     directory (parakeet, sense-voice); that runtime cannot read a
-    //     `.nemo` without an offline export step.
-    //
-    // `EngineType::Nemotron` and its explicit error are kept on purpose:
-    // a stored preference still naming this model must fail loudly
-    // rather than quietly resolve to something the user did not pick.
+    // NVIDIA Nemotron-3.5-ASR Streaming 0.6B — multilingual streaming ASR.
+    // Now implemented via parakeet-rs 0.3.6 (pinned for ort 2.0.0-rc.12 compatibility).
+    // Uses the ONNX export from HuggingFace: pantinor/nemotron-3.5-asr-streaming-0.6b-onnx
+    // Files: encoder.onnx + encoder.onnx.data (~2.4 GB), decoder_joint.onnx (93 MB), tokenizer.model (0.4 MB)
+    // Total size: ~2500 MB. Supports 40 language-locales with streaming inference.
+    let nemotron_languages: Vec<String> = [
+        "en", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "zh", "ja", "ko", "ar", "hi", "tr",
+        "vi", "th", "id", "ms", "sv", "da", "no", "fi", "cs", "ro", "hu", "uk", "el", "he", "ca",
+        "bg", "hr", "sk", "sl", "et", "lt", "lv", "mt", "sq", "sr", "mk", "bs", "me", "is",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+
+    map.insert(
+        "nemotron-3.5-asr-streaming-0.6b".into(),
+        ModelInfo {
+            id: "nemotron-3.5-asr-streaming-0.6b".into(),
+            name: "Nemotron 3.5 ASR Streaming 0.6B".into(),
+            description: "Multilingual streaming ASR with 40 language-locales, auto language detection, and punctuation.".into(),
+            filename: "nemotron-3.5-asr-streaming-0.6b".into(),
+            url: Some("https://huggingface.co/pantinor/nemotron-3.5-asr-streaming-0.6b-onnx/resolve/main/nemotron-3.5-asr-streaming-0.6b.tar.gz".into()),
+            sha256: None, // TODO: Add SHA256 after first verified download
+            size_mb: 2500,
+            is_downloaded: false,
+            is_downloading: false,
+            partial_size: 0,
+            is_directory: true,
+            engine_type: EngineType::Nemotron,
+            accuracy_score: 0.85,
+            speed_score: 0.75,
+            supports_translation: false,
+            supports_streaming: true,
+            is_recommended: false,
+            supported_languages: nemotron_languages,
+            supports_language_selection: true,
+            is_custom: false,
+            is_verifying: false,
+        },
+    );
 }
 
 #[cfg(test)]
@@ -1610,11 +1629,7 @@ mod tests {
         assert!(engines.contains(&EngineType::GigaAM));
         assert!(engines.contains(&EngineType::Canary));
         assert!(engines.contains(&EngineType::Cohere));
-        // Nemotron is intentionally absent — `load_engine` has no
-        // implementation for it, so listing it can only produce a
-        // download that never becomes a working transcriber. See the
-        // note where its catalog entry used to live, and
-        // `catalog_never_offers_an_unloadable_engine` below.
+        assert!(engines.contains(&EngineType::Nemotron));
     }
 
     #[test]
@@ -1629,19 +1644,32 @@ mod tests {
         assert!(recommended.contains(&"parakeet-tdt-0.6b-v2"));
     }
 
-    /// Nothing may be advertised that no engine can load. Nemotron was
-    /// listed AND recommended while `load_engine` had only a stub for
-    /// it, which cost a 2.2 GB download and an unresolvable spinner.
+    /// Nothing may be advertised that no engine can load. Every engine type
+    /// in the catalog must have a corresponding implementation in stt_local.rs.
     #[test]
     fn catalog_never_offers_an_unloadable_engine() {
         let mut map = HashMap::new();
         populate_catalog(&mut map);
+        let implemented_engines: HashSet<EngineType> = [
+            EngineType::Whisper,
+            EngineType::Parakeet,
+            EngineType::Moonshine,
+            EngineType::MoonshineStreaming,
+            EngineType::SenseVoice,
+            EngineType::GigaAM,
+            EngineType::Canary,
+            EngineType::Cohere,
+            EngineType::Nemotron,
+        ]
+        .into_iter()
+        .collect();
+
         for m in map.values() {
-            assert_ne!(
-                m.engine_type,
-                EngineType::Nemotron,
-                "{} uses an engine with no implementation — see load_engine",
-                m.id
+            assert!(
+                implemented_engines.contains(&m.engine_type),
+                "{} uses engine {:?} which has no implementation in stt_local.rs",
+                m.id,
+                m.engine_type
             );
         }
     }

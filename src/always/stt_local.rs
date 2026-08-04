@@ -5,7 +5,7 @@
 //! [`crate::stt::Transcriber`], so the daemon can swap remote Groq for
 //! a local model without touching call sites. The engine dispatch
 //! (Whisper / Parakeet / Moonshine / MoonshineStreaming / SenseVoice /
-//! GigaAM / Canary / Cohere) is decided at load time from the catalog
+//! GigaAM / Canary / Cohere / Nemotron) is decided at load time from the catalog
 //! entry — see [`crate::managers::model_registry::EngineType`].
 //!
 //! Audio path: callers hand us WAV bytes (16 kHz mono i16, produced by
@@ -52,6 +52,9 @@ use transcribe_rs::{
     whisper_cpp::{WhisperEngine, WhisperInferenceParams},
 };
 
+#[cfg(feature = "local-stt")]
+use parakeet_rs::Nemotron;
+
 use crate::managers::model_registry::EngineType;
 use crate::stt::{SttError, Transcriber, TranscriptionResult, StreamingTranscriptionResult};
 use futures::stream::Stream;
@@ -68,6 +71,8 @@ enum LoadedEngine {
     GigaAM(GigaAMModel),
     Canary(CanaryModel),
     Cohere(CohereModel),
+    #[cfg(feature = "local-stt")]
+    Nemotron(Nemotron),
 }
 
 /// Local-model [`Transcriber`] implementation.
@@ -206,8 +211,14 @@ fn build_engine(engine_type: EngineType, path: &Path) -> Result<LoadedEngine> {
             CohereModel::load(path, &Quantization::Int8)
                 .map_err(|e| anyhow::anyhow!("cohere load failed: {e}"))?,
         ),
+        #[cfg(feature = "local-stt")]
+        EngineType::Nemotron => LoadedEngine::Nemotron(
+            Nemotron::from_pretrained(path, None)
+                .map_err(|e| anyhow::anyhow!("nemotron load failed: {e}"))?,
+        ),
+        #[cfg(not(feature = "local-stt"))]
         EngineType::Nemotron => {
-            return Err(anyhow::anyhow!("Nemotron engine not yet implemented in transcribe-rs"))
+            return Err(anyhow::anyhow!("Nemotron requires the local-stt feature"))
         }
     })
 }
@@ -357,6 +368,19 @@ fn run_engine(
             };
             c.transcribe(samples, &options)
                 .map_err(|e| anyhow::anyhow!("cohere transcribe failed: {e}"))?
+        }
+        #[cfg(feature = "local-stt")]
+        LoadedEngine::Nemotron(n) => {
+            // Nemotron is a streaming model, but for non-streaming transcription
+            // we transcribe the entire audio at once using transcribe_audio.
+            // It returns a String directly, so we wrap it in a TranscriptionResult.
+            let text = n.transcribe_audio(samples)
+                .map_err(|e| anyhow::anyhow!("nemotron transcribe failed: {e}"))?;
+            transcribe_rs::TranscriptionResult { text, segments: None }
+        }
+        #[cfg(not(feature = "local-stt"))]
+        LoadedEngine::Nemotron(_) => {
+            anyhow::bail!("Nemotron requires the local-stt feature")
         }
     };
     Ok(result.text)
