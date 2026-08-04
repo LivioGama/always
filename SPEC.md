@@ -255,14 +255,37 @@ Nemotron 3.5 ASR Streaming 0.6B is implemented via the `parakeet-rs` crate (0.3.
 pinned for ort 2.0.0-rc.12 compatibility). It provides multilingual streaming ASR
 with 40 language-locales, auto language detection, and punctuation.
 
-**Model files:** The ONNX export from HuggingFace (pantinor/nemotron-3.5-asr-streaming-0.6b-onnx)
-includes:
-- `encoder.onnx` + `encoder.onnx.data` (~2.4 GB)
-- `decoder_joint.onnx` (93 MB)
-- `tokenizer.model` (0.4 MB)
+**Model files:** The ONNX export from HuggingFace
+(`pantinor/nemotron-3.5-asr-streaming-0.6b-onnx`) publishes four loose files, whose
+names `parakeet-rs` looks for exactly:
 
-Total size: ~2500 MB. The model is a directory (not a single file) and requires
-the `local-stt` feature to be enabled.
+| File | Bytes |
+|---|---|
+| `encoder.onnx` | 42,164,972 |
+| `encoder.onnx.data` | 2,454,405,120 |
+| `decoder_joint.onnx` | 97,590,054 |
+| `tokenizer.model` | 406,554 |
+
+Total 2,594,566,700 bytes (2474 MB). It is a directory model and needs the
+`local-stt` feature.
+
+**Distribution — this model has no archive.** HuggingFace serves each file
+separately and offers no repo-tarball endpoint, so the usual "one `.tar.gz` URL"
+catalogue shape cannot express it. Pointing `url` at a constructed `.tar.gz` path
+returns 404 and produces a model that downloads nothing and spins forever — the
+entry shipped that way once and had to be removed.
+
+Catalogue entries may therefore declare a **file list** (`ModelInfo::files`)
+instead of `url`. Each file carries its own URL, SHA256 and size; the daemon
+fetches them into a `.downloading` staging directory, verifies each against its
+checksum as it lands, and only then renames the directory into place and writes
+the `.verified` marker. An interrupted download can never leave a half-populated
+directory that looks installed. Progress is aggregated from the declared sizes,
+since there is no single content-length to report.
+
+`url` and `files` are mutually exclusive; a test enforces this, along with real
+checksums, real sizes, `is_directory`, filenames that cannot escape the model
+directory, and a declared `size_mb` that agrees with the sum of the parts.
 
 **Implementation details:**
 - Loaded via `parakeet_rs::Nemotron::from_pretrained(path, None)`

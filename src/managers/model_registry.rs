@@ -55,6 +55,20 @@ pub enum EngineType {
     Nemotron,
 }
 
+/// One file of a multi-file directory model. See [`ModelInfo::files`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelFile {
+    /// Name the file must have inside the model directory. The engine
+    /// loaders look for exact names (`encoder.onnx`, `tokenizer.model`,
+    /// …), so this is not cosmetic.
+    pub name: String,
+    pub url: String,
+    /// Mandatory. A multi-file model has no single archive checksum to
+    /// fall back on, so each part verifies itself.
+    pub sha256: String,
+    pub size_bytes: u64,
+}
+
 /// One catalog entry. Mirrors Handy's struct field-for-field so we can
 /// keep the same SHA256s + URLs and let the existing Handy CDN serve
 /// our downloads until we host them ourselves.
@@ -66,6 +80,19 @@ pub struct ModelInfo {
     pub filename: String,
     pub url: Option<String>,
     pub sha256: Option<String>,
+    /// Non-empty for directory models published as loose files rather
+    /// than one archive.
+    ///
+    /// The single-`url` path assumes one `.tar.gz` it can download and
+    /// unpack. Some model hosts do not publish an archive at all —
+    /// HuggingFace serves each ONNX file separately and has no
+    /// repo-tarball endpoint — so pointing `url` at an invented
+    /// `.tar.gz` yields a 404 and a model that can never install. When
+    /// this list is non-empty it takes precedence over `url`: each file
+    /// is fetched into the model directory under its exact `name` and
+    /// verified individually.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<ModelFile>,
     pub size_mb: u64,
     pub is_downloaded: bool,
     pub is_downloading: bool,
@@ -613,10 +640,195 @@ impl ModelRegistry {
     /// Returns `Ok(())` even on user cancellation (the partial file is
     /// kept so a future call resumes); only network / IO / verify
     /// failures surface as `Err`.
+    /// Download a directory model published as loose files.
+    ///
+    /// Mirrors the single-archive path's contract exactly — same
+    /// progress/verification/extraction events, same `.verified` marker,
+    /// same cancel semantics — so the GUI cannot tell the two apart. The
+    /// differences are forced by the shape of the source: progress is
+    /// aggregated across files from the catalog's declared sizes (there
+    /// is no single content-length to report), each file verifies with
+    /// its own SHA256 (there is no archive checksum), and assembly is a
+    /// directory rename rather than an unpack.
+    ///
+    /// Files land in a `.downloading` directory that is only promoted to
+    /// the real name once every part has arrived and verified, so an
+    /// interrupted download can never leave a half-populated model dir
+    /// that looks installed to the loader.
+    async fn download_files(&self, model_id: &str, model_info: &ModelInfo) -> Result<()> {
+        let final_dir = self.models_dir.join(&model_info.filename);
+        if path_matches_kind(&final_dir, true) && self.dir_verified(&model_info.filename) {
+            self.refresh_disk_status()?;
+            return Ok(());
+        }
+
+        let total_bytes: u64 = model_info.files.iter().map(|f| f.size_bytes).sum();
+        tracing::info!(
+            model = %model_id,
+            files = model_info.files.len(),
+            total_bytes,
+            "model_multifile_download_start"
+        );
+
+        if let Some(m) = self.available_models.lock().get_mut(model_id) {
+            m.is_downloading = true;
+        }
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.cancel_flags
+            .lock()
+            .insert(model_id.to_string(), cancel_flag.clone());
+        let mut cleanup = DownloadCleanup {
+            available_models: &self.available_models,
+            cancel_flags: &self.cancel_flags,
+            model_id: model_id.to_string(),
+            disarmed: false,
+        };
+
+        let staging_dir = self
+            .models_dir
+            .join(format!("{}.downloading", model_info.filename));
+        if staging_dir.exists() {
+            let _ = fs::remove_dir_all(&staging_dir);
+        }
+        fs::create_dir_all(&staging_dir)?;
+
+        let client = reqwest::Client::new();
+        let mut completed: u64 = 0;
+        self.emit_progress(model_id, 0, total_bytes);
+        let mut last_emit = Instant::now();
+        let throttle = Duration::from_millis(100);
+
+        for spec in &model_info.files {
+            // Reject path separators outright: a catalog entry must not be
+            // able to write outside the model directory.
+            if spec.name.contains('/') || spec.name.contains('\\') || spec.name.contains("..") {
+                let _ = fs::remove_dir_all(&staging_dir);
+                let msg = format!("illegal file name in catalog entry: {}", spec.name);
+                self.emit_failed(model_id, &msg);
+                return Err(anyhow::anyhow!(msg));
+            }
+            let dest = staging_dir.join(&spec.name);
+
+            let mut response = match client.get(&spec.url).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = fs::remove_dir_all(&staging_dir);
+                    self.emit_failed(model_id, &format!("network error: {e}"));
+                    return Err(e.into());
+                }
+            };
+            if !response.status().is_success() {
+                let _ = fs::remove_dir_all(&staging_dir);
+                let msg = format!(
+                    "Failed to download {}: HTTP {}",
+                    spec.name,
+                    response.status()
+                );
+                self.emit_failed(model_id, &msg);
+                return Err(anyhow::anyhow!(msg));
+            }
+
+            let mut file = std::fs::File::create(&dest)?;
+            let mut this_file: u64 = 0;
+            while let Some(chunk) = response.chunk().await.transpose() {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    drop(file);
+                    let _ = fs::remove_dir_all(&staging_dir);
+                    tracing::info!(model = %model_id, "model_download_cancelled");
+                    let _ = self.events_tx.send(ModelEvent::DownloadCancelled {
+                        model_id: model_id.to_string(),
+                    });
+                    return Ok(());
+                }
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(e) => {
+                        drop(file);
+                        let _ = fs::remove_dir_all(&staging_dir);
+                        self.emit_failed(model_id, &format!("stream error: {e}"));
+                        return Err(e.into());
+                    }
+                };
+                file.write_all(&chunk)?;
+                this_file += chunk.len() as u64;
+                if last_emit.elapsed() >= throttle {
+                    self.emit_progress(model_id, completed + this_file, total_bytes);
+                    last_emit = Instant::now();
+                }
+            }
+            file.flush()?;
+            drop(file);
+            completed += this_file;
+            self.emit_progress(model_id, completed, total_bytes);
+
+            // Verify this part before moving on, so a corrupt 2 GB file is
+            // caught here rather than as a confusing load failure later.
+            let verify_path = dest.clone();
+            let expected = spec.sha256.clone();
+            let verify_id = format!("{model_id}:{}", spec.name);
+            let verified = tokio::task::spawn_blocking(move || {
+                verify_sha256(&verify_path, Some(&expected), &verify_id)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("SHA256 task panicked: {e}"))?;
+            if let Err(e) = verified {
+                let _ = fs::remove_dir_all(&staging_dir);
+                self.emit_failed(model_id, &format!("sha256 mismatch for {}: {e}", spec.name));
+                return Err(e);
+            }
+        }
+
+        let _ = self.events_tx.send(ModelEvent::VerificationCompleted {
+            model_id: model_id.to_string(),
+        });
+
+        if final_dir.exists() {
+            fs::remove_dir_all(&final_dir)?;
+        }
+        fs::rename(&staging_dir, &final_dir)?;
+
+        // Same trust marker the archive path drops: a directory model is
+        // only considered usable when we ourselves downloaded and
+        // verified it.
+        let marker = self.verified_marker(&model_info.filename);
+        if let Err(e) = fs::write(&marker, b"") {
+            tracing::warn!(
+                model = %model_id,
+                error = %e,
+                "model_verified_marker_write_failed"
+            );
+        }
+
+        tracing::info!(
+            model = %model_id,
+            path = %final_dir.display(),
+            "model_download_done"
+        );
+
+        // Success path runs its own cleanup so the guard's Drop doesn't
+        // clobber `is_downloaded = true`.
+        cleanup.disarmed = true;
+        if let Some(m) = self.available_models.lock().get_mut(model_id) {
+            m.is_downloading = false;
+            m.is_downloaded = true;
+            m.partial_size = 0;
+        }
+        self.cancel_flags.lock().remove(model_id);
+
+        let _ = self.events_tx.send(ModelEvent::DownloadComplete {
+            model_id: model_id.to_string(),
+        });
+        self.refresh_disk_status()?;
+        Ok(())
+    }
+
     pub async fn download(&self, model_id: &str) -> Result<()> {
         let model_info = self
             .get(model_id)
             .ok_or_else(|| anyhow::anyhow!("Model not found: {model_id}"))?;
+        if !model_info.files.is_empty() {
+            return self.download_files(model_id, &model_info).await;
+        }
         let url = model_info
             .url
             .clone()
@@ -1079,6 +1291,7 @@ fn discover_custom_whisper_models(
                 supported_languages: vec![],
                 supports_language_selection: true,
                 is_custom: true,
+                files: Vec::new(),
                 is_verifying: false,
             },
         );
@@ -1126,6 +1339,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: whisper_languages.clone(),
             supports_language_selection: true,
             is_custom: false,
+            files: Vec::new(),
             is_verifying: false,
         },
     );
@@ -1153,6 +1367,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: whisper_languages.clone(),
             supports_language_selection: true,
             is_custom: false,
+            files: Vec::new(),
             is_verifying: false,
         },
     );
@@ -1180,6 +1395,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: whisper_languages.clone(),
             supports_language_selection: true,
             is_custom: false,
+            files: Vec::new(),
             is_verifying: false,
         },
     );
@@ -1207,6 +1423,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: whisper_languages.clone(),
             supports_language_selection: true,
             is_custom: false,
+            files: Vec::new(),
             is_verifying: false,
         },
     );
@@ -1234,6 +1451,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: vec!["zh".into(), "zh-Hans".into(), "zh-Hant".into(), "en".into()],
             supports_language_selection: true,
             is_custom: false,
+            files: Vec::new(),
             is_verifying: false,
         },
     );
@@ -1266,6 +1484,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: vec!["en".to_string()],
             supports_language_selection: false,
             is_custom: false,
+            files: Vec::new(),
             is_verifying: false,
         },
     );
@@ -1299,6 +1518,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: vec!["en".to_string()],
             supports_language_selection: false,
             is_custom: false,
+            files: Vec::new(),
             is_verifying: false,
         },
     );
@@ -1326,6 +1546,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: vec!["en".into()],
             supports_language_selection: false,
             is_custom: false,
+            files: Vec::new(),
             is_verifying: false,
         },
     );
@@ -1352,6 +1573,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: vec!["en".into()],
             supports_language_selection: false,
             is_custom: false,
+            files: Vec::new(),
             is_verifying: false,
         },
     );
@@ -1378,6 +1600,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: vec!["en".into()],
             supports_language_selection: false,
             is_custom: false,
+            files: Vec::new(),
             is_verifying: false,
         },
     );
@@ -1404,6 +1627,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: vec!["en".into()],
             supports_language_selection: false,
             is_custom: false,
+            files: Vec::new(),
             is_verifying: false,
         },
     );
@@ -1437,6 +1661,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: sense_voice_languages,
             supports_language_selection: true,
             is_custom: false,
+            files: Vec::new(),
             is_verifying: false,
         },
     );
@@ -1464,6 +1689,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: vec!["ru".into()],
             supports_language_selection: false,
             is_custom: false,
+            files: Vec::new(),
             is_verifying: false,
         },
     );
@@ -1496,6 +1722,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: canary_flash_languages,
             supports_language_selection: true,
             is_custom: false,
+            files: Vec::new(),
             is_verifying: false,
         },
     );
@@ -1531,6 +1758,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: canary_1b_languages,
             supports_language_selection: true,
             is_custom: false,
+            files: Vec::new(),
             is_verifying: false,
         },
     );
@@ -1566,6 +1794,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: cohere_languages,
             supports_language_selection: true,
             is_custom: false,
+            files: Vec::new(),
             is_verifying: false,
         },
     );
@@ -1591,9 +1820,17 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             name: "Nemotron 3.5 ASR Streaming 0.6B".into(),
             description: "Multilingual streaming ASR with 40 language-locales, auto language detection, and punctuation.".into(),
             filename: "nemotron-3.5-asr-streaming-0.6b".into(),
-            url: Some("https://huggingface.co/pantinor/nemotron-3.5-asr-streaming-0.6b-onnx/resolve/main/nemotron-3.5-asr-streaming-0.6b.tar.gz".into()),
-            sha256: None, // TODO: Add SHA256 after first verified download
-            size_mb: 2500,
+            // No archive: HuggingFace publishes these as loose files and
+            // has no repo-tarball endpoint, so `files` is used instead of
+            // `url`. An invented `.tar.gz` path here returns 404 and the
+            // model can never install — that is exactly the failure this
+            // entry shipped with before.
+            url: None,
+            // Per-file checksums live in `files`; there is no archive to
+            // hash.
+            sha256: None,
+            // 2_594_566_700 bytes across the four files below.
+            size_mb: 2474,
             is_downloaded: false,
             is_downloading: false,
             partial_size: 0,
@@ -1607,10 +1844,48 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             supported_languages: nemotron_languages,
             supports_language_selection: true,
             is_custom: false,
+            // Names are load-bearing: `parakeet_rs::Nemotron::from_pretrained`
+            // looks for these exact filenames in the model directory.
+            // Checksums and sizes come from the HuggingFace LFS metadata
+            // for the pinned repo revision.
+            files: vec![
+                ModelFile {
+                    name: "encoder.onnx".into(),
+                    url: NEMOTRON_FILE_BASE.to_string() + "encoder.onnx",
+                    sha256: "d569fbe78b48fbb04e169d324f5d25463838ceed7b5fc3bfe209872441979bd9"
+                        .into(),
+                    size_bytes: 42_164_972,
+                },
+                ModelFile {
+                    name: "encoder.onnx.data".into(),
+                    url: NEMOTRON_FILE_BASE.to_string() + "encoder.onnx.data",
+                    sha256: "7584f85df76bc9ae6fbdfa53aa8d97b07a842525d1c501d536d77fd9e4f57ac7"
+                        .into(),
+                    size_bytes: 2_454_405_120,
+                },
+                ModelFile {
+                    name: "decoder_joint.onnx".into(),
+                    url: NEMOTRON_FILE_BASE.to_string() + "decoder_joint.onnx",
+                    sha256: "634dfadf24cb4f73c2fae170b36611d68db48186426882cbc8f7e02ed9f2bb29"
+                        .into(),
+                    size_bytes: 97_590_054,
+                },
+                ModelFile {
+                    name: "tokenizer.model".into(),
+                    url: NEMOTRON_FILE_BASE.to_string() + "tokenizer.model",
+                    sha256: "ce3895e40806f02a26c3a225161b96ef682d6c0054bae32a245dec4258d7d291"
+                        .into(),
+                    size_bytes: 406_554,
+                },
+            ],
             is_verifying: false,
         },
     );
 }
+
+/// Where the Nemotron ONNX export's files live.
+const NEMOTRON_FILE_BASE: &str =
+    "https://huggingface.co/pantinor/nemotron-3.5-asr-streaming-0.6b-onnx/resolve/main/";
 
 #[cfg(test)]
 mod tests {
@@ -1630,6 +1905,76 @@ mod tests {
         assert!(engines.contains(&EngineType::Canary));
         assert!(engines.contains(&EngineType::Cohere));
         assert!(engines.contains(&EngineType::Nemotron));
+    }
+
+    /// Every catalogue entry must be installable. The Nemotron entry
+    /// shipped twice with a download that could not work — first a
+    /// `.nemo` archive no engine could read, then an invented `.tar.gz`
+    /// path that returned 404 — and both times the symptom was a model
+    /// that downloaded nothing and spun forever.
+    #[test]
+    fn every_entry_has_a_usable_download_source() {
+        let mut map = HashMap::new();
+        populate_catalog(&mut map);
+        for m in map.values() {
+            assert!(
+                m.url.is_some() || !m.files.is_empty(),
+                "{} has neither a url nor a file list — it can never install",
+                m.id
+            );
+            assert!(
+                !(m.url.is_some() && !m.files.is_empty()),
+                "{} declares both a url and a file list; `files` silently wins, \
+                 so the url is a lie",
+                m.id
+            );
+            for f in &m.files {
+                assert!(
+                    !m.url.is_some(),
+                    "{}: multi-file entries must not also set url",
+                    m.id
+                );
+                assert!(
+                    m.is_directory,
+                    "{}: a multi-file model lands in a directory, so is_directory must be true",
+                    m.id
+                );
+                assert_eq!(
+                    f.sha256.len(),
+                    64,
+                    "{}: file {} needs a real sha256 — unverified bytes were one of the \
+                     original defects",
+                    m.id,
+                    f.name
+                );
+                assert!(
+                    f.size_bytes > 0,
+                    "{}: file {} needs a real size; progress is computed from it",
+                    m.id,
+                    f.name
+                );
+                assert!(
+                    !f.name.contains('/') && !f.name.contains('\\') && !f.name.contains(".."),
+                    "{}: file name {} could escape the model directory",
+                    m.id,
+                    f.name
+                );
+            }
+            // A declared size that disagrees with the parts is how the
+            // progress bar ends up running past 100%.
+            if !m.files.is_empty() {
+                let total: u64 = m.files.iter().map(|f| f.size_bytes).sum();
+                let declared = m.size_mb * 1_000_000;
+                let diff = declared.abs_diff(total);
+                assert!(
+                    diff * 100 / total < 5,
+                    "{}: size_mb {} disagrees with the sum of its files ({} bytes)",
+                    m.id,
+                    m.size_mb,
+                    total
+                );
+            }
+        }
     }
 
     #[test]
@@ -1674,12 +2019,19 @@ mod tests {
         }
     }
 
+    /// Superseded by `every_entry_has_a_usable_download_source`, which
+    /// checks the same thing plus the multi-file case. Kept as the
+    /// narrow single-archive check for entries that use `url`.
     #[test]
-    fn each_catalog_entry_has_url() {
+    fn each_catalog_entry_has_url_or_files() {
         let mut map = HashMap::new();
         populate_catalog(&mut map);
         for m in map.values() {
-            assert!(m.url.is_some(), "{} missing url", m.id);
+            assert!(
+                m.url.is_some() || !m.files.is_empty(),
+                "{} has no download source",
+                m.id
+            );
         }
     }
 
