@@ -233,6 +233,37 @@ Local development uses the **debug** profile so `cfg!(debug_assertions)` is `tru
 
 `build.sh` auto-picks the newest of `target/release/always` and `target/debug/always`. Force a profile with `ALWAYS_BUILD_PROFILE=release|debug ./build.sh`.
 
+## 🚨 HARD RULE — `SPEC.md` is normative, and you keep it in sync
+
+`SPEC.md` describes the behaviour this product is supposed to have. It is not
+documentation written after the fact; it is the reference the code answers to.
+
+**Every change that alters behaviour MUST update `SPEC.md` in the same commit.**
+A spec that lags the code is worse than no spec — it looks authoritative while
+lying, and the next person "fixes" the code to match a rule that no longer holds.
+
+- Changing a default, a threshold, a timing, a state machine, or anything a user
+  can perceive → update the relevant section, in the same commit.
+- Fixing a bug where the code disagreed with the spec → the spec was right; say
+  so in the commit message and leave it alone.
+- Finding behaviour the spec does not describe → add it, or mark it `❓` if you
+  could not verify it. Never guess and write it as fact.
+- The **Invariants** section (§2) is the highest bar in the repo. If a change
+  breaks one, it is a regression no matter what else it improves. Do not edit an
+  invariant to make a change legal — raise it with the product owner.
+
+**Never change behaviour that was not asked for.** Fix the reported symptom and
+nothing else. If a fix genuinely requires touching adjacent behaviour — a
+threshold, a timing, a default — stop and propose it with the trade-off stated.
+"Fix it by any means" authorises effort, not scope. When a behavioural change
+does ship, the commit message says who asked for it and why.
+
+**Why this rule exists:** a session's worth of fixes drifted the product away
+from what the owner wanted — a wider trust window, a changed threshold, altered
+paste behaviour — each defensible alone, none requested, and none written down.
+The owner had no way to see the accumulated change except by using the app and
+finding it different. The spec is how that stops.
+
 ### 🚨 HARD RULE — nothing is "done" until the new build is RUNNING
 
 **Every change to any `.rs` or `.swift` file MUST end with `scripts/dev-rebuild.sh`

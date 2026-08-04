@@ -591,7 +591,15 @@ class StatusOverlayWindow: NSPanel {
 
         self.backgroundColor = NSColor.clear
         self.isOpaque = false
-        self.level = .floating
+        // `.floating` (level 3) sits BELOW a native fullscreen app's own
+        // windows, so the HUD was ordered front, reported visible with
+        // alpha 1.0 on a real screen — and was still invisible, because
+        // something was simply drawn on top of it. `.fullScreenAuxiliary`
+        // gets the panel into the fullscreen Space; it does not win the
+        // z-order fight once there. `.statusBar` (level 25) is above
+        // normal and fullscreen app content while staying below system
+        // alerts, which is exactly where a status HUD belongs.
+        self.level = .statusBar
         // `.fullScreenAuxiliary` is required for the HUD to appear over native
         // fullscreen apps (same Space). NSPanel + nonactivatingPanel matches
         // ListeningIndicator, which renders correctly in fullscreen Spaces.
@@ -661,11 +669,16 @@ class StatusOverlayWindow: NSPanel {
             self.shownAt = Date()
             if case .voiceActivity = state {
                 let f = self.frame
-                let onScreen = NSScreen.screens.contains { $0.frame.intersects(f) }
+                let host = NSScreen.screens.firstIndex { $0.frame.intersects(f) }
+                let main = NSScreen.main.map { NSScreen.screens.firstIndex(of: $0) ?? -1 } ?? -1
+                let contained = NSScreen.screens.contains { $0.frame.contains(f) }
                 overlayTimingLog(
                     "onscreen visible=\(self.isVisible) alpha=\(self.alphaValue) "
+                        + "level=\(self.level.rawValue) "
                         + "frame=\(Int(f.origin.x)),\(Int(f.origin.y)) "
-                        + "\(Int(f.width))x\(Int(f.height)) onAScreen=\(onScreen)"
+                        + "\(Int(f.width))x\(Int(f.height)) "
+                        + "screenIdx=\(host.map(String.init) ?? "none") mainIdx=\(main) "
+                        + "fullyOnScreen=\(contained) screens=\(NSScreen.screens.count)"
                 )
             }
             if snapIn {

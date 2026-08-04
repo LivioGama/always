@@ -45,6 +45,32 @@ This project is indexed by GitNexus as **always** (4794 symbols, 11926 relations
 
 # Always Project Rules
 
+## 🚨 `SPEC.md` is normative — keep it in sync with the code
+
+`SPEC.md` describes the behaviour this product is supposed to have. It is the
+reference the code answers to, not documentation written afterwards.
+
+**Every change that alters behaviour MUST update `SPEC.md` in the same commit.**
+A spec that lags the code is worse than no spec: it looks authoritative while
+lying, and the next person "fixes" working code to match a rule that no longer
+holds.
+
+- Changing a default, threshold, timing, state machine, or anything a user can
+  perceive → update the relevant section in the same commit.
+- Code disagreed with the spec and you fixed the code → the spec was right. Say
+  so in the commit message; leave the spec alone.
+- Found behaviour the spec does not describe → add it, or mark it `❓` if you
+  could not verify it. Never guess and write it as fact.
+- The **Invariants** (§2) are the highest bar in the repo. Breaking one is a
+  regression regardless of what else improved. Never edit an invariant to make a
+  change legal — raise it with the product owner.
+
+**Never change behaviour that was not asked for.** Fix the reported symptom and
+nothing else. If a fix genuinely requires touching adjacent behaviour, stop and
+propose it with the trade-off stated. "Fix it by any means" authorises effort,
+not scope. Every behavioural change that does ship names its requester in the
+commit message.
+
 ## 🚨 Rebuild After Changes — nothing is "done" until the new build is RUNNING
 
 **Every change to any `.rs` or `.swift` file MUST end with `scripts/dev-rebuild.sh`
