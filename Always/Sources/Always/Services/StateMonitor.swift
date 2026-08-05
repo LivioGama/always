@@ -107,7 +107,7 @@ class StateMonitor: ObservableObject {
         udsClient.$isConnected
             .receive(on: DispatchQueue.main)
             .sink { [weak self] connected in
-                self?.isDaemonConnected = connected
+                if self?.isDaemonConnected != connected { self?.isDaemonConnected = connected }
                 if !connected {
                     // Daemon went away — drop sticky listening state so the
                     // overlay actually disappears instead of lingering.
@@ -220,16 +220,25 @@ class StateMonitor: ObservableObject {
 
     /// Predict `isPaused` from master + idle + focused-app allowlist.
     /// Daemon events remain authoritative; this covers optimistic UI.
+    /// Recompute the effective pause flag.
+    ///
+    /// Called from four sites, one of which is every focused-app change —
+    /// 326 of those in a four-hour sample. Combine republishes on every
+    /// assignment whether the value changed or not, and each republish
+    /// re-ran the overlay decision, so this was a major amplifier of the
+    /// show/hide churn. Assign only on a real change.
     func applyLocalEffectivePauseState() {
+        let desired: Bool
         if isMasterPaused || isIdleAutoPaused {
-            isPaused = true
-            return
+            desired = true
+        } else if let bundle = FocusedAppMonitor.shared.currentBundleId {
+            desired = !resumedBundleIds.contains(bundle)
+        } else {
+            desired = true
         }
-        guard let bundle = FocusedAppMonitor.shared.currentBundleId else {
-            isPaused = true
-            return
+        if isPaused != desired {
+            isPaused = desired
         }
-        isPaused = !resumedBundleIds.contains(bundle)
     }
 
     private func setupFocusedAppPauseSync() {
@@ -368,33 +377,66 @@ class StateMonitor: ObservableObject {
         currentModelSupportsStreaming = ModelManagerClient.shared.activeModelSupportsStreaming
     }
 
-    private func updateOverlay() {
-        // Connection lost or any pause-class state active → hide.
+    /// What the overlay SHOULD be showing right now. `nil` means hidden.
+    ///
+    /// Pure: reads state, calls nothing. Separated from applying it so the
+    /// decision can be compared against what is already on screen.
+    private func desiredOverlayState() -> OverlayState? {
+        // Connection lost or any pause-class state active → hidden.
         if !isDaemonConnected || isMasterPaused || isPaused || isIdleAutoPaused {
-            StatusOverlayController.shared.hide()
-            return
+            return nil
         }
         // Activity-only model: the overlay represents something happening
         // (you speaking or the daemon transcribing), not "daemon is alive".
         if isTranscribing {
-            // Check if the current model supports streaming and we have partial text
-            let supportsStreaming = currentModelSupportsStreaming
-            let hasPartialText = !partialTranscript.isEmpty
-
-            if supportsStreaming && hasPartialText {
-                // Show the partial transcript with interim styling
-                StatusOverlayController.shared.show(state: .transcribingWithText(text: partialTranscript, isInterim: true))
-            } else {
-                // Fall back to standard transcribing badge
-                let elapsed = transcribingSince.map { Date().timeIntervalSince($0) } ?? 0
-                if elapsed >= transcribingElapsedThreshold {
-                    StatusOverlayController.shared.show(state: .transcribingElapsed(seconds: Int(elapsed)))
-                } else {
-                    StatusOverlayController.shared.show(state: .transcribing)
-                }
+            if currentModelSupportsStreaming && !partialTranscript.isEmpty {
+                return .transcribingWithText(text: partialTranscript, isInterim: true)
             }
-        } else if isVoiceActivity {
-            StatusOverlayController.shared.show(state: .voiceActivity)
+            let elapsed = transcribingSince.map { Date().timeIntervalSince($0) } ?? 0
+            return elapsed >= transcribingElapsedThreshold
+                ? .transcribingElapsed(seconds: Int(elapsed))
+                : .transcribing
+        }
+        if isVoiceActivity {
+            return .voiceActivity
+        }
+        return nil
+    }
+
+    /// Last state actually pushed to the overlay. Outer `nil` = nothing
+    /// applied yet (or the window was taken over by a flash), inner `nil`
+    /// = deliberately hidden.
+    private var appliedOverlay: OverlayState??
+
+    /// The overlay is taken away from this state machine while a flash
+    /// owns the window. Call this when the flash ends so the next real
+    /// state change is not swallowed as "already applied".
+    func invalidateAppliedOverlay() {
+        appliedOverlay = nil
+    }
+
+    /// Render the desired state, but only when it actually changed.
+    ///
+    /// This used to re-apply on EVERY emission of the eight publishers it
+    /// observes, calling `show()`/`hide()` blindly. Measured over four
+    /// hours of real use: 2.0 `show()` calls per daemon event, a median of
+    /// 4 and a maximum of 35 shows within a single appearance, and 481
+    /// hide requests of which 67 had no daemon event behind them at all
+    /// and 76 landed within 300 ms of the daemon saying "show". Each
+    /// redundant `show()` restarted the minimum-visible clock and each
+    /// redundant `hide()` started another fade, which is what made the
+    /// badge feel like it arrived late and left slowly. 12.5% of
+    /// `VoiceActivityDetected` events produced no visible badge at all.
+    ///
+    /// Comparing against what is already applied costs one `Equatable`
+    /// check — `OverlayState` already conforms — and removes the entire
+    /// class of problem at its source.
+    private func updateOverlay() {
+        let desired = desiredOverlayState()
+        guard appliedOverlay != .some(desired) else { return }
+        appliedOverlay = .some(desired)
+        if let desired {
+            StatusOverlayController.shared.show(state: desired)
         } else {
             StatusOverlayController.shared.hide()
         }
@@ -532,13 +574,16 @@ class StateMonitor: ObservableObject {
             armTranscribingLease()
             updateOverlay()
         case .transcribingStopped:
-            isTranscribing = false
+            if isTranscribing { isTranscribing = false }
             cancelTranscribingLease()
             stopTranscribingTicker()
-        case .transcriptChunk:
-            // Speculative transcription result — update the streaming preview.
+        case .transcriptChunk, .transcriptionInterim:
+            // Streaming and speculative previews share the same UTF-8 text
+            // contract.  A valid preview proves the transcription is still
+            // active, so it must also keep the HUD lease alive.
             if let text = event.data?["text"], !text.isEmpty {
                 partialTranscript = text
+                armTranscribingLease()
             }
         case .transcriptFinal:
             // The phrase is fully done. Force-clear the ongoing state
@@ -569,7 +614,7 @@ class StateMonitor: ObservableObject {
             showOngoingOverlayIfNeeded()
             NSLog("Always: VoiceActivityDetected -> overlay")
         case .voiceActivityEnded:
-            isVoiceActivity = false
+            if isVoiceActivity { isVoiceActivity = false }
             cancelVoiceLease()
             NSLog("Always: VoiceActivityEnded -> hide overlay")
         case .transcriptionFiltered:

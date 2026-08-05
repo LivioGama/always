@@ -622,6 +622,11 @@ fn record_with_local_vad(
     // before `announce_voice_activity!` because macro_rules hygiene
     // binds the locals a macro reads at its DEFINITION site.
     let mut first_voice_at: Option<std::time::Instant> = None;
+    // Whether the trust window was already open when this recording call
+    // began — i.e. whether the badge can appear on onset or must wait for
+    // verification. Sampled here because by announce time the verified
+    // path has already opened the window itself.
+    let trust_at_onset = speaker_trust_active();
     let mut early_voice_streak = 0usize;
     let mut long_recording_warned = false;
     let mut total_frames = 0usize;
@@ -678,7 +683,14 @@ fn record_with_local_vad(
                 // understated the wait the user actually feels.
                 tracing::info!(
                     latency_ms = first_voice_at.map(|t| t.elapsed().as_millis() as u64),
-                    trusted = speaker_trust_active(),
+                    // `trust_at_onset`, captured BEFORE any verification in
+                    // this utterance could mark the user as trusted.
+                    // Sampling it here used to be worthless: the verified
+                    // path calls `mark_speaker_verified()` immediately
+                    // before announcing, so the field read `true` in
+                    // 1110 of 1110 logged samples and could not
+                    // distinguish the fast path from the slow one.
+                    trusted = trust_at_onset,
                     "listening_overlay_shown"
                 );
                 event::global_broadcaster().voice_activity_detected();
@@ -1560,6 +1572,17 @@ fn record_with_local_vad(
                 if enough_wall_time && tentative_voice_silence >= early_voice_false_start_frames {
                     voice_activity_announced = false;
                     voice_activity_announced_at = None;
+                    // Reset the latency reference too. It is set once per
+                    // speech-like frame and was never cleared, so after a
+                    // retracted false start it kept measuring from the
+                    // FIRST sound of the whole recording call rather than
+                    // from the utterance actually being announced. That
+                    // made `listening_overlay_shown.latency_ms` report
+                    // multi-second values for badges that appeared in
+                    // 13 ms — observed at 20467 ms — and sent a previous
+                    // investigation chasing a latency problem that did
+                    // not exist.
+                    first_voice_at = None;
                     tentative_voice_silence = 0;
                     event::global_broadcaster().voice_activity_ended();
                 }

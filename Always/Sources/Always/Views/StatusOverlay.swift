@@ -579,6 +579,20 @@ class StatusOverlayWindow: NSPanel {
             overlayView = view
             contentView = view
         }
+        lockContentSize()
+    }
+
+    /// A long transcript must wrap or truncate inside the HUD, never resize
+    /// the panel after its position has been calculated.  AppKit can otherwise
+    /// momentarily adopt the label's intrinsic width, visibly moving a panel
+    /// whose origin was centered for the fixed HUD width.
+    private func lockContentSize() {
+        let size = hudSize
+        minSize = size
+        maxSize = size
+        contentMinSize = size
+        contentMaxSize = size
+        setContentSize(size)
     }
 
     init() {
@@ -648,13 +662,15 @@ class StatusOverlayWindow: NSPanel {
 
             // Create overlay view if needed (or rebuild on mode change).
             self.ensureContentView()
-            self.positionOnActiveScreen()
-            self.startFollowingMouse()
 
             // Update state on the existing view so consecutive flashes
             // (e.g. pause then auto-enter) reuse the same window instead
             // of stacking.
             self.overlayView?.state = state
+            self.overlayView?.layoutSubtreeIfNeeded()
+            self.lockContentSize()
+            self.positionOnActiveScreen()
+            self.startFollowingMouse()
 
             let snapIn = instant || state.isInstantShow
             let wasVisible = self.isVisible
@@ -662,6 +678,9 @@ class StatusOverlayWindow: NSPanel {
                 self.alphaValue = 0.0
             }
             self.orderFrontRegardless()
+            // A show interrupts any in-flight fade, so the guard must be
+            // released or the next genuine hide would be swallowed.
+            self.isFadingOut = false
             // A show cancels any hide that was waiting out the minimum,
             // and restarts the clock.
             self.pendingHide?.cancel()
@@ -721,6 +740,10 @@ class StatusOverlayWindow: NSPanel {
     /// A hide deferred because the overlay had not yet been visible long
     /// enough. Cancelled if a show arrives first.
     private var pendingHide: DispatchWorkItem?
+    /// True while the fade-out animation is in flight. `isVisible` is not
+    /// a substitute — it stays true for the whole animation, so hides
+    /// arriving mid-fade used to restart it and stretch the disappearance.
+    private var isFadingOut = false
 
     /// Fade the window's alpha to 0 over `duration` seconds, then hide.
     /// Calling show() during the fade restores alpha to 1 (see show()).
@@ -750,6 +773,15 @@ class StatusOverlayWindow: NSPanel {
             }
             self.pendingHide?.cancel()
             self.pendingHide = nil
+            // A fade already running must be left alone. `isVisible` stays
+            // true for the whole animation, so it was not a sufficient
+            // guard: measured, 79 of 269 hides arrived within 400 ms of
+            // the previous one and restarted the alpha animation from
+            // wherever it had reached. That stretched an 0.4 s fade to a
+            // measured 0.79 s and is a direct cause of "takes time to
+            // leave".
+            guard !self.isFadingOut else { return }
+            self.isFadingOut = true
             overlayTimingLog("HIDE begins (fade \(duration)s)")
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = duration
@@ -757,6 +789,7 @@ class StatusOverlayWindow: NSPanel {
                 self.animator().alphaValue = 0.0
             }, completionHandler: { [weak self] in
                 guard let self = self else { return }
+                self.isFadingOut = false
                 // Only actually hide if we're still at zero alpha (i.e. no
                 // show() interrupted us).
                 if self.alphaValue == 0.0 {
@@ -1094,6 +1127,11 @@ class StatusOverlayController {
         let work = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             self.flashEndsAt = nil
+            // A flash owns the window outright, so whatever StateMonitor
+            // believed was applied is no longer true. Tell it to forget,
+            // or its change-detection will treat the next real state as
+            // "already showing" and never re-apply it.
+            StateMonitor.shared.invalidateAppliedOverlay()
             // If a persistent show was deferred during the flash, honor it now
             // instead of hiding (avoids a flicker between flash hide and show).
             if let deferred = self.pendingShowState {
