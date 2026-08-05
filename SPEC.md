@@ -330,6 +330,39 @@ Between transcription and the keyboard:
 
 ---
 
+## 9a. First-run setup
+
+Shown **once**, to someone who has never been through it, and never again.
+
+Two steps:
+
+1. **Permissions.** Microphone and Accessibility are required and gate the
+   Continue button — without them nothing works at all. Input Monitoring is
+   offered but never blocks: it enables the global shortcuts, not dictation.
+   The window polls permission state, so granting in System Settings updates it
+   without a restart.
+2. **My Voice.** The three enrollment recordings, inline. Always skippable —
+   "Skip for now" and "Finish without it" both complete setup.
+
+**Completion is a recorded fact, not an inference.** It was previously derived
+from "is a Groq API key saved?", which was wrong in both directions: a user
+running a local model has no key and was re-shown the welcome window on every
+launch forever with no way to stop it, while a user who already had a key never
+saw onboarding at all and was never walked through permissions. Completion is
+now stored under `onboardingCompletedV1` and written the moment the user
+finishes or skips.
+
+**Existing installs are never shown it.** On first run of a build carrying this
+flag, a saved API key or a recorded voice profile is taken as proof the user has
+used the app before, and the flag is retro-marked. Upgrading must not greet a
+working setup with a welcome window.
+
+**The window is always dismissable.** No step may hold a first-run user hostage.
+The Groq API key was deliberately removed from this flow for that reason — it is
+not required (local models need none) and it now lives in Settings → Models.
+
+---
+
 ## 10. Preferences
 
 Stored in the daemon's database, editable from Settings and the CLI

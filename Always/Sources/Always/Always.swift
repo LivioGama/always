@@ -75,19 +75,44 @@ class OnboardingState: ObservableObject {
     @Published var showOnboarding = false
     private var hostedWindow: NSWindow?
 
+    /// Show first-run setup exactly once, to someone who has never been
+    /// through it.
+    ///
+    /// This used to key off "is a Groq API key saved?", which is wrong in
+    /// both directions. A user running a local model needs no key, so the
+    /// welcome window reopened on every single launch, forever, with no
+    /// way to make it stop. And a user who already had a key never saw
+    /// onboarding at all, so they never got walked through permissions or
+    /// My Voice. Completion is now its own recorded fact rather than
+    /// something inferred from unrelated config.
+    ///
+    /// Existing installs are treated as already-onboarded: someone with a
+    /// working setup must not be shown a welcome window on upgrade. The
+    /// signal is a saved API key or a recorded voice profile — either
+    /// proves they have used the app before this flag existed.
     func checkAndShowOnboardingIfNeeded() {
+        if OnboardingCompletion.isComplete {
+            return
+        }
         Task {
             let config = try? await CLIService().getConfig()
             let hasAPIKey = !(config?.groqApiKey?.isEmpty ?? true)
+            let hasVoiceProfile = UserDefaults.standard.bool(
+                forKey: "voiceEnrollmentIsEnrolled"
+            )
             await MainActor.run {
-                if !hasAPIKey {
-                    self.showOnboarding = true
-                    // Must happen HERE, after the async key check resolved —
-                    // the old call site checked `showOnboarding` synchronously
-                    // right after kicking this Task off, so the window never
-                    // opened for a fresh install.
-                    self.openOnboardingWindow()
+                if hasAPIKey || hasVoiceProfile {
+                    // Pre-existing install — retro-mark so this check never
+                    // runs again for them.
+                    OnboardingCompletion.markComplete()
+                    return
                 }
+                self.showOnboarding = true
+                // Must happen HERE, after the async check resolved — the
+                // old call site checked `showOnboarding` synchronously
+                // right after kicking this Task off, so the window never
+                // opened for a fresh install.
+                self.openOnboardingWindow()
             }
         }
     }
