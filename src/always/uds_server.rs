@@ -1018,6 +1018,23 @@ fn set_language(ctx: &ModelCommandCtx, lang: &str) {
 /// DB, and emit [`DaemonEvent::ActiveTranscriberChanged`] so connected
 /// UDS clients refresh their active-model badge.
 fn switch_active_backend(ctx: &ModelCommandCtx, choice: TranscriberBackendChoice) {
+    // Selecting the backend that is already active is free. Without this
+    // guard it is anything but: each call rebuilds the transcriber, which
+    // for a local model means loading ONNX sessions from disk, and each
+    // success broadcasts `ActiveTranscriberChanged` — which the GUI's
+    // model picker observes, re-emitting the selection and driving the
+    // whole cycle again. Measured on a single user-initiated switch: ten
+    // `SetActiveTranscriber` commands and ten full transcriber rebuilds
+    // inside one second, which is the stall the user sees as the app
+    // freezing after picking a model.
+    //
+    // Idempotence here fixes it at the source regardless of how the UI
+    // binding behaves.
+    if ctx.cfg.read().transcriber_backend == choice {
+        tracing::debug!(backend = %choice, "uds_set_active_transcriber_noop");
+        return;
+    }
+
     let mut new_cfg = ctx.cfg.write();
     new_cfg.transcriber_backend = choice.clone();
     match build_transcriber(&new_cfg, &ctx.registry) {

@@ -113,8 +113,14 @@ daemon broadcasts events, the GUI sends commands.
 9. **Paste** — text is typed into the focused application. If auto-Enter is on,
    Return follows after `auto_enter_delay_ms`.
 
-❓ Step 9 currently presses Return with **no delay by default**, which has caused
-messages to send mid-thought. Product decision needed on the default.
+**Pause tolerance is the difference between dictating and being interrupted.**
+Two settings govern it, and the shipped defaults were both too aggressive for
+real speech: a 1.4 s silence window ended utterances during ordinary thinking
+pauses, and auto-Enter with no grace period then sent the half-finished message.
+This instance now runs 2.2 s and 800 ms.
+
+❓ The code defaults are still 1.4 s / 0 ms. Product decision needed on whether
+to move them for everyone.
 
 ---
 
@@ -335,10 +341,10 @@ Stored in the daemon's database, editable from Settings and the CLI
 | `stt_energy_threshold` | 0.012 | Speech energy floor |
 | `hear_energy_threshold` | 0.001 | Wake-on-voice floor |
 | `silero_threshold` | 0.4 | VAD speech probability |
-| `stt_silence_secs` | 1.4 | Silence that ends an utterance |
+| `stt_silence_secs` | 1.4 (this instance: 2.2) | Silence that ends an utterance. CLI key is `stt_silence`. |
 | `stt_adaptive_silence` | true | Extend the window mid-sentence |
 | `stt_auto_enter` | true | Press Return after pasting |
-| `auto_enter_delay_ms` | 0 | Grace period before Return ❓ |
+| `auto_enter_delay_ms` | 0 (this instance: 800) | Grace period before Return |
 | `speaker_gate_enabled` | true | My Voice |
 | `speaker_gate_threshold` | 0.40 | Identity cut-off |
 | `idle_pause_secs` | 0 (off) | Idle auto-pause |
@@ -383,8 +389,9 @@ non-zero if not.
 
 1. Trust window at 5 minutes — how much badge-flashing is acceptable in
    exchange for an instant indicator?
-2. Auto-Enter with no delay — should a grace period be the default?
-3. Silence window at 1.4 s — long enough for natural thinking pauses?
+2. ~~Auto-Enter with no delay~~ / ~~silence window at 1.4 s~~ — **resolved for this
+   instance 2026-08-05**: 2.2 s and 800 ms, after both cut the user off
+   mid-thought. Open question is whether the code defaults should follow.
 4. ~~Should a streaming local model become the default so live text works?~~
    **Resolved 2026-08-04:** `moonshine-small-streaming-en` downloaded and made
    active, so the overlay's live-text path has something to render. English

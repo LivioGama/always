@@ -687,9 +687,11 @@ impl ModelRegistry {
         let staging_dir = self
             .models_dir
             .join(format!("{}.downloading", model_info.filename));
-        if staging_dir.exists() {
-            let _ = fs::remove_dir_all(&staging_dir);
-        }
+        // Keep an existing staging directory rather than deleting it: each
+        // file below is skipped when it is already present and hashes
+        // correctly, so an interrupted install resumes instead of
+        // re-fetching gigabytes. Anything corrupt or half-written fails
+        // its checksum and is re-downloaded.
         fs::create_dir_all(&staging_dir)?;
 
         let client = reqwest::Client::new();
@@ -708,6 +710,29 @@ impl ModelRegistry {
                 return Err(anyhow::anyhow!(msg));
             }
             let dest = staging_dir.join(&spec.name);
+
+            // Already fetched by an earlier attempt? Verify rather than
+            // re-download — these files run to 2.4 GB.
+            if dest.metadata().map(|m| m.len()) .ok() == Some(spec.size_bytes) {
+                let verify_path = dest.clone();
+                let expected = spec.sha256.clone();
+                let verify_id = format!("{model_id}:{}", spec.name);
+                let already_good = tokio::task::spawn_blocking(move || {
+                    verify_sha256(&verify_path, Some(&expected), &verify_id).is_ok()
+                })
+                .await
+                .unwrap_or(false);
+                if already_good {
+                    tracing::info!(
+                        model = %model_id,
+                        file = %spec.name,
+                        "model_file_already_present_skipping"
+                    );
+                    completed += spec.size_bytes;
+                    self.emit_progress(model_id, completed, total_bytes);
+                    continue;
+                }
+            }
 
             let mut response = match client.get(&spec.url).send().await {
                 Ok(r) => r,
@@ -782,10 +807,24 @@ impl ModelRegistry {
             model_id: model_id.to_string(),
         });
 
-        if final_dir.exists() {
-            fs::remove_dir_all(&final_dir)?;
+        // Clear whatever occupies the target path. This must NOT assume a
+        // directory: this exact model previously shipped as a single
+        // `.nemo` archive, so a user who tried the old entry has a 2.2 GB
+        // FILE sitting at the directory's path. `remove_dir_all` on a file
+        // fails with ENOTDIR, which aborted the install after all four
+        // files had downloaded and verified — the whole 2.5 GB thrown away
+        // at the final step, with the UI left spinning because the error
+        // propagated instead of being reported.
+        if let Err(e) = remove_path_any_kind(&final_dir) {
+            let msg = format!("could not clear {}: {e}", final_dir.display());
+            self.emit_failed(model_id, &msg);
+            return Err(anyhow::anyhow!(msg));
         }
-        fs::rename(&staging_dir, &final_dir)?;
+        if let Err(e) = fs::rename(&staging_dir, &final_dir) {
+            let msg = format!("could not install into {}: {e}", final_dir.display());
+            self.emit_failed(model_id, &msg);
+            return Err(anyhow::anyhow!(msg));
+        }
 
         // Same trust marker the archive path drops: a directory model is
         // only considered usable when we ourselves downloaded and
@@ -1883,6 +1922,21 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
     );
 }
 
+/// Remove `path` whether it is a file, a directory, or absent.
+///
+/// A model id's on-disk path can legitimately change kind across
+/// catalogue revisions — Nemotron shipped first as a single `.nemo`
+/// archive and later as a directory of ONNX files — so install must not
+/// assume the previous shape. Absence is success.
+fn remove_path_any_kind(path: &Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// Where the Nemotron ONNX export's files live.
 const NEMOTRON_FILE_BASE: &str =
     "https://huggingface.co/pantinor/nemotron-3.5-asr-streaming-0.6b-onnx/resolve/main/";
@@ -1905,6 +1959,42 @@ mod tests {
         assert!(engines.contains(&EngineType::Canary));
         assert!(engines.contains(&EngineType::Cohere));
         assert!(engines.contains(&EngineType::Nemotron));
+    }
+
+    /// Install must survive the target path being the wrong kind.
+    ///
+    /// Nemotron shipped first as a single `.nemo` archive and later as a
+    /// directory of ONNX files, so anyone who tried the old entry has a
+    /// 2.2 GB FILE where the directory now goes. `remove_dir_all` on a
+    /// file fails with ENOTDIR, which aborted the install after all four
+    /// files had downloaded and verified.
+    #[test]
+    fn removing_the_install_target_handles_file_dir_and_absent() {
+        let tmp = std::env::temp_dir().join(format!(
+            "always-remove-any-kind-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        // A file where a directory is expected — the case that broke.
+        let as_file = tmp.join("model");
+        fs::write(&as_file, b"stale archive").unwrap();
+        assert!(as_file.is_file());
+        remove_path_any_kind(&as_file).expect("must remove a file");
+        assert!(!as_file.exists());
+
+        // A populated directory.
+        let as_dir = tmp.join("model");
+        fs::create_dir_all(as_dir.join("nested")).unwrap();
+        fs::write(as_dir.join("nested").join("f"), b"x").unwrap();
+        remove_path_any_kind(&as_dir).expect("must remove a directory tree");
+        assert!(!as_dir.exists());
+
+        // Absent is success, not an error.
+        remove_path_any_kind(&tmp.join("never-existed")).expect("absent must be ok");
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     /// Every catalogue entry must be installable. The Nemotron entry
