@@ -16,9 +16,9 @@
 //! transcribe-rs accepts samples directly.
 
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use std::pin::Pin;
 
 /// Warmup / keep-alive audio: 0.5s of silence @16kHz. Running one throwaway
 /// inference forces the ONNX graph + Apple-Neural-Engine execution provider to
@@ -56,7 +56,7 @@ use transcribe_rs::{
 use parakeet_rs::Nemotron;
 
 use crate::managers::model_registry::EngineType;
-use crate::stt::{SttError, Transcriber, TranscriptionResult, StreamingTranscriptionResult};
+use crate::stt::{StreamingTranscriptionResult, SttError, Transcriber, TranscriptionResult};
 use futures::stream::Stream;
 
 /// One loaded local engine. The variants mirror Handy's
@@ -218,7 +218,7 @@ fn build_engine(engine_type: EngineType, path: &Path) -> Result<LoadedEngine> {
         ),
         #[cfg(not(feature = "local-stt"))]
         EngineType::Nemotron => {
-            return Err(anyhow::anyhow!("Nemotron requires the local-stt feature"))
+            return Err(anyhow::anyhow!("Nemotron requires the local-stt feature"));
         }
     })
 }
@@ -233,6 +233,10 @@ const MAX_LOCAL_STT_SECS: usize = 600;
 /// any extra LIST/JUNK/INFO chunks so a legitimately-capped clip isn't
 /// rejected for header overhead.
 const MAX_WAV_BYTES: usize = 16_000 * 2 * MAX_LOCAL_STT_SECS;
+
+/// Nemotron's cache-aware encoder expects 560 ms audio windows.
+const NEMOTRON_CHUNK_SAMPLES: usize = 8_960;
+const NEMOTRON_FLUSH_CHUNKS: usize = 3;
 
 impl Transcriber for LocalTranscriber {
     fn transcribe_from_bytes(&self, audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
@@ -289,19 +293,91 @@ impl Transcriber for LocalTranscriber {
         &self,
         audio: Vec<u8>,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>> {
+        #[cfg(feature = "local-stt")]
         if self.supports_streaming {
-            tracing::info!("local_stt_streaming_enabled");
-            // TODO: Implement actual streaming for streaming-capable models.
-            // For now, fall back to non-streaming behavior with a single final result.
-            // This is a placeholder that can be extended to use transcribe-rs's
-            // streaming API when available for the specific engine type.
+            let decoded = decode_wav_to_f32(&audio).map_err(SttError::Other);
+            let is_nemotron = self
+                .engine
+                .lock()
+                .map(|engine| matches!(&*engine, LoadedEngine::Nemotron(_)))
+                .unwrap_or(false);
+
+            if is_nemotron {
+                let samples = match decoded {
+                    Ok(samples) if !samples.is_empty() => samples,
+                    Ok(_) => return Box::pin(futures::stream::empty()),
+                    Err(error) => {
+                        return Box::pin(futures::stream::once(async move { Err(error) }));
+                    }
+                };
+                let chunks = samples
+                    .chunks(NEMOTRON_CHUNK_SAMPLES)
+                    .map(|chunk| {
+                        let mut padded = chunk.to_vec();
+                        padded.resize(NEMOTRON_CHUNK_SAMPLES, 0.0);
+                        padded
+                    })
+                    .collect::<Vec<_>>();
+                let total = chunks.len() + NEMOTRON_FLUSH_CHUNKS;
+                let engine = Arc::clone(&self.engine);
+                let last_used = Arc::clone(&self.last_used);
+                let stream = futures::stream::unfold(
+                    (engine, last_used, chunks, 0usize, false),
+                    move |(engine, last_used, chunks, index, initialized)| async move {
+                        if index >= total {
+                            return None;
+                        }
+                        let samples = chunks
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(|| vec![0.0; NEMOTRON_CHUNK_SAMPLES]);
+                        let result = match engine.lock() {
+                            Ok(mut guard) => match &mut *guard {
+                                LoadedEngine::Nemotron(model) => {
+                                    if !initialized {
+                                        model.reset();
+                                    }
+                                    model
+                                        .transcribe_chunk(&samples)
+                                        .map(|text| StreamingTranscriptionResult {
+                                            text: text.trim().to_string(),
+                                            is_final: index + 1 == total,
+                                            is_interim: index + 1 != total,
+                                        })
+                                        .map_err(|error| {
+                                            SttError::Other(anyhow::anyhow!(
+                                                "nemotron streaming failed: {error}"
+                                            ))
+                                        })
+                                }
+                                _ => Err(SttError::Other(anyhow::anyhow!(
+                                    "streaming engine changed while transcribing"
+                                ))),
+                            },
+                            Err(_) => Err(SttError::Other(anyhow::anyhow!(
+                                "local engine mutex poisoned"
+                            ))),
+                        };
+                        if let Ok(mut used) = last_used.lock() {
+                            *used = Instant::now();
+                        }
+                        Some((result, (engine, last_used, chunks, index + 1, true)))
+                    },
+                );
+                tracing::info!(
+                    chunk_samples = NEMOTRON_CHUNK_SAMPLES,
+                    "nemotron_streaming_enabled"
+                );
+                return Box::pin(stream);
+            }
+        }
+
+        if self.supports_streaming {
+            tracing::debug!("local_stt_streaming_fallback_for_non_nemotron");
         } else {
             tracing::debug!("local_stt_streaming_not_supported");
         }
 
-        // For now, all models use non-streaming behavior.
-        // Streaming models (MoonshineStreaming, etc.) can be extended here
-        // to use their streaming APIs.
         let result = match self.transcribe_from_bytes(audio) {
             Ok(r) => Ok(StreamingTranscriptionResult {
                 text: r.text,
@@ -374,9 +450,13 @@ fn run_engine(
             // Nemotron is a streaming model, but for non-streaming transcription
             // we transcribe the entire audio at once using transcribe_audio.
             // It returns a String directly, so we wrap it in a TranscriptionResult.
-            let text = n.transcribe_audio(samples)
+            let text = n
+                .transcribe_audio(samples)
                 .map_err(|e| anyhow::anyhow!("nemotron transcribe failed: {e}"))?;
-            transcribe_rs::TranscriptionResult { text, segments: None }
+            transcribe_rs::TranscriptionResult {
+                text,
+                segments: None,
+            }
         }
         #[cfg(not(feature = "local-stt"))]
         LoadedEngine::Nemotron(_) => {

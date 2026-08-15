@@ -143,6 +143,9 @@ Idle-paused · Low mic volume · correction confirmations.
 - **Minimum 600 ms on screen** (I2).
 - Follows the active screen and the cursor; must be fully on a screen the user
   is looking at.
+- Fixed-size panel: transcript text wraps within the fixed content width and
+  never enlarges or moves the HUD as interim text changes. Normal mode shows
+  at most four wrapped lines; compact mode remains a single truncated line.
 - Hidden entirely when paused, disconnected, or when the user selects the hidden
   display mode.
 
@@ -252,7 +255,7 @@ offline; the cloud backend is faster to start and needs an API key.
 
 **Streaming models available:** `moonshine-tiny-streaming-en`,
 `moonshine-small-streaming-en`, `moonshine-medium-streaming-en`, `nemotron-3.5-asr-streaming-0.6b`.
-These engines produce live partial text (§5). Moonshine models are English only;
+These engines expose partial text events (§5). Moonshine models are English only;
 Nemotron 3.5 supports 40 language-locales with auto language detection.
 
 ### 8.1 NVIDIA Nemotron 3.5 ASR — implementation notes
@@ -296,7 +299,11 @@ directory, and a declared `size_mb` that agrees with the sum of the parts.
 **Implementation details:**
 - Loaded via `parakeet_rs::Nemotron::from_pretrained(path, None)`
 - Non-streaming transcription uses `transcribe_audio(&samples)`
-- Streaming transcription uses `transcribe_chunk(&audio_chunk)` with 560ms chunks (8960 samples @ 16kHz)
+- `LocalTranscriber::transcribe_streaming` uses stateful `transcribe_chunk(&audio_chunk)` calls with 560ms chunks (8960 samples @ 16kHz)
+- Each preview snapshot resets Nemotron state, pads its final chunk to 8960 samples, and sends three silent flush chunks
+- VAD consume-mode previews call `transcribe_streaming`; preview events contain cumulative text because the Swift monitor replaces its stored partial transcript on each event
+- The final paste path remains non-streaming and uses `transcribe_audio(&samples)`
+- The implementation has focused Rust test coverage, but real Nemotron model inference and long-running memory behavior remain unverified
 - The loader auto-detects English-only vs multilingual variants from the encoder ONNX graph
 - Multilingual variant optionally accepts a target language code (e.g., "es-ES", "ja-JP") via `set_target_lang()`
 
@@ -431,4 +438,6 @@ non-zero if not.
    only — revisit if multilingual dictation matters more than live text.
 5. Mic conflict discards the interrupted sentence rather than pasting it — right
    call?
-6. Nemotron — fix and restore, or leave out?
+6. ~~Nemotron — fix and restore, or leave out?~~ **Resolved 2026-08-15:**
+   Nemotron is restored with state-reset, padded 560 ms chunk processing,
+   trailing-frame flushes, and intact UTF-8 partial transcript updates.

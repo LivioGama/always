@@ -355,6 +355,38 @@ final class AlwaysTests: XCTestCase {
         XCTAssertTrue(isStatusOverlayVisible())
     }
 
+    func testTranscriptionInterimPreservesFrenchUTF8Preview() throws {
+        try ensureAppKit()
+        let monitor = StateMonitor.shared
+        let expected = "Salut ça va, même en français."
+
+        let event = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: #"{"type":"TranscriptionInterim","data":{"text":"Salut ça va, même en français."}}"#.data(using: .utf8)!
+        )
+
+        NotificationCenter.default.post(name: .daemonEvent, object: event)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+
+        XCTAssertEqual(monitor.partialTranscript, expected)
+    }
+
+    func testLongTranscriptKeepsOverlayFixedSize() throws {
+        try ensureAppKit()
+        let window = StatusOverlayWindow()
+        let longText = String(repeating: "This transcript must wrap inside the HUD. ", count: 20)
+
+        window.show(state: .transcribingWithText(text: longText, isInterim: true), instant: true)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+
+        XCTAssertEqual(window.frame.size.width, StatusOverlayWindow.overlayWidth)
+        XCTAssertEqual(window.frame.size.height, StatusOverlayWindow.overlayHeight)
+        XCTAssertEqual(window.contentView?.frame.size.width, StatusOverlayWindow.overlayWidth)
+        XCTAssertEqual(window.contentView?.frame.size.height, StatusOverlayWindow.overlayHeight)
+
+        window.orderOut(nil)
+    }
+
     func testStateMonitorTogglesPauseFromEvents() throws {
         try ensureAppKit()
         let monitor = StateMonitor.shared
@@ -426,7 +458,7 @@ final class AlwaysTests: XCTestCase {
         // `src/always/event.rs` and `tests/uds_protocol_test.rs`. Bumping
         // either side without updating the matching constant on the
         // other side will fail both tests at once.
-        XCTAssertEqual(UDS_PROTOCOL_VERSION, 10)
+        XCTAssertEqual(UDS_PROTOCOL_VERSION, 11)
     }
 
     func testHelloWithMismatchedVersionIsObservable() throws {

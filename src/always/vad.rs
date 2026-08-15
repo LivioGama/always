@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use futures::StreamExt;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -364,7 +365,11 @@ fn mark_speaker_verified() {
 #[cfg(feature = "macos")]
 fn speaker_trust_active() -> bool {
     let stored = LAST_VERIFIED_AT_MS.load(Ordering::Relaxed);
-    trust_window_open(stored, TRUST_EPOCH.elapsed().as_millis() as u64, SPEAKER_TRUST_WINDOW_MS)
+    trust_window_open(
+        stored,
+        TRUST_EPOCH.elapsed().as_millis() as u64,
+        SPEAKER_TRUST_WINDOW_MS,
+    )
 }
 
 /// Pure core of [`speaker_trust_active`], split out so the window logic
@@ -536,6 +541,20 @@ const TRAILING_CONNECTORS: &[&str] = &[
     "and", "but", "or", "so", "because", "which", "that", "to", "the", "a", "an", "with", "for",
     "of", "in", "on", "at", "by",
 ];
+
+/// StateMonitor replaces its partial transcript on every event, so streaming
+/// producers must send the cumulative text rather than the latest chunk only.
+fn append_streaming_preview(accumulated: &mut String, chunk: &str) -> bool {
+    let chunk = chunk.trim();
+    if chunk.is_empty() {
+        return false;
+    }
+    if !accumulated.is_empty() {
+        accumulated.push(' ');
+    }
+    accumulated.push_str(chunk);
+    true
+}
 
 #[cfg(feature = "macos")]
 fn record_with_local_vad(
@@ -808,10 +827,7 @@ fn record_with_local_vad(
         // still flows through the normal transcribe path below — the
         // words are kept and reported, just never pasted.
         if pause::is_mic_conflict_paused() {
-            tracing::info!(
-                voiced_samples,
-                "capture_preempted_by_mic_conflict"
-            );
+            tracing::info!(voiced_samples, "capture_preempted_by_mic_conflict");
             mic_conflict_preempted = true;
             break;
         }
@@ -1269,20 +1285,32 @@ fn record_with_local_vad(
                     let audio_snapshot =
                         speech_samples[speech_samples.len() - preview_len..].to_vec();
                     let transcriber_for_preview = Arc::clone(transcriber);
+                    let rt_for_preview = rt.clone();
                     let flag = Arc::clone(&preview_pending);
                     std::thread::spawn(move || {
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                             || -> Result<crate::stt::TranscriptionResult> {
                                 let wav = audio::create_wav_bytes_i16_mono_16k(&audio_snapshot)?;
-                                transcriber_for_preview
-                                    .transcribe_from_bytes(wav)
-                                    .map_err(anyhow::Error::from)
+                                let mut stream = transcriber_for_preview.transcribe_streaming(wav);
+                                let mut accumulated = String::new();
+                                rt_for_preview.block_on(async {
+                                    while let Some(item) = stream.next().await {
+                                        let item = item.map_err(anyhow::Error::from)?;
+                                        if append_streaming_preview(&mut accumulated, &item.text) {
+                                            event::global_broadcaster()
+                                                .transcript_chunk(accumulated.clone());
+                                        }
+                                    }
+                                    Ok::<(), anyhow::Error>(())
+                                })?;
+                                Ok(crate::stt::TranscriptionResult {
+                                    text: accumulated,
+                                    ..Default::default()
+                                })
                             },
                         ));
-                        if let Ok(Ok(ref r)) = outcome
-                            && !r.text.is_empty()
-                        {
-                            event::global_broadcaster().transcript_chunk(r.text.clone());
+                        if let Err(error) = outcome {
+                            tracing::warn!(error = ?error, "streaming_preview_failed");
                         }
                         flag.store(false, std::sync::atomic::Ordering::Relaxed);
                     });
@@ -2339,7 +2367,11 @@ mod tests {
         assert!(best > blend_only);
 
         // Never worse than the old centroid-only behaviour.
-        let midway = vec![std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2, 0.0];
+        let midway = vec![
+            std::f32::consts::FRAC_1_SQRT_2,
+            std::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+        ];
         let (best_mid, _) = best_voiceprint_match(&midway, &profile);
         assert!(best_mid >= crate::always::speaker_embed::cosine(&midway, &combined) - 1e-6);
 
@@ -2471,5 +2503,21 @@ mod tests {
         assert!(!speaker_gate_should_reject_unavailable(
             true, true, threshold
         ));
+    }
+
+    #[test]
+    fn streaming_preview_is_cumulative_and_preserves_chunk_text() {
+        let mut accumulated = String::new();
+        assert!(!super::append_streaming_preview(&mut accumulated, "  "));
+        assert!(super::append_streaming_preview(
+            &mut accumulated,
+            "Bonjour, ça va ?"
+        ));
+        assert!(super::append_streaming_preview(
+            &mut accumulated,
+            "Très bien."
+        ));
+        assert_eq!(accumulated, "Bonjour, ça va ? Très bien.");
+        assert!(!accumulated.contains(", B, o"));
     }
 }

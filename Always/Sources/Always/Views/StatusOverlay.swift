@@ -401,6 +401,16 @@ class StatusOverlayView: NSView {
     private var verticalPadding: CGFloat { compact ? 6 : 14 }
     private var horizontalPadding: CGFloat { compact ? 12 : 20 }
 
+    // Give the content view the same fixed size as its window. Without this,
+    // the label's intrinsic one-line width participates in window fitting
+    // before the wrapping constraint is applied, allowing long transcripts to
+    // stretch the entire panel.
+    override var intrinsicContentSize: NSSize {
+        compact
+            ? NSSize(width: StatusOverlayWindow.compactWidth, height: StatusOverlayWindow.compactHeight)
+            : NSSize(width: StatusOverlayWindow.overlayWidth, height: StatusOverlayWindow.overlayHeight)
+    }
+
     var state: OverlayState = .voiceActivity {
         didSet {
             applyState()
@@ -416,6 +426,14 @@ class StatusOverlayView: NSView {
         self.dotWaveView = DotWaveView(frame: .zero, compact: compact)
         self.label = NSTextField(labelWithString: "")
         super.init(frame: frameRect)
+
+        // The content view participates in NSWindow's fitting pass. Required
+        // root constraints prevent a long label's intrinsic width from
+        // resizing that content view before the wrapping constraint applies.
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: frameRect.width),
+            heightAnchor.constraint(equalToConstant: frameRect.height)
+        ])
 
         wantsLayer = true
         layer?.cornerRadius = cornerRadius
@@ -451,7 +469,17 @@ class StatusOverlayView: NSView {
         label.isSelectable = false
         label.drawsBackground = false
         label.alignment = .center
-        label.lineBreakMode = .byTruncatingTail
+        // The normal HUD has a fixed frame, so long transcript text must wrap
+        // inside its content width instead of expanding the panel or being
+        // reduced to a single truncated line. Compact mode remains one line
+        // because its fixed 40-point height is intentionally a pill.
+        label.usesSingleLineMode = compact
+        label.lineBreakMode = compact ? .byTruncatingTail : .byWordWrapping
+        // Keep the label's vertical demand bounded as well as its width. The
+        // panel is deliberately fixed-size; excess transcript is clipped at
+        // the last visible wrapped line instead of forcing AppKit to resize
+        // the stack or window.
+        label.maximumNumberOfLines = compact ? 1 : 4
         label.translatesAutoresizingMaskIntoConstraints = false
 
         iconContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -465,13 +493,11 @@ class StatusOverlayView: NSView {
         stackView.addArrangedSubview(label)
         addSubview(stackView)
 
-        NSLayoutConstraint.activate([
+        var panelConstraints: [NSLayoutConstraint] = [
             stackView.centerXAnchor.constraint(equalTo: centerXAnchor),
             stackView.centerYAnchor.constraint(equalTo: centerYAnchor),
             stackView.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: verticalPadding),
             stackView.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -verticalPadding),
-            stackView.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: horizontalPadding),
-            stackView.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -horizontalPadding),
 
             iconContainer.widthAnchor.constraint(equalToConstant: iconSize),
             iconContainer.heightAnchor.constraint(equalToConstant: iconSize),
@@ -487,8 +513,26 @@ class StatusOverlayView: NSView {
             dotWaveView.widthAnchor.constraint(equalTo: iconView.widthAnchor),
             dotWaveView.heightAnchor.constraint(equalTo: iconView.heightAnchor),
 
-            label.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -2 * horizontalPadding)
-        ])
+            // An equality is important here: a <= constraint lets NSTextField
+            // choose its intrinsic width, which can make wrapping change as
+            // text arrives. Keep the text column fixed with the panel.
+            label.widthAnchor.constraint(equalTo: widthAnchor, constant: -2 * horizontalPadding)
+        ]
+        if compact {
+            panelConstraints += [
+                stackView.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: horizontalPadding),
+                stackView.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -horizontalPadding)
+            ]
+        } else {
+            // Make the normal HUD's text column a hard rectangle. Inequality
+            // edges leave NSStackView free to fit its intrinsic label width,
+            // which can resize the window before wrapping is applied.
+            panelConstraints += [
+                stackView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: horizontalPadding),
+                stackView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -horizontalPadding)
+            ]
+        }
+        NSLayoutConstraint.activate(panelConstraints)
 
         applyState()
     }
@@ -592,7 +636,23 @@ class StatusOverlayWindow: NSPanel {
         maxSize = size
         contentMinSize = size
         contentMaxSize = size
+        // Reassert both sides of the window/content boundary after Auto
+        // Layout has measured the transcript. This keeps a late fitting pass
+        // from restoring the label's old intrinsic one-line width.
         setContentSize(size)
+        var fixedFrame = frame
+        fixedFrame.size = size
+        setFrame(fixedFrame, display: false)
+        contentView?.setFrameSize(size)
+        contentView?.layoutSubtreeIfNeeded()
+        // AppKit may perform one fitting pass after the state label changes.
+        // Reassert the contract on the next main-queue turn as well.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            let currentOrigin = self.frame.origin
+            self.setFrame(NSRect(origin: currentOrigin, size: self.hudSize), display: false)
+            self.contentView?.setFrameSize(self.hudSize)
+        }
     }
 
     init() {
