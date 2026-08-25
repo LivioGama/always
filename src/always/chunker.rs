@@ -342,7 +342,7 @@ fn failed_chunks_dir() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stt::{SttError, StreamingTranscriptionResult};
+    use crate::stt::{StreamingTranscriptionResult, SttError};
     use futures::Stream;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -374,7 +374,8 @@ mod tests {
         fn transcribe_streaming(
             &self,
             _audio: Vec<u8>,
-        ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>> {
+        ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>>
+        {
             let result = match self.transcribe_from_bytes(_audio) {
                 Ok(r) => Ok(StreamingTranscriptionResult {
                     text: r.text,

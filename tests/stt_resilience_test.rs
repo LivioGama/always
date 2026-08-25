@@ -19,7 +19,8 @@ use futures::Stream;
 use tokio::sync::Mutex;
 
 use always::stt::{
-    SttError, StreamingTranscriptionResult, TranscriptionResult, reset_circuit_breaker_for_test, transcribe_from_bytes,
+    StreamingTranscriptionResult, SttError, TranscriptionResult, reset_circuit_breaker_for_test,
+    transcribe_from_bytes,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -245,7 +246,8 @@ async fn open_breaker_degrades_to_local_fallback_instead_of_dropping() {
         fn transcribe_streaming(
             &self,
             _audio: Vec<u8>,
-        ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>> {
+        ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>>
+        {
             let result = Ok(StreamingTranscriptionResult {
                 text: "offline transcript".into(),
                 is_final: true,

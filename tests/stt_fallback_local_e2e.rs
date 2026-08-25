@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::process::Command;
 use std::sync::Arc;
 
-use always::stt::{SttError, StreamingTranscriptionResult, Transcriber, TranscriptionResult};
+use always::stt::{StreamingTranscriptionResult, SttError, Transcriber, TranscriptionResult};
 use always::stt_dispatch::FallbackTranscriber;
 use futures::stream::Stream;
 

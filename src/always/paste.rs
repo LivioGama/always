@@ -543,11 +543,17 @@ mod pasteboard_tests {
         let _restore = ClipboardTextRestore(read_clipboard_text().unwrap_or_default());
         let french = "Salut, ça va ? Même l'été à Genève — déjà vu.";
 
-        MacClipboard.copy(french).expect("pbcopy accepts valid UTF-8");
+        MacClipboard
+            .copy(french)
+            .expect("pbcopy accepts valid UTF-8");
         let pasted = read_clipboard_text().expect("pbpaste reads clipboard text");
 
         assert_eq!(pasted, french, "text must not be decoded as MacRoman");
-        assert_eq!(pasted.as_bytes(), french.as_bytes(), "UTF-8 bytes must survive");
+        assert_eq!(
+            pasted.as_bytes(),
+            french.as_bytes(),
+            "UTF-8 bytes must survive"
+        );
     }
 
     /// Live probe of the objc changeCount bridge. Ignored by default

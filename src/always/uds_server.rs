@@ -381,7 +381,6 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         }
     }
 
-
     tracing::info!(
         clients = CONNECTED_CLIENTS.load(Ordering::Relaxed),
         "uds_client_connected"
@@ -476,11 +475,11 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     if !initial_payload.is_empty() {
         const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
         let mut pos = 0;
-        
+
         while pos < initial_payload.len() {
             let end = std::cmp::min(pos + CHUNK_SIZE, initial_payload.len());
             let chunk = &initial_payload[pos..end];
-            
+
             // Find the last complete line in this chunk
             let write_end = if let Some(last_newline) = chunk.rfind('\n') {
                 pos + last_newline + 1
@@ -488,7 +487,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
                 // No newline found, write the whole chunk
                 end
             };
-            
+
             if write_end <= pos {
                 // Couldn't find a complete line, write what we have
                 if let Err(e) = tokio::time::timeout(WRITE_TIMEOUT, async {
@@ -502,7 +501,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
                 }
                 break;
             }
-            
+
             let write_chunk = &initial_payload[pos..write_end];
             if let Err(e) = tokio::time::timeout(WRITE_TIMEOUT, async {
                 writer.write_all(write_chunk.as_bytes()).await?;
@@ -513,7 +512,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
                 tracing::error!(error = %e, "uds_send_initial_state_failed");
                 return Ok(());
             }
-            
+
             pos = write_end;
         }
     }

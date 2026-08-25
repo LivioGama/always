@@ -19,7 +19,9 @@ use parking_lot::{Condvar, Mutex};
 
 use crate::always::AlwaysConfig;
 use crate::managers::model_registry::ModelRegistry;
-use crate::stt::{GroqTranscriber, SttError, StreamingTranscriptionResult, Transcriber, TranscriptionResult};
+use crate::stt::{
+    GroqTranscriber, StreamingTranscriptionResult, SttError, Transcriber, TranscriptionResult,
+};
 
 /// Placeholder installed at daemon boot so the UDS server can bind before
 /// the (potentially seconds-long) model load completes. Unlike a plain
@@ -530,7 +532,8 @@ mod tests {
         fn transcribe_streaming(
             &self,
             audio: Vec<u8>,
-        ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>> {
+        ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>>
+        {
             let result = match self.transcribe_from_bytes(audio) {
                 Ok(r) => Ok(StreamingTranscriptionResult {
                     text: r.text,
@@ -553,7 +556,8 @@ mod tests {
         fn transcribe_streaming(
             &self,
             audio: Vec<u8>,
-        ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>> {
+        ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>>
+        {
             let result = match self.transcribe_from_bytes(audio) {
                 Ok(r) => Ok(StreamingTranscriptionResult {
                     text: r.text,

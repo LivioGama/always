@@ -241,12 +241,13 @@ impl ModelRegistry {
 
         // Custom user-supplied .bin files in the models directory show
         // up as "Custom" entries in the UI. Mirrors Handy's behavior.
-        let custom_discover_ms = if let Err(e) = discover_custom_whisper_models(&models_dir, &mut catalog) {
-            tracing::warn!(error = %e, "model_registry_custom_discovery_failed");
-            0
-        } else {
-            total_start.elapsed().as_millis() as u64 - dir_create_ms - catalog_populate_ms
-        };
+        let custom_discover_ms =
+            if let Err(e) = discover_custom_whisper_models(&models_dir, &mut catalog) {
+                tracing::warn!(error = %e, "model_registry_custom_discovery_failed");
+                0
+            } else {
+                total_start.elapsed().as_millis() as u64 - dir_create_ms - catalog_populate_ms
+            };
 
         // 16 listeners is plenty — UDS clients, the dispatch hot-swap
         // task, future UI watchers. Slow consumers receive `Lagged`
@@ -270,10 +271,17 @@ impl ModelRegistry {
         // background thread. Activation still hashes via `model_path`,
         // so nothing unverified can ever be loaded.
         registry.load_verify_cache();
-        let cache_load_ms = total_start.elapsed().as_millis() as u64 - dir_create_ms - catalog_populate_ms - custom_discover_ms;
+        let cache_load_ms = total_start.elapsed().as_millis() as u64
+            - dir_create_ms
+            - catalog_populate_ms
+            - custom_discover_ms;
 
         registry.refresh_disk_status_provisional();
-        let provisional_ms = total_start.elapsed().as_millis() as u64 - dir_create_ms - catalog_populate_ms - custom_discover_ms - cache_load_ms;
+        let provisional_ms = total_start.elapsed().as_millis() as u64
+            - dir_create_ms
+            - catalog_populate_ms
+            - custom_discover_ms
+            - cache_load_ms;
 
         let background = registry.clone();
         std::thread::Builder::new()
@@ -713,7 +721,7 @@ impl ModelRegistry {
 
             // Already fetched by an earlier attempt? Verify rather than
             // re-download — these files run to 2.4 GB.
-            if dest.metadata().map(|m| m.len()) .ok() == Some(spec.size_bytes) {
+            if dest.metadata().map(|m| m.len()).ok() == Some(spec.size_bytes) {
                 let verify_path = dest.clone();
                 let expected = spec.sha256.clone();
                 let verify_id = format!("{model_id}:{}", spec.name);
@@ -1970,10 +1978,8 @@ mod tests {
     /// files had downloaded and verified.
     #[test]
     fn removing_the_install_target_handles_file_dir_and_absent() {
-        let tmp = std::env::temp_dir().join(format!(
-            "always-remove-any-kind-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("always-remove-any-kind-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
 
@@ -2131,12 +2137,7 @@ mod tests {
         populate_catalog(&mut map);
         for m in map.values() {
             if let Some(sha) = &m.sha256 {
-                assert_eq!(
-                    sha.len(),
-                    64,
-                    "{} has malformed sha256",
-                    m.id
-                );
+                assert_eq!(sha.len(), 64, "{} has malformed sha256", m.id);
             }
         }
     }

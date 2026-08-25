@@ -14,16 +14,16 @@
 //!   (see `stt_dispatch::FallbackTranscriber`); the breaker only spares the
 //!   user from stalling on each call while Groq is down.
 
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::pin::Pin;
 
+use futures::stream::Stream;
 use rand::Rng;
 use reqwest::StatusCode;
 use reqwest::blocking::multipart as blocking_multipart;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use futures::stream::Stream;
 
 const GROQ_TRANSCRIPTIONS_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 pub const GROQ_MODEL_NAME: &str = "whisper-large-v3-turbo";
@@ -515,12 +515,12 @@ mod stt_unit_tests {
 pub mod mock {
     //! Test double for [`Transcriber`].
 
-    use super::{SttError, Transcriber, TranscriptionResult, StreamingTranscriptionResult};
+    use super::{StreamingTranscriptionResult, SttError, Transcriber, TranscriptionResult};
+    use futures::stream::Stream;
     use parking_lot::Mutex;
     use std::collections::VecDeque;
-    use std::sync::Arc;
     use std::pin::Pin;
-    use futures::stream::Stream;
+    use std::sync::Arc;
 
     /// A queueing transcriber. Returns successive scripted outcomes; once
     /// exhausted it returns the trailing `default` outcome (or an error
@@ -564,7 +564,8 @@ pub mod mock {
         fn transcribe_streaming(
             &self,
             audio: Vec<u8>,
-        ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>> {
+        ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>>
+        {
             // MockTranscriber doesn't support streaming, so we wrap the non-streaming result.
             let result = match self.transcribe_from_bytes(audio) {
                 Ok(r) => Ok(StreamingTranscriptionResult {
