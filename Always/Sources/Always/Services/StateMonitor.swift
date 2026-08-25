@@ -270,6 +270,20 @@ class StateMonitor: ObservableObject {
         setAutoEnter(!isAutoEnter)
     }
 
+    /// Set the transcription language live. `nil` (or `"auto"`) reverts to
+    /// auto-detect. Only engines that declare `supports_language_selection`
+    /// (currently NVIDIA Nemotron 3.5 ASR Streaming) bake a fixed code into
+    /// their decode — other engines ignore it and keep auto-detecting.
+    ///
+    /// Unlike `applyRuntimePreferences`, this hits its own dedicated
+    /// `SetLanguage` UDS command: the daemon writes `cfg.lang`, persists it
+    /// to the prefs DB, and rebuilds the active transcriber itself, so no
+    /// separate CLI `setConfig` call is needed here.
+    func setLanguage(_ lang: String?) {
+        struct Payload: Encodable { let lang: String }
+        udsClient.sendCommandWithData("SetLanguage", Payload(lang: lang ?? "auto"))
+    }
+
     /// Push sensitivity + auto-enter delay to the running daemon after
     /// Settings writes them to the DB.
     func applyRuntimePreferences(from config: Config) {

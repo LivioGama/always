@@ -11,7 +11,7 @@ struct ModelsPanel: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                ModelsSection()
+                ModelsSection(config: $config)
                 Divider()
                 groqKeySection
             }

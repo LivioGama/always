@@ -24,6 +24,7 @@ private enum SortOrder: String, CaseIterable {
 ///   Groq API without scrolling past the catalog.
 struct ModelsSection: View {
     @ObservedObject private var models: ModelManagerClient = .shared
+    @Binding var config: Config
 
     @State private var languageFilter: LanguageFilter = .all
     @State private var translationOnly = false
@@ -112,6 +113,8 @@ struct ModelsSection: View {
             sectionHeader
 
             backendBar
+
+            languagePickerSection
 
             filterBar
 
@@ -208,6 +211,65 @@ struct ModelsSection: View {
             return "Groq Whisper (Remote)"
         }
         return models.activeBackend
+    }
+
+    /// The catalog entry for the currently active local model, or `nil`
+    /// when the active backend is Groq or the catalog hasn't loaded it yet.
+    private var activeModel: ModelInfo? {
+        guard let id = models.activeModelId else { return nil }
+        return models.models.first(where: { $0.id == id })
+    }
+
+    /// Target-language picker — only appears for an engine that can bake a
+    /// fixed language into its decode (`supports_language_selection`) and
+    /// actually offers more than one option. Mirrors `ModelInfo.languageLabel`'s
+    /// gating condition.
+    @ViewBuilder
+    private var languagePickerSection: some View {
+        if let model = activeModel,
+           model.supports_language_selection,
+           model.supported_languages.count > 1 {
+            HStack(spacing: 10) {
+                Text("Language:")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Picker("", selection: languageBinding) {
+                    Text("Auto-detect").tag(Optional<String>.none)
+                    ForEach(model.supported_languages, id: \.self) { code in
+                        Text(languageDisplayName(for: code)).tag(Optional(code))
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 220)
+                Spacer()
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    /// `nil` selection means auto-detect, mirrored on the wire as `"auto"`
+    /// (see `Config.lang`'s doc comment and `StateMonitor.setLanguage`).
+    /// Setting immediately pushes the daemon's live `SetLanguage` command —
+    /// there's no separate save step, the daemon persists it itself.
+    private var languageBinding: Binding<String?> {
+        Binding(
+            get: {
+                let lang = config.lang
+                return (lang == nil || lang == "auto") ? nil : lang
+            },
+            set: { newValue in
+                config.lang = newValue ?? "auto"
+                StateMonitor.shared.setLanguage(newValue)
+            }
+        )
+    }
+
+    /// Localized language name for a plain ISO 639-1 code ("en" → "English").
+    /// Falls back to the uppercased code if the current locale has no name
+    /// for it.
+    private func languageDisplayName(for code: String) -> String {
+        Locale.current.localizedString(forLanguageCode: code)?.capitalized(with: .current) ?? code.uppercased()
     }
 }
 
