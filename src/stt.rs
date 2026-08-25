@@ -384,6 +384,18 @@ pub trait Transcriber: Send + Sync {
         &self,
         audio: Vec<u8>,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>>;
+
+    /// Whether this transcriber genuinely streams partial results — i.e.
+    /// `transcribe_streaming` yields more than one chunk with real interim
+    /// text, not just a single `is_final` result. Used to gate the live
+    /// overlay preview loop (`vad.rs`) so it only fires continuously during
+    /// active speech for engines cheap/fast enough to afford it (local
+    /// cache-aware streaming engines), not for cloud backends where that
+    /// would mean a network round trip every ~200ms. Defaults to `false`;
+    /// override only where `transcribe_streaming` is a real implementation.
+    fn supports_streaming(&self) -> bool {
+        false
+    }
 }
 
 /// Production [`Transcriber`] backed by the Groq Whisper API. Holds the

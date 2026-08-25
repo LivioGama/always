@@ -736,12 +736,14 @@ fn record_with_local_vad(
     // discarded if speech resumes before final silence.
     let speculation_slot = SpeculationSlot::new();
     let mut speculation_pending = false;
-    // Consume-mode live streaming: a lightweight PREVIEW stream that runs
-    // WHILE the user is still speaking (the tentative speculation above only
-    // fires at a pause). Independent of the speculation slot / final path — it
-    // only re-transcribes the growing buffer and emits a `TranscriptChunk`.
-    // The atomic serialises the background transcribes (one Groq round-trip at
-    // a time) and is cleared by the thread on completion.
+    // Live streaming preview: a lightweight PREVIEW stream that runs WHILE
+    // the user is still speaking (the tentative speculation above only fires
+    // at a pause). Armed by consume mode OR a genuinely-streaming active
+    // engine — see the gating condition below. Independent of the
+    // speculation slot / final path — it only re-transcribes the growing
+    // buffer and emits a `TranscriptChunk`. The atomic serialises the
+    // background transcribes (one round-trip at a time) and is cleared by
+    // the thread on completion.
     let preview_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut last_preview_at: Option<std::time::Instant> = None;
     // Adaptive mid-sentence extension: latched once per silence run when
@@ -1260,14 +1262,25 @@ fn record_with_local_vad(
                     }
                 }
 
-                // Consume-mode LIVE preview: while the user is mid-sentence
-                // (this is the voiced branch — no pause needed), re-transcribe
-                // the growing buffer on an interval and emit it as a preview so
-                // a stream consumer sees text land as it's spoken. Serialised
-                // by `preview_pending`; the effective cadence self-limits to a
-                // single Groq round-trip. Preview only — the final still comes
-                // from the speculation/chunker path, unchanged.
-                if crate::always::pause::is_consume_mode()
+                // LIVE preview: while the user is mid-sentence (this is the
+                // voiced branch — no pause needed), re-transcribe the growing
+                // buffer on an interval and emit it as a preview. Two
+                // independent reasons this can be armed:
+                // - `is_consume_mode()`: a stream consumer (e.g. Iris) opted
+                //   in via `SetConsumeMode`, regardless of engine.
+                // - `transcriber.supports_streaming()`: the active engine
+                //   genuinely streams (local cache-aware decode, e.g.
+                //   Nemotron/MoonshineStreaming — fast, no network round
+                //   trip), so the HUD can show live text as SPEC.md §5
+                //   promises without waiting for an external consumer to ask.
+                // Cloud backends (Groq) report `false` here on purpose —
+                // firing this every `CONSUME_STREAM_INTERVAL_MS` would mean
+                // a network round trip that often, which is why this stayed
+                // consume-mode-only before local streaming engines existed.
+                // Serialised by `preview_pending`; the effective cadence
+                // self-limits to one round-trip. Preview only — the final
+                // still comes from the speculation/chunker path, unchanged.
+                if (crate::always::pause::is_consume_mode() || transcriber.supports_streaming())
                     && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
                     && speech_samples.len() >= CONSUME_STREAM_MIN_SAMPLES
                     && !preview_pending.load(std::sync::atomic::Ordering::Relaxed)

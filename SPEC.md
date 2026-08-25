@@ -164,8 +164,19 @@ have already been pasted.
 
 Live text requires a streaming engine to be **active**, not merely available. The
 cloud backend returns one finished transcript per utterance and must not be
-marked as streaming. `MoonshineStreaming` models do stream and render partial
-text as the user speaks.
+marked as streaming. `MoonshineStreaming` and `Nemotron` models do stream and
+render partial text as the user speaks.
+
+The daemon's live-preview loop (`vad.rs`) re-transcribes the growing buffer on
+an interval while the user is still talking and arms whenever *either*: an
+external stream consumer opted in via `SetConsumeMode` (regardless of engine),
+**or** `Transcriber::supports_streaming()` reports the active engine genuinely
+streams. The cloud backend always reports `false` — firing this loop every
+~200ms would mean a network round trip that often — so normal dictation on
+Groq still only shows one flash of speculative text at a pause, exactly as
+before. A local streaming engine (Nemotron, MoonshineStreaming) reports `true`
+and gets continuous live preview during normal dictation too, not just under
+an external consumer.
 
 ---
 

@@ -255,6 +255,10 @@ const NEMOTRON_CHUNK_SAMPLES: usize = 8_960;
 const NEMOTRON_FLUSH_CHUNKS: usize = 3;
 
 impl Transcriber for LocalTranscriber {
+    fn supports_streaming(&self) -> bool {
+        self.supports_streaming
+    }
+
     fn transcribe_from_bytes(&self, audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
         if audio.len() > MAX_WAV_BYTES + 4096 {
             return Err(SttError::Other(anyhow::anyhow!(

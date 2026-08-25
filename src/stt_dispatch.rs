@@ -81,6 +81,17 @@ impl PendingTranscriber {
 }
 
 impl Transcriber for PendingTranscriber {
+    fn supports_streaming(&self) -> bool {
+        // Non-blocking peek: the vad loop's live-preview gate calls this on
+        // every voiced frame, so it must never wait on the init thread.
+        // Not-ready-yet or lock-contended both read as "no live preview
+        // until the real engine is up" — same as the pre-ready default.
+        let (lock, _cv) = &*self.slot;
+        lock.try_lock()
+            .and_then(|guard| guard.as_ref().map(|t| t.supports_streaming()))
+            .unwrap_or(false)
+    }
+
     fn transcribe_from_bytes(&self, audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
         match self.wait_for_ready() {
             Some(real) => real.transcribe_from_bytes(audio),
