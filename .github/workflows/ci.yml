@@ -53,6 +53,15 @@ jobs:
       - name: Run tests
         run: cargo test --locked --all-targets
 
+      # `local-stt` (Whisper/Parakeet/Moonshine/.../Nemotron engines) isn't in
+      # default features, so the step above never compiles or runs it — a
+      # broken local-model code path would ship silently. This doesn't
+      # download the multi-GB model weights any real transcription needs;
+      # it only compiles the engine code and runs the plumbing/pure-logic
+      # tests that don't need a loaded model.
+      - name: Run tests (local-stt feature)
+        run: cargo test --locked --all-targets --features local-stt
+
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
