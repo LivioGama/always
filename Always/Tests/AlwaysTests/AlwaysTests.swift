@@ -371,6 +371,44 @@ final class AlwaysTests: XCTestCase {
         XCTAssertEqual(monitor.partialTranscript, expected)
     }
 
+    // Regression: streaming producers (e.g. Nemotron) re-process the growing
+    // audio buffer on every preview call and emit the full cumulative text
+    // each time — not just the newly-added chunk. StateMonitor MUST replace
+    // partialTranscript wholesale on every event, never append. A single-event
+    // test can't catch a handler that concatenates instead of overwriting, so
+    // this posts a sequence of events with clearly different cumulative text
+    // and asserts each one replaces the previous value exactly.
+    func testStreamingPreviewReplacesNotAppendsAcrossMultipleEvents() throws {
+        try ensureAppKit()
+        let monitor = StateMonitor.shared
+
+        func postInterim(_ text: String) throws {
+            let json = "{\"type\":\"TranscriptionInterim\",\"data\":{\"text\":\"\(text)\"}}"
+            let event = try JSONDecoder().decode(DaemonEvent.self, from: json.data(using: .utf8)!)
+            NotificationCenter.default.post(name: .daemonEvent, object: event)
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        }
+
+        try postInterim("hello")
+        XCTAssertEqual(monitor.partialTranscript, "hello")
+
+        // Later preview snapshot: cumulative text changed, not a simple
+        // concatenation of the previous chunk.
+        try postInterim("hello world")
+        XCTAssertEqual(
+            monitor.partialTranscript, "hello world",
+            "must replace the previous preview, not append to it"
+        )
+
+        // A third event confirms replace-not-append holds across the whole
+        // sequence, not just a two-event tolerance.
+        try postInterim("hello world, how are you")
+        XCTAssertEqual(
+            monitor.partialTranscript, "hello world, how are you",
+            "must replace again, never accumulate prior previews"
+        )
+    }
+
     func testLongTranscriptKeepsOverlayFixedSize() throws {
         try ensureAppKit()
         let window = StatusOverlayWindow()
