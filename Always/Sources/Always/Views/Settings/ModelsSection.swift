@@ -333,6 +333,13 @@ private struct ModelRow: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+                if isDownloaded {
+                    // Actual on-disk bytes, not the catalog's advertised
+                    // estimate — see `ModelInfo.diskSizeLabel`.
+                    Label(model.diskSizeLabel, systemImage: "internaldrive")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 if isDownloaded {
                     actionsForDownloaded

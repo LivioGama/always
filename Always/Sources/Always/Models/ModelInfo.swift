@@ -70,6 +70,64 @@ struct ModelInfo: Codable, Identifiable, Equatable, Hashable {
         return "\(size_mb) MB"
     }
 
+    /// Root directory holding downloaded model files. Mirrors Rust's
+    /// `default_models_dir()` in `src/managers/model_registry.rs`
+    /// (`dirs::data_dir()` resolves to `~/Library/Application Support`
+    /// on macOS). The app ships with `com.apple.security.app-sandbox`
+    /// disabled (see `Always.entitlements`), so reading this path
+    /// directly from Swift is safe — no daemon round-trip needed just
+    /// to stat a file the daemon doesn't measure either.
+    private static let modelsDirectory: URL = {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/always/models", isDirectory: true)
+    }()
+
+    /// Actual bytes on disk for this model, once downloaded — sums
+    /// every file for a directory model (e.g. a multi-file engine whose
+    /// weights ship as loose files rather than one archive), or reads
+    /// the single file's size otherwise. `nil` when not downloaded, or
+    /// when the on-disk state can't be read (deleted out-of-band,
+    /// permissions, etc.) — callers should fall back to `sizeLabel`.
+    var actualSizeBytes: UInt64? {
+        guard is_downloaded else { return nil }
+        let fm = FileManager.default
+        let path = Self.modelsDirectory.appendingPathComponent(filename, isDirectory: is_directory)
+        if is_directory {
+            guard let enumerator = fm.enumerator(
+                at: path,
+                includingPropertiesForKeys: [.fileSizeKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                return nil
+            }
+            var total: UInt64 = 0
+            for case let fileURL as URL in enumerator {
+                let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey])
+                total += UInt64(values?.fileSize ?? 0)
+            }
+            return total > 0 ? total : nil
+        }
+        guard let attrs = try? fm.attributesOfItem(atPath: path.path),
+              let size = attrs[.size] as? UInt64 else {
+            return nil
+        }
+        return size
+    }
+
+    /// Human-readable size for the "Downloaded Models" list: the real
+    /// on-disk byte count once downloaded ("2.4 GB"), formatted with
+    /// the same `ByteCountFormatter` convention `ModelRow` already uses
+    /// for download-progress byte counts. Falls back to the catalog's
+    /// advertised `sizeLabel` estimate when the model isn't downloaded
+    /// yet, or the real bytes can't be read.
+    var diskSizeLabel: String {
+        guard let bytes = actualSizeBytes else { return sizeLabel }
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: Int64(bytes))
+    }
+
     /// True when both score fields are 0 — the daemon's sentinel for
     /// user-supplied custom models we don't have benchmarks for.
     var hidesScores: Bool {

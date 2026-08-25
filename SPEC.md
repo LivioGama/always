@@ -303,6 +303,13 @@ the `.verified` marker. An interrupted download can never leave a half-populated
 directory that looks installed. Progress is aggregated from the declared sizes,
 since there is no single content-length to report.
 
+**Settings → Models** shows the catalogue's advertised `size_mb` (an estimate)
+before download, and the model's *actual* on-disk byte count once downloaded —
+summed across every file for a directory model like Nemotron. Read directly by
+the Swift app from `~/Library/Application Support/always/models/` (the daemon
+doesn't compute this itself); falls back to the advertised estimate if the
+real bytes can't be read.
+
 `url` and `files` are mutually exclusive; a test enforces this, along with real
 checksums, real sizes, `is_directory`, filenames that cannot escape the model
 directory, and a declared `size_mb` that agrees with the sum of the parts.
