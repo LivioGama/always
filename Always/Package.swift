@@ -29,7 +29,16 @@ let package = Package(
         .testTarget(
             name: "AlwaysTests",
             dependencies: ["Always"],
-            path: "Tests"
+            path: "Tests",
+            linkerSettings: [
+                // SwiftPM leaves binary-target frameworks in `.build/artifacts` instead
+                // of embedding them in the XCTest bundle. Resolve Sparkle from that
+                // stable build-relative location while running `swift test`.
+                .unsafeFlags([
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@loader_path/../../../../../../artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64"
+                ])
+            ]
         )
     ]
 )

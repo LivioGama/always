@@ -522,6 +522,34 @@ pub mod mock {
 mod pasteboard_tests {
     use super::*;
 
+    /// Restores the plain-text clipboard even when a live probe panics.
+    ///
+    /// This deliberately mirrors the production limitation documented on
+    /// `read_clipboard_text`: non-text pasteboard flavors cannot be preserved.
+    struct ClipboardTextRestore(String);
+
+    impl Drop for ClipboardTextRestore {
+        fn drop(&mut self) {
+            let _ = copy_to_clipboard(self.0.clone());
+        }
+    }
+
+    /// Live UTF-8 boundary probe for the exact `pbcopy`/`pbpaste` path used
+    /// by dictation.  It is ignored because it temporarily owns the real
+    /// clipboard; the guard restores its prior plain-text contents.
+    #[test]
+    #[ignore = "touches the real macOS pasteboard"]
+    fn pbcopy_round_trips_french_utf8_bytes() {
+        let _restore = ClipboardTextRestore(read_clipboard_text().unwrap_or_default());
+        let french = "Salut, ça va ? Même l'été à Genève — déjà vu.";
+
+        MacClipboard.copy(french).expect("pbcopy accepts valid UTF-8");
+        let pasted = read_clipboard_text().expect("pbpaste reads clipboard text");
+
+        assert_eq!(pasted, french, "text must not be decoded as MacRoman");
+        assert_eq!(pasted.as_bytes(), french.as_bytes(), "UTF-8 bytes must survive");
+    }
+
     /// Live probe of the objc changeCount bridge. Ignored by default
     /// because it writes to (and then restores) the real pasteboard.
     #[test]
