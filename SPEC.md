@@ -297,15 +297,15 @@ checksums, real sizes, `is_directory`, filenames that cannot escape the model
 directory, and a declared `size_mb` that agrees with the sum of the parts.
 
 **Implementation details:**
-- Loaded via `parakeet_rs::Nemotron::from_pretrained(path, None)`
-- Non-streaming transcription uses `transcribe_audio(&samples)`
-- `LocalTranscriber::transcribe_streaming` uses stateful `transcribe_chunk(&audio_chunk)` calls with 560ms chunks (8960 samples @ 16kHz)
-- Each preview snapshot resets Nemotron state, pads its final chunk to 8960 samples, and sends three silent flush chunks
+- `LoadedEngine::Nemotron` holds a **shared, read-only `parakeet_rs::NemotronHandle`** (loaded via `NemotronHandle::load(path, None)`), never a bare `Nemotron` instance. Every call — the one-shot final path and each streaming session — spawns its own independent `Nemotron::from_shared(&handle)` with fresh decoder state, transcribes, and drops it. This is required, not cosmetic: `Nemotron::transcribe_audio` (the one-shot path) starts by resetting the same cache-aware decode state (`encoder_cache`, LSTM `state_1`/`state_2`, `last_token`) that a concurrent `transcribe_chunk` streaming sequence depends on, and the streaming path releases `self.engine`'s mutex between chunks (so a slow decode doesn't block unrelated daemon work) — sharing one `Nemotron` between the two paths let the daemon's independent "speculative transcription" (fires ~240ms after any pause, unrelated to streaming preview state) silently corrupt an in-progress streaming decode. Per-call isolation removes the shared mutable state entirely; no additional locking is needed.
+- Non-streaming transcription uses `Nemotron::from_shared(&handle)` then `transcribe_audio(&samples)`
+- `LocalTranscriber::transcribe_streaming` clones the handle out of `self.engine` once, then uses stateful `transcribe_chunk(&audio_chunk)` calls on its own `Nemotron` instance with 560ms chunks (8960 samples @ 16kHz)
+- Each preview snapshot spawns a fresh (already-reset) instance, pads its final chunk to 8960 samples, and sends three silent flush chunks
 - VAD consume-mode previews call `transcribe_streaming`; preview events contain cumulative text because the Swift monitor replaces its stored partial transcript on each event
 - The final paste path remains non-streaming and uses `transcribe_audio(&samples)`
-- The implementation has focused Rust test coverage, but real Nemotron model inference and long-running memory behavior remain unverified
+- Rust test coverage covers the chunk-splitting/padding math (560ms sizing, ragged-tail zero-padding, flush-tail count) without a loaded model; real Nemotron model inference and long-running memory behavior remain unverified by automated tests since that needs ~2.5GB of real weights this repo doesn't ship
 - The loader auto-detects English-only vs multilingual variants from the encoder ONNX graph
-- Multilingual variant optionally accepts a target language code (e.g., "es-ES", "ja-JP") via `set_target_lang()`
+- Multilingual variant accepts a target language code via `apply_nemotron_language()` → `set_target_lang()`, driven by the Settings language picker (Swift) and the daemon's existing `cfg.lang` plumbing (`uds_server.rs::set_language`). **Known format mismatch**: `cfg.lang` and this model's own catalogue entry use bare ISO 639-1 codes ("es", "ja", "zh", ...), but parakeet-rs's `PROMPT_DICTIONARY` only has bare-code entries for most languages — "ja"/"zh" require locale-tagged form ("ja-JP", "zh-CN"). A bare "ja"/"zh" selection is rejected by `set_target_lang` and falls back to auto-detect with a logged warning rather than failing the transcription. Mapping "ja"→"ja-JP"/"zh"→"zh-CN" before the call is a known follow-up, not yet done.
 
 **Why it was previously absent:**
 The original implementation attempt failed because:

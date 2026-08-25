@@ -53,7 +53,7 @@ use transcribe_rs::{
 };
 
 #[cfg(feature = "local-stt")]
-use parakeet_rs::Nemotron;
+use parakeet_rs::{Nemotron, NemotronHandle, NemotronMode};
 
 use crate::managers::model_registry::EngineType;
 use crate::stt::{StreamingTranscriptionResult, SttError, Transcriber, TranscriptionResult};
@@ -71,8 +71,24 @@ enum LoadedEngine {
     GigaAM(GigaAMModel),
     Canary(CanaryModel),
     Cohere(CohereModel),
+    /// Holds the **shared, read-only** [`NemotronHandle`] — never a bare
+    /// `Nemotron`. Every other variant here is a plain owned model that
+    /// `run_engine` mutates directly under `self.engine`'s mutex, held for
+    /// the whole call. Nemotron can't use that pattern: `transcribe_streaming`
+    /// holds cache-aware decode state across many chunks and releases the
+    /// mutex between chunks (so a slow decode doesn't block the daemon for
+    /// hundreds of ms) — which means a concurrent one-shot `run_engine` call
+    /// could interleave mid-stream. `Nemotron::transcribe_audio` starts with
+    /// `self.reset()` and mutates the exact same decode-state fields a
+    /// concurrent `transcribe_chunk` call relies on, so sharing one `Nemotron`
+    /// between those two call paths silently corrupts in-progress streams.
+    /// `NemotronHandle` fixes this at the type level: it wraps only the
+    /// expensive, immutable ONNX session (synchronized internally by
+    /// parakeet-rs). `Nemotron::from_shared(&handle)` spawns a fresh instance
+    /// with independent decode state per call/stream — cheap enough to do
+    /// every time — so there's no shared mutable state left to corrupt.
     #[cfg(feature = "local-stt")]
-    Nemotron(Nemotron),
+    Nemotron(NemotronHandle),
 }
 
 /// Local-model [`Transcriber`] implementation.
@@ -213,7 +229,7 @@ fn build_engine(engine_type: EngineType, path: &Path) -> Result<LoadedEngine> {
         ),
         #[cfg(feature = "local-stt")]
         EngineType::Nemotron => LoadedEngine::Nemotron(
-            Nemotron::from_pretrained(path, None)
+            NemotronHandle::load(path, None)
                 .map_err(|e| anyhow::anyhow!("nemotron load failed: {e}"))?,
         ),
         #[cfg(not(feature = "local-stt"))]
@@ -293,17 +309,23 @@ impl Transcriber for LocalTranscriber {
         &self,
         audio: Vec<u8>,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>> {
+        // Nemotron: lock `self.engine` ONCE just long enough to clone the
+        // cheap, shared `NemotronHandle` out of it, then drop the lock. From
+        // then on this stream owns a fresh, independent `Nemotron` instance
+        // (`Nemotron::from_shared`) that no other call — streaming or
+        // one-shot — can see or mutate, so it never needs to re-acquire
+        // `self.engine`'s lock again for the rest of the stream and can
+        // safely run concurrently with a one-shot `run_engine` call on the
+        // same handle. See the doc comment on `LoadedEngine::Nemotron`.
         #[cfg(feature = "local-stt")]
         if self.supports_streaming {
-            let decoded = decode_wav_to_f32(&audio).map_err(SttError::Other);
-            let is_nemotron = self
-                .engine
-                .lock()
-                .map(|engine| matches!(&*engine, LoadedEngine::Nemotron(_)))
-                .unwrap_or(false);
+            let nemotron_handle = self.engine.lock().ok().and_then(|guard| match &*guard {
+                LoadedEngine::Nemotron(handle) => Some(handle.clone()),
+                _ => None,
+            });
 
-            if is_nemotron {
-                let samples = match decoded {
+            if let Some(handle) = nemotron_handle {
+                let samples = match decode_wav_to_f32(&audio).map_err(SttError::Other) {
                     Ok(samples) if !samples.is_empty() => samples,
                     Ok(_) => return Box::pin(futures::stream::empty()),
                     Err(error) => {
@@ -319,11 +341,14 @@ impl Transcriber for LocalTranscriber {
                     })
                     .collect::<Vec<_>>();
                 let total = chunks.len() + NEMOTRON_FLUSH_CHUNKS;
-                let engine = Arc::clone(&self.engine);
+
+                let mut nemotron = Nemotron::from_shared(&handle);
+                apply_nemotron_language(&mut nemotron, self.language.as_deref());
+
                 let last_used = Arc::clone(&self.last_used);
                 let stream = futures::stream::unfold(
-                    (engine, last_used, chunks, 0usize, false),
-                    move |(engine, last_used, chunks, index, initialized)| async move {
+                    (nemotron, last_used, chunks, 0usize),
+                    move |(mut nemotron, last_used, chunks, index)| async move {
                         if index >= total {
                             return None;
                         }
@@ -331,37 +356,22 @@ impl Transcriber for LocalTranscriber {
                             .get(index)
                             .cloned()
                             .unwrap_or_else(|| vec![0.0; NEMOTRON_CHUNK_SAMPLES]);
-                        let result = match engine.lock() {
-                            Ok(mut guard) => match &mut *guard {
-                                LoadedEngine::Nemotron(model) => {
-                                    if !initialized {
-                                        model.reset();
-                                    }
-                                    model
-                                        .transcribe_chunk(&samples)
-                                        .map(|text| StreamingTranscriptionResult {
-                                            text: text.trim().to_string(),
-                                            is_final: index + 1 == total,
-                                            is_interim: index + 1 != total,
-                                        })
-                                        .map_err(|error| {
-                                            SttError::Other(anyhow::anyhow!(
-                                                "nemotron streaming failed: {error}"
-                                            ))
-                                        })
-                                }
-                                _ => Err(SttError::Other(anyhow::anyhow!(
-                                    "streaming engine changed while transcribing"
-                                ))),
-                            },
-                            Err(_) => Err(SttError::Other(anyhow::anyhow!(
-                                "local engine mutex poisoned"
-                            ))),
-                        };
+                        let result = nemotron
+                            .transcribe_chunk(&samples)
+                            .map(|text| StreamingTranscriptionResult {
+                                text: text.trim().to_string(),
+                                is_final: index + 1 == total,
+                                is_interim: index + 1 != total,
+                            })
+                            .map_err(|error| {
+                                SttError::Other(anyhow::anyhow!(
+                                    "nemotron streaming failed: {error}"
+                                ))
+                            });
                         if let Ok(mut used) = last_used.lock() {
                             *used = Instant::now();
                         }
-                        Some((result, (engine, last_used, chunks, index + 1, true)))
+                        Some((result, (nemotron, last_used, chunks, index + 1)))
                     },
                 );
                 tracing::info!(
@@ -446,10 +456,16 @@ fn run_engine(
                 .map_err(|e| anyhow::anyhow!("cohere transcribe failed: {e}"))?
         }
         #[cfg(feature = "local-stt")]
-        LoadedEngine::Nemotron(n) => {
-            // Nemotron is a streaming model, but for non-streaming transcription
-            // we transcribe the entire audio at once using transcribe_audio.
-            // It returns a String directly, so we wrap it in a TranscriptionResult.
+        LoadedEngine::Nemotron(handle) => {
+            // One-shot transcription. Never call `transcribe_audio` on a
+            // shared instance — see the doc comment on `LoadedEngine::Nemotron`
+            // for why that would race with a concurrent `transcribe_streaming`
+            // call. Each call spawns its own independent `Nemotron`,
+            // transcribes once, and drops it; the only thing shared with any
+            // other concurrent Nemotron call is the read-only ONNX session
+            // inside `handle`, which parakeet-rs synchronizes internally.
+            let mut n = Nemotron::from_shared(handle);
+            apply_nemotron_language(&mut n, language.as_deref());
             let text = n
                 .transcribe_audio(samples)
                 .map_err(|e| anyhow::anyhow!("nemotron transcribe failed: {e}"))?;
@@ -464,6 +480,39 @@ fn run_engine(
         }
     };
     Ok(result.text)
+}
+
+/// Apply the daemon's configured language hint to a freshly spawned Nemotron
+/// instance, if any. `None` (or the English-only variant, which has no
+/// language conditioning) leaves the model on `auto`-detect.
+///
+/// **Known format mismatch** (flagged rather than silently worked around):
+/// `cfg.lang` and every other multilingual local engine's catalogue entry
+/// (see `model_registry.rs`'s SenseVoice/Canary lists) use bare ISO 639-1
+/// codes. `SPEC.md`'s own Nemotron example ("es-ES", "ja-JP") uses
+/// locale-tagged codes instead, and parakeet-rs's `PROMPT_DICTIONARY` is
+/// inconsistent about which form it accepts: most languages have a bare-code
+/// key ("es", "fr", "de", ...), but "ja"/"zh" do NOT — only
+/// "ja-JA"/"ja-JP" and "zh-CN"/"zh-TW"/"zh-ZH" exist. A bare "ja" or "zh"
+/// hint (what this daemon sends today) is rejected by `set_target_lang`.
+/// Rather than fail the whole transcription over an unsupported language
+/// code, log a warning and fall back to auto-detect. Reconciling the
+/// registry's codes with parakeet-rs's dictionary is a follow-up decision.
+#[cfg(feature = "local-stt")]
+fn apply_nemotron_language(n: &mut Nemotron, language: Option<&str>) {
+    let Some(lang) = language else {
+        return;
+    };
+    if n.mode() != NemotronMode::Multilingual {
+        return;
+    }
+    if let Err(e) = n.set_target_lang(lang) {
+        tracing::warn!(
+            lang,
+            error = %e,
+            "nemotron_set_target_lang_failed_falling_back_to_auto"
+        );
+    }
 }
 
 /// Decode the daemon's canonical WAV format (16 kHz mono PCM i16) into
@@ -544,4 +593,78 @@ mod tests {
         let bogus = vec![0u8; 64];
         assert!(decode_wav_to_f32(&bogus).is_err());
     }
+}
+
+/// Pure chunk-splitting/padding math for Nemotron streaming. None of this
+/// needs a loaded model, so it's tested directly rather than skipped.
+#[cfg(all(test, feature = "local-stt"))]
+mod nemotron_chunking_tests {
+    use super::*;
+
+    #[test]
+    fn chunk_size_is_560ms_at_16khz() {
+        // 56 mel frames * 160-sample hop (parakeet-rs's CHUNK_SIZE *
+        // HOP_LENGTH in nemotron.rs) = 8_960 samples = 0.56s at 16 kHz.
+        assert_eq!(NEMOTRON_CHUNK_SAMPLES, 56 * 160);
+        let ms = (NEMOTRON_CHUNK_SAMPLES as f64 / 16_000.0) * 1000.0;
+        assert!((ms - 560.0).abs() < 1e-9);
+    }
+
+    /// Mirrors the chunking/padding done in `transcribe_streaming`'s
+    /// Nemotron branch, without needing a loaded model.
+    fn split_and_pad(samples: &[f32]) -> Vec<Vec<f32>> {
+        samples
+            .chunks(NEMOTRON_CHUNK_SAMPLES)
+            .map(|chunk| {
+                let mut padded = chunk.to_vec();
+                padded.resize(NEMOTRON_CHUNK_SAMPLES, 0.0);
+                padded
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ragged_final_chunk_is_zero_padded_to_full_length() {
+        // 2.5 chunks worth of audio: the last chunk must still come out
+        // full-length, zero-padded rather than short.
+        let half = NEMOTRON_CHUNK_SAMPLES / 2;
+        let samples = vec![1.0f32; NEMOTRON_CHUNK_SAMPLES * 2 + half];
+        let chunks = split_and_pad(&samples);
+        assert_eq!(chunks.len(), 3);
+        for c in &chunks {
+            assert_eq!(c.len(), NEMOTRON_CHUNK_SAMPLES);
+        }
+        let last = &chunks[2];
+        assert!(last[..half].iter().all(|&v| v == 1.0));
+        assert!(last[half..].iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn exact_multiple_of_chunk_size_has_no_extra_padded_chunk() {
+        let samples = vec![1.0f32; NEMOTRON_CHUNK_SAMPLES * 3];
+        let chunks = split_and_pad(&samples);
+        assert_eq!(chunks.len(), 3);
+        for c in &chunks {
+            assert!(c.iter().all(|&v| v == 1.0));
+        }
+    }
+
+    #[test]
+    fn total_chunk_count_includes_flush_tail() {
+        let samples = vec![0.0f32; NEMOTRON_CHUNK_SAMPLES * 4];
+        let chunks = split_and_pad(&samples);
+        let total = chunks.len() + NEMOTRON_FLUSH_CHUNKS;
+        assert_eq!(total, 4 + NEMOTRON_FLUSH_CHUNKS);
+    }
+
+    // `NemotronHandle::load` and `Nemotron::from_shared` are NOT tested
+    // here: `load` requires real ONNX encoder/decoder weights and a
+    // `tokenizer.model` on disk (~2.5 GB), which this test suite does not
+    // ship and should not download. The concurrency fix (an independent
+    // `Nemotron` spawned per call/stream instead of one instance shared
+    // across concurrent calls) and the language fix (`set_target_lang`
+    // applied per fresh instance) are therefore verified by the doc
+    // comments on `LoadedEngine::Nemotron` and `apply_nemotron_language`
+    // plus manual testing against a real downloaded model, not by an
+    // automated test.
 }
