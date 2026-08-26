@@ -14,6 +14,27 @@ private let knownButUnboundCliKeys: Set<String> = [
     "passive_correction_capture",
 ]
 
+/// Bool that decodes to `true` when its key is absent — backward
+/// compatibility for Config JSON written before the field existed.
+@propertyWrapper
+struct DefaultTrue: Codable, Equatable {
+    var wrappedValue: Bool
+    init(wrappedValue: Bool = true) { self.wrappedValue = wrappedValue }
+    init(from decoder: Decoder) throws {
+        wrappedValue = try decoder.singleValueContainer().decode(Bool.self)
+    }
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(wrappedValue)
+    }
+}
+
+extension KeyedDecodingContainer {
+    func decode(_ type: DefaultTrue.Type, forKey key: Key) throws -> DefaultTrue {
+        try decodeIfPresent(DefaultTrue.self, forKey: key) ?? DefaultTrue()
+    }
+}
+
 struct AppOverride: Codable {
     var autoEnter: Bool?
     var paused: Bool?
@@ -34,6 +55,11 @@ struct Config: Codable {
     /// Extend the silence window when the transcript-so-far looks
     /// mid-sentence (daemon-side heuristic). Default on.
     var sttAdaptiveSilence: Bool
+    /// Live provisional transcript in the overlay while the user is
+    /// still talking (daemon periodically re-transcribes the growing
+    /// utterance on non-streaming backends). Default on; decodes to
+    /// `true` for JSON written before the field existed.
+    @DefaultTrue var sttLivePreview: Bool
     var sttAutoEnter: Bool
     /// Auto-enter delay in milliseconds. Single source of truth — UI
     /// displays as seconds via `Double(autoEnterDelayMs) / 1000` but the
@@ -64,6 +90,7 @@ struct Config: Codable {
         sttCooldownMs: 150,
         sttSilence: 0.9,
         sttAdaptiveSilence: true,
+        sttLivePreview: DefaultTrue(wrappedValue: true),
         sttAutoEnter: true,
         autoEnterDelayMs: 4000,
         groqApiKey: nil,
@@ -106,6 +133,8 @@ struct Config: Codable {
                     config.sttSilence = Double(value.replacingOccurrences(of: "s", with: "")) ?? defaultConfig.sttSilence
                 case "stt_adaptive_silence":
                     config.sttAdaptiveSilence = (value == "true" || value == "1")
+                case "stt_live_preview":
+                    config.sttLivePreview = (value == "true" || value == "1")
                 case "stt_auto_enter":
                     config.sttAutoEnter = (value == "true" || value == "1")
                 case "auto_enter_delay_ms":

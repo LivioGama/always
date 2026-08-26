@@ -103,13 +103,17 @@ daemon broadcasts events, the GUI sends commands.
 4. **Speaking** — audio accumulates. Long utterances are committed in chunks and
    transcribed as they go, so a two-minute dictation does not wait until the end.
 5. **Pause detected** — a tentative silence starts a *speculative* transcription
-   in the background. If speech resumes, it is discarded.
+   in the background, which also pre-warms the grammar LLM for the expected
+   final text (§9). If speech resumes, it is discarded.
 6. **End of utterance** — silence exceeds the configured window
    (`stt_silence_secs`, default 1.4 s). With adaptive silence on, the window
    extends when the text looks mid-sentence.
 7. **Transcribe** — the speculative result is used if still valid, otherwise a
    fresh transcription runs.
 8. **Post-process** — filters, glossary corrections, grammar cleanup (§9).
+   A rule-filtered utterance (not a hallucination) is still copied to the
+   clipboard — no paste, no auto-Enter — so a wrong filter verdict costs a
+   manual ⌘V instead of the whole utterance.
 9. **Paste** — text is typed into the focused application. If auto-Enter is on,
    Return follows after `auto_enter_delay_ms`.
 
@@ -117,7 +121,9 @@ daemon broadcasts events, the GUI sends commands.
 Two settings govern it, and the shipped defaults were both too aggressive for
 real speech: a 1.4 s silence window ended utterances during ordinary thinking
 pauses, and auto-Enter with no grace period then sent the half-finished message.
-This instance now runs 2.2 s and 800 ms.
+This instance now runs 1.1 s (lowered from 2.2 s on 2026-08-26 after log
+analysis showed real pauses p95 ≈ 1.25 s and the adaptive mid-sentence
+extension covering the tail) and 0 ms auto-Enter delay.
 
 ❓ The code defaults are still 1.4 s / 0 ms. Product decision needed on whether
 to move them for everyone.
@@ -143,40 +149,76 @@ Idle-paused · Low mic volume · correction confirmations.
 - **Minimum 600 ms on screen** (I2).
 - Follows the active screen and the cursor; must be fully on a screen the user
   is looking at.
-- Fixed-size panel: transcript text wraps within the fixed content width and
-  never enlarges or moves the HUD as interim text changes. Normal mode shows
-  at most four wrapped lines; compact mode remains a single truncated line.
+- Fixed width, growing height: transcript text wraps within the fixed content
+  width — the panel never widens or shifts horizontally as interim text
+  changes. In normal mode the panel's height grows to fit the wrapped
+  transcript, from the classic 130 pt up to a 200 pt cap (~6 wrapped lines),
+  and shrinks back when the text shortens or the state changes. The bottom
+  edge stays anchored, so growth is upward and can never push the HUD
+  off-screen. Text taller than the cap is head-truncated — a leading "…"
+  replaces the oldest words so the words just spoken stay visible. Compact
+  mode remains a fixed single truncated line.
 - Hidden entirely when paused, disconnected, or when the user selects the hidden
   display mode.
+- **Live feedback preempts transient confirmations.** Brief confirmation
+  flashes (Pause/Resume, Auto-Enter toggles, low-mic volume, offline
+  fallback — 1.5 s to 4 s) normally run their full duration, but if the user
+  starts speaking (Listening) or a transcription state arrives while one is
+  showing, the flash ends immediately and the live state shows at once.
+  Lower-priority states still wait for the flash to finish, so a
+  confirmation is never cut short by e.g. a stale state re-emission.
 
 **When "Listening" appears:**
 
 | Situation | Timing |
 |---|---|
 | My Voice off | On voice onset — immediately. |
-| My Voice on, speaker verified recently | On voice onset — immediately (trust window, §6). |
-| My Voice on, no recent verification | Only once the speaker is confirmed. ~0.6 s minimum: the voiceprint model requires 0.5 s of voice. |
+| My Voice on | On voice onset — immediately, **optimistically**, before the speaker is verified. Verification still gates transcription (I3); if it rejects the speaker, the badge is retracted at once. Non-user audio can produce a brief badge flash, never text. |
 
-**Live transcript text** is only shown for models that genuinely stream partial
-results. A model that returns one finished transcript per utterance must not
-claim streaming — doing so produces a useless flash of text *after* the words
-have already been pasted.
+(Previously, with My Voice on and no recent verification, the badge waited for
+speaker confirmation — up to ~2 s measured live. That wait was the single
+largest perceived-latency hit under the gate and is gone; the trust window in §6
+no longer influences when the badge appears.)
 
-Live text requires a streaming engine to be **active**, not merely available. The
-cloud backend returns one finished transcript per utterance and must not be
-marked as streaming. `MoonshineStreaming` and `Nemotron` models do stream and
-render partial text as the user speaks.
+**Live transcript text** is shown whenever the daemon produces a provisional
+preview — the GUI renders any non-empty partial it receives, during the
+transcribing wait *and* while the user is still talking. The daemon, not the
+GUI, decides when previews flow. (Previously the GUI discarded previews unless
+the active model claimed streaming; that gate is gone.) A model that returns
+one finished transcript per utterance must still not claim streaming —
+`Transcriber::supports_streaming()` stays `false` for the cloud backend.
 
-The daemon's live-preview loop (`vad.rs`) re-transcribes the growing buffer on
-an interval while the user is still talking and arms whenever *either*: an
-external stream consumer opted in via `SetConsumeMode` (regardless of engine),
-**or** `Transcriber::supports_streaming()` reports the active engine genuinely
-streams. The cloud backend always reports `false` — firing this loop every
-~200ms would mean a network round trip that often — so normal dictation on
-Groq still only shows one flash of speculative text at a pause, exactly as
-before. A local streaming engine (Nemotron, MoonshineStreaming) reports `true`
-and gets continuous live preview during normal dictation too, not just under
-an external consumer.
+The daemon's live-preview loop (`vad.rs`, `preview_cadence`) re-transcribes the
+growing buffer on an interval while the user is still talking. Three ways it
+arms, in priority order:
+
+1. **Consume mode** (`SetConsumeMode`, regardless of engine) — fast cadence:
+   every `CONSUME_STREAM_INTERVAL_MS` (200ms), self-limited to one round trip
+   at a time. Unchanged; external consumers (Iris) depend on it, and its
+   preview payloads are never prefixed with chunk text.
+2. **A genuinely-streaming local engine** (`supports_streaming()` true —
+   Nemotron, MoonshineStreaming) — same fast cadence; decode is local and
+   cheap. Unchanged.
+3. **The `stt_live_preview` preference (default ON)** — non-streaming cloud
+   backends (Groq) get a SLOW cadence: at most one preview every
+   `LIVE_PREVIEW_INTERVAL_MS` (1.5s), and only after ~1s of NEW audio since
+   the last preview (`LIVE_PREVIEW_MIN_NEW_SAMPLES`). Each tick is a full
+   cloud round trip, so a minute of continuous dictation costs tens of extra
+   API calls, not hundreds. The preview audio is capped to the last ~10s
+   (`CONSUME_STREAM_PREVIEW_MAX_SAMPLES`); for chunked long utterances the
+   already-settled chunk texts are prefixed (when cheaply available) so the
+   overlay shows the whole sentence, not just the open chunk.
+
+Starvation safety for the slow cloud path: a tick is skipped while a
+tentative-silence speculation is pending, while a previous preview is still
+in flight (`preview_pending` single-flight), and entirely until the speaker
+gate has verified the utterance (no API calls for audio that may be dropped).
+It never flips the overlay to "Transcribing" — the user is still talking, so
+the partial text renders under the listening state. The final transcription
+path (speculation → final cut → paste) is untouched by all three arms.
+
+With `stt_live_preview` off, Groq dictation shows no mid-speech previews;
+the free speculative preview at a pause (below) still renders once.
 
 ---
 
@@ -200,13 +242,15 @@ above the threshold, it is the user.
   not when the room goes quiet.
 - Audio that fails is discarded before any transcription is paid for.
 
-**Trust window:** after a confirmed match, the indicator appears on voice onset
-for a period without re-proving identity. This trades a possible brief flash for
-media or another voice against re-paying the 0.5 s floor on every sentence.
+**Trust window:** after a confirmed match, the match is remembered for a period
+without re-proving identity. Since the indicator now appears optimistically on
+every voice onset regardless of verification (§5), the window no longer governs
+badge timing; it remains as the "recently verified" signal (logged as
+`trusted` on `listening_overlay_shown`).
 
-❓ Currently 5 minutes. This is the single most aggressive value in the product
-and directly re-opens the "badge appears when I'm not talking" complaint.
-Product decision needed.
+❓ Currently 5 minutes. With the optimistic badge, a brief flash on non-user
+audio is now expected behavior rather than a trust-window artifact — the
+window's remaining value should be re-evaluated.
 
 **Threshold** is a preference (currently 0.40). Measured on the owner's profile:
 their own voice scores 0.50–0.67, other audio scores below 0.30 in the vast
@@ -249,6 +293,22 @@ Another application taking the microphone is detected within about a second.
   about 3 s. Dictation apps release the mic between phrases; resuming on the
   first free moment means Always starts listening to speech still aimed at the
   other app.
+
+### 7.2 Recorder health and respawn
+
+The `rec` (SoX) process runs for the daemon's lifetime and is only replaced
+when genuinely unhealthy. CoreAudio "buffer overrun" messages trigger a respawn
+only as a **rate**: at least 64 overruns within one 60 s window. Overruns are
+**not counted while capture is deliberately gated** (pause, mic conflict) —
+during a gate nobody drains the pipe, SoX blocks, and CoreAudio discarding
+callbacks is expected backpressure, not a device fault. (The previous
+lifetime-cumulative counter condemned a healthy recorder after any single
+benign backpressure episode — 291 respawns in 2 days, each paying a ~4.5 s
+device cold start.)
+
+When a respawn does happen, the old recorder is killed and reaped **before**
+the replacement is spawned, so two `rec` processes never hold the input device
+at the same time (I4).
 
 ---
 
@@ -350,6 +410,17 @@ Between transcription and the keyboard:
 3. **Glossary corrections** — known mistranscriptions mapped to canonical terms.
 4. **Snippets / text expansion.** ❓ Not verified in detail.
 5. **Grammar cleanup** — an LLM pass, on by default (`postprocess_enabled`).
+   The blocking call at paste time is pre-warmed in the background so it
+   usually lands as a cache hit (or joins the identical in-flight request):
+   - **Un-chunked utterance:** the tentative-silence speculation warms the
+     grammar key for its transcript as soon as speculative STT returns.
+   - **Chunked utterance:** the paste-time call is keyed on the *join* of the
+     corrected chunks (+ tail), a key the per-chunk corrections never touch.
+     Each chunk that finishes its per-chunk correction warms the joined
+     transcript once every committed chunk is settled; a voiced tail's
+     speculation warms join + tail. Warm and paste build the request through
+     the same builder (`correction_request::build`), which is what keeps the
+     cache keys byte-identical.
 6. **Corrections** — the user can log a correction for a wrong transcription;
    passive capture of clipboard edits is available but off by default.
 
@@ -401,6 +472,7 @@ Stored in the daemon's database, editable from Settings and the CLI
 | `silero_threshold` | 0.4 | VAD speech probability |
 | `stt_silence_secs` | 1.4 (this instance: 2.2) | Silence that ends an utterance. CLI key is `stt_silence`. |
 | `stt_adaptive_silence` | true | Extend the window mid-sentence |
+| `stt_live_preview` | true | Live provisional transcript in the overlay while still talking (§5) |
 | `stt_auto_enter` | true | Press Return after pasting |
 | `auto_enter_delay_ms` | 0 (this instance: 800) | Grace period before Return |
 | `speaker_gate_enabled` | true | My Voice |

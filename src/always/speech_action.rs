@@ -370,6 +370,7 @@ mod tests {
             localization: Localization::ENGLISH,
             transcript_stream_enabled: false,
             audible_status_sound: crate::always::status_sound::StatusSoundSetting::default(),
+            stt_live_preview: true,
         }
     }
 

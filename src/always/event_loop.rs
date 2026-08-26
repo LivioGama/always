@@ -510,6 +510,20 @@ fn handle_speech(
                 reason: filter_result,
             });
             pause::set_last_filtered(text);
+            // Real speech a filter rule blocked still lands on the clipboard
+            // (no paste, no auto-enter) so a wrong filter verdict costs the
+            // user a manual ⌘V instead of the whole utterance. Hallucinated
+            // utterances below are excluded — whisper noise artifacts would
+            // clobber the clipboard on every false VAD trigger.
+            match paste::copy_to_clipboard(text.to_string()) {
+                Ok(()) => tracing::info!(
+                    chars = text.chars().count(),
+                    "filtered_copied_to_clipboard"
+                ),
+                Err(error) => {
+                    tracing::warn!(error = %error, "filtered_clipboard_copy_failed")
+                }
+            }
             event::global_broadcaster().voice_activity_ended();
             event::global_broadcaster().transcription_filtered(reason);
             Ok(())
@@ -661,6 +675,12 @@ fn handle_speech(
                 processed: &final_text,
                 energy,
             });
+            // Reference point for `pre_paste_ms` below: everything between
+            // here and the clipboard write (merge, dedupe, stream append,
+            // pause checks) should be near-instant — unexplained
+            // multi-second stalls were observed in this window and this
+            // makes them measurable.
+            let pasting_logged_at = Instant::now();
 
             event::global_broadcaster().transcript_final(final_text.clone());
 
@@ -780,9 +800,10 @@ fn handle_speech(
                 return Ok(());
             }
 
-            if daemon::list_daemon_pids().len() > 1 {
-                daemon::reconcile_duplicate_processes();
-            }
+            // NOTE: no duplicate-daemon check here. It used to fork
+            // `ps -eo pid=,args=` on EVERY paste (multi-second stalls were
+            // traced to this window); the 30s reconcile loop at startup
+            // already owns duplicate-process cleanup.
 
             // Inserted (dictation) text is LEFT on the clipboard on purpose —
             // the user wants every pasted utterance to land in their clipboard
@@ -854,6 +875,9 @@ fn handle_speech(
                     .saturating_duration_since(timing.stt_done_at)
                     .as_millis() as u64,
                 grammar_ms,
+                pre_paste_ms = paste_started
+                    .saturating_duration_since(pasting_logged_at)
+                    .as_millis() as u64,
                 paste_ms = pasted_at
                     .saturating_duration_since(paste_started)
                     .as_millis() as u64,

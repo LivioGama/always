@@ -54,6 +54,11 @@ struct ChunkSlot {
 struct ChunkText {
     raw: String,
     corrected: Option<String>,
+    /// The per-chunk grammar attempt finished (success or failure), so
+    /// this chunk's contribution to the final join can no longer change.
+    /// Drives `settled_join` — the joined-text grammar warm must only
+    /// fire on a join that `finalize` is guaranteed to reproduce.
+    grammar_done: bool,
 }
 
 pub struct ChunkedTranscript {
@@ -66,7 +71,54 @@ pub struct ChunkedTranscript {
 
 #[derive(Default)]
 pub struct ChunkAccumulator {
-    slots: Vec<Arc<ChunkSlot>>,
+    /// Shared with the per-chunk transcription threads so a finished
+    /// chunk can inspect ALL committed chunks and warm the joined-text
+    /// grammar key (see `settled_join`).
+    slots: Arc<Mutex<Vec<Arc<ChunkSlot>>>>,
+}
+
+/// Cheap read-only view of the committed chunks, safe to move into the
+/// tail-speculation thread in `vad.rs` so its grammar warm can target
+/// the prospective joined transcript instead of the tail alone.
+#[derive(Clone)]
+pub struct ChunkJoinHandle {
+    slots: Arc<Mutex<Vec<Arc<ChunkSlot>>>>,
+}
+
+impl ChunkJoinHandle {
+    pub fn chunk_count(&self) -> usize {
+        self.slots.lock().len()
+    }
+
+    /// See [`settled_join`].
+    pub fn settled_join(&self) -> Option<String> {
+        let slots = self.slots.lock().clone();
+        settled_join(&slots)
+    }
+}
+
+/// The exact chunk join `finalize` will assemble, or `None` while it is
+/// still undetermined. `Some` only when every committed chunk has a
+/// stored successful result AND its grammar attempt has finished —
+/// `finalize` then picks `corrected.unwrap_or(raw)` per chunk, which is
+/// reproduced byte-for-byte here (same choice, same skip-empty, same
+/// single-space join). A failed or in-flight chunk returns `None`: its
+/// final text depends on the retry at finalize. Non-consuming.
+fn settled_join(slots: &[Arc<ChunkSlot>]) -> Option<String> {
+    let mut parts: Vec<String> = Vec::with_capacity(slots.len());
+    for slot in slots {
+        let guard = slot.result.lock();
+        match guard.as_ref() {
+            Some(Ok(text)) if text.grammar_done => {
+                let chosen = text.corrected.clone().unwrap_or_else(|| text.raw.clone());
+                if !chosen.is_empty() {
+                    parts.push(chosen);
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(parts.join(" "))
 }
 
 impl ChunkAccumulator {
@@ -75,11 +127,17 @@ impl ChunkAccumulator {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
+        self.slots.lock().is_empty()
     }
 
     pub fn chunk_count(&self) -> usize {
-        self.slots.len()
+        self.slots.lock().len()
+    }
+
+    pub fn join_handle(&self) -> ChunkJoinHandle {
+        ChunkJoinHandle {
+            slots: Arc::clone(&self.slots),
+        }
     }
 
     /// Commit `audio_chunk` for background transcription. Never discarded
@@ -93,18 +151,19 @@ impl ChunkAccumulator {
         grammar: Option<Arc<crate::always::postprocess::PostProcessor>>,
         rt: &tokio::runtime::Handle,
     ) {
-        let index = self.slots.len();
+        let index = self.slots.lock().len();
         let secs = audio_chunk.len() as f64 / 16_000.0;
         let slot = Arc::new(ChunkSlot {
             index,
             result: Mutex::new(None),
             audio: Mutex::new(Some(audio_chunk.clone())),
         });
-        self.slots.push(Arc::clone(&slot));
+        self.slots.lock().push(Arc::clone(&slot));
         tracing::info!(chunk = index, secs, "chunk_flush");
 
         let transcriber = Arc::clone(transcriber);
         let rt = rt.clone();
+        let all_slots = Arc::clone(&self.slots);
         std::thread::spawn(move || {
             // Same catch_unwind rationale as the speculation thread in
             // `vad.rs`: a panic must surface as a stored failure, not a
@@ -139,9 +198,11 @@ impl ChunkAccumulator {
                     // it before setting `result` made finalize time out and
                     // paste `[audio saved: chunk N]` even though Whisper had
                     // already returned usable text.
+                    let will_correct = grammar.is_some() && !raw.is_empty();
                     *slot.result.lock() = Some(Ok(ChunkText {
                         raw: raw.clone(),
                         corrected: None,
+                        grammar_done: !will_correct,
                     }));
                     // Success: the audio has served its purpose. Drop it only
                     // after a usable raw result is visible to finalize.
@@ -153,6 +214,7 @@ impl ChunkAccumulator {
                     // Per-chunk grammar correction, paid for during the
                     // recording instead of at finalize. Best-effort: any
                     // failure falls back to the raw Whisper text.
+                    let grammar_for_warm = grammar.clone();
                     let corrected = grammar.and_then(|pp| {
                         if raw.is_empty() {
                             return None;
@@ -168,11 +230,37 @@ impl ChunkAccumulator {
                         corrected = corrected.is_some(),
                         "chunk_transcribed"
                     );
-                    if let Some(corrected) = corrected {
+                    {
                         let mut result = slot.result.lock();
                         if let Some(Ok(text)) = result.as_mut() {
-                            text.corrected = Some(corrected);
+                            text.corrected = corrected;
+                            text.grammar_done = true;
                         }
+                    }
+                    // Joined-transcript grammar warm. The paste path's
+                    // blocking grammar call is keyed on the JOIN of the
+                    // corrected chunks (+ tail), not on any chunk's raw
+                    // text — a key no per-chunk correction ever touched,
+                    // which is why chunked dictations (the vast majority,
+                    // measured 469/518 pastes) always paid a cold
+                    // ~600-1400ms LLM call at paste. As soon as this
+                    // chunk settles the join, start that call in the
+                    // background so the paste-path request lands as a
+                    // cache hit / joins the in-flight single-flight cell.
+                    // If more chunks follow, the superseded warm is a
+                    // wasted-but-cached call, bounded per chunk and by
+                    // GRAMMAR_MAX_CHARS (above it the paste path skips
+                    // blocking grammar entirely).
+                    let slots_snapshot = all_slots.lock().clone();
+                    if let Some(pp) = grammar_for_warm
+                        && let Some(join) = settled_join(&slots_snapshot)
+                        && !crate::always::event_loop::is_short_utterance(&join)
+                        && join.chars().count() <= crate::always::event_loop::GRAMMAR_MAX_CHARS
+                    {
+                        let req = crate::always::correction_request::build(&join, pp.can_correct());
+                        rt.spawn(async move {
+                            let _ = pp.process_request(&req).await;
+                        });
                     }
                 }
                 Err(err) => {
@@ -191,9 +279,10 @@ impl ChunkAccumulator {
     /// Emits the GUI transcribing heartbeat while waiting so the overlay
     /// lease can't expire during a long straggler.
     pub fn finalize(&self, transcriber: &Arc<dyn Transcriber>) -> ChunkedTranscript {
-        let mut parts: Vec<String> = Vec::with_capacity(self.slots.len());
+        let slots: Vec<Arc<ChunkSlot>> = self.slots.lock().clone();
+        let mut parts: Vec<String> = Vec::with_capacity(slots.len());
         let mut failed = 0usize;
-        for slot in &self.slots {
+        for slot in &slots {
             // Each chunk has had at least a full chunk-duration of head
             // start; scale the residual wait like the speculation wait in
             // `vad.rs` does.
@@ -253,7 +342,7 @@ impl ChunkAccumulator {
 
         ChunkedTranscript {
             text: parts.join(" "),
-            chunk_count: self.slots.len(),
+            chunk_count: slots.len(),
             failed_chunks: failed,
         }
     }
@@ -491,5 +580,74 @@ mod tests {
         let acc = ChunkAccumulator::new();
         assert!(acc.is_empty());
         assert_eq!(acc.chunk_count(), 0);
+    }
+
+    fn slot_with(result: Option<Result<ChunkText, String>>) -> Arc<ChunkSlot> {
+        Arc::new(ChunkSlot {
+            index: 0,
+            result: Mutex::new(result),
+            audio: Mutex::new(None),
+        })
+    }
+
+    #[test]
+    fn settled_join_prefers_corrected_and_matches_finalize_choice() {
+        let slots = vec![
+            slot_with(Some(Ok(ChunkText {
+                raw: "furst part".into(),
+                corrected: Some("first part".into()),
+                grammar_done: true,
+            }))),
+            slot_with(Some(Ok(ChunkText {
+                raw: "second part".into(),
+                corrected: None,
+                grammar_done: true,
+            }))),
+        ];
+        assert_eq!(
+            settled_join(&slots).as_deref(),
+            Some("first part second part")
+        );
+    }
+
+    #[test]
+    fn settled_join_is_none_while_grammar_pending_or_chunk_failed() {
+        let pending = vec![slot_with(Some(Ok(ChunkText {
+            raw: "text".into(),
+            corrected: None,
+            grammar_done: false,
+        })))];
+        assert!(settled_join(&pending).is_none());
+
+        let in_flight = vec![slot_with(None)];
+        assert!(settled_join(&in_flight).is_none());
+
+        let failed = vec![slot_with(Some(Err("boom".into())))];
+        assert!(settled_join(&failed).is_none());
+    }
+
+    #[test]
+    fn no_grammar_flush_settles_immediately() {
+        let rt = rt();
+        let t = mock(vec!["hello there"], vec![]);
+        let mut acc = ChunkAccumulator::new();
+        acc.flush(vec![0i16; 16_000], &t, None, rt.handle());
+        let handle = acc.join_handle();
+        // The background thread stores the raw result with grammar_done
+        // (no post-processor was supplied); poll briefly for it.
+        let started = Instant::now();
+        let join = loop {
+            if let Some(j) = handle.settled_join() {
+                break j;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "join never settled"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(join, "hello there");
+        // And finalize assembles the identical string.
+        assert_eq!(acc.finalize(&t).text, "hello there");
     }
 }

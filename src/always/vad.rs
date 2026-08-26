@@ -518,6 +518,18 @@ const CONSUME_STREAM_MIN_SAMPLES: usize = 4_000;
 /// transcription (a major source of consume-mode/Iris latency). 10s shows the
 /// recent words while keeping every preview cheap; the final is always complete.
 const CONSUME_STREAM_PREVIEW_MAX_SAMPLES: usize = 10 * 16_000;
+/// Live mid-speech preview cadence for NON-streaming backends (Groq)
+/// during normal dictation, gated by the `stt_live_preview` pref. Each
+/// tick is a full cloud round trip (~250-400ms typical, up to ~1.5s),
+/// so this is an order of magnitude slower than
+/// `CONSUME_STREAM_INTERVAL_MS` above: fast enough that the overlay
+/// text feels live, slow enough that a minute of dictation costs tens
+/// of extra API calls, not hundreds.
+const LIVE_PREVIEW_INTERVAL_MS: u64 = 1_500;
+/// Minimum NEW voiced audio (samples at 16kHz, ~1s) accumulated since
+/// the last live-preview kickoff before the next tick may fire.
+/// Re-transcribing near-identical audio is a wasted round trip.
+const LIVE_PREVIEW_MIN_NEW_SAMPLES: usize = 16_000;
 /// Adaptive mid-sentence extension: when the speculative transcript ends
 /// mid-thought (no terminator, or a trailing connector word), the final
 /// silence window is stretched by this factor so a thinking pause doesn't
@@ -541,6 +553,63 @@ const TRAILING_CONNECTORS: &[&str] = &[
     "and", "but", "or", "so", "because", "which", "that", "to", "the", "a", "an", "with", "for",
     "of", "in", "on", "at", "by",
 ];
+
+/// How the mid-speech live-preview loop ticks for the current
+/// mode/engine/pref combination. `None` = no live preview at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreviewCadence {
+    /// Minimum time between preview kickoffs.
+    interval_ms: u64,
+    /// New samples (beyond the last kickoff) required before the next
+    /// tick. Zero for the fast local/consume path.
+    min_new_samples: usize,
+    /// Whether a pending tentative-silence speculation blocks the tick.
+    /// The slow cloud path must never race the speculative/final
+    /// transcription; the fast path never waited and must not start.
+    require_speculation_idle: bool,
+    /// Whether kicking off a preview flips the overlay to Transcribing.
+    /// Consume/streaming previews historically did; the slow cloud
+    /// preview keeps the Listening badge — the user is still talking
+    /// and the partial text renders under it.
+    flip_overlay: bool,
+    /// Prefix the settled chunk-join text so a long chunked utterance's
+    /// preview shows the whole sentence, not just the open chunk. Only
+    /// the slow overlay path — consume-mode payloads are parsed by
+    /// external consumers and must not change shape.
+    prefix_settled_chunks: bool,
+}
+
+/// Decide whether — and how — the live preview loop is armed.
+///
+/// Priority: consume mode or a genuinely-streaming engine keep the
+/// original fast cadence (unchanged behavior). Otherwise the
+/// `stt_live_preview` pref arms a slow cloud cadence so Groq dictation
+/// still shows provisional text while the user talks.
+fn preview_cadence(
+    consume_mode: bool,
+    streaming_engine: bool,
+    live_preview_pref: bool,
+) -> Option<PreviewCadence> {
+    if consume_mode || streaming_engine {
+        return Some(PreviewCadence {
+            interval_ms: CONSUME_STREAM_INTERVAL_MS,
+            min_new_samples: 0,
+            require_speculation_idle: false,
+            flip_overlay: true,
+            prefix_settled_chunks: false,
+        });
+    }
+    if live_preview_pref {
+        return Some(PreviewCadence {
+            interval_ms: LIVE_PREVIEW_INTERVAL_MS,
+            min_new_samples: LIVE_PREVIEW_MIN_NEW_SAMPLES,
+            require_speculation_idle: true,
+            flip_overlay: false,
+            prefix_settled_chunks: true,
+        });
+    }
+    None
+}
 
 /// StateMonitor replaces its partial transcript on every event, so streaming
 /// producers must send the cumulative text rather than the latest chunk only.
@@ -746,6 +815,10 @@ fn record_with_local_vad(
     // the thread on completion.
     let preview_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut last_preview_at: Option<std::time::Instant> = None;
+    // Total voiced-buffer size (committed + live) at the last preview
+    // kickoff. Drives the slow cloud cadence's "enough NEW audio" check
+    // so a tick never re-transcribes near-identical audio.
+    let mut samples_at_last_preview: usize = 0;
     // Adaptive mid-sentence extension: latched once per silence run when
     // the speculative transcript looks unfinished; reset on speech resume.
     // `decided` records that the speculative text was inspected (either
@@ -778,8 +851,8 @@ fn record_with_local_vad(
     // Speaker verification ladder + tail monitor (see SPEAKER_TAIL_*
     // consts). A check runs every SPEAKER_TAIL_CHECK_EVERY_SAMPLES of
     // NEW voiced audio: before verification it tries to confirm the
-    // user (and only then announces the listening overlay — media must
-    // never light it up); after verification it watches the trailing
+    // user (the badge is already up optimistically — a rejection
+    // retracts it); after verification it watches the trailing
     // window so the utterance ends when the USER stops talking, not
     // when the room goes quiet.
     let mut next_speaker_check = SPEAKER_TAIL_CHECK_EVERY_SAMPLES;
@@ -956,22 +1029,17 @@ fn record_with_local_vad(
         // discriminator (see EARLY_VOICE_MIN_FRAMES) and the 150ms
         // retraction below covers anything that still slips through.
         //
-        // Skipped entirely when the "My Voice" gate is active
-        // (`speaker_gate_requested`): those users enabled the feature
-        // precisely so that other people and background media do not
-        // register, and an announce-before-verify makes the overlay blink
-        // on every non-user voice for the 40ms-4s until the gate rejects
-        // it. With the gate on, the announce comes from
-        // `speaker_gate_verified` / whole-utterance pass below instead —
-        // slightly later, but only ever for the enrolled user.
+        // Runs even when the "My Voice" gate is active and the speaker
+        // is not yet trusted: the badge goes up OPTIMISTICALLY on onset
+        // (real logs showed the verify wait holding it back up to ~2s —
+        // the single biggest perceived-latency hit under the gate). The
+        // gate still owns transcription: a rejection retracts the badge
+        // via `VoiceActivityEnded` on every reject path (unavailable /
+        // early / tentative / final), so non-user audio shows at most a
+        // brief flash, never text.
         if is_speech && first_voice_at.is_none() {
             first_voice_at = Some(std::time::Instant::now());
         }
-        // The gate normally holds the badge back until the speaker is
-        // confirmed. Inside the trust window a match was confirmed
-        // seconds ago, so the badge goes up on onset instead — see
-        // SPEAKER_TRUST_WINDOW_MS.
-        //
         // Deliberately NOT gated on `!in_speech`. It used to be, and
         // that silently voided the fast path: `in_speech` latches after
         // `onset_ms` (60 ms = 2 frames), so on any utterance with a
@@ -982,7 +1050,7 @@ fn record_with_local_vad(
         // being true. Once `in_speech` is set the streak requirement is
         // already satisfied by definition, so the transient guard the
         // streak provides is not lost.
-        if !voice_activity_announced && (!speaker_gate_requested || speaker_trust_active()) {
+        if !voice_activity_announced {
             if early_voice_frame_ok(
                 frame_energy,
                 last_prob,
@@ -1078,13 +1146,11 @@ fn record_with_local_vad(
                             event::global_broadcaster().low_microphone_volume_maybe(frame_energy);
                         }
 
-                        // Send voice activity detected event. With the
-                        // "My Voice" gate active the overlay waits for
-                        // speaker verification instead (see the ladder
-                        // below) — unverified audio must stay invisible.
-                        if !speaker_gate_requested {
-                            announce_voice_activity!();
-                        }
+                        // Send voice activity detected event. Fires under
+                        // the "My Voice" gate too — the badge is
+                        // optimistic (see the early-voice announce above);
+                        // a gate rejection retracts it.
+                        announce_voice_activity!();
                         // Clear the idle-auto-paused flag the moment we
                         // see voice. Upstream calls `mark_voice_seen()`
                         // unconditionally below (every confirmed speech
@@ -1163,11 +1229,13 @@ fn record_with_local_vad(
                 // briefly; rec's 131KB pipe buffer (~4s) absorbs it.
                 //
                 // UNVERIFIED phase: a trailing-window match at the full
-                // threshold verifies the user (typically 0.5-1s in) and
-                // only then announces the listening overlay. Still
-                // unverified at ~2s → decisive whole-utterance check,
-                // ABORT on mismatch — background media dialogue must not
-                // hold the recorder hostage for an entire scene.
+                // threshold verifies the user (typically 0.5-1s in) —
+                // the listening overlay is already up optimistically, so
+                // verification only confirms it (and a mismatch retracts
+                // it). Still unverified at ~2s → decisive
+                // whole-utterance check, ABORT on mismatch — background
+                // media dialogue must not hold the recorder hostage for
+                // an entire scene.
                 //
                 // VERIFIED phase: keep scoring the trailing window. The
                 // generic VAD can never end the utterance while media
@@ -1264,8 +1332,9 @@ fn record_with_local_vad(
 
                 // LIVE preview: while the user is mid-sentence (this is the
                 // voiced branch — no pause needed), re-transcribe the growing
-                // buffer on an interval and emit it as a preview. Two
-                // independent reasons this can be armed:
+                // buffer on an interval and emit it as a preview. Three
+                // independent reasons this can be armed (see
+                // `preview_cadence` for the priority):
                 // - `is_consume_mode()`: a stream consumer (e.g. Iris) opted
                 //   in via `SetConsumeMode`, regardless of engine.
                 // - `transcriber.supports_streaming()`: the active engine
@@ -1273,34 +1342,56 @@ fn record_with_local_vad(
                 //   Nemotron/MoonshineStreaming — fast, no network round
                 //   trip), so the HUD can show live text as SPEC.md §5
                 //   promises without waiting for an external consumer to ask.
-                // Cloud backends (Groq) report `false` here on purpose —
-                // firing this every `CONSUME_STREAM_INTERVAL_MS` would mean
-                // a network round trip that often, which is why this stayed
-                // consume-mode-only before local streaming engines existed.
-                // Serialised by `preview_pending`; the effective cadence
-                // self-limits to one round-trip. Preview only — the final
-                // still comes from the speculation/chunker path, unchanged.
-                if (crate::always::pause::is_consume_mode() || transcriber.supports_streaming())
-                    && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
+                // - `cfg.stt_live_preview` (default on): non-streaming cloud
+                //   backends (Groq) get a SLOW cadence — one full round trip
+                //   every ~1.5s, and only once ~1s of new audio accumulated —
+                //   so normal dictation shows provisional text while the
+                //   user is still talking without hammering the API.
+                // Serialised by `preview_pending`; the slow path additionally
+                // yields to a pending speculation so it can never starve the
+                // tentative-silence/final transcription. Preview only — the
+                // final still comes from the speculation/chunker path,
+                // unchanged.
+                if let Some(cadence) = preview_cadence(
+                    crate::always::pause::is_consume_mode(),
+                    transcriber.supports_streaming(),
+                    cfg.stt_live_preview,
+                ) && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
                     && speech_samples.len() >= CONSUME_STREAM_MIN_SAMPLES
+                    && committed_samples + speech_samples.len()
+                        >= samples_at_last_preview + cadence.min_new_samples
+                    && !(cadence.require_speculation_idle && speculation_pending)
                     && !preview_pending.load(std::sync::atomic::Ordering::Relaxed)
                     && last_preview_at.is_none_or(|t| {
-                        t.elapsed() >= std::time::Duration::from_millis(CONSUME_STREAM_INTERVAL_MS)
+                        t.elapsed() >= std::time::Duration::from_millis(cadence.interval_ms)
                     })
                 {
                     last_preview_at = Some(std::time::Instant::now());
+                    samples_at_last_preview = committed_samples + speech_samples.len();
                     preview_pending.store(true, std::sync::atomic::Ordering::Relaxed);
-                    flip_to_transcribing!();
+                    if cadence.flip_overlay {
+                        flip_to_transcribing!();
+                    }
                     // Cap to the last N seconds so a long chunk's preview stays
                     // cheap and can't monopolize the single STT engine ahead of
                     // the final transcription.
                     let preview_len = CONSUME_STREAM_PREVIEW_MAX_SAMPLES.min(speech_samples.len());
                     let audio_snapshot =
                         speech_samples[speech_samples.len() - preview_len..].to_vec();
+                    // Slow overlay path only: prefix the already-settled
+                    // chunk texts so a long chunked utterance previews as
+                    // the whole sentence, not just the open chunk. Cheap
+                    // (non-blocking; `None` while any chunk is in flight).
+                    let settled_prefix = if cadence.prefix_settled_chunks && !chunker.is_empty() {
+                        chunker.join_handle().settled_join()
+                    } else {
+                        None
+                    };
                     let transcriber_for_preview = Arc::clone(transcriber);
                     let rt_for_preview = rt.clone();
                     let flag = Arc::clone(&preview_pending);
                     std::thread::spawn(move || {
+                        let preview_started = std::time::Instant::now();
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                             || -> Result<crate::stt::TranscriptionResult> {
                                 let wav = audio::create_wav_bytes_i16_mono_16k(&audio_snapshot)?;
@@ -1310,8 +1401,13 @@ fn record_with_local_vad(
                                     while let Some(item) = stream.next().await {
                                         let item = item.map_err(anyhow::Error::from)?;
                                         if append_streaming_preview(&mut accumulated, &item.text) {
-                                            event::global_broadcaster()
-                                                .transcript_chunk(accumulated.clone());
+                                            let display = match settled_prefix.as_deref() {
+                                                Some(prefix) if !prefix.is_empty() => {
+                                                    format!("{prefix} {accumulated}")
+                                                }
+                                                _ => accumulated.clone(),
+                                            };
+                                            event::global_broadcaster().transcript_chunk(display);
                                         }
                                     }
                                     Ok::<(), anyhow::Error>(())
@@ -1322,8 +1418,18 @@ fn record_with_local_vad(
                                 })
                             },
                         ));
-                        if let Err(error) = outcome {
-                            tracing::warn!(error = ?error, "streaming_preview_failed");
+                        match outcome {
+                            Ok(Ok(result)) => tracing::info!(
+                                chars = result.text.len(),
+                                preview_ms = preview_started.elapsed().as_millis() as u64,
+                                "live_preview_sent"
+                            ),
+                            Ok(Err(error)) => {
+                                tracing::warn!(error = ?error, "streaming_preview_failed")
+                            }
+                            Err(error) => {
+                                tracing::warn!(error = ?error, "streaming_preview_failed")
+                            }
                         }
                         flag.store(false, std::sync::atomic::Ordering::Relaxed);
                     });
@@ -1494,6 +1600,10 @@ fn record_with_local_vad(
                     None
                 };
                 let rt_for_warm = rt.clone();
+                // For the warm's target text: a chunked utterance pastes
+                // the JOIN of the committed chunks + this tail, so the
+                // warm must key on that join, not the tail alone.
+                let chunk_join = chunker.join_handle();
                 std::thread::spawn(move || {
                     // Wrap in catch_unwind: a panic in transcribe_from_bytes
                     // (network, deserialization, etc.) used to poison
@@ -1542,19 +1652,53 @@ fn record_with_local_vad(
                     // paste path arrives while this is still in flight. If
                     // the user resumed speaking, the final text differs and
                     // this warm is a wasted-but-cached call.
+                    //
+                    // Chunked utterance: the paste key is over
+                    // join(corrected chunks) + tail (see
+                    // `finalize_chunked`), so warm THAT — but only once
+                    // the join is deterministic (every chunk's grammar
+                    // settled); an unsettled join would warm a key
+                    // finalize never asks for.
                     if let Some(text) = warm_text
                         && captured_gen == slot.current_generation()
-                        && !crate::always::event_loop::is_short_utterance(&text)
                         && let Some(pp) = grammar_warm
                     {
+                        let warm_target = if chunk_join.chunk_count() > 0 {
+                            chunk_join.settled_join().map(|joined| {
+                                // Byte-identical to finalize_chunked's
+                                // assembly: trimmed tail, single-space
+                                // separator, joined-only when the tail is
+                                // empty.
+                                let tail = text.trim();
+                                if joined.is_empty() {
+                                    tail.to_string()
+                                } else if tail.is_empty() {
+                                    joined
+                                } else {
+                                    format!("{joined} {tail}")
+                                }
+                            })
+                        } else {
+                            Some(text)
+                        };
                         // Build through the SAME request builder as the
                         // paste path — identical tiering, candidates, and
                         // session context mean an identical cache key, so
                         // the paste path's grammar call is a cache hit.
-                        let req = crate::always::correction_request::build(&text, pp.can_correct());
-                        rt_for_warm.spawn(async move {
-                            let _ = pp.process_request(&req).await;
-                        });
+                        // Same skip conditions as the paste path: short
+                        // utterances bypass grammar, oversized joins skip
+                        // the blocking pass.
+                        if let Some(target) = warm_target
+                            && !crate::always::event_loop::is_short_utterance(&target)
+                            && target.chars().count()
+                                <= crate::always::event_loop::GRAMMAR_MAX_CHARS
+                        {
+                            let req =
+                                crate::always::correction_request::build(&target, pp.can_correct());
+                            rt_for_warm.spawn(async move {
+                                let _ = pp.process_request(&req).await;
+                            });
+                        }
                     }
                 });
             }
@@ -1602,6 +1746,15 @@ fn record_with_local_vad(
             }
         } else {
             consecutive_speech = 0;
+            // A speech-like blip that died before anything was announced:
+            // drop the latency reference with it. Left set, the next real
+            // utterance in this same recording call would measure its
+            // badge latency from the stale blip — the same class of bogus
+            // multi-second `latency_ms` values as the retraction leak
+            // fixed below.
+            if !voice_activity_announced && early_voice_streak == 0 {
+                first_voice_at = None;
+            }
             if voice_activity_announced && !voice_logged {
                 tentative_voice_silence += 1;
                 let enough_wall_time = voice_activity_announced_at
@@ -2532,5 +2685,45 @@ mod tests {
         ));
         assert_eq!(accumulated, "Bonjour, ça va ? Très bien.");
         assert!(!accumulated.contains(", B, o"));
+    }
+
+    #[test]
+    fn preview_cadence_fast_path_for_consume_mode_and_streaming_engines() {
+        // Consume mode keeps the original fast cadence regardless of
+        // engine or pref — external consumers (Iris) depend on it.
+        for (streaming, pref) in [(false, false), (false, true), (true, false), (true, true)] {
+            let cadence = super::preview_cadence(true, streaming, pref)
+                .expect("consume mode always arms the preview");
+            assert_eq!(cadence.interval_ms, super::CONSUME_STREAM_INTERVAL_MS);
+            assert_eq!(cadence.min_new_samples, 0);
+            assert!(!cadence.require_speculation_idle);
+            assert!(cadence.flip_overlay);
+            assert!(!cadence.prefix_settled_chunks);
+        }
+        // A genuinely-streaming engine gets the same fast path even with
+        // the live-preview pref off (streaming previews are local + free).
+        let cadence = super::preview_cadence(false, true, false)
+            .expect("streaming engine always arms the preview");
+        assert_eq!(cadence.interval_ms, super::CONSUME_STREAM_INTERVAL_MS);
+    }
+
+    #[test]
+    fn preview_cadence_slow_cloud_path_gated_on_pref() {
+        // Groq (non-streaming) + pref ON → slow, starvation-safe cadence.
+        let cadence = super::preview_cadence(false, false, true)
+            .expect("live-preview pref arms the slow cloud cadence");
+        assert_eq!(cadence.interval_ms, super::LIVE_PREVIEW_INTERVAL_MS);
+        assert_eq!(cadence.min_new_samples, super::LIVE_PREVIEW_MIN_NEW_SAMPLES);
+        assert!(cadence.require_speculation_idle);
+        assert!(!cadence.flip_overlay);
+        assert!(cadence.prefix_settled_chunks);
+        // The slow cadence must actually be slow: a full order of
+        // magnitude above the local/consume interval, and it must demand
+        // real new audio before burning another round trip.
+        assert!(cadence.interval_ms >= 1_000);
+        assert!(cadence.min_new_samples >= 8_000);
+
+        // Pref OFF (and no consume/streaming) → no live preview at all.
+        assert_eq!(super::preview_cadence(false, false, false), None);
     }
 }

@@ -182,6 +182,23 @@ enum OverlayState: Equatable, Hashable {
         }
     }
 
+    /// States that are time-critical live feedback: if one arrives while a
+    /// flash is animating, the flash is cut short and this state shows
+    /// immediately. Deferring "Listening" behind a 1.5–4s informational
+    /// flash makes the badge appear seconds after the user started
+    /// speaking, which reads as "the app isn't hearing me". Lower-priority
+    /// states still defer (see `StatusOverlayController.show(state:)`) so
+    /// an informative flash isn't killed early by e.g. a stale state
+    /// re-emission.
+    var preemptsFlash: Bool {
+        switch self {
+        case .voiceActivity, .transcribing, .transcribingWithText, .transcribingElapsed:
+            return true
+        default:
+            return false
+        }
+    }
+
     var rawValue: String {
         switch self {
         case .paused: return "Paused"
@@ -395,11 +412,25 @@ class StatusOverlayView: NSView {
     /// intrusive during constant dictation.
     private let compact: Bool
 
-    private var iconSize: CGFloat { compact ? 18 : 42 }
+    private var iconSize: CGFloat { compact ? 18 : OverlayHUDSizing.iconSize }
     private var cornerRadius: CGFloat { compact ? 12 : 22 }
-    private var iconLabelSpacing: CGFloat { compact ? 6 : 10 }
-    private var verticalPadding: CGFloat { compact ? 6 : 14 }
-    private var horizontalPadding: CGFloat { compact ? 12 : 20 }
+    private var iconLabelSpacing: CGFloat { compact ? 6 : OverlayHUDSizing.iconLabelSpacing }
+    private var verticalPadding: CGFloat { compact ? 6 : OverlayHUDSizing.verticalPadding }
+    private var horizontalPadding: CGFloat { compact ? 12 : OverlayHUDSizing.horizontalPadding }
+
+    /// Required root height constraint. Width stays fixed forever; height is
+    /// state-dependent in normal mode: the panel grows (up to
+    /// `OverlayHUDSizing.maxHeight`) to fit a long live transcript and
+    /// shrinks back when the text shortens or the state changes.
+    private var heightConstraint: NSLayoutConstraint?
+
+    /// The panel height the current state wants. The window sizes itself to
+    /// this in `lockContentSize`, so the view — which measures the text — is
+    /// the single authority.
+    var desiredHeight: CGFloat {
+        if compact { return StatusOverlayWindow.compactHeight }
+        return heightConstraint?.constant ?? StatusOverlayWindow.overlayHeight
+    }
 
     // Give the content view the same fixed size as its window. Without this,
     // the label's intrinsic one-line width participates in window fitting
@@ -408,7 +439,7 @@ class StatusOverlayView: NSView {
     override var intrinsicContentSize: NSSize {
         compact
             ? NSSize(width: StatusOverlayWindow.compactWidth, height: StatusOverlayWindow.compactHeight)
-            : NSSize(width: StatusOverlayWindow.overlayWidth, height: StatusOverlayWindow.overlayHeight)
+            : NSSize(width: StatusOverlayWindow.overlayWidth, height: desiredHeight)
     }
 
     var state: OverlayState = .voiceActivity {
@@ -430,9 +461,13 @@ class StatusOverlayView: NSView {
         // The content view participates in NSWindow's fitting pass. Required
         // root constraints prevent a long label's intrinsic width from
         // resizing that content view before the wrapping constraint applies.
+        // Width is fixed forever; the height constant is updated by
+        // `applyState` so the panel can grow vertically for long transcripts.
+        let height = heightAnchor.constraint(equalToConstant: frameRect.height)
+        heightConstraint = height
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: frameRect.width),
-            heightAnchor.constraint(equalToConstant: frameRect.height)
+            height
         ])
 
         wantsLayer = true
@@ -461,7 +496,9 @@ class StatusOverlayView: NSView {
         dotWaveView.isHidden = true
         iconContainer.addSubview(dotWaveView)
 
-        label.font = .systemFont(ofSize: compact ? 12 : 15, weight: .medium)
+        label.font = compact
+            ? .systemFont(ofSize: 12, weight: .medium)
+            : OverlayHUDSizing.labelFont
         label.textColor = .secondaryLabelColor
         label.backgroundColor = .clear
         label.isBezeled = false
@@ -469,17 +506,19 @@ class StatusOverlayView: NSView {
         label.isSelectable = false
         label.drawsBackground = false
         label.alignment = .center
-        // The normal HUD has a fixed frame, so long transcript text must wrap
+        // The normal HUD has a fixed width, so long transcript text must wrap
         // inside its content width instead of expanding the panel or being
-        // reduced to a single truncated line. Compact mode remains one line
-        // because its fixed 40-point height is intentionally a pill.
+        // reduced to a single truncated line. Height grows with the text (see
+        // `applyState`) up to `OverlayHUDSizing.maxHeight`; beyond that the
+        // text is head-truncated so the newest words stay visible. Compact
+        // mode remains one line because its fixed 40-point height is
+        // intentionally a pill.
         label.usesSingleLineMode = compact
         label.lineBreakMode = compact ? .byTruncatingTail : .byWordWrapping
-        // Keep the label's vertical demand bounded as well as its width. The
-        // panel is deliberately fixed-size; excess transcript is clipped at
-        // the last visible wrapped line instead of forcing AppKit to resize
-        // the stack or window.
-        label.maximumNumberOfLines = compact ? 1 : 4
+        // Keep the label's vertical demand bounded as well as its width.
+        // `OverlayHUDSizing.fittedTail` guarantees the displayed text fits the
+        // capped height; the line limit is defense against measurement drift.
+        label.maximumNumberOfLines = compact ? 1 : OverlayHUDSizing.maxLines
         label.translatesAutoresizingMaskIntoConstraints = false
 
         iconContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -544,7 +583,19 @@ class StatusOverlayView: NSView {
     private static let waveStates: Set<OverlayState> = [.voiceActivity, .processing, .transcribing]
 
     private func applyState() {
-        label.stringValue = state.rawValue
+        if compact {
+            label.stringValue = state.rawValue
+        } else {
+            // One decision for text + height so they can never disagree: text
+            // past the growth cap is head-truncated ("…" prefix) to keep the
+            // newest words visible, and the panel height fits what is shown.
+            let layout = OverlayHUDSizing.layout(forText: state.rawValue)
+            label.stringValue = layout.display
+            if heightConstraint?.constant != layout.height {
+                heightConstraint?.constant = layout.height
+                invalidateIntrinsicContentSize()
+            }
+        }
 
         // Handle visual distinction for interim vs final text
         if case .transcribingWithText(_, let isInterim) = state {
@@ -590,6 +641,12 @@ class StatusOverlayView: NSView {
 class StatusOverlayWindow: NSPanel {
     private var overlayView: StatusOverlayView?
 
+    /// Read-only view of the state currently rendered by the overlay
+    /// view, if any. Exists so tests can assert WHAT the HUD shows
+    /// (e.g. live partial text vs the bare listening badge), not just
+    /// that a window is visible.
+    var currentOverlayState: OverlayState? { overlayView?.state }
+
     /// Repeating poll that lets the HUD follow the cursor across displays.
     /// nil whenever the HUD is hidden.
     private var mouseFollowTimer: Timer?
@@ -606,10 +663,17 @@ class StatusOverlayWindow: NSPanel {
     /// is re-read at every `show`; a change rebuilds the view + resizes.
     private var builtCompact = false
 
+    /// Current target size. Width is constant per mode; normal-mode height is
+    /// whatever the content view measured for the current state (base 130pt,
+    /// growing to `OverlayHUDSizing.maxHeight` for long transcripts).
     private var hudSize: NSSize {
-        builtCompact
-            ? NSSize(width: StatusOverlayWindow.compactWidth, height: StatusOverlayWindow.compactHeight)
-            : NSSize(width: StatusOverlayWindow.overlayWidth, height: StatusOverlayWindow.overlayHeight)
+        if builtCompact {
+            return NSSize(width: StatusOverlayWindow.compactWidth, height: StatusOverlayWindow.compactHeight)
+        }
+        return NSSize(
+            width: StatusOverlayWindow.overlayWidth,
+            height: overlayView?.desiredHeight ?? StatusOverlayWindow.overlayHeight
+        )
     }
 
     /// (Re)build the content view when it doesn't exist yet or the user
@@ -626,10 +690,13 @@ class StatusOverlayWindow: NSPanel {
         lockContentSize()
     }
 
-    /// A long transcript must wrap or truncate inside the HUD, never resize
-    /// the panel after its position has been calculated.  AppKit can otherwise
-    /// momentarily adopt the label's intrinsic width, visibly moving a panel
-    /// whose origin was centered for the fixed HUD width.
+    /// Pin the window to exactly `hudSize` — the size the content view
+    /// measured for the current state. Height growth for a long transcript is
+    /// deliberate and flows through here; what must never happen is AppKit's
+    /// own fitting pass momentarily adopting the label's intrinsic one-line
+    /// width, visibly moving a panel whose origin was centered for the fixed
+    /// HUD width. The origin is bottom-left, so reasserting size with the
+    /// same origin keeps the bottom edge anchored and grows the panel upward.
     private func lockContentSize() {
         let size = hudSize
         minSize = size
@@ -1152,8 +1219,11 @@ class StatusOverlayController {
 
     /// Show the overlay and keep it visible until explicitly hidden. Used
     /// for ongoing states like transcribing or voice activity.
-    /// If a flash is currently active, defer until the flash completes
-    /// so the user actually sees the toggle confirmation.
+    /// If a flash is currently active: time-critical states (listening /
+    /// transcribing — `preemptsFlash`) end the flash immediately and show
+    /// right away, because live feedback beats a stale confirmation.
+    /// Everything else defers until the flash completes so the user
+    /// actually sees the toggle confirmation.
     func show(state: OverlayState) {
         // Hidden mode: the user opted out of the HUD entirely.
         guard OverlayDisplayMode.current != .hidden else {
@@ -1161,10 +1231,14 @@ class StatusOverlayController {
             return
         }
         ensureWindow()
-        if isFlashActive() {
+        if isFlashActive() && !state.preemptsFlash {
             pendingShowState = state
             return
         }
+        // Either no flash is active, or the incoming state preempts it.
+        // cancelPendingHide() cancels the flash's hide work item, clears
+        // flashEndsAt (so isFlashActive() is false again) and drops any
+        // deferred pendingShowState — the preempting state supersedes it.
         cancelPendingHide()
         window?.show(state: state, instant: state.isInstantShow)
     }

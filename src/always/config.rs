@@ -270,6 +270,13 @@ pub struct AlwaysConfig {
     pub transcript_stream_enabled: bool,
     /// Status sounds for the four sleep-coding states. Off by default.
     pub audible_status_sound: StatusSoundSetting,
+    /// Live provisional transcript while the user is still talking, on
+    /// NON-streaming backends (Groq): periodically re-transcribe the
+    /// growing utterance and push the partial text to the overlay via
+    /// `TranscriptChunk`. Each tick is a full cloud round trip, so the
+    /// cadence is much slower than the streaming-engine preview loop
+    /// (see `LIVE_PREVIEW_INTERVAL_MS` in vad.rs). Default on.
+    pub stt_live_preview: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -469,6 +476,7 @@ impl AlwaysConfig {
                 .as_deref()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or_default(),
+            stt_live_preview: resolve_stt_live_preview(&prefs),
         };
 
         Ok(config)
@@ -548,7 +556,49 @@ impl Default for AlwaysConfig {
             localization: Localization::ENGLISH,
             transcript_stream_enabled: false,
             audible_status_sound: StatusSoundSetting::default(),
+            stt_live_preview: true,
         }
+    }
+}
+
+/// Resolve the live mid-speech preview toggle. Order: DB pref →
+/// `ALWAYS_STT_LIVE_PREVIEW` env var → default ON.
+fn resolve_stt_live_preview(prefs: &Preferences) -> bool {
+    if let Some(saved) = prefs.stt_live_preview {
+        return saved;
+    }
+    std::env::var("ALWAYS_STT_LIVE_PREVIEW")
+        .ok()
+        .and_then(|s| match s.to_lowercase().as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(true)
+}
+
+#[cfg(test)]
+mod stt_live_preview_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn saved_preference_wins() {
+        let prefs = Preferences {
+            stt_live_preview: Some(false),
+            ..Default::default()
+        };
+        assert!(!resolve_stt_live_preview(&prefs));
+
+        let prefs = Preferences {
+            stt_live_preview: Some(true),
+            ..Default::default()
+        };
+        assert!(resolve_stt_live_preview(&prefs));
+    }
+
+    #[test]
+    fn defaults_on_when_unset() {
+        assert!(resolve_stt_live_preview(&Preferences::default()));
     }
 }
 

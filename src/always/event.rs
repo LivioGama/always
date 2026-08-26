@@ -476,6 +476,10 @@ pub enum DaemonCommand {
         /// Optional so payloads from older GUI builds still decode.
         #[serde(default)]
         audible_status_sound: Option<String>,
+        /// Live mid-speech preview on non-streaming backends.
+        /// Optional so payloads from older GUI builds still decode.
+        #[serde(default)]
+        stt_live_preview: Option<bool>,
     },
     /// Approve a pending correction in the queue and apply it to the
     /// glossary. The daemon emits `CorrectionLogged` on success.

@@ -68,6 +68,14 @@ struct BehaviorPanel: View {
                 "When the transcript-so-far ends mid-thought (no punctuation, trailing 'and'/'which'/…), the pause window is temporarily doubled so the sentence isn't split."
             )
             .font(.caption)
+            Toggle(
+                "Show live transcript while you speak",
+                isOn: $config.sttLivePreview
+            )
+            .help(
+                "Periodically transcribes what you've said so far and shows the provisional text in the overlay while you're still talking. Uses a few extra transcription calls per utterance on the cloud backend."
+            )
+            .font(.caption)
 
             DisclosureGroup("Advanced thresholds") {
                 VStack(alignment: .leading, spacing: 8) {

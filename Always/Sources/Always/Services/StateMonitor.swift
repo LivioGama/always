@@ -296,6 +296,7 @@ class StateMonitor: ObservableObject {
             let silero_threshold: Float
             let adaptive_silence: Bool
             let audible_status_sound: String
+            let stt_live_preview: Bool
         }
         let payload = Payload(
             auto_enter_delay_ms: UInt32(max(0, config.autoEnterDelayMs)),
@@ -304,7 +305,8 @@ class StateMonitor: ObservableObject {
             cooldown_ms: UInt32(max(0, config.sttCooldownMs)),
             silero_threshold: config.sileroThreshold,
             adaptive_silence: config.sttAdaptiveSilence,
-            audible_status_sound: config.audibleStatusSound
+            audible_status_sound: config.audibleStatusSound,
+            stt_live_preview: config.sttLivePreview
         )
         udsClient.sendCommandWithData("ApplyRuntimePreferences", payload)
     }
@@ -402,8 +404,17 @@ class StateMonitor: ObservableObject {
         }
         // Activity-only model: the overlay represents something happening
         // (you speaking or the daemon transcribing), not "daemon is alive".
+        //
+        // Partial text renders whenever the daemon sent some — during the
+        // transcribing wait AND while the user is still talking
+        // (voiceActivity). The daemon is the authority on when previews
+        // flow (streaming engine, consume mode, the stt_live_preview
+        // pref, or the free speculative pass at a pause), so the old
+        // `currentModelSupportsStreaming` render gate is gone: it
+        // silently discarded previews the daemon deliberately produced
+        // on the cloud backend.
         if isTranscribing {
-            if currentModelSupportsStreaming && !partialTranscript.isEmpty {
+            if !partialTranscript.isEmpty {
                 return .transcribingWithText(text: partialTranscript, isInterim: true)
             }
             let elapsed = transcribingSince.map { Date().timeIntervalSince($0) } ?? 0
@@ -412,6 +423,9 @@ class StateMonitor: ObservableObject {
                 : .transcribing
         }
         if isVoiceActivity {
+            if !partialTranscript.isEmpty {
+                return .transcribingWithText(text: partialTranscript, isInterim: true)
+            }
             return .voiceActivity
         }
         return nil
@@ -623,6 +637,12 @@ class StateMonitor: ObservableObject {
                 }
             }
         case .voiceActivityDetected:
+            // Fresh utterance start (not a mid-utterance heartbeat):
+            // drop any stale partial from the previous one so the badge
+            // opens clean instead of flashing old words.
+            if !isVoiceActivity && !isTranscribing {
+                partialTranscript = ""
+            }
             isVoiceActivity = true
             armVoiceLease()
             showOngoingOverlayIfNeeded()
@@ -637,6 +657,7 @@ class StateMonitor: ObservableObject {
             // heard them but suppressed the paste.
             isTranscribing = false
             isVoiceActivity = false
+            partialTranscript = ""
             cancelVoiceLease()
             cancelTranscribingLease()
             let reason = event.data?["reason"] ?? ""
@@ -646,6 +667,7 @@ class StateMonitor: ObservableObject {
             // overlay so the user isn't left on a stuck "Processing…".
             isTranscribing = false
             isVoiceActivity = false
+            partialTranscript = ""
             cancelVoiceLease()
             cancelTranscribingLease()
             let message = event.data?["message"] ?? "Transcription failed"

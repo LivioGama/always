@@ -16,11 +16,21 @@ pub const FRAME_MS: u32 = 30;
 pub const FRAME_SAMPLES: usize = 480;
 pub const FRAME_BYTES: usize = 960;
 
-/// CoreAudio overrun count that triggers a `rec` respawn. Bursts of
-/// "unhandled buffer overrun" mean SoX is discarding input samples —
-/// usually a native-rate capture / resample mismatch on USB mics (e.g.
-/// Elgato Wave:3 @ 48 kHz stereo).
+/// CoreAudio overrun RATE that triggers a `rec` respawn: at least this
+/// many "unhandled buffer overrun" lines inside one
+/// [`REC_OVERRUN_WINDOW_SECS`] window. Sustained bursts mean SoX is
+/// discarding input samples — usually a native-rate capture / resample
+/// mismatch on USB mics (e.g. Elgato Wave:3 @ 48 kHz stereo).
+///
+/// Rate-based, NOT lifetime-cumulative: the old lifetime counter never
+/// decayed, so one benign backpressure episode (event loop deliberately
+/// not draining the pipe) condemned a healthy recorder at the next
+/// `get_or_spawn` — measured at 291 respawns in 2 days, each paying the
+/// ~4.5 s device cold start (see `READ_FRAME_TIMEOUT_MS`).
 const REC_OVERRUN_RESPAWN_THRESHOLD: u32 = 64;
+
+/// Width of the overrun-counting window (see above).
+const REC_OVERRUN_WINDOW_SECS: u64 = 60;
 
 /// Max wall-clock wait for the next bytes of a frame before declaring the
 /// recorder *wedged* (alive, but permanently producing neither data nor
@@ -131,20 +141,71 @@ impl Drop for AudioBuffer {
     }
 }
 
+/// Tumbling-window overrun counter shared between the stderr drainer
+/// (writer) and `is_healthy` (reader). A window older than
+/// [`REC_OVERRUN_WINDOW_SECS`] restarts from 1 on the next overrun, so
+/// only a *sustained* storm crosses the respawn threshold.
+#[cfg(feature = "macos")]
+struct OverrunWindow {
+    /// Epoch seconds of the current window's first overrun.
+    window_start: AtomicU64,
+    count: AtomicU32,
+}
+
+#[cfg(feature = "macos")]
+impl OverrunWindow {
+    fn new() -> Self {
+        Self {
+            window_start: AtomicU64::new(0),
+            count: AtomicU32::new(0),
+        }
+    }
+
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// Record one overrun; returns the count within the current window.
+    fn record(&self) -> u32 {
+        let now = Self::now_secs();
+        let start = self.window_start.load(Ordering::Relaxed);
+        if now.saturating_sub(start) >= REC_OVERRUN_WINDOW_SECS {
+            self.window_start.store(now, Ordering::Relaxed);
+            self.count.store(1, Ordering::Relaxed);
+            1
+        } else {
+            self.count.fetch_add(1, Ordering::Relaxed) + 1
+        }
+    }
+
+    /// Overrun count within the current window, or 0 once the window
+    /// has aged out.
+    fn windowed_count(&self) -> u32 {
+        let start = self.window_start.load(Ordering::Relaxed);
+        if Self::now_secs().saturating_sub(start) >= REC_OVERRUN_WINDOW_SECS {
+            return 0;
+        }
+        self.count.load(Ordering::Relaxed)
+    }
+}
+
 #[cfg(feature = "macos")]
 pub struct RecChild {
     child: Child,
     stdout: ChildStdout,
     reuse_count: u32,
-    /// Incremented by the stderr drainer on CoreAudio buffer overruns.
-    overrun_count: Arc<AtomicU32>,
+    /// Fed by the stderr drainer on CoreAudio buffer overruns.
+    overruns: Arc<OverrunWindow>,
 }
 
 #[cfg(feature = "macos")]
 impl RecChild {
     pub fn spawn() -> Result<Self> {
         tracing::info!("rec_spawn_starting");
-        let overrun_count = Arc::new(AtomicU32::new(0));
+        let overruns = Arc::new(OverrunWindow::new());
         let rec_path = if cfg!(target_os = "macos") {
             "/opt/homebrew/bin/rec"
         } else {
@@ -159,6 +220,14 @@ impl RecChild {
             // speech energy in the VAD pipeline.
             .args([
                 "--no-show-progress",
+                // 131072 is a deliberate stall budget, not a leftover:
+                // ~4 s of slack inside SoX (output-side, 16 kHz mono
+                // i16) plus ~2 s of kernel pipe. The single event-loop
+                // thread legitimately stops draining stdout for seconds
+                // at a time (gate sleeps, paste path); with a small
+                // buffer SoX blocks on write and CoreAudio starts
+                // discarding every callback. See `drain_pending` for why
+                // the backlog is discarded on resume.
                 "--buffer",
                 "131072",
                 "-t",
@@ -185,7 +254,7 @@ impl RecChild {
             .with_context(|| format!("Failed to run '{rec_path}'. Install SoX"))?;
         let stdout = child.stdout.take().context("sox stdout missing")?;
         if let Some(stderr) = child.stderr.take() {
-            let overruns = Arc::clone(&overrun_count);
+            let overruns = Arc::clone(&overruns);
             // Drain stderr on a background thread; log every non-empty
             // line as a daemon warning so SoX/CoreAudio errors surface
             // in the structured log instead of disappearing.
@@ -198,7 +267,15 @@ impl RecChild {
                         continue;
                     }
                     if trimmed.contains("buffer overrun") {
-                        let count = overruns.fetch_add(1, Ordering::Relaxed) + 1;
+                        // Overruns while capture is deliberately gated are
+                        // backpressure we created ourselves — nobody drains
+                        // the pipe during a gate, SoX blocks, CoreAudio
+                        // discards. Expected, not a device fault: don't
+                        // count them toward a respawn.
+                        if crate::always::pause::should_gate_capture() {
+                            continue;
+                        }
+                        let count = overruns.record();
                         // Avoid flooding the log — first + every 32nd.
                         if count == 1 || count.is_multiple_of(32) {
                             tracing::warn!(count, line = %trimmed, "rec_coreaudio_overrun");
@@ -214,7 +291,7 @@ impl RecChild {
             child,
             stdout,
             reuse_count: 0,
-            overrun_count,
+            overruns,
         })
     }
 
@@ -222,37 +299,36 @@ impl RecChild {
         let recorder_lock = Arc::clone(&GLOBAL_RECORDER);
         let mut recorder = recorder_lock.lock();
 
-        match recorder.as_mut() {
+        let needs_respawn = match recorder.as_mut() {
             Some(rec) => {
-                // Check if process is still alive before reuse
                 if rec.is_healthy() {
                     rec.reuse_count += 1;
                     // Restart every 1000 uses to prevent memory leaks
-                    if rec.reuse_count > 1000 {
-                        let _ = rec.child.kill();
-                        *recorder = Some(Self::spawn()?);
-                    }
-                    Ok(Arc::clone(&GLOBAL_RECORDER))
+                    rec.reuse_count > 1000
                 } else {
-                    // Process died, create new one
-                    *recorder = Some(Self::spawn()?);
-                    Ok(Arc::clone(&GLOBAL_RECORDER))
+                    true
                 }
             }
-            None => {
-                // Create new recorder
-                *recorder = Some(Self::spawn()?);
-                Ok(Arc::clone(&GLOBAL_RECORDER))
-            }
+            None => true,
+        };
+        if needs_respawn {
+            // Drop (kill + wait) the old recorder BEFORE spawning the
+            // replacement, so two `rec` processes never hold the input
+            // device at the same time — spawning first briefly ran both
+            // against the same CoreAudio device.
+            *recorder = None;
+            *recorder = Some(Self::spawn()?);
         }
+        Ok(Arc::clone(&GLOBAL_RECORDER))
     }
 
     fn is_healthy(&mut self) -> bool {
-        let overruns = self.overrun_count.load(Ordering::Relaxed);
+        let overruns = self.overruns.windowed_count();
         if overruns >= REC_OVERRUN_RESPAWN_THRESHOLD {
             tracing::warn!(
                 overruns,
                 threshold = REC_OVERRUN_RESPAWN_THRESHOLD,
+                window_secs = REC_OVERRUN_WINDOW_SECS,
                 "rec_respawn_due_to_coreaudio_overruns"
             );
             return false;
@@ -584,6 +660,31 @@ mod tests {
         let wav_data = create_wav_bytes_i16_mono_16k(&samples).unwrap();
         assert!(wav_data.len() > 44); // At least WAV header size
         assert!(wav_data.starts_with(b"RIFF"));
+    }
+
+    #[cfg(feature = "macos")]
+    #[test]
+    fn overrun_window_counts_within_window_and_ages_out() {
+        use super::{OverrunWindow, REC_OVERRUN_RESPAWN_THRESHOLD, REC_OVERRUN_WINDOW_SECS};
+        use std::sync::atomic::Ordering;
+
+        let w = OverrunWindow::new();
+        assert_eq!(w.windowed_count(), 0);
+        for i in 1..=REC_OVERRUN_RESPAWN_THRESHOLD {
+            assert_eq!(w.record(), i);
+        }
+        assert_eq!(w.windowed_count(), REC_OVERRUN_RESPAWN_THRESHOLD);
+
+        // Age the window out: a stale window reports 0 (healthy) and the
+        // next overrun restarts the count from 1 instead of accumulating
+        // forever — the lifetime-counter behavior this replaced.
+        w.window_start.store(
+            OverrunWindow::now_secs() - REC_OVERRUN_WINDOW_SECS,
+            Ordering::Relaxed,
+        );
+        assert_eq!(w.windowed_count(), 0);
+        assert_eq!(w.record(), 1);
+        assert_eq!(w.windowed_count(), 1);
     }
 
     #[test]

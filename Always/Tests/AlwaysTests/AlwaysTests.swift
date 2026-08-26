@@ -196,10 +196,11 @@ final class AlwaysTests: XCTestCase {
 
     // MARK: - StatusOverlayController flash protection
     //
-    // Regression: calling show(state:) while a flash is animating used to
-    // immediately replace the flash icon with the "Listening" state, so users
-    // never saw the pause/resume confirmation. Fixed by deferring show() until
-    // isFlashActive() returns false. These tests exercise that contract.
+    // Contract: a low-priority show(state:) during a flash defers until the
+    // flash completes (the user must see the toggle confirmation), while
+    // time-critical live feedback (`preemptsFlash` — listening/transcribing)
+    // cuts the flash short and shows immediately. Deferring "Listening"
+    // behind a 1.5–4s flash made the badge appear seconds late.
 
     /// `flash()` and `show()` touch AppKit (NSWindow). Skip if we can't bring
     /// up NSApplication in the test environment.
@@ -221,19 +222,19 @@ final class AlwaysTests: XCTestCase {
         }
     }
 
-    func testFlashIsNotClobberedByShow() throws {
+    func testFlashIsNotClobberedByLowPriorityShow() throws {
         try ensureAppKit()
         let controller = StatusOverlayController.shared
 
         controller.flash(state: .autoEnterOn, duration: 1.0)
-        // Simulate voice-activity arriving 100 ms into the flash.
+        // Simulate a low-priority state arriving 100 ms into the flash.
         Thread.sleep(forTimeInterval: 0.1)
-        controller.show(state: .voiceActivity)
+        controller.show(state: .processing)
 
-        // Flash window is still ~900 ms from finishing — the show() call
-        // must not have cancelled it.
+        // Flash window is still ~900 ms from finishing — a non-preempting
+        // show() call must not have cancelled it.
         XCTAssertTrue(controller.isFlashActive(),
-                      "show(state:) called during a flash must not clobber the flash")
+                      "low-priority show(state:) during a flash must not clobber the flash")
 
         // Wait out the flash so subsequent tests start with a clean slate.
         Thread.sleep(forTimeInterval: 1.1)
@@ -241,6 +242,38 @@ final class AlwaysTests: XCTestCase {
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
         XCTAssertFalse(controller.isFlashActive(),
                        "Flash must clear itself after duration elapses")
+    }
+
+    func testListeningPreemptsActiveFlash() throws {
+        try ensureAppKit()
+        let controller = StatusOverlayController.shared
+
+        controller.flash(state: .autoEnterOn, duration: 1.0)
+        XCTAssertTrue(controller.isFlashActive())
+        // Voice activity arriving mid-flash must end the flash immediately —
+        // the listening badge is live feedback and cannot wait up to 4s.
+        Thread.sleep(forTimeInterval: 0.1)
+        controller.show(state: .voiceActivity)
+
+        XCTAssertFalse(controller.isFlashActive(),
+                       "voiceActivity must preempt an active flash, not defer behind it")
+        XCTAssertTrue(isStatusOverlayVisible(),
+                      "overlay must be showing the preempting state immediately")
+
+        // Clean up for subsequent tests.
+        controller.hide()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+    }
+
+    func testPreemptsFlashClassification() {
+        XCTAssertTrue(OverlayState.voiceActivity.preemptsFlash)
+        XCTAssertTrue(OverlayState.transcribing.preemptsFlash)
+        XCTAssertTrue(OverlayState.transcribingElapsed(seconds: 3).preemptsFlash)
+        XCTAssertTrue(
+            OverlayState.transcribingWithText(text: "hi", isInterim: true).preemptsFlash)
+        XCTAssertFalse(OverlayState.processing.preemptsFlash)
+        XCTAssertFalse(OverlayState.paused.preemptsFlash)
+        XCTAssertFalse(OverlayState.autoEnterCountdown(secondsRemaining: 2).preemptsFlash)
     }
 
     func testFlashClearedAfterDuration() throws {
@@ -409,18 +442,124 @@ final class AlwaysTests: XCTestCase {
         )
     }
 
-    func testLongTranscriptKeepsOverlayFixedSize() throws {
+    // Live provisional transcript (Groq live preview): a TranscriptChunk
+    // arriving WHILE the user is still talking must render its text in the
+    // overlay even when the active model does not stream. The daemon is
+    // the authority on when previews flow; the GUI must not discard them
+    // behind a streaming-capability gate.
+    func testLivePreviewTextRendersDuringVoiceActivityOnNonStreamingModel() throws {
+        try ensureAppKit()
+        let monitor = StateMonitor.shared
+
+        monitor.currentModelSupportsStreaming = false
+        monitor.isDaemonConnected = true
+        monitor.isPaused = false
+        monitor.isMasterPaused = false
+        monitor.isIdleAutoPaused = false
+        monitor.isTranscribing = false
+        monitor.isVoiceActivity = false
+        monitor.partialTranscript = ""
+        monitor.invalidateAppliedOverlay()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.2))
+
+        let detected = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: #"{"type":"VoiceActivityDetected","data":null}"#.data(using: .utf8)!
+        )
+        NotificationCenter.default.post(name: .daemonEvent, object: detected)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        XCTAssertTrue(monitor.isVoiceActivity)
+
+        let chunk = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: #"{"type":"TranscriptChunk","data":{"text":"draft while talking"}}"#
+                .data(using: .utf8)!
+        )
+        NotificationCenter.default.post(name: .daemonEvent, object: chunk)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.2))
+
+        XCTAssertEqual(monitor.partialTranscript, "draft while talking")
+        XCTAssertTrue(isStatusOverlayVisible())
+        let shown = NSApplication.shared.windows
+            .compactMap { $0 as? StatusOverlayWindow }
+            .compactMap { $0.currentOverlayState }
+            .first
+        XCTAssertEqual(
+            shown,
+            .transcribingWithText(text: "draft while talking", isInterim: true),
+            "partial text must render while the user is still talking, not the bare listening badge"
+        )
+
+        // Cleanup for later tests.
+        let ended = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: #"{"type":"VoiceActivityEnded","data":null}"#.data(using: .utf8)!
+        )
+        NotificationCenter.default.post(name: .daemonEvent, object: ended)
+        monitor.partialTranscript = ""
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+    }
+
+    // A fresh utterance must open with a clean badge: stale partial text
+    // from the previous utterance is dropped on the first
+    // VoiceActivityDetected of a new utterance.
+    func testFreshVoiceActivityClearsStalePartialTranscript() throws {
+        try ensureAppKit()
+        let monitor = StateMonitor.shared
+
+        monitor.isVoiceActivity = false
+        monitor.isTranscribing = false
+        monitor.partialTranscript = "words from the previous utterance"
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+
+        let detected = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: #"{"type":"VoiceActivityDetected","data":null}"#.data(using: .utf8)!
+        )
+        NotificationCenter.default.post(name: .daemonEvent, object: detected)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+
+        XCTAssertEqual(monitor.partialTranscript, "")
+
+        // Cleanup for later tests.
+        let ended = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: #"{"type":"VoiceActivityEnded","data":null}"#.data(using: .utf8)!
+        )
+        NotificationCenter.default.post(name: .daemonEvent, object: ended)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+    }
+
+    func testLongTranscriptGrowsOverlayHeightWithinCap() throws {
         try ensureAppKit()
         let window = StatusOverlayWindow()
-        let longText = String(repeating: "This transcript must wrap inside the HUD. ", count: 20)
 
+        // Baseline: a short state uses the classic HUD size; remember where
+        // the bottom edge sits.
+        window.show(state: .voiceActivity, instant: true)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        XCTAssertEqual(window.frame.size.height, StatusOverlayWindow.overlayHeight)
+        let anchoredBottomY = window.frame.origin.y
+
+        let longText = String(repeating: "This transcript must wrap inside the HUD. ", count: 20)
         window.show(state: .transcribingWithText(text: longText, isInterim: true), instant: true)
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
 
+        // Width never changes; height grows to fit, bounded by the cap.
         XCTAssertEqual(window.frame.size.width, StatusOverlayWindow.overlayWidth)
-        XCTAssertEqual(window.frame.size.height, StatusOverlayWindow.overlayHeight)
+        XCTAssertGreaterThan(window.frame.size.height, StatusOverlayWindow.overlayHeight)
+        XCTAssertLessThanOrEqual(window.frame.size.height, OverlayHUDSizing.maxHeight)
         XCTAssertEqual(window.contentView?.frame.size.width, StatusOverlayWindow.overlayWidth)
-        XCTAssertEqual(window.contentView?.frame.size.height, StatusOverlayWindow.overlayHeight)
+        XCTAssertEqual(window.contentView?.frame.size.height, window.frame.size.height)
+        // Bottom edge stays anchored — the panel grows upward, so it can
+        // never be pushed off the bottom of the screen.
+        XCTAssertEqual(window.frame.origin.y, anchoredBottomY)
+
+        // Shrinks back when the transcript goes away.
+        window.show(state: .voiceActivity, instant: true)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        XCTAssertEqual(window.frame.size.height, StatusOverlayWindow.overlayHeight)
+        XCTAssertEqual(window.frame.origin.y, anchoredBottomY)
 
         window.orderOut(nil)
     }
@@ -577,6 +716,96 @@ final class AlwaysTests: XCTestCase {
         XCTAssertEqual(event.correctionPending?.right, "kubernetes")
         XCTAssertNil(event.data)
         XCTAssertNil(event.correctionLogged)
+    }
+
+    // MARK: - Overlay HUD vertical growth for long transcripts
+
+    /// ~127 chars: too tall for the classic 130pt HUD, but within the cap.
+    private static let longTranscript =
+        "This live transcript keeps growing while the user talks, passing one "
+        + "hundred characters so the HUD must grow taller to show it."
+
+    private static let overflowingTranscript = String(
+        repeating: "the quick brown fox jumps over the lazy dog ", count: 30
+    ) + "and these final words must remain visible"
+
+    func testHUDHeightStaysBaseForShortText() {
+        XCTAssertEqual(OverlayHUDSizing.hudHeight(forText: "Listening"),
+                       OverlayHUDSizing.baseHeight)
+        XCTAssertEqual(OverlayHUDSizing.hudHeight(forText: ""),
+                       OverlayHUDSizing.baseHeight)
+    }
+
+    func testHUDHeightGrowsForLongTranscriptUpToCap() {
+        let height = OverlayHUDSizing.hudHeight(forText: Self.longTranscript)
+        XCTAssertGreaterThan(height, OverlayHUDSizing.baseHeight,
+                             "a 100+ char transcript must grow the panel")
+        XCTAssertLessThanOrEqual(height, OverlayHUDSizing.maxHeight)
+        XCTAssertEqual(OverlayHUDSizing.hudHeight(forText: Self.overflowingTranscript),
+                       OverlayHUDSizing.maxHeight,
+                       "unbounded text clamps at the growth cap")
+    }
+
+    func testFittedTailKeepsShortTextIntact() {
+        XCTAssertEqual(OverlayHUDSizing.fittedTail(of: "Listening"), "Listening")
+        XCTAssertEqual(OverlayHUDSizing.fittedTail(of: Self.longTranscript),
+                       Self.longTranscript,
+                       "text that fits within the cap must not be truncated")
+    }
+
+    func testFittedTailHeadTruncatesKeepingNewestWords() {
+        let fitted = OverlayHUDSizing.fittedTail(of: Self.overflowingTranscript)
+        XCTAssertTrue(fitted.hasPrefix("…"), "truncation marker belongs at the START")
+        XCTAssertTrue(fitted.hasSuffix("and these final words must remain visible"),
+                      "the newest words must survive head-truncation")
+        XCTAssertLessThan(fitted.count, Self.overflowingTranscript.count)
+        XCTAssertLessThanOrEqual(OverlayHUDSizing.textHeight(of: fitted),
+                                 OverlayHUDSizing.maxTextHeight,
+                                 "fitted text must fit the capped label area")
+        // The displayed layout for capped text sizes to the fitted lines —
+        // above the base, never above the cap.
+        let layoutHeight = OverlayHUDSizing.layout(forText: Self.overflowingTranscript).height
+        XCTAssertGreaterThan(layoutHeight, OverlayHUDSizing.baseHeight)
+        XCTAssertLessThanOrEqual(layoutHeight, OverlayHUDSizing.maxHeight)
+    }
+
+    func testOverlayViewGrowsAndShrinksWithState() throws {
+        try ensureAppKit()
+        let view = StatusOverlayView(
+            frame: NSRect(x: 0, y: 0,
+                          width: StatusOverlayWindow.overlayWidth,
+                          height: StatusOverlayWindow.overlayHeight)
+        )
+        XCTAssertEqual(view.desiredHeight, OverlayHUDSizing.baseHeight)
+
+        view.state = .transcribingWithText(text: Self.longTranscript, isInterim: true)
+        XCTAssertGreaterThan(view.desiredHeight, OverlayHUDSizing.baseHeight,
+                             "panel must grow for a long live transcript")
+        XCTAssertLessThanOrEqual(view.desiredHeight, OverlayHUDSizing.maxHeight)
+
+        let grown = view.desiredHeight
+        view.state = .transcribingWithText(text: Self.overflowingTranscript, isInterim: true)
+        XCTAssertGreaterThanOrEqual(view.desiredHeight, grown,
+                                    "overflowing text is at least as tall as long text")
+        XCTAssertLessThanOrEqual(view.desiredHeight, OverlayHUDSizing.maxHeight,
+                                 "growth clamps at the cap")
+
+        view.state = .voiceActivity
+        XCTAssertEqual(view.desiredHeight, OverlayHUDSizing.baseHeight,
+                       "panel must shrink back when the transcript goes away")
+    }
+
+    func testCompactModeStaysFixedPill() throws {
+        try ensureAppKit()
+        let view = StatusOverlayView(
+            frame: NSRect(x: 0, y: 0,
+                          width: StatusOverlayWindow.compactWidth,
+                          height: StatusOverlayWindow.compactHeight),
+            compact: true
+        )
+        view.state = .transcribingWithText(text: Self.overflowingTranscript, isInterim: true)
+        XCTAssertEqual(view.desiredHeight, StatusOverlayWindow.compactHeight,
+                       "compact pill never grows")
     }
 
 }

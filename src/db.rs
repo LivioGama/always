@@ -55,6 +55,11 @@ pub struct Preferences {
     /// transcript looks mid-sentence, so brief thinking pauses don't
     /// split one thought into two pastes. Default on.
     pub stt_adaptive_silence: Option<bool>,
+    /// Live provisional transcript while the user is still talking:
+    /// periodically re-transcribe the growing utterance on non-streaming
+    /// (cloud) backends and show the partial text in the overlay.
+    /// Costs one extra Groq round trip per tick. Default on.
+    pub stt_live_preview: Option<bool>,
     /// "My Voice" gate: when enabled AND a voiceprint is enrolled,
     /// only speech matching the enrolled speaker is transcribed.
     /// Default off (opt-in via Settings → My Voice).
@@ -253,6 +258,13 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN stt_adaptive_silence INTEGER;")?;
     }
 
+    let has_stt_live_preview = conn
+        .prepare("SELECT stt_live_preview FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_stt_live_preview {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN stt_live_preview INTEGER;")?;
+    }
+
     let has_speaker_gate_enabled = conn
         .prepare("SELECT speaker_gate_enabled FROM preferences LIMIT 0")
         .is_ok();
@@ -333,7 +345,7 @@ fn encode_plaintext_groq_key(conn: &Connection) -> Result<()> {
 
 pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
     let mut stmt = conn.prepare(
-        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, idle_pause_action, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream, stt_adaptive_silence, speaker_gate_enabled, speaker_gate_threshold, audible_status_sound FROM preferences WHERE id = 1",
+        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, idle_pause_action, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream, stt_adaptive_silence, speaker_gate_enabled, speaker_gate_threshold, audible_status_sound, stt_live_preview FROM preferences WHERE id = 1",
     )?;
     let result = stmt.query_row([], |row| {
         Ok(Preferences {
@@ -368,6 +380,7 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             speaker_gate_enabled: row.get::<_, Option<i64>>(28)?.map(|v| v != 0),
             speaker_gate_threshold: row.get(29)?,
             audible_status_sound: row.get(30)?,
+            stt_live_preview: row.get::<_, Option<i64>>(31)?.map(|v| v != 0),
         })
     });
     match result {
@@ -411,6 +424,7 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "shortcut_master_pause",
         "transcript_stream",
         "stt_adaptive_silence",
+        "stt_live_preview",
         "speaker_gate_enabled",
         "speaker_gate_threshold",
         "audible_status_sound",
@@ -494,6 +508,7 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         | "passive_correction_capture"
         | "transcript_stream"
         | "stt_adaptive_silence"
+        | "stt_live_preview"
         | "speaker_gate_enabled" => {
             if !matches!(value, "true" | "false" | "1" | "0") {
                 anyhow::bail!("{key} must be one of: true, false, 1, 0");
@@ -570,6 +585,7 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         | "passive_correction_capture"
         | "transcript_stream"
         | "stt_adaptive_silence"
+        | "stt_live_preview"
         | "speaker_gate_enabled" => {
             if matches!(value, "true" | "1") {
                 "1".to_string()
