@@ -173,12 +173,12 @@ Idle-paused · Low mic volume · correction confirmations.
 | Situation | Timing |
 |---|---|
 | My Voice off | On voice onset — immediately. |
-| My Voice on | On voice onset — immediately, **optimistically**, before the speaker is verified. Verification still gates transcription (I3); if it rejects the speaker, the badge is retracted at once. Non-user audio can produce a brief badge flash, never text. |
+| My Voice on | After the speaker is verified — up to ~2 s measured live. Background media and other voices do NOT flash the badge; the indicator appears only for the enrolled user. |
 
-(Previously, with My Voice on and no recent verification, the badge waited for
-speaker confirmation — up to ~2 s measured live. That wait was the single
-largest perceived-latency hit under the gate and is gone; the trust window in §6
-no longer influences when the badge appears.)
+The verify wait under My Voice is the price of the gate doing its job: the
+badge must not register audio the user did not produce. An earlier "optimistic
+badge on onset" experiment flashed the overlay on every non-user voice (videos,
+meetings, sleep-time media) and was reverted at the owner's request — see §6.
 
 **Live transcript text** is shown whenever the daemon produces a provisional
 preview — the GUI renders any non-empty partial it receives, during the
@@ -242,15 +242,15 @@ above the threshold, it is the user.
   not when the room goes quiet.
 - Audio that fails is discarded before any transcription is paid for.
 
-**Trust window:** after a confirmed match, the match is remembered for a period
-without re-proving identity. Since the indicator now appears optimistically on
-every voice onset regardless of verification (§5), the window no longer governs
-badge timing; it remains as the "recently verified" signal (logged as
-`trusted` on `listening_overlay_shown`).
-
-❓ Currently 5 minutes. With the optimistic badge, a brief flash on non-user
-audio is now expected behavior rather than a trust-window artifact — the
-window's remaining value should be re-evaluated.
+**No trust window.** An earlier build remembered a confirmed match for a period
+(10 s, later 5 min) and let the badge appear on voice onset without re-verifying
+inside that window. That made the overlay flash on every non-user voice —
+videos, meetings, media played while sleeping — and the mic kept capturing audio
+that would never be the user's, which blocked dictation until the media stopped.
+Reverted at the owner's request: every sentence re-proves identity from scratch.
+The cost is up to ~2 s of verify wait at the start of each utterance under the
+gate (§5); the benefit is that the badge and the mic only ever engage for the
+enrolled user.
 
 **Threshold** is a preference (currently 0.40). Measured on the owner's profile:
 their own voice scores 0.50–0.67, other audio scores below 0.30 in the vast
@@ -517,8 +517,12 @@ non-zero if not.
 
 ## 13. Open questions for the product owner
 
-1. Trust window at 5 minutes — how much badge-flashing is acceptable in
-   exchange for an instant indicator?
+1. ~~Trust window at 5 minutes — how much badge-flashing is acceptable in
+   exchange for an instant indicator?~~ **Resolved 2026-08-30:** reverted
+   entirely. The optimistic badge flashed on every non-user voice (videos,
+   meetings, sleep-time media) and blocked dictation while media played. Every
+   sentence now re-verifies; the ~2 s verify wait is accepted as the cost of the
+   gate.
 2. ~~Auto-Enter with no delay~~ / ~~silence window at 1.4 s~~ — **resolved for this
    instance 2026-08-05**: 2.2 s and 800 ms, after both cut the user off
    mid-thought. Open question is whether the code defaults should follow.
