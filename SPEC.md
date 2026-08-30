@@ -267,6 +267,12 @@ overwrite each other — a manual pause survives a call ending.
 | Source | Trigger | Clears when |
 |---|---|---|
 | Master | User toggles pause (shortcut or menu) | User resumes |
+
+The master pause shortcut is configurable via Settings → Shortcuts →
+"Master Pause / Mute" or `always config set shortcut_master_pause <combo>`.
+Default: `ctrl+alt+shift+p`. Supports the Fn/Globe key as a standalone
+shortcut (`fn`) — the Fn key fires as a `flagsChanged` event on macOS,
+not `keyDown`, so a dedicated `CGEventTap` catches it alongside `rdev`.
 | Per-app | Focused app is on the paused list | Focus moves to an allowed app |
 | Mic conflict | Another app holds the microphone | Mic free for ~3 s (§7.1) |
 | Audio output | System audio is playing | Playback stops |

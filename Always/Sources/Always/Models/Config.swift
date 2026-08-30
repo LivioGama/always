@@ -71,6 +71,7 @@ struct Config: Codable {
     var shortcutAutoEnter: String
     var shortcutForcePaste: String
     var shortcutCorrectionDialog: String
+    var shortcutMasterPause: String
     var postprocessEnabled: Bool
     var perAppSettingsJson: String?
     /// Seconds of no voice before daemon auto-pauses. 0 = disabled.
@@ -99,6 +100,7 @@ struct Config: Codable {
         shortcutAutoEnter: "ctrl+alt+a",
         shortcutForcePaste: "ctrl+alt+v",
         shortcutCorrectionDialog: "ctrl+alt+w",
+        shortcutMasterPause: "ctrl+alt+shift+p",
         postprocessEnabled: true,
         perAppSettingsJson: nil,
         idlePauseSecs: 600,
@@ -168,6 +170,10 @@ struct Config: Codable {
                 case "shortcut_correction_dialog":
                     if !value.contains("(not set)") {
                         config.shortcutCorrectionDialog = value
+                    }
+                case "shortcut_master_pause":
+                    if !value.contains("(not set)") {
+                        config.shortcutMasterPause = value
                     }
                 case "postprocess_enabled":
                     config.postprocessEnabled = (value == "true" || value == "1")

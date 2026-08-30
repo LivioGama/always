@@ -9,6 +9,13 @@ struct ShortcutsPanel: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Keyboard Shortcuts").font(.headline)
                 KeyCaptureButton(
+                    label: "Master Pause / Mute",
+                    shortcut: $config.shortcutMasterPause,
+                    onSave: { value in
+                        _ = try? await cliService.setConfig(key: "shortcut_master_pause", value: value)
+                    }
+                )
+                KeyCaptureButton(
                     label: "Pause / Resume",
                     shortcut: $config.shortcutPause,
                     onSave: { value in

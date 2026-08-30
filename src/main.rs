@@ -425,6 +425,13 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .unwrap_or("ctrl+alt+w")
             );
             println!(
+                "shortcut_master_pause: {}",
+                prefs
+                    .shortcut_master_pause
+                    .as_deref()
+                    .unwrap_or("ctrl+alt+shift+p")
+            );
+            println!(
                 "passive_correction_capture: {}",
                 prefs
                     .passive_correction_capture

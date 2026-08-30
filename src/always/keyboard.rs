@@ -138,7 +138,10 @@ struct Combo {
 #[allow(dead_code)] // listener body uses these on macOS only
 impl Combo {
     /// Parse `"ctrl+alt+p"` (case-insensitive, any modifier order).
-    /// Requires at least one modifier and exactly one key character.
+    /// Requires at least one modifier and exactly one key character,
+    /// OR a standalone `"fn"` (the Fn/Globe key on macOS keyboards,
+    /// which fires no ctrl/shift/alt flags and is the only modifier-less
+    /// shortcut we accept).
     fn from_str(s: &str) -> Option<Self> {
         let mut ctrl = false;
         let mut shift = false;
@@ -157,6 +160,19 @@ impl Combo {
         }
 
         let key_char = key_char?;
+        // `"fn"` is the only modifier-less shortcut we accept — the Fn
+        // key on Apple keyboards fires as a flagsChanged event with no
+        // ctrl/shift/alt, so the standard "must have a modifier" guard
+        // would reject it. The Fn listener is a separate CGEventTap
+        // (see `start_fn_listener`), not rdev.
+        if key_char == "fn" {
+            return Some(Combo {
+                ctrl: false,
+                shift: false,
+                alt: false,
+                key_char,
+            });
+        }
         if !ctrl && !shift && !alt {
             return None;
         }
@@ -299,6 +315,7 @@ fn key_to_shortcut_name(key: &rdev::Key) -> Option<&'static str> {
         Key::KeyY => Some("y"),
         Key::KeyZ => Some("z"),
         Key::Space => Some("space"),
+        Key::Function => Some("fn"),
         _ => None,
     }
 }
@@ -494,6 +511,11 @@ pub fn start_keyboard_listener() -> Result<()> {
         master_pause_combo,
     ) = load_shortcuts();
     let (tx, _rx) = mpsc::channel();
+
+    // Check if the master pause shortcut is Fn-only before the combo
+    // is moved into the rdev thread. If so, start a separate CGEventTap
+    // for flagsChanged events (rdev can't see the Fn key).
+    let master_pause_is_fn = master_pause_combo.key_char == "fn";
 
     thread::spawn(move || {
         let mut ctrl_pressed = false;
@@ -705,7 +727,146 @@ pub fn start_keyboard_listener() -> Result<()> {
     });
 
     thread::sleep(Duration::from_millis(100));
+
+    // Start the Fn key listener alongside rdev. rdev's CGEventTap only
+    // forwards keyDown/keyUp events — it drops flagsChanged, which is how
+    // macOS delivers the Fn/Globe key. This separate tap catches that.
+    // Only started if the master pause combo is `fn` (the only Fn-based
+    // shortcut we support today).
+    if master_pause_is_fn {
+        start_fn_listener();
+    }
+
     Ok(())
+}
+
+/// Start a CGEventTap that listens for `flagsChanged` events to detect
+/// the Fn/Globe key (keycode 63). The Fn key on macOS keyboards fires as
+/// a modifier-flag change, not a keyDown — `rdev` never sees it. This
+/// mirrors the approach from iris-sama's `shortcut-events.swift`.
+#[cfg(feature = "macos")]
+fn start_fn_listener() {
+    use std::os::raw::{c_int, c_void};
+
+    // CGEventFlags bit for the Fn key (kCGEventFlagMaskSecondaryFn).
+    const FN_FLAG: u64 = 0x800000;
+    // Keycode for the Fn key.
+    const FN_KEYCODE: i64 = 63;
+
+    static FN_PREVIOUSLY_HELD: AtomicBool = AtomicBool::new(false);
+
+    // FFI for CGEventTap + CoreFoundation RunLoop. core-graphics 0.24
+    // exposes CGEventTapCreate but not the RunLoop integration, so we
+    // declare what we need directly.
+    unsafe extern "C" {
+        fn CGEventTapCreate(
+            tap: u32,
+            place: u32,
+            options: u32,
+            events_of_interest: u64,
+            callback: unsafe extern "C" fn(
+                proxy: *mut c_void,
+                type_: u32,
+                event: *mut c_void,
+                user_info: *mut c_void,
+            ) -> *mut c_void,
+            user_info: *mut c_void,
+        ) -> *mut c_void;
+        fn CGEventTapEnable(tap: *mut c_void, enable: bool);
+        fn CGEventGetIntegerValueField(event: *mut c_void, field: u32) -> i64;
+        fn CGEventGetFlags(event: *mut c_void) -> u64;
+        fn CFMachPortCreateRunLoopSource(
+            alloc: *mut c_void,
+            port: *mut c_void,
+            order: c_int,
+        ) -> *mut c_void;
+        fn CFRunLoopAddSource(
+            rl: *mut c_void,
+            source: *mut c_void,
+            mode: *const c_void,
+        );
+        fn CFRunLoopGetCurrent() -> *mut c_void;
+        fn CFRunLoopRun();
+        fn CFRelease(cf: *mut c_void);
+        fn CFStringCreateWithCString(
+            alloc: *mut c_void,
+            cstr: *const u8,
+            encoding: u32,
+        ) -> *mut c_void;
+    }
+
+    // CGEventType: flagsChanged = 12
+    const FLAGS_CHANGED: u64 = 1 << 12;
+
+    unsafe extern "C" fn fn_tap_callback(
+        _proxy: *mut c_void,
+        type_: u32,
+        event: *mut c_void,
+        _user_info: *mut c_void,
+    ) -> *mut c_void {
+        if type_ != 12 {
+            return event;
+        }
+        // kCGKeyboardEventKeycode = 9
+        let keycode = CGEventGetIntegerValueField(event, 9);
+        let flags = CGEventGetFlags(event);
+
+        if keycode == FN_KEYCODE {
+            let fn_held = (flags & FN_FLAG) != 0;
+            let was_held = FN_PREVIOUSLY_HELD.swap(fn_held, Ordering::Relaxed);
+            if fn_held && !was_held {
+                tracing::info!("fn_key_pressed");
+                handle_master_pause_hotkey();
+            }
+        }
+        event
+    }
+
+    thread::spawn(move || {
+        let tap = unsafe {
+            CGEventTapCreate(
+                1, // kCGSessionEventTap
+                0, // kCGHeadInsertEventTap
+                1, // kCGEventTapListenOption
+                FLAGS_CHANGED,
+                fn_tap_callback,
+                std::ptr::null_mut(),
+            )
+        };
+
+        if tap.is_null() {
+            tracing::warn!("fn_listener_tap_failed");
+            // Show the error state in the GUI — same as when the main
+            // keyboard listener's tap fails. The banner tells the user
+            // shortcuts are inactive until they grant Input Monitoring.
+            set_input_monitoring_status(false);
+            return;
+        }
+
+        unsafe {
+            let source = CFMachPortCreateRunLoopSource(std::ptr::null_mut(), tap, 0);
+            if source.is_null() {
+                tracing::error!("fn_listener_runloop_source_failed");
+                set_input_monitoring_status(false);
+                CFRelease(tap);
+                return;
+            }
+            let rl = CFRunLoopGetCurrent();
+            let mode_str = b"kCFRunLoopCommonModes\0";
+            let mode = CFStringCreateWithCString(
+                std::ptr::null_mut(),
+                mode_str.as_ptr(),
+                0x08000100, // kCFStringEncodingUTF8
+            );
+            CFRunLoopAddSource(rl, source, mode as *const c_void);
+            CGEventTapEnable(tap, true);
+            tracing::info!("fn_listener_started");
+            CFRunLoopRun();
+            CFRelease(source);
+            CFRelease(tap);
+            CFRelease(mode);
+        }
+    });
 }
 
 // ----------------------------------------------------------------------
@@ -799,6 +960,13 @@ mod tests {
         assert!(Combo::from_str("p").is_none());
         assert!(Combo::from_str("ctrl+alt").is_none());
         assert!(Combo::from_str("ctrl+alt+return").is_none());
+    }
+
+    #[test]
+    fn parses_fn_only_shortcut() {
+        let combo = Combo::from_str("fn").expect("fn is a valid modifier-less shortcut");
+        assert!(combo.matches_name(false, false, false, "fn"));
+        assert!(!combo.matches_name(true, false, false, "fn"));
     }
 
     #[test]
