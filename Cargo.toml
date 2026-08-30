@@ -62,6 +62,12 @@ vad-rs = { version = "0.1.6", git = "https://github.com/cjpais/vad-rs", default-
 # (no cmake). Feature recipe must match WeSpeaker training: 80 mel bins,
 # 25/10 ms, dither=0, hamming window, int16-scale waveform, utterance
 # CMN — see `always::speaker_embed`.
+# NOTE: `coreml` was tried and reverted — CoreML only supports 15/39
+# encoder nodes and 4/35 decoder nodes of the Parakeet graph, so the
+# weights stay in process RAM AND CoreML adds its own compiled-model
+# overhead, making RSS WORSE (1350 MB vs 865 MB CPU-only). The memory
+# cost is inherent to running a 622 MB local model; the only real
+# reductions are switching to Groq (cloud, ~80 MB) or a smaller model.
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["download-binaries", "ndarray"] }
 kaldi-fbank-rust-kautism = "0.1.0"
 ndarray = "0.17"
