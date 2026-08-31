@@ -586,6 +586,49 @@ fn live_carrying_state(degraded: Option<bool>, live_invalidated: bool) -> bool {
     !live_invalidated && degraded == Some(false)
 }
 
+/// Inputs to the live verdict's evaluation cadence, extracted so the gate is
+/// testable in isolation.
+///
+/// The gate used to be an inline `&&` chain, and the reason log lived INSIDE
+/// it. When the chain was false the block never ran, no reason was computed,
+/// and the blocker was invisible — the exact failure the reason log had been
+/// added to prevent, one level up. Pulling it out makes each term nameable
+/// (see `silence_verdict_state`) and unit-testable.
+#[derive(Clone, Copy)]
+struct VerdictTick {
+    live_invalidated: bool,
+    voice_logged: bool,
+    speculation_speaker_ok: bool,
+    consecutive_silence: usize,
+    tentative_frames: usize,
+    base_frames: usize,
+    midsentence_decided: bool,
+}
+
+/// May the live mid-sentence / early-finalize verdict be evaluated this frame?
+///
+/// Deliberately does NOT include `voiced_since_flush`. That flag means "no real
+/// speech has landed in the buffer since the last chunk drain", and its purpose
+/// is to avoid SPENDING a speculative STT round trip on trailing silence. The
+/// live verdict spends nothing — it reads a transcript that already exists — and
+/// gating it on the flag cost every chunked utterance its verdict for the whole
+/// remaining silence run, because the flag is cleared by the flush and only a
+/// VOICED frame ever sets it back. When the flushing pause was also the end of
+/// the utterance, nothing could ever re-enable it.
+fn verdict_tick_allowed(t: VerdictTick) -> bool {
+    t.consecutive_silence >= t.tentative_frames
+        && !t.live_invalidated
+        && t.voice_logged
+        && t.speculation_speaker_ok
+        // Every 2nd frame to keep the hot loop cheap, plus one guaranteed last
+        // look immediately before the base cut. The last look matters because
+        // the verdict waits for the trailing audio to be decoded: without it,
+        // an utterance whose undecoded remainder outlives the final even frame
+        // would reach the cut with no verdict at all.
+        && (t.consecutive_silence.is_multiple_of(2)
+            || (!t.midsentence_decided && t.consecutive_silence + 1 >= t.base_frames))
+}
+
 /// Why rolling chunking is (or is not) bypassed right now, as a log field.
 ///
 /// `live_session_carrying` collapses three very different situations into one
@@ -662,6 +705,11 @@ const STREAM_CHUNK_TARGET_SECS: u32 = 120;
 /// still loading. Cheap — a `try_lock` plus, on a non-streaming engine, an
 /// immediate `None` — but not free, so not every 30 ms frame.
 const LIVE_START_RETRY_MS: u64 = 300;
+/// How many times one utterance may replace a degraded live session before it
+/// gives up and lets rolling chunking carry the rest. Bounded so a genuinely
+/// broken engine costs three re-opens, not one per 300 ms for a whole
+/// dictation.
+const MAX_LIVE_REOPENS: u32 = 3;
 /// First-speculation cadence, used in EVERY mode (not just consume mode):
 /// fire the speculative transcription at a brief inter-phrase pause (~240ms
 /// = 8 × 30ms frames) so a stream consumer sees text land as the user
@@ -1159,8 +1207,10 @@ fn record_with_local_vad(
     // no longer matches `speech_samples` and finalization must fall back to a
     // one-shot decode of the truncated buffer.
     let mut live_invalidated = false;
-    // Throttle for the re-open attempt below.
+    // Throttle + budget for the re-open attempt below.
     let mut live_start_retry_at: Option<std::time::Instant> = None;
+    let mut live_reopens: u32 = 0;
+    let mut live_unavailable_logged = false;
     // Whether the tentative-pause work (mid-sentence verdict + grammar warm)
     // has run for THIS silence run. Reset on speech resume / chunk flush,
     // exactly like `midsentence_decided`.
@@ -1194,6 +1244,8 @@ fn record_with_local_vad(
     // per-tick instrumentation logs a reason CHANGE rather than the same line
     // every other frame. Reset wherever `early_finalize_armed` is.
     let mut early_finalize_skip_logged: Option<&'static str> = None;
+    // One `silence_verdict_state` line per silence run. Reset with the rest.
+    let mut verdict_state_logged = false;
     // `speech_samples.len()` as of the end of the last VOICED frame — i.e. how
     // much of the buffer is speech rather than the trailing silence run.
     //
@@ -1488,6 +1540,7 @@ fn record_with_local_vad(
             midsentence_decided = false;
             early_finalize_armed = false;
             early_finalize_skip_logged = None;
+            verdict_state_logged = false;
             live_warm_fired = false;
             consecutive_speech += 1;
             consecutive_silence = 0;
@@ -1900,6 +1953,7 @@ fn record_with_local_vad(
                     voiced_len = 0;
                     early_finalize_armed = false;
                     early_finalize_skip_logged = None;
+                    verdict_state_logged = false;
                     // The tail monitor's boundary points into the drained
                     // buffer — rebase to the fresh (empty) one.
                     confirmed_user_len = 0;
@@ -1917,6 +1971,7 @@ fn record_with_local_vad(
                 voiced_len = speech_samples.len();
                 early_finalize_armed = false;
                 early_finalize_skip_logged = None;
+                verdict_state_logged = false;
                 pause::mark_voice_seen();
                 continue;
             }
@@ -2028,6 +2083,7 @@ fn record_with_local_vad(
                 midsentence_decided = false;
                 early_finalize_armed = false;
                 early_finalize_skip_logged = None;
+                verdict_state_logged = false;
                 voiced_len = 0;
                 voiced_since_flush = false;
                 // The tail monitor's boundary points into the drained
@@ -2226,19 +2282,75 @@ fn record_with_local_vad(
             // was completely invisible — which is how the mid-sentence branch
             // permanently short-circuiting the early branch (see
             // `looks_mid_sentence_live`) stayed invisible.
-            let early_tick = !live_invalidated
-                && voice_logged
-                && voiced_since_flush
-                && speculation_speaker_ok
-                && consecutive_silence >= eff_tentative_frames
-                // Every 2nd frame to keep the hot loop cheap, plus one
-                // guaranteed last look immediately before the base cut. The
-                // last look matters because the verdict below now waits for
-                // the trailing audio to be decoded: without it, an utterance
-                // whose undecoded remainder outlives the final even frame
-                // would reach the cut with no verdict at all.
-                && (consecutive_silence.is_multiple_of(2)
-                    || (!midsentence_decided && consecutive_silence + 1 >= eff_silence_frames));
+            //
+            // The gate's own terms are themselves instrumented
+            // (`silence_verdict_state`), because the FIRST round of this fix
+            // put the reason log INSIDE the guard: when the guard itself was
+            // false the block never ran, no reason was computed, and the
+            // blocker was invisible one level further up. A gate that can be
+            // false must say so from OUTSIDE itself.
+            //
+            // `voiced_since_flush` is deliberately NOT one of them. Its
+            // documented job is "after a chunk drain the live buffer holds
+            // only trailing silence, which is not worth a speculative STT
+            // round trip" — that reasoning is about SPENDING a decode, and
+            // applies to the speculation kickoff above, which still carries
+            // it. The live verdict spends nothing; it READS a transcript that
+            // already exists. Gating it here meant that any utterance long
+            // enough to chunk lost its verdict for the entire remaining
+            // silence run — `voiced_since_flush` is cleared by the flush and
+            // only ever set true again by a VOICED frame, so when the flushing
+            // pause was also the end of the utterance (the common case: the
+            // user stopped) neither branch could run again. Removing it cannot
+            // cut anyone off: the flush calls `live.reset()`, so
+            // `live.transcript()` is `None` until real speech is decoded
+            // again, which is the `no_transcript` skip, which leaves the
+            // window exactly as configured.
+            // ONE unconditional line per silence run, at the tentative mark,
+            // naming the value of every input to the verdict guard below.
+            // This is the log that cannot be starved by the thing it is
+            // measuring: it is emitted before the guard and does not depend on
+            // any of the guard's terms.
+            // Latched, not `== eff_tentative_frames`: `is_short` can flip
+            // mid-silence (the trailing silence frames grow `speech_samples`),
+            // which moves `eff_tentative_frames` and could step over an
+            // equality test. This log exists to be unmissable.
+            if consecutive_silence >= eff_tentative_frames && !verdict_state_logged {
+                verdict_state_logged = true;
+                tracing::info!(
+                    live_invalidated,
+                    voice_logged,
+                    voiced_since_flush,
+                    speculation_speaker_ok,
+                    speaker_gate_requested,
+                    speaker_checked,
+                    adaptive = cfg.adaptive_silence_enabled,
+                    is_short,
+                    tentative_frames = eff_tentative_frames,
+                    base_frames = eff_silence_frames,
+                    early_frames = complete_utterance_silence_frames(eff_silence_frames),
+                    live = live_carrying_reason(live_stream.as_ref(), live_invalidated),
+                    live_caught_up = live_stream.as_ref().is_some_and(|l| l.caught_up()),
+                    live_fed = live_stream.as_ref().map_or(0, |l| l.fed()),
+                    live_chars = live_stream
+                        .as_ref()
+                        .and_then(|l| l.transcript())
+                        .map_or(0, |t| t.chars().count()),
+                    voiced_len,
+                    buffered_secs = speech_samples.len() as f64 / 16_000.0,
+                    committed_secs = committed_samples as f64 / 16_000.0,
+                    "silence_verdict_state"
+                );
+            }
+            let early_tick = verdict_tick_allowed(VerdictTick {
+                live_invalidated,
+                voice_logged,
+                speculation_speaker_ok,
+                consecutive_silence,
+                tentative_frames: eff_tentative_frames,
+                base_frames: eff_silence_frames,
+                midsentence_decided,
+            });
             if early_tick {
                 let early_frames = complete_utterance_silence_frames(eff_silence_frames);
                 let mut words = 0usize;
@@ -2341,6 +2453,7 @@ fn record_with_local_vad(
                         base_frames = eff_silence_frames,
                         early_frames,
                         words,
+                        live = live_carrying_reason(live_stream.as_ref(), live_invalidated),
                         "early_finalize_skipped"
                     );
                 }
@@ -2449,8 +2562,24 @@ fn record_with_local_vad(
         // first sample, and after a chunk flush that buffer IS the tail that
         // `finalize_chunked` appends. Throttled, and only while the active
         // engine says it can stream, so a cloud backend never pays for it.
-        if live_stream.is_none()
+        //
+        // A DEGRADED session counts as absent. This is the second half of the
+        // same hole: `degraded()` latches on one worker decode error or a
+        // queue that fell 16 windows behind, and a degraded session is
+        // present-but-dead — `feed` returns immediately, `transcript()` is
+        // `None`, `finish()` is `None`, and `live_session_carrying` goes
+        // false, which puts the 6 s chunk target back in force for the rest of
+        // the utterance. Gating the retry on `is_none()` alone meant that
+        // state was permanent once entered. Re-opening is complete, not
+        // partial: the new session starts at `fed = 0` on a fresh generation
+        // and re-decodes the current buffer from its first sample.
+        //
+        // Capped per utterance so a genuinely broken engine degrades to
+        // chunking (which has its own retries and spill) instead of thrashing.
+        let live_dead = live_stream.as_ref().is_none_or(|live| live.degraded());
+        if live_dead
             && !live_invalidated
+            && live_reopens < MAX_LIVE_REOPENS
             && live_start_retry_at.is_none_or(|at: std::time::Instant| {
                 at.elapsed() >= std::time::Duration::from_millis(LIVE_START_RETRY_MS)
             })
@@ -2459,7 +2588,37 @@ fn record_with_local_vad(
             // backend is asked once every 300 ms rather than every 30 ms frame.
             live_start_retry_at = Some(std::time::Instant::now());
             if transcriber.supports_streaming() {
-                live_stream = crate::always::live_stream::LiveStream::start(transcriber);
+                let was_degraded = live_stream.is_some();
+                if let Some(fresh) = crate::always::live_stream::LiveStream::start(transcriber) {
+                    live_stream = Some(fresh);
+                    live_warm_fired = false;
+                    voiced_len = speech_samples.len();
+                    if was_degraded {
+                        live_reopens += 1;
+                        tracing::info!(
+                            reopens = live_reopens,
+                            buffered_secs = speech_samples.len() as f64 / 16_000.0,
+                            "live_stream_reopened"
+                        );
+                    }
+                } else if was_degraded {
+                    // Could not replace it; leave the dead handle in place so
+                    // `live_carrying_reason` still reports `degraded` rather
+                    // than silently becoming `no_session`.
+                    live_reopens += 1;
+                    tracing::warn!("live_stream_reopen_failed");
+                } else if !live_unavailable_logged {
+                    // The engine claims it streams but will not open a
+                    // session. This is a real configuration class, not a
+                    // transient: `supports_streaming` is a per-model registry
+                    // constant, while `open_live_stream` additionally requires
+                    // the engine to actually be Nemotron — the
+                    // `moonshine-*-streaming-*` entries declare the flag and
+                    // then answer `None` forever. Said once per utterance so
+                    // the retry loop above cannot flood the log.
+                    live_unavailable_logged = true;
+                    tracing::warn!("live_stream_unavailable_despite_supports_streaming");
+                }
             }
         }
         // Hand the live session every complete 560 ms window captured so far.
@@ -2709,6 +2868,23 @@ fn record_with_local_vad(
     // empty case matters: one-shot Nemotron returns an empty decode often
     // enough that `chunker` carries a dedicated retry for it, so a blank live
     // result must never become a silent `DroppedNoise`.
+    // Why the live path did or did not carry this utterance, on EVERY
+    // utterance. `stt_wait_ms` scaling with utterance length is the signature
+    // of a one-shot decode (~0.10x realtime); flat ~130 ms is the signature of
+    // live finalization. Without this line the two are indistinguishable in
+    // the log and the question "is the session actually carrying?" can only be
+    // answered by inference.
+    tracing::info!(
+        live = live_carrying_reason(live_stream.as_ref(), live_invalidated),
+        reopens = live_reopens,
+        fed = live_stream.as_ref().map_or(0, |l| l.fed()),
+        voiced_len,
+        buffered_secs = speech_samples.len() as f64 / 16_000.0,
+        committed_secs = committed_samples as f64 / 16_000.0,
+        chunks = chunker.chunk_count(),
+        speculation_pending,
+        "live_final_state"
+    );
     let live_final = if live_invalidated {
         None
     } else if let Some(live) = live_stream.as_mut() {
@@ -3219,7 +3395,7 @@ mod tests {
         normal_silence_frames, normalized_energy, speaker_gate_allows_score,
         speaker_gate_allows_stt, speaker_gate_allows_transcription,
         speaker_gate_dependencies_ready, speaker_gate_should_reject_unavailable,
-        voice_activity_energy_threshold,
+        verdict_tick_allowed, voice_activity_energy_threshold,
     };
     use crate::always::AlwaysConfig;
 
@@ -3530,6 +3706,71 @@ mod tests {
         // branch — the whole point of the fix.
         assert!(!looks_mid_sentence_live(loc, "How do you think it working"));
         assert!(looks_complete_utterance(loc, "How do you think it working"));
+    }
+
+    fn tick(silence: usize) -> super::VerdictTick {
+        super::VerdictTick {
+            live_invalidated: false,
+            voice_logged: true,
+            speculation_speaker_ok: true,
+            consecutive_silence: silence,
+            tentative_frames: 8,
+            base_frames: 30,
+            midsentence_decided: false,
+        }
+    }
+
+    /// The gate's cadence: nothing before the tentative mark, then every
+    /// second frame, plus one guaranteed last look before the base cut.
+    #[test]
+    fn verdict_tick_cadence() {
+        for f in 0..8 {
+            assert!(!verdict_tick_allowed(tick(f)), "too early at {f}");
+        }
+        assert!(verdict_tick_allowed(tick(8)));
+        assert!(!verdict_tick_allowed(tick(9)));
+        assert!(verdict_tick_allowed(tick(10)));
+        // Last look: odd frame immediately before the base cut, only while no
+        // verdict has been reached yet.
+        assert!(verdict_tick_allowed(tick(29)));
+        let mut decided = tick(29);
+        decided.midsentence_decided = true;
+        assert!(!verdict_tick_allowed(decided));
+    }
+
+    /// Each hard precondition, one at a time.
+    #[test]
+    fn verdict_tick_hard_preconditions() {
+        let mut t = tick(10);
+        t.live_invalidated = true;
+        assert!(!verdict_tick_allowed(t));
+
+        let mut t = tick(10);
+        t.voice_logged = false;
+        assert!(!verdict_tick_allowed(t));
+
+        let mut t = tick(10);
+        t.speculation_speaker_ok = false;
+        assert!(!verdict_tick_allowed(t));
+    }
+
+    /// REGRESSION: the gate must not depend on "has speech landed since the
+    /// last chunk flush".
+    ///
+    /// `voiced_since_flush` is cleared by every chunk flush and set back to
+    /// true only by a VOICED frame. When the flushing pause is also the end of
+    /// the utterance — the ordinary case, since the flush happens at a
+    /// tentative pause — nothing can ever set it again, so the verdict was
+    /// unreachable for the whole remaining silence run and neither
+    /// `early_finalize_decision` nor its skip reason could be logged. The gate
+    /// therefore takes no such input at all: `VerdictTick` has no field for it,
+    /// which this test pins by construction.
+    #[test]
+    fn verdict_tick_survives_a_chunk_flush() {
+        // Post-flush state differs from pre-flush state ONLY in fields the
+        // gate does not read, so the answer must be identical.
+        assert!(verdict_tick_allowed(tick(10)));
+        assert!(verdict_tick_allowed(tick(12)));
     }
 
     #[test]

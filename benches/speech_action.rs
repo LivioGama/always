@@ -161,9 +161,17 @@ fn bench_merge(c: &mut Criterion) {
 ///   - `romanize_latin_only` — every English utterance. One scan, no
 ///     allocation, `Cow::Borrowed` returned.
 ///   - `romanize_mixed_utterance` — the reported failure, code-switched.
-///   - `romanize_pure_devanagari` — worst realistic case, all lookups.
+///   - `romanize_pure_devanagari` — the reported failure again, all
+///     Devanagari. Three of its nine words miss the cache, so this is also
+///     the measured cost of ONE batched ONNX call.
+///   - `romanize_all_cached` — pure Devanagari, every word in the table. This
+///     is the cache-only cost, and the number the model must not regress.
+///   - `romanize_four_cache_misses` — four out-of-vocabulary words in one
+///     utterance. Compared against `romanize_one_cache_miss` it shows that
+///     batching makes the model cost per UTTERANCE, not per word.
+///   - `romanize_one_cache_miss` — the single-miss case.
 fn bench_romanize(c: &mut Criterion) {
-    use always::always::translit::romanize;
+    use always::always::translit::{forget_memoized_words, romanize};
 
     let english = "send the quarterly report to Bob before five and cc the team";
     c.bench_function("romanize_latin_only", |b| {
@@ -177,7 +185,43 @@ fn bench_romanize(c: &mut Criterion) {
 
     let devanagari = "अच्छी बात है, एक स्पीकिंग ना चाह इट गोस";
     c.bench_function("romanize_pure_devanagari", |b| {
-        b.iter(|| romanize(black_box(devanagari)));
+        b.iter_batched(
+            forget_memoized_words,
+            |()| romanize(black_box(devanagari)),
+            criterion::BatchSize::PerIteration,
+        );
+    });
+
+    // Every word here is in `dev_roman.tsv`, so no ONNX session is consulted.
+    let cached = "हुन्छ मलाई धेरै राम्रो काम गर्न भयो छैन पर्छ";
+    c.bench_function("romanize_all_cached", |b| {
+        b.iter(|| romanize(black_box(cached)));
+    });
+
+    // COLD: the memo is cleared before every sample, so this is the cost of
+    // meeting a word for the first time. Warm, the same call is a hash lookup.
+    let one_miss = "हुन्छ मलाई धेरै राम्रो ट्रान्सलिटरेसन गर्न भयो छैन पर्छ";
+    c.bench_function("romanize_one_cache_miss_cold", |b| {
+        b.iter_batched(
+            forget_memoized_words,
+            |()| romanize(black_box(one_miss)),
+            criterion::BatchSize::PerIteration,
+        );
+    });
+
+    c.bench_function("romanize_one_cache_miss_memoized", |b| {
+        romanize(one_miss);
+        b.iter(|| romanize(black_box(one_miss)));
+    });
+
+    let four_misses =
+        "हुन्छ ट्रान्सलिटरेसन धेरै माइक्रोसफ्टको सङ्ग्रहालयहरूमा गर्न अन्तर्राष्ट्रियकरण छैन पर्छ";
+    c.bench_function("romanize_four_cache_misses_cold", |b| {
+        b.iter_batched(
+            forget_memoized_words,
+            |()| romanize(black_box(four_misses)),
+            criterion::BatchSize::PerIteration,
+        );
     });
 }
 

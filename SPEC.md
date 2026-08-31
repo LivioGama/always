@@ -159,12 +159,27 @@ daemon broadcasts events, the GUI sends commands.
    (measured: it fired 0 times, ever) and ordinary dictation silently paid the
    *doubled* 1.8 s window instead of the configured 0.9 s.
 
-   Every evaluation of this ladder is logged: `midsentence_decision`,
-   `early_finalize_decision`, or `early_finalize_skipped` with the exact
-   precondition that was false (`no_live_session`, `worker_behind`,
-   `no_transcript`, `adaptive_disabled`, `short_utterance`, `tail_not_decoded`,
-   `already_extended`, `silence_below_early_window`, `not_complete_utterance`).
-   A verdict that only logs when it succeeds cannot be shown to be dead.
+   The ladder is evaluated from the tentative mark onward, every second frame,
+   plus one guaranteed last look before the base cut. It requires only that the
+   session was not invalidated, that voice was logged, and that the speaker gate
+   has verified the user. It deliberately does **not** require "speech has landed
+   since the last chunk flush": that flag exists to avoid *spending* a
+   speculative decode on trailing silence, and the live verdict spends nothing.
+   Requiring it cost every chunked utterance its verdict for the whole remaining
+   silence run, because the flush clears the flag and only a voiced frame sets it
+   again — and the flushing pause is usually the end of the utterance.
+
+   Every evaluation is logged: `midsentence_decision`, `early_finalize_decision`,
+   or `early_finalize_skipped` with the exact precondition that was false
+   (`no_live_session`, `worker_behind`, `no_transcript`, `adaptive_disabled`,
+   `short_utterance`, `tail_not_decoded`, `already_extended`,
+   `silence_below_early_window`, `not_complete_utterance`). Because that log
+   lived *inside* the gate, a false gate produced no reason at all; the gate is
+   therefore reported from outside itself by `silence_verdict_state` — one
+   unconditional line per silence run, at the tentative mark, naming every input
+   including the live-session state. A gate that can be false must say so from
+   outside itself, and a verdict that only logs when it succeeds cannot be shown
+   to be dead.
 
    Both verdicts require that *every voiced sample has actually been decoded
    into the transcript*. The live session withholds a partial trailing window
@@ -559,6 +574,8 @@ directory, and a declared `size_mb` that agrees with the sum of the parts.
 - `LocalTranscriber::open_live_stream` returns the **persistent** session used for both the live preview and the final transcript. It takes the handle from a `nemotron` field held *outside* `self.engine`'s mutex — `transcribe_from_bytes` holds that mutex for a whole decode, and the session is opened from the capture thread, which must never block behind an unrelated one-shot. The session lives on its own worker thread (`always::live_stream`), is fed exactly 8960-sample windows in capture order, and exposes only the **cumulative** transcript (`Nemotron::get_transcript()`), never per-call returns.
 - Measured on the shipped int8 model (`examples/nemotron_stream_bench.rs`): per-window decode cost is **flat at ~54 ms** from a 0.5 s buffer to a 120 s buffer (0.10x realtime, ~10x headroom), and the flush costs 51-54 ms. The same clips cost 514 ms / 4200 ms / 11512 ms to decode one-shot at 4.7 s / 39.6 s / 119.7 s. Transcript equivalence versus one-shot: WER 0.000 at 4.7 s, 0.008 at 39.6 s.
 - The session is opened at voice onset. On a cold daemon the engine may still be loading, and the open is a deliberately non-blocking `try_lock` that answers "no session" rather than stalling the capture thread; that answer is **retried every 300 ms** for as long as the active engine reports it can stream. Without the retry a single unlucky first frame disabled streaming for the whole utterance — no live transcript (so no early finalization) and the 6 s chunk target back in force, which is how `chunk_flush` still appeared on a streaming engine. Re-opening mid-utterance is complete, not partial: `feed` starts from sample 0 of the current buffer, and after a chunk flush that buffer is exactly the tail `finalize_chunked` appends.
+- A **degraded** session is treated as an absent one and is replaced, up to three times per utterance. `degraded()` latches on a single worker decode error or a queue 16 windows behind, and a degraded session is present-but-dead: `feed` returns immediately, `transcript()` and `finish()` are `None`, and `live_session_carrying` goes false — which puts the 6 s chunk target back for the rest of the utterance. The replacement starts at `fed = 0` on a fresh generation and re-decodes the current buffer from its first sample. Past three attempts the utterance falls back to rolling chunking, which has its own retries and spill. `live_final_state` is logged once per utterance with the carrying reason, the re-open count and the chunk count, because `stt_wait_ms` scaling with utterance length (one-shot, ~0.10x realtime) and flat ~130 ms (live) are otherwise indistinguishable in the log.
+- `supports_streaming() == true` does **not** imply `open_live_stream().is_some()` — the flag is a per-model registry constant while the session additionally requires the loaded engine to be Nemotron. That combination is warned once per utterance (`live_stream_unavailable_despite_supports_streaming`) rather than retried silently.
 - Every chunk flush logs which of the three non-carrying states caused it (`no_session`, `invalidated`, `degraded`, or `carrying` for the 120 s safety valve), because `live_session_carrying` collapses three very different failures into one `false`.
 - The session is re-based (`LiveStream::reset`) on every chunker flush, because the committed audio leaves the live buffer and `finalize_chunked` appends the tail to the separately-decoded chunks — a session still holding the committed words would duplicate them. It is invalidated outright on a speaker-gate truncation, because its decoded state then covers audio the rest of the pipeline has discarded.
 - Because a flush destroys the session's accumulated state, the two are mutually exclusive by design: while a healthy session is carrying the utterance the chunk target rises from `CHUNK_TARGET_SECS` (6 s) / `CHUNK_HARD_MAX_SECS` (15 s) to `STREAM_CHUNK_TARGET_SECS` (120 s), so a normal dictation never chunks at all. 120 s rather than "never" because that is the longest span the flat per-window cost was actually measured over, and because past it the chunker still provides things the live path does not: per-chunk empty-result retries, per-chunk grammar for text beyond `GRAMMAR_MAX_CHARS`, the failed-chunk WAV spill, and a bound on the raw sample buffer (120 s ≈ 3.8 MB). parakeet-rs trims its own retained audio to ~1.8 s per session regardless of length, so a long session is memory-bounded on the engine side. The `ALWAYS_CHUNK_TARGET_SECS` test override still wins over the streaming ceiling.
@@ -658,19 +675,58 @@ Between transcription and the keyboard:
    emoji, code — passes through **byte-identical**, so a code-switched
    sentence comes out uniformly Latin rather than half-transliterated.
 
-   Two tiers: an exact table of 49,064 entries, built offline by running the
-   trained transliteration model (99.0% exact on held-out pairs of his own
-   spellings) over the SLR54 Nepali corpus and word-aligning the result, with
-   his 1,844 hand-mined pairs overriding it; then a rule engine for anything
-   the table lacks. The table is `include_str!`-ed and binary-searched in
-   place, so there is no init cost and no allocation for Latin-only text.
-   Measured: **28 ns** for an English utterance, **7.2 µs** for a full
-   Devanagari sentence, against a ~870 ms decode.
+   **Every tier is the same learned model.** There are no hand-written
+   transliteration rules; the tiers differ only in what the answer costs.
+
+   0. Devanagari digits `०-९` are a 1:1 map and never reach the model — the
+      same carve-out the training pipeline made, because a seq2seq guessing
+      them turned `००७` into `dah`.
+   1. An exact table of 49,064 entries, built offline by running the trained
+      transliteration model (99.0% exact on held-out pairs of his own
+      spellings) over the SLR54 Nepali corpus and word-aligning the result,
+      with his 1,844 hand-mined pairs overriding it. `include_str!`-ed and
+      binary-searched in place: no init cost, no allocation for Latin-only
+      text.
+   2. **The model itself**, as ONNX (`translit_encoder.onnx` +
+      `translit_decoder.onnx`, 18.4 MB, lazily loaded on the first cache
+      miss), for words the table lacks. Every miss in one utterance is
+      submitted as a single batch.
+   3. A per-process memo of everything tier 2 has already answered, so a
+      novel word costs the model once per process and a hash lookup after.
+   4. `char_roman.tsv` — the model's own answer for each Devanagari codepoint
+      taken alone — reachable only when ORT cannot build a session at all.
+
+   Tier 2 replaced a hand-written syllable transliterator that scored **39.0%
+   exact** (19,148/49,064) against tier 1 used as gold, at 607 ns/word. The
+   model reproduces tier 1 on **97.7%** of a 2,000-word sample and is
+   bit-identical to the PyTorch checkpoint it was exported from.
+
+   Measured cost, release build, against a ~870 ms decode:
+
+   | case | time |
+   |---|---|
+   | English utterance (no Devanagari) | **28.9 ns** |
+   | Devanagari, every word in the table | **4.1 µs** |
+   | Devanagari, one novel word, memoized | **4.2 µs** |
+   | Devanagari, one novel word, cold | **8.2 ms** |
+   | the reported code-switched utterance, cold | **19.6 ms** |
+   | four novel words in one utterance, cold | **42.3 ms** |
+
+   The cold numbers are ORT per-kernel dispatch over a 317-node decoder graph
+   run once per output character, not arithmetic: ORT thread count, graph
+   fusion and prepacking all fail to move them. This is **over the
+   single-digit-millisecond budget** for utterances containing words the table
+   has never seen, which is ~31% of Devanagari utterances on a held-out split
+   (mean 0.37 novel words per utterance). Peak RSS for a session that reaches
+   tier 2 is **+71 MB**; a session that never leaves tier 1 pays **+0.5 MB**
+   and an English-only session pays **0**.
 
    **Invariant: no codepoint in U+0900..U+097F ever reaches the clipboard.**
-   Unmapped Devanagari is dropped rather than passed through. The pass is
-   idempotent, and it runs *before* snippet expansion, so user-authored
-   snippet text is never transliterated.
+   This is now structural: the model's entire target vocabulary is the 26
+   lowercase ASCII letters, so no decode can emit one. Unmapped Devanagari is
+   dropped rather than passed through. The pass is idempotent, and it runs
+   *before* snippet expansion, so user-authored snippet text is never
+   transliterated.
 
    Ordering note: this deliberately precedes the hallucination filter, which
    rejects mixed Latin/Devanagari as "mixed-script gibberish" — precisely what
