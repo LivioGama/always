@@ -482,7 +482,14 @@ mod tests {
                     !crate::always::translit::contains_devanagari(&text),
                     "Devanagari reached the paste: {text}"
                 );
-                assert_eq!(text, "axi baata hai, ek spiking naa caaha ita gosa");
+                // `spiking` is `स्पीकिंग`, which is English "speaking" spelled
+                // phonetically in Devanagari because Nemotron picked one
+                // language for the utterance and picked Hindi. The romaniser
+                // transliterates it faithfully; the recovery pass afterwards
+                // recognises it — see `crate::always::english_recovery`.
+                // Everything else here is real Nepali and is left exactly as
+                // the romaniser wrote it, `baata` included.
+                assert_eq!(text, "axi baata hai, ek speaking naa caaha ita gosa");
             }
             other => panic!("expected Paste, got {other:?}"),
         }

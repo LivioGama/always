@@ -737,6 +737,70 @@ Between transcription and the keyboard:
    content filtering runs at all) a code-switched utterance is still dropped.
    Local backends are unaffected. Escape hatch: `ALWAYS_NO_ROMANIZE=1`.
 
+   **English recovery.** Romanisation is faithful, and that is the problem for
+   the English *inside* a Nepali utterance. Nemotron picks one language per
+   utterance; when the utterance is mostly Nepali it picks Hindi, and the
+   English words in it come back spelled phonetically in Devanagari. The
+   romaniser then transliterates them rather than recognising them:
+
+   | raw | romanised | said |
+   |---|---|---|
+   | `स्पीकिंग` | `spiking` | speaking |
+   | `इंग्लिस` | `inglis` | English |
+   | `बिटवीन` | `bitwin` | between |
+   | `अगेन` | `agena` | again |
+   | `एम` | `em` | am |
+
+   Nothing is lost — `स्पीकिंग` *is* "speaking" — so a recovery pass runs on
+   each romanised word, and only on words that came out of a Devanagari run.
+   English dictation never reaches it and keeps its borrowed, zero-allocation
+   path.
+
+   Devanagari destroys English vowels (it cannot write the lax/tense contrast,
+   so *and*/*end* and *speaking*/*spiking* collapse) but preserves consonants
+   including voicing, so the match key is a **consonant skeleton**:
+   `spiking → SPKNG ← speaking`. A skeleton alone is far too permissive, so a
+   rewrite must also survive, in order:
+
+   1. **The vocabulary veto** — anything he has ever typed himself (9,730
+      tokens mined from 18,452 of his WhatsApp messages) is left alone. This
+      covers all of his Nepali *and* his English that transcribed correctly.
+   2. **Nepali orthographic shape** — `x` (his `छ`), the aspirate digraphs
+      `dh`/`bh`/`jh`/`chh`, an `h` after `k g l r n m d b j v y`, and
+      consonant+`y` clusters. Devanagari renderings of English words do not
+      contain these.
+   3. **Vowel correspondence** — each vowel must be a collapse Devanagari
+      actually forces (`i`←`ea`, `i`←`ee`, `e`←`a`) and not one it does not
+      (`o`←`e`, or a long `aa` standing for English /ʌ/). This alone is what
+      separates `owar → over` from `owar → every`, and what stops his `बात`
+      (`baata`) becoming `but`.
+   4. **Evidence proportional to ambiguity** — a one-consonant skeleton may
+      only rewrite a two-letter token one edit away; two consonants need four
+      letters and two edits; longer skeletons carry themselves.
+
+   Targets come only from his own vocabulary (`en_recover.tsv`, 2,121
+   skeletons / 2,684 words, built by
+   `training/nepali-nemotron/build_en_recover.py`), so a recovery can never
+   produce a word he does not use. Ties break on fewest edits, then on how
+   often he writes the word. **A wrong rewrite is worse than none** — he can
+   read `spiking`; `spike` would mislead — so every filter exists to make "do
+   nothing" the default answer.
+
+   Measured, release build:
+
+   | case | result |
+   |---|---|
+   | the reported utterance, English recovered | **5/5** (`speaking`, `english`, `between`, `again`, `am`) |
+   | the reported utterance, Nepali damaged | **0** (`dekhi`, `nepali`, `boli`, `ki`, `khabar`, `rat`, `ita`, `aai` all survive) |
+   | his own 9,730-token vocabulary rewritten | **0 (0.00%)**, asserted as a test |
+   | unseen SLR54 romanisations rewritten | 662/45,923 (**1.44%**), mostly correct loanword recoveries |
+   | English utterance (no Devanagari) | **30.5 ns**, unchanged — the pass is not reached |
+   | added to a 6-word Devanagari sentence | **+4.7 µs** (8.8 → 13.5 µs) |
+   | added to a 20-word code-switched sentence | **+9.3 µs** (15.0 → 24.3 µs) |
+
+   The pass is idempotent and emits lowercase, matching how he writes. Escape
+   hatch: `ALWAYS_NO_ENGLISH_RECOVERY=1`.
+
 1. **Hallucination filter** — rejects the known failure modes of speech models:
    empty output, "thank you"/"bye" family, subtitle credits, repeated tokens,
    gibberish, low-confidence segments.

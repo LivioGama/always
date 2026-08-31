@@ -60,7 +60,18 @@
 //! overwhelmingly common English-only session. Text with no Devanagari returns
 //! `Cow::Borrowed` after a single scan and allocates nothing.
 //!
-//! Escape hatch: `ALWAYS_NO_ROMANIZE=1` disables the transform entirely.
+//! # English inside the Nepali
+//!
+//! Romanising faithfully is exactly wrong for the English words in a
+//! code-switched utterance: Nemotron writes them in Devanagari too, so
+//! `स्पीकिंग` romanises to `spiking` when it means "speaking". Each romanised
+//! word is therefore handed to [`crate::always::english_recovery`], which
+//! restores the English spelling when it can prove it and does nothing
+//! otherwise. It only ever sees words that came out of a Devanagari run, so
+//! Latin-only input still returns `Cow::Borrowed` having touched nothing.
+//!
+//! Escape hatches: `ALWAYS_NO_ROMANIZE=1` disables the transform entirely,
+//! `ALWAYS_NO_ENGLISH_RECOVERY=1` disables only the recovery pass.
 
 use std::borrow::Cow;
 
@@ -128,7 +139,7 @@ pub fn contains_devanagari(text: &str) -> bool {
 /// A probe lands at an arbitrary byte, so it snaps backwards to the start of
 /// the record it landed in and compares whole records. That is why the loop
 /// carries byte bounds but never compares partial keys.
-fn lookup_sorted<'a>(blob: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn lookup_sorted<'a>(blob: &'a str, key: &str) -> Option<&'a str> {
     let bytes = blob.as_bytes();
     let (mut lo, mut hi) = (0usize, bytes.len());
     while lo < hi {
@@ -171,7 +182,7 @@ fn dictionary(word: &str) -> Option<&'static str> {
 }
 
 /// How often he has typed this Roman token. 0 = never.
-fn roman_freq(word: &str) -> u32 {
+pub(crate) fn roman_freq(word: &str) -> u32 {
     lookup_sorted(ROMAN_FREQ, word)
         .and_then(|v| v.parse().ok())
         .unwrap_or(0)
@@ -481,6 +492,26 @@ fn romanize_word(word: &str) -> String {
     }
 }
 
+/// His spelling for one Devanagari word, with an English word recovered from it
+/// if that is what it really was.
+///
+/// Nemotron picks one language per utterance, so the English words inside a
+/// mostly-Nepali sentence come back spelled phonetically in Devanagari and
+/// romanise to `spiking`, `inglis`, `bitwin`. Recovery only ever sees tokens
+/// that came out of a Devanagari run, which is why English dictation — where
+/// there is no run at all — never pays for it. See
+/// `crate::always::english_recovery`.
+fn romanize_word_recovered(word: &str, recover: bool) -> String {
+    let roman = romanize_word(word);
+    if !recover {
+        return roman;
+    }
+    match crate::always::english_recovery::recover_word(&roman) {
+        Some(english) => english.to_string(),
+        None => roman,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -509,6 +540,8 @@ pub fn romanize(text: &str) -> Cow<'_, str> {
     if !contains_devanagari(text) || disabled() {
         return Cow::Borrowed(text);
     }
+    // Read once per utterance, not once per word — this is the paste path.
+    let recover = !crate::always::english_recovery::disabled();
     let mut out = String::with_capacity(text.len());
     let mut run = String::new();
     // A run breaks on anything that is neither Devanagari nor an invisible
@@ -521,7 +554,7 @@ pub fn romanize(text: &str) -> Cow<'_, str> {
             run.push(c);
         } else {
             if !run.is_empty() {
-                out.push_str(&romanize_word(&run));
+                out.push_str(&romanize_word_recovered(&run, recover));
                 run.clear();
             }
             if is_devanagari_punctuation(c) {
@@ -532,7 +565,7 @@ pub fn romanize(text: &str) -> Cow<'_, str> {
         }
     }
     if !run.is_empty() {
-        out.push_str(&romanize_word(&run));
+        out.push_str(&romanize_word_recovered(&run, recover));
     }
     Cow::Owned(out)
 }
@@ -540,6 +573,31 @@ pub fn romanize(text: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- English recovered out of a code-switched utterance -------------------
+
+    #[test]
+    fn romanize_recovers_english_written_in_devanagari() {
+        // The reported utterance. Nemotron resolved the whole thing onto Hindi
+        // because it was mostly Nepali, so the English in it came back in
+        // Devanagari and used to paste as `end aai em spiking in inglis in
+        // bitwin`. The Nepali beside it must come through untouched.
+        let spoken = "एंड आई एम स्पीकिंग इन इंग्लिस इन बिटवीन एंड देखि नेपाली बोली अगेन";
+        let got = romanize(spoken);
+        assert!(!contains_devanagari(&got), "Devanagari survived: {got}");
+        assert_eq!(
+            got,
+            "end aai am speaking in english in between end dekhi nepali boli again"
+        );
+    }
+
+    #[test]
+    fn romanize_stays_idempotent_with_recovery_on() {
+        let spoken = "एंड आई एम स्पीकिंग इन इंग्लिस इन बिटवीन एंड देखि नेपाली बोली अगेन";
+        let once = romanize(spoken).into_owned();
+        assert!(matches!(romanize(&once), Cow::Borrowed(_)));
+        assert_eq!(romanize(&once), once);
+    }
 
     // -- the invariant -------------------------------------------------------
 
@@ -716,7 +774,6 @@ mod tests {
     fn whitespace_and_newlines_are_preserved_exactly() {
         assert_eq!(romanize("  हो\n\tहुन्छ  \n"), "  ho\n\thunxa  \n");
     }
-
 
     // -- lookup ------------------------------------------------------------
 

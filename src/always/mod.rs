@@ -15,6 +15,7 @@ pub mod correction_queue;
 pub mod correction_request;
 pub mod daemon;
 pub mod dictation;
+pub mod english_recovery;
 pub mod enrollment;
 pub mod event;
 pub mod event_loop;
