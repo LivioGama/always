@@ -1855,6 +1855,10 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
         "en", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "zh", "ja", "ko", "ar", "hi", "tr",
         "vi", "th", "id", "ms", "sv", "da", "no", "fi", "cs", "ro", "hu", "uk", "el", "he", "ca",
         "bg", "hr", "sk", "sl", "et", "lt", "lv", "mt", "sq", "sr", "mk", "bs", "me", "is",
+        // Present in parakeet-rs's PROMPT_DICTIONARY as locale-tagged keys and
+        // reachable via `nemotron_lang_key`; omitting them here hid them from
+        // the Settings picker even though the model supports them.
+        "ne", "si", "bn", "ta", "te", "ml", "kn", "mr", "gu", "pa", "ur", "fa", "sw", "am",
     ]
     .into_iter()
     .map(String::from)
