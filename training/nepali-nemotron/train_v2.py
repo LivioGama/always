@@ -20,7 +20,8 @@ import json, random, sys, time
 from pathlib import Path
 import torch, torch.nn as nn
 sys.path.insert(0, str(Path(__file__).parent))
-from train_translit import Seq2Seq, encode, BOS, EOS
+from train_translit import encode, BOS, EOS
+from model_tf import TranslitTF
 
 D = Path("/private/tmp/claude-501/-Users-abhi-proj-always/4a95cd0a-1cd0-4d0c-a5dd-0eebdd6e8956/scratchpad")
 DIGITS = {d: str(i) for i, d in enumerate("०१२३४५६७८९")}
@@ -55,7 +56,7 @@ def main():
     print(f"src vocab {len(src)}  tgt vocab {len(tgt)}")
 
     dev = "mps" if torch.backends.mps.is_available() else "cpu"
-    model = Seq2Seq(len(src), len(tgt), h=320, emb=128).to(dev)
+    model = TranslitTF(len(src), len(tgt)).to(dev)
     lossf = nn.CrossEntropyLoss(ignore_index=0)
 
     def run(pairs, epochs, lr, tag, bs=512):
@@ -78,8 +79,8 @@ def main():
             torch.save({"model": model.state_dict(), "src": src, "tgt": tgt,
                         "ms": MAXLEN, "mt": MAXLEN}, D / "translit_v2.pt")
 
-    run(ak, 3, 2e-3, "stage1-general")
-    run(mine, 40, 5e-4, "stage2-abhi", bs=128)
+    run(ak, 4, 3e-4, "stage1-general", bs=1024)
+    run(mine, 60, 1e-4, "stage2-abhi", bs=128)
     print(f"\nsaved translit_v2.pt  ({time.time()-t0:.0f}s total)")
 
 if __name__ == "__main__":

@@ -56,7 +56,10 @@ use transcribe_rs::{
 use parakeet_rs::{Nemotron, NemotronHandle, NemotronMode};
 
 use crate::managers::model_registry::EngineType;
-use crate::stt::{StreamingTranscriptionResult, SttError, Transcriber, TranscriptionResult};
+use crate::stt::{
+    LiveTranscriptionStream, StreamingTranscriptionResult, SttError, Transcriber,
+    TranscriptionResult,
+};
 use futures::stream::Stream;
 
 /// One loaded local engine. The variants mirror Handy's
@@ -111,6 +114,16 @@ pub struct LocalTranscriber {
     last_used: Arc<Mutex<Instant>>,
     /// Whether this model supports streaming transcription.
     supports_streaming: bool,
+    /// The shared Nemotron ONNX session, held OUTSIDE `engine`'s mutex.
+    ///
+    /// `transcribe_from_bytes` holds `engine` for the whole decode (seconds
+    /// on a long clip), and `open_live_stream` is called from the capture
+    /// thread — going through `engine` to fetch the handle would stall audio
+    /// capture behind an unrelated one-shot decode. The handle is a cheap
+    /// `Arc` clone of the same session `LoadedEngine::Nemotron` holds, so
+    /// there is no second model in memory.
+    #[cfg(feature = "local-stt")]
+    nemotron: Option<NemotronHandle>,
 }
 
 impl LocalTranscriber {
@@ -152,11 +165,19 @@ impl LocalTranscriber {
             );
         }
 
+        #[cfg(feature = "local-stt")]
+        let nemotron = match &*engine.lock().expect("freshly built engine mutex") {
+            LoadedEngine::Nemotron(handle) => Some(handle.clone()),
+            _ => None,
+        };
+
         Ok(Self {
             engine,
             language,
             last_used,
             supports_streaming,
+            #[cfg(feature = "local-stt")]
+            nemotron,
         })
     }
 }
@@ -229,13 +250,54 @@ fn build_engine(engine_type: EngineType, path: &Path) -> Result<LoadedEngine> {
         ),
         #[cfg(feature = "local-stt")]
         EngineType::Nemotron => LoadedEngine::Nemotron(
-            NemotronHandle::load(path, None)
+            NemotronHandle::load(path, Some(nemotron_exec_config()))
                 .map_err(|e| anyhow::anyhow!("nemotron load failed: {e}"))?,
         ),
         #[cfg(not(feature = "local-stt"))]
         EngineType::Nemotron => {
             return Err(anyhow::anyhow!("Nemotron requires the local-stt feature"));
         }
+    })
+}
+
+/// ONNX Runtime session config for the Nemotron encoder/decoder.
+///
+/// The one setting that matters here is `session.disable_prepacking`.
+///
+/// By default ORT rewrites every weight into a kernel-optimal layout at load
+/// time. That rewrite necessarily ALLOCATES, so the 615MB of weights — which
+/// are read-only and already sitting on disk in a usable layout — get
+/// materialised a second time as private, dirty, anonymous heap. Dirty pages
+/// cannot be reclaimed by the OS; they can only be swapped, which costs a
+/// disk WRITE. Measured on this machine: 474MB dirty, 224MB of it already
+/// swapped out.
+///
+/// With prepacking disabled ORT keeps using its memory-mapping of the
+/// external weight file, so the pages stay CLEAN and file-backed: resident
+/// while there is room, dropped (not written) under pressure, and shareable.
+///
+/// Measured with a standalone probe against this exact model and the same
+/// `ort` revision the daemon links:
+///
+/// | | prepacking on | prepacking off |
+/// |---|---|---|
+/// | physical footprint | 639 MB | **122 MB** |
+/// | dirty / unreclaimable | 474 MB | **0 KB** |
+/// | encoder per chunk | 35.3 ms | 51.2 ms (+45%) |
+///
+/// The +45% is affordable ONLY because transcription now runs *while the
+/// user is still speaking* (see `live_stream`): at 51ms per 560ms window the
+/// real-time factor is 0.09, roughly 11x headroom, so the extra 16ms per
+/// window never reaches the user's critical path. Before streaming
+/// finalization existed this trade would have made the perceived wait worse
+/// and should not have been taken.
+#[cfg(feature = "local-stt")]
+fn nemotron_exec_config() -> parakeet_rs::ExecutionConfig {
+    parakeet_rs::ExecutionConfig::default().with_custom_configure(|b| {
+        // `with_config_entry` returns a RECOVERABLE error carrying the
+        // builder back; the closure signature wants the plain form.
+        b.with_config_entry("session.disable_prepacking", "1")
+            .map_err(Into::into)
     })
 }
 
@@ -261,6 +323,36 @@ const NEMOTRON_FLUSH_CHUNKS: usize = 1;
 impl Transcriber for LocalTranscriber {
     fn supports_streaming(&self) -> bool {
         self.supports_streaming
+    }
+
+    /// Spawn a persistent cache-aware Nemotron session for one utterance.
+    ///
+    /// Same isolation rule as `transcribe_streaming`: lock `self.engine` only
+    /// long enough to clone the cheap shared `NemotronHandle`, then hand back
+    /// a `Nemotron::from_shared` instance with its own decode state. The
+    /// expensive ONNX session stays shared (and is internally mutex-guarded by
+    /// parakeet-rs), so a concurrent one-shot decode is safe — it just
+    /// serialises on the model lock, which is exactly why the caller should
+    /// stop firing speculative full decodes once this session is live.
+    #[cfg(feature = "local-stt")]
+    fn open_live_stream(&self) -> Option<Box<dyn LiveTranscriptionStream>> {
+        if !self.supports_streaming {
+            return None;
+        }
+        let handle = self.nemotron.as_ref()?;
+        let mut nemotron = Nemotron::from_shared(handle);
+        apply_nemotron_language(&mut nemotron, self.language.as_deref());
+        if let Ok(mut used) = self.last_used.lock() {
+            *used = Instant::now();
+        }
+        tracing::debug!(
+            chunk_samples = NEMOTRON_CHUNK_SAMPLES,
+            "nemotron_live_stream_opened"
+        );
+        Some(Box::new(NemotronLiveStream {
+            inner: nemotron,
+            last_used: Arc::clone(&self.last_used),
+        }))
     }
 
     fn transcribe_from_bytes(&self, audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
@@ -405,6 +497,70 @@ impl Transcriber for LocalTranscriber {
             Err(e) => Err(e),
         };
         Box::pin(futures::stream::once(async move { result }))
+    }
+}
+
+/// Persistent cache-aware Nemotron session — the live decode that makes
+/// finalization cost one 560 ms window instead of a whole-utterance re-decode.
+///
+/// Measured on this machine with the shipped int8 model (see
+/// `examples/nemotron_stream_bench.rs`): per-chunk cost is FLAT at ~54 ms for
+/// buffer lengths from 0.5 s to 120 s — 0.10x realtime, ~10x headroom — and a
+/// flush costs 51-54 ms. The same 120 s clip costs 11.5 s to decode one-shot.
+/// Transcript equivalence vs one-shot: WER 0.000 at 4.7 s, 0.008 at 40 s (the
+/// single differing token is a nonsense word both modes garble differently).
+#[cfg(feature = "local-stt")]
+struct NemotronLiveStream {
+    inner: Nemotron,
+    last_used: Arc<Mutex<Instant>>,
+}
+
+#[cfg(feature = "local-stt")]
+impl NemotronLiveStream {
+    /// Zero-pad a short slice up to one full encoder window. Only ever
+    /// correct for the final tail — padding mid-utterance would splice
+    /// silence into the cache-aware context.
+    fn padded(samples: &[f32]) -> std::borrow::Cow<'_, [f32]> {
+        if samples.len() == NEMOTRON_CHUNK_SAMPLES {
+            std::borrow::Cow::Borrowed(samples)
+        } else {
+            let mut v = samples.to_vec();
+            v.resize(NEMOTRON_CHUNK_SAMPLES, 0.0);
+            std::borrow::Cow::Owned(v)
+        }
+    }
+
+    fn feed(&mut self, samples: &[f32]) -> Result<(), SttError> {
+        let chunk = Self::padded(samples);
+        self.inner.transcribe_chunk(&chunk).map_err(|error| {
+            SttError::Other(anyhow::anyhow!("nemotron live chunk failed: {error}"))
+        })?;
+        if let Ok(mut used) = self.last_used.lock() {
+            *used = Instant::now();
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "local-stt")]
+impl LiveTranscriptionStream for NemotronLiveStream {
+    fn chunk_samples(&self) -> usize {
+        NEMOTRON_CHUNK_SAMPLES
+    }
+
+    fn push_chunk(&mut self, samples: &[f32]) -> Result<String, SttError> {
+        self.feed(samples)?;
+        // `get_transcript()` decodes ALL accumulated tokens — never the
+        // per-call return value, which is a sub-word fragment.
+        Ok(self.inner.get_transcript().trim().to_string())
+    }
+
+    fn finish(&mut self) -> Result<String, SttError> {
+        // One trailing silent window drains the decoder for the last word.
+        // parakeet-rs advances exactly one encoder chunk per call, so a
+        // single flush is enough (see NEMOTRON_FLUSH_CHUNKS).
+        self.feed(&vec![0.0f32; NEMOTRON_CHUNK_SAMPLES])?;
+        Ok(self.inner.get_transcript().trim().to_string())
     }
 }
 

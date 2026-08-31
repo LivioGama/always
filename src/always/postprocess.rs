@@ -70,6 +70,29 @@ impl PostProcessor {
         }
     }
 
+    /// Non-blocking cache probe for an already-built request key.
+    ///
+    /// The paste path uses this to answer "is the correction already
+    /// paid for?" in microseconds, WITHOUT awaiting anything. A hit is
+    /// applied to the same single paste; a miss must never make the user
+    /// wait (see `apply_grammar_nonblocking` in `event_loop`).
+    pub fn cached_correction(&self, user_message: &str) -> Option<String> {
+        if !self.can_correct() {
+            return None;
+        }
+        self.cache.lock().get(user_message).cloned()
+    }
+
+    /// True when an identical request is already in flight, so joining it
+    /// costs only the request's remaining time rather than a fresh
+    /// round-trip. Used purely for latency attribution in logs — the
+    /// `grammar_cache_hit` flag alone cannot tell a cold call apart from
+    /// a single-flight join, which is why warm effectiveness has been
+    /// unmeasurable.
+    pub fn has_inflight(&self, user_message: &str) -> bool {
+        self.inflight.lock().contains_key(user_message)
+    }
+
     /// Single optional cleanup pass.
     ///
     /// Just the LLM call when `grammar_correction_enabled` is true;
@@ -178,7 +201,20 @@ impl PostProcessor {
             .get_or_try_init(|| self.fetch_correction(user_message, transcript, api_key, context))
             .await
             .cloned();
-        self.inflight.lock().remove(user_message);
+        // Remove ONLY our own cell. A straggler joiner used to `remove` by
+        // key unconditionally, which could delete a *newer* cell installed
+        // by a later caller (after a failed attempt left the previous cell
+        // uninitialized) — every subsequent arrival then created yet
+        // another cell and duplicated the request.
+        {
+            let mut inflight = self.inflight.lock();
+            if inflight
+                .get(user_message)
+                .is_some_and(|current| Arc::ptr_eq(current, &cell))
+            {
+                inflight.remove(user_message);
+            }
+        }
         outcome
     }
 
@@ -709,5 +745,45 @@ mod tests {
         );
         let other_key = "<transcript>and more</transcript>";
         assert!(!processor.cache.lock().contains_key(other_key));
+    }
+    /// The paste path probes this instead of awaiting the LLM. It must
+    /// answer instantly and must never claim a hit when the LLM would not
+    /// have run at all (no key / feature off) — a false hit there would
+    /// paste a stale correction for a request that can no longer be made.
+    #[test]
+    fn cached_correction_probes_without_awaiting() {
+        let processor = PostProcessor::new(Some("test-key".to_string()));
+        assert_eq!(
+            processor.cached_correction("<transcript>hi</transcript>"),
+            None
+        );
+        processor.insert_cached("<transcript>hi</transcript>".to_string(), "Hi.".to_string());
+        assert_eq!(
+            processor
+                .cached_correction("<transcript>hi</transcript>")
+                .as_deref(),
+            Some("Hi.")
+        );
+    }
+
+    #[test]
+    fn cached_correction_is_silent_when_the_llm_cannot_run() {
+        // No API key: `can_correct` is false, so the probe must report a
+        // miss even though the entry is physically present.
+        let processor = PostProcessor::new(None);
+        processor.insert_cached("<transcript>hi</transcript>".to_string(), "Hi.".to_string());
+        assert!(!processor.can_correct());
+        assert_eq!(
+            processor.cached_correction("<transcript>hi</transcript>"),
+            None
+        );
+    }
+
+    #[test]
+    fn has_inflight_reports_no_pending_request_on_a_fresh_processor() {
+        // Backs the `joined_inflight` log field: distinguishing a cold call
+        // from a single-flight join to a running warm is the whole point.
+        let processor = PostProcessor::new(Some("test-key".to_string()));
+        assert!(!processor.has_inflight("<transcript>hi</transcript>"));
     }
 }

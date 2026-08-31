@@ -396,6 +396,48 @@ pub trait Transcriber: Send + Sync {
     fn supports_streaming(&self) -> bool {
         false
     }
+
+    /// Open a PERSISTENT cache-aware transcription session for ONE utterance.
+    ///
+    /// This is the difference between "streaming" as a presentation trick and
+    /// streaming as the actual decode. [`Self::transcribe_streaming`] takes a
+    /// COMPLETE utterance and merely emits it in pieces — every call decodes
+    /// the whole clip from scratch. The session returned here is fed audio as
+    /// it is captured and keeps encoder/decoder state across chunks, so the
+    /// transcript is built WHILE the user speaks and finalization costs one
+    /// flush chunk (~50 ms) instead of a full re-decode (~0.10x realtime, i.e.
+    /// 4 s for a 40 s utterance).
+    ///
+    /// Returns `None` for engines with no cache-aware streaming mode; callers
+    /// must keep their one-shot path as the fallback.
+    fn open_live_stream(&self) -> Option<Box<dyn LiveTranscriptionStream>> {
+        None
+    }
+}
+
+/// One persistent, cache-aware decode session covering a single utterance.
+///
+/// Contract:
+/// - [`Self::push_chunk`] is called with EXACTLY [`Self::chunk_samples`]
+///   f32 samples (16 kHz mono, `-1.0..=1.0`), in capture order, once each.
+///   Shorter slices are zero-padded by the implementation, but doing that
+///   mid-utterance injects silence into the decode — only pad the tail.
+/// - Every accessor returns the FULL transcript so far, never a delta.
+///   Concatenating per-chunk deltas splits words at chunk boundaries
+///   ("whe ther", "finali zes") because the tokenizer emits sub-word pieces.
+/// - [`Self::finish`] drains the decoder and returns the final transcript.
+///   The session must not be used afterwards.
+pub trait LiveTranscriptionStream: Send {
+    /// Samples per [`Self::push_chunk`] call. Nemotron's cache-aware encoder
+    /// window is 560 ms = 8960 samples at 16 kHz.
+    fn chunk_samples(&self) -> usize;
+
+    /// Feed one chunk. Returns the full transcript accumulated so far.
+    fn push_chunk(&mut self, samples: &[f32]) -> Result<String, SttError>;
+
+    /// Flush the decoder (one trailing silent window) and return the final
+    /// full transcript.
+    fn finish(&mut self) -> Result<String, SttError>;
 }
 
 /// Production [`Transcriber`] backed by the Groq Whisper API. Holds the
@@ -433,6 +475,41 @@ impl Transcriber for GroqTranscriber {
             Err(e) => Err(e),
         };
         Box::pin(futures::stream::once(async move { result }))
+    }
+}
+
+#[cfg(test)]
+mod live_stream_trait_tests {
+    use super::*;
+
+    struct PlainTranscriber;
+
+    impl Transcriber for PlainTranscriber {
+        fn transcribe_from_bytes(&self, _audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
+            Ok(TranscriptionResult::default())
+        }
+        fn transcribe_streaming(
+            &self,
+            _audio: Vec<u8>,
+        ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>>
+        {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    /// Every backend that has not opted in must report "no live session", so
+    /// the capture loop keeps its untouched speculative/one-shot path. A
+    /// default of `Some` would silently route Groq dictation through a
+    /// session it cannot serve.
+    #[test]
+    fn transcribers_have_no_live_session_by_default() {
+        assert!(PlainTranscriber.open_live_stream().is_none());
+        assert!(!PlainTranscriber.supports_streaming());
+    }
+
+    #[test]
+    fn groq_has_no_live_session() {
+        assert!(GroqTranscriber::new("k").open_live_stream().is_none());
     }
 }
 

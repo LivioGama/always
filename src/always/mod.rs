@@ -26,6 +26,7 @@ pub mod hud;
 pub mod idle_watcher;
 pub mod keyboard;
 pub mod keyring;
+pub mod live_stream;
 pub mod localization;
 pub mod log;
 pub mod mic_monitor;

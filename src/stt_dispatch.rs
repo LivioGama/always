@@ -20,7 +20,8 @@ use parking_lot::{Condvar, Mutex};
 use crate::always::AlwaysConfig;
 use crate::managers::model_registry::ModelRegistry;
 use crate::stt::{
-    GroqTranscriber, StreamingTranscriptionResult, SttError, Transcriber, TranscriptionResult,
+    GroqTranscriber, LiveTranscriptionStream, StreamingTranscriptionResult, SttError, Transcriber,
+    TranscriptionResult,
 };
 
 /// Placeholder installed at daemon boot so the UDS server can bind before
@@ -92,6 +93,16 @@ impl Transcriber for PendingTranscriber {
         lock.try_lock()
             .and_then(|guard| guard.as_ref().map(|t| t.supports_streaming()))
             .unwrap_or(false)
+    }
+
+    fn open_live_stream(&self) -> Option<Box<dyn LiveTranscriptionStream>> {
+        // Non-blocking, exactly like `supports_streaming`: this runs on the
+        // capture thread at voice onset and must never wait on the model-load
+        // thread. Not ready yet reads as "no live stream this utterance" and
+        // the caller falls back to the one-shot path.
+        let (lock, _cv) = &*self.slot;
+        lock.try_lock()
+            .and_then(|guard| guard.as_ref().and_then(|t| t.open_live_stream()))
     }
 
     fn transcribe_from_bytes(&self, audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
@@ -236,6 +247,13 @@ impl Transcriber for FallbackTranscriber {
                 Err(primary_err)
             }
         }
+    }
+
+    fn open_live_stream(&self) -> Option<Box<dyn LiveTranscriptionStream>> {
+        // Same policy as `transcribe_streaming`: the live session belongs to
+        // the primary engine. If the primary can't stream there is no session
+        // and the caller keeps its one-shot path (which still falls back).
+        self.primary.open_live_stream()
     }
 
     fn transcribe_streaming(

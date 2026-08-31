@@ -432,6 +432,44 @@ pub fn clear_last_pasted_for_test() {
     *LAST_PASTED.lock() = None;
 }
 
+/// Deadline until which keystrokes observed by our own event tap are
+/// assumed to be ours, not the user's.
+///
+/// The daemon posts synthetic Cmd+Z / Cmd+V to `CGEventTapLocation::HID`,
+/// and its own `rdev` listener sees them come back. The auto-enter
+/// countdown cancels on ANY key press, so without this window an
+/// in-place grammar patch cancels the very Return it was trying to
+/// preserve — and clears the dictation buffer the patch needs as its
+/// "message not yet submitted" proof.
+static SYNTHETIC_INPUT_UNTIL: std::sync::LazyLock<Mutex<Option<Instant>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+/// Open a window during which our own synthetic keystrokes are ignored by
+/// the countdown-cancel path. Deliberately time-bounded rather than a
+/// begin/end pair: a panic between the two would otherwise wedge the
+/// daemon into ignoring every real keypress.
+pub fn begin_synthetic_input(window: std::time::Duration) {
+    *SYNTHETIC_INPUT_UNTIL.lock() = Some(Instant::now() + window);
+}
+
+/// Close the window early (the patch finished sooner than its budget).
+pub fn end_synthetic_input() {
+    *SYNTHETIC_INPUT_UNTIL.lock() = None;
+}
+
+/// True while the daemon is posting its own key events.
+pub fn synthetic_input_active() -> bool {
+    let mut guard = SYNTHETIC_INPUT_UNTIL.lock();
+    match *guard {
+        Some(deadline) if Instant::now() < deadline => true,
+        Some(_) => {
+            *guard = None;
+            false
+        }
+        None => false,
+    }
+}
+
 /// True while a paste pipeline (copy → Cmd+V → optional grammar patch) is
 /// in flight. Prevents overlapping pastes from VAD double-fire.
 static PASTE_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -961,5 +999,29 @@ mod tests {
         set_current_app(Some("com.example.editor".into()));
         assert!(recompute_effective().0, "fresh app, no allowlist — paused");
         assert!(should_gate_capture());
+    }
+    /// The daemon's own Cmd+Z / Cmd+V come back through its own event tap.
+    /// Without this window the in-place grammar patch cancels the very
+    /// auto-enter countdown it is trying to preserve, and clears the
+    /// dictation buffer the patch uses as its "not yet submitted" proof.
+    #[test]
+    fn synthetic_input_window_opens_and_closes() {
+        end_synthetic_input();
+        assert!(!synthetic_input_active());
+
+        begin_synthetic_input(std::time::Duration::from_secs(30));
+        assert!(synthetic_input_active());
+
+        end_synthetic_input();
+        assert!(!synthetic_input_active());
+    }
+
+    /// Time-bounded rather than a begin/end pair on purpose: a panic
+    /// between the two would otherwise wedge the daemon into ignoring
+    /// every real keypress forever.
+    #[test]
+    fn synthetic_input_window_expires_on_its_own() {
+        begin_synthetic_input(std::time::Duration::ZERO);
+        assert!(!synthetic_input_active());
     }
 }

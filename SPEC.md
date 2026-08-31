@@ -119,14 +119,76 @@ daemon broadcasts events, the GUI sends commands.
 3. **Listening shown** — see §5.
 4. **Speaking** — audio accumulates. Long utterances are committed in chunks and
    transcribed as they go, so a two-minute dictation does not wait until the end.
-5. **Pause detected** — a tentative silence starts a *speculative* transcription
-   in the background, which also pre-warms the grammar LLM for the expected
-   final text (§9). If speech resumes, it is discarded.
+   **Chunking is suppressed while a live decode session is carrying the
+   utterance** (§4a): every flush resets that session, so chunking a streaming
+   utterance replaced one flat ~130 ms finalization with a from-scratch
+   one-shot decode of every 6 s of speech, and the end-of-utterance wait grew
+   with how long the user talked (measured 487 ms streaming → 880 → 1086 →
+   1296 ms once chunking engaged). Rolling chunks resume past 120 s of speech —
+   the longest span over which streaming was measured flat — and immediately if
+   the session dies or its audio is truncated.
+4a. **Live decode (cache-aware streaming engines only — Nemotron)** — a single
+   persistent decode session is fed the audio in 560 ms windows as it is
+   captured, so the transcript is built *while the user speaks*. The overlay
+   preview is read straight off that session; no extra decode runs.
+5. **Pause detected** — at a tentative silence the grammar LLM is pre-warmed
+   for the expected final text (§9), and the adaptive-silence verdict is taken.
+   On a live session both use the transcript that already exists. Without one,
+   a *speculative* background transcription starts instead and both wait on it;
+   if speech resumes, it is discarded.
 6. **End of utterance** — silence exceeds the configured window
    (`stt_silence_secs`, default 1.4 s). With adaptive silence on, the window
-   extends when the text looks mid-sentence.
-7. **Transcribe** — the speculative result is used if still valid, otherwise a
-   fresh transcription runs.
+   moves in *both* directions:
+   - **Extends** (×2, capped at +1.5 s) when the transcript looks mid-sentence.
+     On the **live** path that means an explicitly unfinished trailing mark
+     (`,` `;` `:` `—` `-`) or a trailing connector / hesitation filler. On the
+     **speculative** path (cloud engines, which punctuate reliably) a missing
+     sentence terminator also counts.
+   - **Shortens to 300 ms** when the transcript reads as a finished sentence:
+     its last word is not a connector or filler, it does not end on an
+     unfinished mark, and it is at least three words long. A sentence
+     terminator counts when present but is **not required** — local streaming
+     engines do not punctuate dictation. The short window is clamped to the
+     configured one, so it can only ever shorten the wait.
+
+   The two verdicts are a ladder: extend wins, then shorten, then the window is
+   left alone. They must never both hold for the same text. The live path
+   deliberately does **not** treat missing punctuation as "unfinished": doing so
+   made the extend branch true on every unpunctuated utterance, which is every
+   utterance on a local streaming engine, so the shorten branch was unreachable
+   (measured: it fired 0 times, ever) and ordinary dictation silently paid the
+   *doubled* 1.8 s window instead of the configured 0.9 s.
+
+   Every evaluation of this ladder is logged: `midsentence_decision`,
+   `early_finalize_decision`, or `early_finalize_skipped` with the exact
+   precondition that was false (`no_live_session`, `worker_behind`,
+   `no_transcript`, `adaptive_disabled`, `short_utterance`, `tail_not_decoded`,
+   `already_extended`, `silence_below_early_window`, `not_complete_utterance`).
+   A verdict that only logs when it succeeds cannot be shown to be dead.
+
+   Both verdicts require that *every voiced sample has actually been decoded
+   into the transcript*. The live session withholds a partial trailing window
+   of up to 560 ms from the decoder, so "caught up" alone does not mean the
+   user's last words are in the text; judging a truncated transcript reads as
+   "unfinished" almost by construction and extended the window on utterances
+   that were in fact complete. The verdict is deferred frame by frame until the
+   trailing audio is covered — the silence itself flows into the decoder, so
+   this resolves within one 560 ms window. If it never resolves before the
+   configured window expires, no verdict is taken and the window applies
+   unchanged. Shortening additionally requires a live decode session; the
+   speculative path can still only extend.
+
+   In practice the shortened cut lands 300-660 ms after the last voiced frame
+   (never at exactly 300 ms unless speech happened to end on a 560 ms decoder
+   boundary), plus ~130 ms of flat live finalization.
+7. **Transcribe** — with a live session the transcript is already complete:
+   finalization feeds the last partial window plus one silent flush window and
+   takes the accumulated text (measured 124-139 ms, and **flat** — a 40 s
+   utterance finalizes as fast as a 5 s one). Otherwise the speculative result
+   is used if still valid, else a fresh whole-utterance transcription runs
+   (~0.10x realtime: 0.5 s for 5 s of audio, 3.8 s for 40 s, 11.5 s for 2 min).
+   A live session that failed, timed out, decoded nothing, or whose audio was
+   truncated by the speaker gate falls back to that same fresh transcription.
 8. **Post-process** — filters, glossary corrections, grammar cleanup (§9).
    A rule-filtered utterance (not a hallucination) is still copied to the
    clipboard — no paste, no auto-Enter — so a wrong filter verdict costs a
@@ -208,9 +270,21 @@ the active model claimed streaming; that gate is gone.) A model that returns
 one finished transcript per utterance must still not claim streaming —
 `Transcriber::supports_streaming()` stays `false` for the cloud backend.
 
-The daemon's live-preview loop (`vad.rs`, `preview_cadence`) re-transcribes the
-growing buffer on an interval while the user is still talking. Three ways it
-arms, in priority order:
+**A live decode session supersedes the preview loop entirely.** When the active
+engine offers one (`Transcriber::open_live_stream`, today Nemotron only), the
+overlay preview is the session's own cumulative transcript, broadcast whenever
+it changes and at most every `LIVE_STREAM_PREVIEW_MIN_GAP_MS` (250 ms). It
+costs no extra decode, and the text is the *cumulative* transcript rather than
+concatenated per-chunk returns — those split words at window boundaries
+("whe ther", "finali zes") because the tokenizer emits sub-word pieces.
+`preview_cadence` is not consulted at all in that case; the re-decode loop
+below would otherwise contend with the session for the one shared ONNX model
+mutex (measured: seven previews in a single 30 s utterance at 318-1966 ms each,
+with the final decode queued behind all of them).
+
+The re-decode preview loop (`vad.rs`, `preview_cadence`) re-transcribes the
+growing buffer on an interval while the user is still talking, for engines with
+no live session. Three ways it arms, in priority order:
 
 1. **Consume mode** (`SetConsumeMode`, regardless of engine) — fast cadence:
    every `CONSUME_STREAM_INTERVAL_MS` (200ms), self-limited to one round trip
@@ -482,10 +556,16 @@ directory, and a declared `size_mb` that agrees with the sum of the parts.
 **Implementation details:**
 - `LoadedEngine::Nemotron` holds a **shared, read-only `parakeet_rs::NemotronHandle`** (loaded via `NemotronHandle::load(path, None)`), never a bare `Nemotron` instance. Every call — the one-shot final path and each streaming session — spawns its own independent `Nemotron::from_shared(&handle)` with fresh decoder state, transcribes, and drops it. This is required, not cosmetic: `Nemotron::transcribe_audio` (the one-shot path) starts by resetting the same cache-aware decode state (`encoder_cache`, LSTM `state_1`/`state_2`, `last_token`) that a concurrent `transcribe_chunk` streaming sequence depends on, and the streaming path releases `self.engine`'s mutex between chunks (so a slow decode doesn't block unrelated daemon work) — sharing one `Nemotron` between the two paths let the daemon's independent "speculative transcription" (fires ~240ms after any pause, unrelated to streaming preview state) silently corrupt an in-progress streaming decode. Per-call isolation removes the shared mutable state entirely; no additional locking is needed.
 - Non-streaming transcription uses `Nemotron::from_shared(&handle)` then `transcribe_audio(&samples)`
-- `LocalTranscriber::transcribe_streaming` clones the handle out of `self.engine` once, then uses stateful `transcribe_chunk(&audio_chunk)` calls on its own `Nemotron` instance with 560ms chunks (8960 samples @ 16kHz)
+- `LocalTranscriber::open_live_stream` returns the **persistent** session used for both the live preview and the final transcript. It takes the handle from a `nemotron` field held *outside* `self.engine`'s mutex — `transcribe_from_bytes` holds that mutex for a whole decode, and the session is opened from the capture thread, which must never block behind an unrelated one-shot. The session lives on its own worker thread (`always::live_stream`), is fed exactly 8960-sample windows in capture order, and exposes only the **cumulative** transcript (`Nemotron::get_transcript()`), never per-call returns.
+- Measured on the shipped int8 model (`examples/nemotron_stream_bench.rs`): per-window decode cost is **flat at ~54 ms** from a 0.5 s buffer to a 120 s buffer (0.10x realtime, ~10x headroom), and the flush costs 51-54 ms. The same clips cost 514 ms / 4200 ms / 11512 ms to decode one-shot at 4.7 s / 39.6 s / 119.7 s. Transcript equivalence versus one-shot: WER 0.000 at 4.7 s, 0.008 at 39.6 s.
+- The session is opened at voice onset. On a cold daemon the engine may still be loading, and the open is a deliberately non-blocking `try_lock` that answers "no session" rather than stalling the capture thread; that answer is **retried every 300 ms** for as long as the active engine reports it can stream. Without the retry a single unlucky first frame disabled streaming for the whole utterance — no live transcript (so no early finalization) and the 6 s chunk target back in force, which is how `chunk_flush` still appeared on a streaming engine. Re-opening mid-utterance is complete, not partial: `feed` starts from sample 0 of the current buffer, and after a chunk flush that buffer is exactly the tail `finalize_chunked` appends.
+- Every chunk flush logs which of the three non-carrying states caused it (`no_session`, `invalidated`, `degraded`, or `carrying` for the 120 s safety valve), because `live_session_carrying` collapses three very different failures into one `false`.
+- The session is re-based (`LiveStream::reset`) on every chunker flush, because the committed audio leaves the live buffer and `finalize_chunked` appends the tail to the separately-decoded chunks — a session still holding the committed words would duplicate them. It is invalidated outright on a speaker-gate truncation, because its decoded state then covers audio the rest of the pipeline has discarded.
+- Because a flush destroys the session's accumulated state, the two are mutually exclusive by design: while a healthy session is carrying the utterance the chunk target rises from `CHUNK_TARGET_SECS` (6 s) / `CHUNK_HARD_MAX_SECS` (15 s) to `STREAM_CHUNK_TARGET_SECS` (120 s), so a normal dictation never chunks at all. 120 s rather than "never" because that is the longest span the flat per-window cost was actually measured over, and because past it the chunker still provides things the live path does not: per-chunk empty-result retries, per-chunk grammar for text beyond `GRAMMAR_MAX_CHARS`, the failed-chunk WAV spill, and a bound on the raw sample buffer (120 s ≈ 3.8 MB). parakeet-rs trims its own retained audio to ~1.8 s per session regardless of length, so a long session is memory-bounded on the engine side. The `ALWAYS_CHUNK_TARGET_SECS` test override still wins over the streaming ceiling.
+- `LocalTranscriber::transcribe_streaming` (the older, non-persistent API) clones the handle out of `self.engine` once, then uses stateful `transcribe_chunk(&audio_chunk)` calls on its own `Nemotron` instance with 560ms chunks (8960 samples @ 16kHz). It decodes a COMPLETE clip from scratch each call, so it is a presentation helper only — it is no longer on the dictation path for Nemotron.
 - Each preview snapshot spawns a fresh (already-reset) instance, pads its final chunk to 8960 samples, and sends three silent flush chunks
 - VAD consume-mode previews call `transcribe_streaming`; preview events contain cumulative text because the Swift monitor replaces its stored partial transcript on each event
-- The final paste path remains non-streaming and uses `transcribe_audio(&samples)`
+- The final paste path uses the live session when one is available, and falls back to non-streaming `transcribe_audio(&samples)` otherwise
 - Rust test coverage covers the chunk-splitting/padding math (560ms sizing, ragged-tail zero-padding, flush-tail count) without a loaded model; real Nemotron model inference and long-running memory behavior remain unverified by automated tests since that needs ~2.5GB of real weights this repo doesn't ship
 - The loader auto-detects English-only vs multilingual variants from the encoder ONNX graph
 - Multilingual variant accepts a target language code via `apply_nemotron_language()` → `set_target_lang()`, driven by the Settings language picker (Swift) and the daemon's existing `cfg.lang` plumbing (`uds_server.rs::set_language`). **Known format mismatch**: `cfg.lang` and this model's own catalogue entry use bare ISO 639-1 codes ("es", "ja", "zh", ...), but parakeet-rs's `PROMPT_DICTIONARY` only has bare-code entries for most languages — "ja"/"zh" require locale-tagged form ("ja-JP", "zh-CN"). A bare "ja"/"zh" selection is rejected by `set_target_lang` and falls back to auto-detect with a logged warning rather than failing the transcription. Mapping "ja"→"ja-JP"/"zh"→"zh-CN" before the call is a known follow-up, not yet done.

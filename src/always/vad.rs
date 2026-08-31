@@ -238,11 +238,34 @@ fn speaker_gate_confirm_utterance(
 /// `SpeakerGate::window_threshold`.
 fn speaker_gate_window_threshold(threshold: f32, system_audio_playing: bool) -> f32 {
     if system_audio_playing {
+        // Competing audio present: be strict per-window. A media voice that
+        // wins one window used to latch the whole utterance.
         threshold + AUDIO_PLAYING_GATE_BUMP
     } else {
-        threshold
+        // Nothing else is playing, so the ONLY plausible speaker is the user.
+        // The per-window bar exists to decide "start transcribing now"; the
+        // authoritative reject is the whole-utterance confirmation that runs
+        // at finalization and cannot be bypassed. Keeping both bars equal made
+        // the fast one the bottleneck: measured on a real utterance, the
+        // user's own voice scored 0.024, -0.031, 0.071, 0.040, 0.318 across
+        // 12.6 SECONDS before a window finally hit 0.617 -- 12.6s of their
+        // speech discarded while every rejection was later contradicted by
+        // the whole-utterance score.
+        //
+        // So this bar is deliberately permissive: admit early, and let the
+        // whole-utterance check do the actual rejecting. Its own measured
+        // ceiling for media is 0.3407, so `WINDOW_FLOOR` stays below the
+        // user's observed range while the real gate keeps its full strength.
+        (threshold * WINDOW_THRESHOLD_FRACTION).min(WINDOW_THRESHOLD_CEILING)
     }
 }
+
+/// Per-window bar as a fraction of the configured whole-utterance threshold.
+/// Only governs how fast transcription STARTS, never whether it is kept.
+const WINDOW_THRESHOLD_FRACTION: f32 = 0.35;
+/// Absolute ceiling so raising the main threshold cannot make the fast bar
+/// strict enough to reintroduce the 12-second rejection stalls.
+const WINDOW_THRESHOLD_CEILING: f32 = 0.15;
 
 fn speaker_gate_allows_stt(requested: bool, speaker_verified: bool) -> bool {
     // "Only me": when the gate is requested, STT/speculation/preview must wait
@@ -542,11 +565,103 @@ fn chunk_target_secs() -> u32 {
         .map(|v| v.max(3))
         .unwrap_or(CHUNK_TARGET_SECS)
 }
+/// Is a live decode session actually carrying this utterance right now?
+///
+/// Both failure modes must count as "no": a session whose worker has died or
+/// fallen hopelessly behind (`degraded`) returns no transcript and finalizes
+/// through the one-shot path, and a session whose audio was truncated out
+/// from under it (`live_invalidated`) no longer describes the buffer. In
+/// either case rolling chunks are valuable again and must resume.
+fn live_session_carrying(
+    live: Option<&crate::always::live_stream::LiveStream>,
+    live_invalidated: bool,
+) -> bool {
+    live_carrying_state(live.map(|live| live.degraded()), live_invalidated)
+}
+
+/// The decision above with the session reduced to its observable state, so
+/// the truth table is testable without a loaded model.
+/// `degraded`: `None` = no session at all.
+fn live_carrying_state(degraded: Option<bool>, live_invalidated: bool) -> bool {
+    !live_invalidated && degraded == Some(false)
+}
+
+/// Why rolling chunking is (or is not) bypassed right now, as a log field.
+///
+/// `live_session_carrying` collapses three very different situations into one
+/// `false`, and the only observable was `chunk_flush` appearing on a machine
+/// where chunking was supposed to be off. This names which one it was.
+fn live_carrying_reason(
+    live: Option<&crate::always::live_stream::LiveStream>,
+    live_invalidated: bool,
+) -> &'static str {
+    match live {
+        None => "no_session",
+        Some(_) if live_invalidated => "invalidated",
+        Some(live) if live.degraded() => "degraded",
+        Some(_) => "carrying",
+    }
+}
+
+/// Speech that must accumulate before a chunk is committed at the next
+/// natural pause. See [`STREAM_CHUNK_TARGET_SECS`] for why a live session
+/// raises this so far.
+///
+/// The `ALWAYS_CHUNK_TARGET_SECS` test override still wins even while
+/// streaming, so an end-to-end test can exercise the chunk path with seconds
+/// of audio on a machine whose engine happens to stream.
+fn effective_chunk_target_secs(live_streaming: bool) -> u32 {
+    if live_streaming && std::env::var_os("ALWAYS_CHUNK_TARGET_SECS").is_none() {
+        STREAM_CHUNK_TARGET_SECS
+    } else {
+        chunk_target_secs()
+    }
+}
+
+/// Mid-speech ceiling for the current utterance. Never below the target —
+/// a hard max under the target would flush every chunk early and defeat the
+/// pause-aligned seam.
+fn effective_chunk_hard_max_secs(live_streaming: bool) -> u32 {
+    CHUNK_HARD_MAX_SECS.max(effective_chunk_target_secs(live_streaming))
+}
+
 /// Absolute per-chunk ceiling: flush at a frame boundary even mid-speech
 /// if the user talks continuously for this long without a tentative dip.
 /// This keeps uninterrupted monologues from becoming one large final STT
 /// call; natural-silence chunking above handles the common case.
 const CHUNK_HARD_MAX_SECS: u32 = 15;
+/// Chunk ceiling while a healthy LIVE decode session is carrying the
+/// utterance. Effectively "don't chunk", with a safety valve.
+///
+/// Rolling chunking exists for exactly one reason: a one-shot decode costs
+/// ~0.10x realtime, so a long utterance's single final decode grows without
+/// bound (0.5 s for 5 s of audio, 3.8 s for 40 s, 11.5 s for 2 min). A live
+/// streaming session has no such term — it decodes each 560 ms window as it
+/// arrives and finalization is flat.
+///
+/// Chunking a STREAMING utterance is therefore not merely useless, it is a
+/// large net loss: every flush calls `LiveStream::reset` (the ordering
+/// contract in `live_stream.rs` requires it), so each committed chunk falls
+/// back to a full from-scratch one-shot decode. Past `CHUNK_TARGET_SECS` the
+/// user paid a fresh one-shot decode every 6 s of speech, and the end-of-
+/// utterance wait grew linearly with how long they talked — measured 487 ms
+/// while streaming, then 880 → 1086 → 1296 ms once chunking kicked in. That
+/// is the "it takes longer and longer the longer I speak" complaint.
+///
+/// 120 s, not "never": it is the longest span over which per-chunk cost was
+/// actually MEASURED flat (`examples/nemotron_stream_bench.rs` drives one
+/// session across 119.7 s / 214 chunks; parakeet-rs bounds its own retained
+/// audio to ~1.8 s regardless of session length, so the flatness is
+/// structural, not luck). Past that the rolling-chunk machinery takes over
+/// again and keeps what only it provides: per-chunk retries, per-chunk
+/// grammar for text beyond `GRAMMAR_MAX_CHARS`, the failed-chunk WAV spill,
+/// and a bound on `speech_samples` (120 s ≈ 3.8 MB).
+const STREAM_CHUNK_TARGET_SECS: u32 = 120;
+/// How often to re-attempt opening a live decode session when the first
+/// attempt (at the top of `record`) came back `None` while the engine was
+/// still loading. Cheap — a `try_lock` plus, on a non-streaming engine, an
+/// immediate `None` — but not free, so not every 30 ms frame.
+const LIVE_START_RETRY_MS: u64 = 300;
 /// First-speculation cadence, used in EVERY mode (not just consume mode):
 /// fire the speculative transcription at a brief inter-phrase pause (~240ms
 /// = 8 × 30ms frames) so a stream consumer sees text land as the user
@@ -579,6 +694,12 @@ const CONSUME_STREAM_MIN_SAMPLES: usize = 4_000;
 // 1911ms. The overlay only needs the recent words to feel live; the paste
 // needs the lock. 3s keeps the preview useful at a third of the cost.
 const CONSUME_STREAM_PREVIEW_MAX_SAMPLES: usize = 3 * 16_000;
+/// Minimum gap between live-session preview broadcasts. The session produces
+/// a new transcript every 560 ms of audio; this only stops a burst of
+/// identical/near-identical UDS frames when the worker catches up on several
+/// queued windows at once. Costs nothing to compute — the text already exists.
+const LIVE_STREAM_PREVIEW_MIN_GAP_MS: u64 = 250;
+
 /// Live mid-speech preview cadence for NON-streaming backends (Groq)
 /// during normal dictation, gated by the `stt_live_preview` pref. Each
 /// tick is a full cloud round trip (~250-400ms typical, up to ~1.5s),
@@ -634,6 +755,31 @@ const MIDSENTENCE_MAX_EXTRA_SECS: f64 = 1.5;
 /// kickoff→result times range ~0.7-1.0s, so 300ms of grace lost the race
 /// whenever Groq was on the slow side of that band.
 const MIDSENTENCE_DECISION_GRACE_FRAMES: usize = 20;
+/// Early finalization: the silence required to end an utterance whose LIVE
+/// transcript already reads as a finished sentence.
+///
+/// The mid-sentence machinery only ever made the window LONGER. But the same
+/// signal read the other way is a much better end-of-utterance detector than
+/// raw silence duration: if the user has stopped and what they said ends in a
+/// terminator with no trailing connector, the thought is over and there is
+/// nothing to wait for. Streaming finalization costs ~130 ms (see
+/// `live_stream.rs`), so the silence window is now the dominant term in
+/// perceived latency — cutting it from the configured 600 ms to 300 ms on
+/// finished sentences is the single largest available win.
+///
+/// 300 ms (10 frames) is deliberately conservative: it is above the 240 ms
+/// tentative mark, above `SHORT_SILENCE_MS`, and well above a normal
+/// inter-word gap. It is only ever used when the transcript is COMPLETE and
+/// fully decoded — see `EarlyFinalize` below — and never exceeds the
+/// configured window.
+const COMPLETE_UTTERANCE_SILENCE_MS: u32 = 300;
+/// Words required in the live transcript before the "finished sentence"
+/// verdict may shorten the window. A one- or two-word fragment that happens
+/// to carry a period ("Okay.") is exactly what a mid-thought pause looks
+/// like to the decoder, and short utterances already have their own fast
+/// path (`SHORT_SILENCE_MS`). Three words is the cheapest guard that keeps
+/// the aggressive cut off the ambiguous cases.
+const COMPLETE_UTTERANCE_MIN_WORDS: usize = 3;
 /// Trailing words that mark a clause as clearly unfinished even when
 /// Whisper appended its habitual period. Lowercase, punctuation-stripped.
 const TRAILING_CONNECTORS: &[&str] = &[
@@ -670,7 +816,9 @@ pub(crate) fn strip_trailing_filler(text: &str) -> String {
         if norm.is_empty() || !TRAILING_FILLERS.contains(&norm.as_str()) {
             break;
         }
-        out = stripped[..stripped.len() - last.len()].trim_end().to_string();
+        out = stripped[..stripped.len() - last.len()]
+            .trim_end()
+            .to_string();
         removed_any = true;
     }
     if removed_any {
@@ -759,6 +907,60 @@ fn preview_cadence(
         });
     }
     None
+}
+
+/// Pre-pay the blocking grammar LLM call for `text` while the user is still
+/// inside the silence window.
+///
+/// Byte-identical to what the paste path will ask for — same assembly of
+/// settled chunks + tail, same skip conditions, same request builder — so the
+/// paste path's call is a cache hit (`PostProcessor` also single-flights, so
+/// arriving mid-warm still waits only once). Extracted from the speculation
+/// thread so the live-stream path can fire the same warm ~600 ms earlier: with
+/// a persistent session the transcript exists at the tentative pause instead
+/// of a full re-decode later.
+#[cfg(feature = "macos")]
+fn spawn_grammar_warm(
+    text: &str,
+    post_processor: Option<Arc<crate::always::postprocess::PostProcessor>>,
+    chunk_join: &crate::always::chunker::ChunkJoinHandle,
+    rt: &tokio::runtime::Handle,
+) {
+    let Some(pp) = post_processor else {
+        return;
+    };
+    if text.is_empty() {
+        return;
+    }
+    // Chunked utterance: the paste key is join(corrected chunks) + tail (see
+    // `finalize_chunked`), so warm THAT — but only once the join is
+    // deterministic; an unsettled join would warm a key finalize never asks for.
+    let warm_target = if chunk_join.chunk_count() > 0 {
+        chunk_join.settled_join().map(|joined| {
+            let tail = text.trim();
+            if joined.is_empty() {
+                tail.to_string()
+            } else if tail.is_empty() {
+                joined
+            } else {
+                format!("{joined} {tail}")
+            }
+        })
+    } else {
+        Some(text.to_string())
+    };
+    let Some(target) = warm_target else {
+        return;
+    };
+    if crate::always::event_loop::is_short_utterance(&target)
+        || target.chars().count() > crate::always::event_loop::GRAMMAR_MAX_CHARS
+    {
+        return;
+    }
+    let req = crate::always::correction_request::build(&target, pp.can_correct());
+    rt.spawn(async move {
+        let _ = pp.process_request(&req).await;
+    });
 }
 
 /// StateMonitor replaces its partial transcript on every event, so streaming
@@ -942,6 +1144,28 @@ fn record_with_local_vad(
     // discarded if speech resumes before final silence.
     let speculation_slot = SpeculationSlot::new();
     let mut speculation_pending = false;
+    // PERSISTENT cache-aware decode session (Nemotron only; `None` for every
+    // other engine). When present it replaces BOTH the speculative
+    // whole-utterance decode and the re-decode-the-last-3s preview: the
+    // transcript is built as the user speaks, so end-of-speech costs one
+    // 560 ms flush window (~54 ms measured) instead of a from-scratch decode
+    // (~0.10x realtime — 4 s for a 40 s utterance). Those two old paths also
+    // contended with the final decode on the ONE shared ONNX model mutex, so
+    // dropping them is a second, independent win.
+    let mut live_stream = crate::always::live_stream::LiveStream::start(transcriber);
+    // Set when the audio buffer was truncated out from under the session
+    // (speaker-gate tail cut / chunk refutation). The decoded state then
+    // covers audio the rest of the pipeline has discarded, so the transcript
+    // no longer matches `speech_samples` and finalization must fall back to a
+    // one-shot decode of the truncated buffer.
+    let mut live_invalidated = false;
+    // Throttle for the re-open attempt below.
+    let mut live_start_retry_at: Option<std::time::Instant> = None;
+    // Whether the tentative-pause work (mid-sentence verdict + grammar warm)
+    // has run for THIS silence run. Reset on speech resume / chunk flush,
+    // exactly like `midsentence_decided`.
+    let mut live_warm_fired = false;
+    let mut last_live_preview: Option<(std::time::Instant, String)> = None;
     // Live streaming preview: a lightweight PREVIEW stream that runs WHILE
     // the user is still speaking (the tentative speculation above only fires
     // at a pause). Armed by consume mode OR a genuinely-streaming active
@@ -962,6 +1186,25 @@ fn record_with_local_vad(
     // verdict) so the decision grace stops holding the cut.
     let mut midsentence_extended = false;
     let mut midsentence_decided = false;
+    // Adaptive EARLY finalization: latched once per silence run when the live
+    // transcript reads as a finished sentence AND every voiced sample has been
+    // decoded into it. Shortens the final window; reset on speech resume.
+    let mut early_finalize_armed = false;
+    // Last `early_finalize_skipped` reason emitted for this silence run, so the
+    // per-tick instrumentation logs a reason CHANGE rather than the same line
+    // every other frame. Reset wherever `early_finalize_armed` is.
+    let mut early_finalize_skip_logged: Option<&'static str> = None;
+    // `speech_samples.len()` as of the end of the last VOICED frame — i.e. how
+    // much of the buffer is speech rather than the trailing silence run.
+    //
+    // This is what makes an early cut safe. `LiveStream::caught_up()` only says
+    // the worker decoded everything it was HANDED, and `feed` withholds a
+    // partial trailing window of up to `chunk_samples` (560 ms). So a
+    // "caught up" transcript can still be missing the last half-second of
+    // speech — the very words the end-of-sentence verdict is read from.
+    // Comparing this against `LiveStream::fed()` closes that gap exactly:
+    // `voiced_len <= fed` means every voiced sample is in the transcript.
+    let mut voiced_len: usize = 0;
     // Rolling chunk transcription for long dictations (see chunker.rs).
     // `committed_samples` tracks audio already flushed out of the live
     // buffer so the long-recording warn/cap math still sees the total.
@@ -1233,15 +1476,19 @@ fn record_with_local_vad(
             }
             // Speech resumed: discard any pending speculation (its audio snapshot
             // is now stale because more speech will be appended).
-            if speculation_pending {
+            if speculation_pending || live_warm_fired {
                 speculation_pending = false;
                 speculation_slot.invalidate();
-                // Overlay was likely flipped by speculation kickoff.
+                // Overlay was likely flipped by speculation kickoff (or, on
+                // the live-session path, by the tentative-pause verdict).
                 // User resumed — flip back. (No-op if already listening.)
                 flip_to_listening!();
             }
             midsentence_extended = false;
             midsentence_decided = false;
+            early_finalize_armed = false;
+            early_finalize_skip_logged = None;
+            live_warm_fired = false;
             consecutive_speech += 1;
             consecutive_silence = 0;
             if consecutive_speech >= min_speech_frames {
@@ -1324,6 +1571,7 @@ fn record_with_local_vad(
                 speech_samples.extend_from_slice(samples);
                 voiced_since_flush = true;
                 voiced_samples += samples.len();
+                voiced_len = speech_samples.len();
                 // Same anchor refresh for the case where we were already in
                 // speech (consecutive_speech overflows min_speech_frames
                 // immediately) — keep the watchdog clock pinned to "right
@@ -1447,6 +1695,12 @@ fn record_with_local_vad(
                                     "speaker_gate_tail_cut"
                                 );
                                 speech_samples.truncate(confirmed_user_len);
+                                // The session already decoded the audio we
+                                // just cut off; its transcript no longer
+                                // describes `speech_samples`. Fall back to a
+                                // one-shot decode of the truncated buffer —
+                                // correctness beats the ~50 ms.
+                                live_invalidated = true;
                                 break;
                             }
                         }
@@ -1475,13 +1729,20 @@ fn record_with_local_vad(
                 // tentative-silence/final transcription. Preview only — the
                 // final still comes from the speculation/chunker path,
                 // unchanged.
-                if let Some(cadence) = preview_cadence(
-                    crate::always::pause::is_consume_mode(),
-                    transcriber.supports_streaming(),
-                    cfg.transcriber_backend.is_local(),
-                    cfg.transcriber_backend.is_apple(),
-                    cfg.stt_live_preview,
-                ) && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
+                // A live session already produces previews for free; the
+                // old loop would re-decode the last 3 s from scratch on the
+                // SAME model mutex the session needs — measured at
+                // 318-1966 ms a shot, seven shots in one 30 s utterance,
+                // with the final decode queued behind all of them.
+                if live_stream.is_none()
+                    && let Some(cadence) = preview_cadence(
+                        crate::always::pause::is_consume_mode(),
+                        transcriber.supports_streaming(),
+                        cfg.transcriber_backend.is_local(),
+                        cfg.transcriber_backend.is_apple(),
+                        cfg.stt_live_preview,
+                    )
+                    && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
                     && speech_samples.len() >= CONSUME_STREAM_MIN_SAMPLES
                     && committed_samples + speech_samples.len()
                         >= samples_at_last_preview + cadence.min_new_samples
@@ -1563,7 +1824,12 @@ fn record_with_local_vad(
                 // Per-chunk ceiling: a pause-free monologue never reaches
                 // the tentative-silence flush point, so cut at a frame
                 // boundary once the chunk is oversized.
-                if speech_samples.len() >= CHUNK_HARD_MAX_SECS as usize * 16_000
+                if speech_samples.len()
+                    >= effective_chunk_hard_max_secs(live_session_carrying(
+                        live_stream.as_ref(),
+                        live_invalidated,
+                    )) as usize
+                        * 16_000
                     && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
                 {
                     // A chunk leaves this buffer for good, so the
@@ -1585,10 +1851,21 @@ fn record_with_local_vad(
                             "speaker_gate_chunk_refuted"
                         );
                         speech_samples.truncate(confirmed_user_len);
+                        // The session already decoded the audio we
+                        // just cut off; its transcript no longer
+                        // describes `speech_samples`. Fall back to a
+                        // one-shot decode of the truncated buffer —
+                        // correctness beats the ~50 ms.
+                        live_invalidated = true;
                         break;
                     }
                     tracing::info!(
                         chunk_secs = speech_samples.len() / 16_000,
+                        // Why chunking was not bypassed. `carrying` here means
+                        // a healthy live session ran past the 120 s safety
+                        // valve; anything else names the failure that put the
+                        // 15 s ceiling back in play.
+                        live = live_carrying_reason(live_stream.as_ref(), live_invalidated),
                         "chunk_hard_flush"
                     );
                     committed_samples += speech_samples.len();
@@ -1605,7 +1882,24 @@ fn record_with_local_vad(
                     );
                     speculation_pending = false;
                     speculation_slot.invalidate();
+                    // The committed audio left the live buffer, so the
+                    // session must start a fresh segment covering only the
+                    // new tail — `finalize_chunked` appends the tail to the
+                    // separately-decoded chunks, and a session still holding
+                    // the committed words would duplicate them.
+                    if let Some(live) = live_stream.as_mut() {
+                        live.reset();
+                    }
+                    live_warm_fired = false;
+                    last_live_preview = None;
                     voiced_since_flush = false;
+                    // The buffer the live session is fed from was just
+                    // drained and re-based, so both the "how much is voiced"
+                    // counter and any early verdict drawn from the old
+                    // transcript are meaningless now.
+                    voiced_len = 0;
+                    early_finalize_armed = false;
+                    early_finalize_skip_logged = None;
                     // The tail monitor's boundary points into the drained
                     // buffer — rebase to the fresh (empty) one.
                     confirmed_user_len = 0;
@@ -1617,6 +1911,12 @@ fn record_with_local_vad(
                 consecutive_silence = 0;
                 consecutive_speech = 0;
                 speech_samples.extend_from_slice(samples);
+                // Held-Option audio is deliberately kept, so it counts as
+                // "not yet decoded speech" for the early-finalize guard.
+                // Over-counting here can only make the guard stricter.
+                voiced_len = speech_samples.len();
+                early_finalize_armed = false;
+                early_finalize_skip_logged = None;
                 pause::mark_voice_seen();
                 continue;
             }
@@ -1659,7 +1959,12 @@ fn record_with_local_vad(
             // silence region at a frame boundary, so no word is split.
             if voice_logged
                 && consecutive_silence >= eff_tentative_frames
-                && speech_samples.len() >= chunk_target_secs() as usize * 16_000
+                && speech_samples.len()
+                    >= effective_chunk_target_secs(live_session_carrying(
+                        live_stream.as_ref(),
+                        live_invalidated,
+                    )) as usize
+                        * 16_000
                 && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
             {
                 // Same reason as the hard flush above: confirm the chunk as
@@ -1677,8 +1982,28 @@ fn record_with_local_vad(
                         "speaker_gate_chunk_refuted"
                     );
                     speech_samples.truncate(confirmed_user_len);
+                    // The session already decoded the audio we
+                    // just cut off; its transcript no longer
+                    // describes `speech_samples`. Fall back to a
+                    // one-shot decode of the truncated buffer —
+                    // correctness beats the ~50 ms.
+                    live_invalidated = true;
                     break;
                 }
+                // Chunking a streaming utterance is a large net loss (see
+                // `STREAM_CHUNK_TARGET_SECS`), so reaching here on a machine
+                // whose engine streams means the live session was NOT
+                // carrying. Say which of the three reasons it was — that is
+                // the whole diagnosis for "chunk_flush still fires".
+                tracing::info!(
+                    chunk_secs = speech_samples.len() / 16_000,
+                    target_secs = effective_chunk_target_secs(live_session_carrying(
+                        live_stream.as_ref(),
+                        live_invalidated,
+                    )),
+                    live = live_carrying_reason(live_stream.as_ref(), live_invalidated),
+                    "chunk_tentative_flush"
+                );
                 committed_samples += speech_samples.len();
                 let grammar = if cfg.postprocess_available() {
                     cfg.post_processor.clone()
@@ -1693,8 +2018,17 @@ fn record_with_local_vad(
                 );
                 speculation_pending = false;
                 speculation_slot.invalidate();
+                // Same re-base as the hard-max flush above.
+                if let Some(live) = live_stream.as_mut() {
+                    live.reset();
+                }
+                live_warm_fired = false;
+                last_live_preview = None;
                 midsentence_extended = false;
                 midsentence_decided = false;
+                early_finalize_armed = false;
+                early_finalize_skip_logged = None;
+                voiced_len = 0;
                 voiced_since_flush = false;
                 // The tail monitor's boundary points into the drained
                 // buffer — rebase to the fresh (empty) one.
@@ -1740,7 +2074,8 @@ fn record_with_local_vad(
             // hit final silence. If the user resumes, we discard it above.
             // Skipped after a chunk drain until real speech lands in the
             // fresh buffer — trailing silence isn't worth an STT round trip.
-            if voice_logged
+            if live_stream.is_none()
+                && voice_logged
                 && voiced_since_flush
                 && !speculation_pending
                 && speculation_speaker_ok
@@ -1866,6 +2201,151 @@ fn record_with_local_vad(
                 });
             }
 
+            // LIVE SESSION tentative-pause work. Same job the speculation
+            // thread used to do — decide whether the user stopped
+            // mid-thought, and pre-pay the grammar LLM — but the transcript
+            // already exists, so there is nothing to wait for. Two
+            // consequences:
+            //   * `MIDSENTENCE_DECISION_GRACE_FRAMES` (600 ms of held cut,
+            //     spent waiting for a speculative decode) is never armed:
+            //     `adaptive_active` requires `speculation_pending`.
+            //   * The grammar warm starts at the tentative pause rather than
+            //     after a whole-utterance re-decode — ~600 ms earlier.
+            //
+            // Re-evaluated every 2nd frame until the extension latches,
+            // because the worker may still be a window behind: the heuristic
+            // reads the TRAILING word, and judging it before the last chunk
+            // is decoded would look at the wrong word. `caught_up` gates the
+            // first verdict for the same reason.
+            //
+            // Every evaluation now RECORDS ITS OUTCOME: either a
+            // `midsentence_decision` / `early_finalize_decision` line, or
+            // `early_finalize_skipped` naming the exact precondition that was
+            // false. The fast path used to log only on success, so a
+            // precondition that was false on every frame of every utterance
+            // was completely invisible — which is how the mid-sentence branch
+            // permanently short-circuiting the early branch (see
+            // `looks_mid_sentence_live`) stayed invisible.
+            let early_tick = !live_invalidated
+                && voice_logged
+                && voiced_since_flush
+                && speculation_speaker_ok
+                && consecutive_silence >= eff_tentative_frames
+                // Every 2nd frame to keep the hot loop cheap, plus one
+                // guaranteed last look immediately before the base cut. The
+                // last look matters because the verdict below now waits for
+                // the trailing audio to be decoded: without it, an utterance
+                // whose undecoded remainder outlives the final even frame
+                // would reach the cut with no verdict at all.
+                && (consecutive_silence.is_multiple_of(2)
+                    || (!midsentence_decided && consecutive_silence + 1 >= eff_silence_frames));
+            if early_tick {
+                let early_frames = complete_utterance_silence_frames(eff_silence_frames);
+                let mut words = 0usize;
+                let skip: Option<&'static str> = if midsentence_extended {
+                    Some("already_extended")
+                } else if let Some(live) = live_stream.as_ref() {
+                    if !live.caught_up() {
+                        Some("worker_behind")
+                    } else if let Some(spec_text) = live.transcript() {
+                        if !live_warm_fired {
+                            live_warm_fired = true;
+                            // Overlay -> Transcribing at the same point the
+                            // speculative decode used to flip it.
+                            flip_to_transcribing!();
+                            let grammar = if cfg.postprocess_available() {
+                                cfg.post_processor.clone()
+                            } else {
+                                None
+                            };
+                            spawn_grammar_warm(&spec_text, grammar, &chunker.join_handle(), rt);
+                        }
+                        words = spec_text.split_whitespace().count();
+                        // Is every VOICED sample actually represented in
+                        // `spec_text`?
+                        //
+                        // `caught_up()` only proves the worker drained what it
+                        // was handed, and `feed` deliberately withholds a
+                        // partial trailing window of up to `chunk_samples`
+                        // (560 ms). At the 240 ms tentative mark that remainder
+                        // still holds real speech more often than not, so the
+                        // verdict was routinely read off a transcript missing
+                        // the user's last words — which reads as "unfinished"
+                        // almost by construction and extended the window on
+                        // utterances that were in fact complete. The trailing
+                        // silence keeps flowing into `feed`, so this becomes
+                        // true on its own within one chunk; until then, no
+                        // verdict.
+                        let tail_decoded = voiced_len <= live.fed();
+                        if !cfg.adaptive_silence_enabled {
+                            Some("adaptive_disabled")
+                        } else if is_short {
+                            Some("short_utterance")
+                        } else if !tail_decoded {
+                            Some("tail_not_decoded")
+                        } else if looks_mid_sentence_live(&cfg.localization, &spec_text) {
+                            midsentence_extended = true;
+                            midsentence_decided = true;
+                            tracing::info!(
+                                extended = true,
+                                decided_at_frame = consecutive_silence,
+                                base_frames = eff_silence_frames,
+                                extended_frames = extended_silence_frames(silence_frames),
+                                source = "live_stream",
+                                "midsentence_decision"
+                            );
+                            None
+                        } else if consecutive_silence < early_frames {
+                            // Complete-looking, but the user has not been
+                            // quiet long enough yet. Deliberately NOT latched:
+                            // the next tick re-reads a longer transcript, so a
+                            // resumed thought still wins.
+                            Some("silence_below_early_window")
+                        } else if !looks_complete_utterance(&cfg.localization, &spec_text) {
+                            Some("not_complete_utterance")
+                        } else {
+                            // Finished sentence, fully decoded, and the user
+                            // has been quiet for the early window: end it now
+                            // instead of serving out the rest of the
+                            // configured silence.
+                            early_finalize_armed = true;
+                            midsentence_decided = true;
+                            tracing::info!(
+                                early = true,
+                                decided_at_frame = consecutive_silence,
+                                base_frames = eff_silence_frames,
+                                early_frames,
+                                words,
+                                source = "live_stream",
+                                "early_finalize_decision"
+                            );
+                            None
+                        }
+                    } else {
+                        Some("no_transcript")
+                    }
+                } else {
+                    Some("no_live_session")
+                };
+                // Once per distinct reason per silence run. The tick fires
+                // every other frame, so logging unconditionally would be ~15
+                // identical lines an utterance and no extra information; a
+                // reason CHANGE is the interesting event.
+                if let Some(reason) = skip
+                    && early_finalize_skip_logged != Some(reason)
+                {
+                    early_finalize_skip_logged = Some(reason);
+                    tracing::info!(
+                        reason,
+                        at_frame = consecutive_silence,
+                        base_frames = eff_silence_frames,
+                        early_frames,
+                        words,
+                        "early_finalize_skipped"
+                    );
+                }
+            }
+
             // Adaptive mid-sentence extension: once the speculative
             // outcome lands, inspect the text (non-consuming; every 2nd
             // frame to keep the hot loop cheap) and stretch the final
@@ -1896,6 +2376,10 @@ fn record_with_local_vad(
 
             let eff_final_frames = if midsentence_extended {
                 extended_silence_frames(silence_frames)
+            } else if early_finalize_armed {
+                // Only reachable from the live-session verdict above, which
+                // requires a fully-decoded transcript that ends a sentence.
+                complete_utterance_silence_frames(eff_silence_frames)
             } else if adaptive_active && !midsentence_decided {
                 // Speculative STT still in flight: hold the cut briefly so
                 // the decision above can happen. Costs ~no paste latency —
@@ -1948,6 +2432,65 @@ fn record_with_local_vad(
             pre_buffer.push_back(samples.to_vec());
             if pre_buffer.len() > pre_buffer_frames {
                 pre_buffer.pop_front();
+            }
+        }
+
+        // The session is opened once at the top of `record`, which on a cold
+        // daemon can be BEFORE the model finished loading:
+        // `PendingTranscriber::open_live_stream` is a deliberately
+        // non-blocking `try_lock` and answers `None` while the load thread
+        // holds the slot. That single `None` used to stand for the whole
+        // utterance — no live transcript (so `early_finalize_skipped`
+        // `no_live_session` on every tick) and `effective_chunk_target_secs`
+        // back to 6 s, i.e. `chunk_flush` on an engine that streams.
+        //
+        // Retrying is safe and complete: `feed` starts from offset 0, so a
+        // session opened mid-utterance still decodes `speech_samples` from its
+        // first sample, and after a chunk flush that buffer IS the tail that
+        // `finalize_chunked` appends. Throttled, and only while the active
+        // engine says it can stream, so a cloud backend never pays for it.
+        if live_stream.is_none()
+            && !live_invalidated
+            && live_start_retry_at.is_none_or(|at: std::time::Instant| {
+                at.elapsed() >= std::time::Duration::from_millis(LIVE_START_RETRY_MS)
+            })
+        {
+            // Stamp before the engine query, not after, so a non-streaming
+            // backend is asked once every 300 ms rather than every 30 ms frame.
+            live_start_retry_at = Some(std::time::Instant::now());
+            if transcriber.supports_streaming() {
+                live_stream = crate::always::live_stream::LiveStream::start(transcriber);
+            }
+        }
+        // Hand the live session every complete 560 ms window captured so far.
+        // O(n) copy + channel send on this thread; the ~54 ms decode happens
+        // on the session's worker. `feed` tracks its own boundary, so calling
+        // it every frame is cheap and idempotent.
+        if !live_invalidated && let Some(live) = live_stream.as_mut() {
+            live.feed(&speech_samples);
+        }
+        // Live preview straight off the session — no extra decode, no model
+        // lock, and (unlike the old path) the CUMULATIVE transcript rather
+        // than concatenated per-chunk fragments, which split words mid-token
+        // ("whe ther", "finali zes") because the tokenizer emits sub-words.
+        if !live_invalidated
+            && voice_logged
+            && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
+            && let Some(live) = live_stream.as_ref()
+            && let Some(text) = live.transcript()
+        {
+            let due = last_live_preview.as_ref().is_none_or(|(at, last)| {
+                *last != text
+                    && at.elapsed()
+                        >= std::time::Duration::from_millis(LIVE_STREAM_PREVIEW_MIN_GAP_MS)
+            });
+            if due {
+                let display = match chunker.join_handle().settled_join() {
+                    Some(prefix) if !prefix.is_empty() => format!("{prefix} {text}"),
+                    _ => text.clone(),
+                };
+                event::global_broadcaster().transcript_chunk(display);
+                last_live_preview = Some((std::time::Instant::now(), text));
             }
         }
 
@@ -2154,7 +2697,36 @@ fn record_with_local_vad(
     // monologue routinely timed out, threw the near-done speculative
     // result away, and re-transcribed the ENTIRE audio from scratch —
     // doubling the worst wait exactly when it was already longest.
-    let speculation = if speculation_pending {
+    // FINALIZATION. With a live session the transcript is already built: the
+    // worker has consumed everything except at most the last 560 ms window,
+    // so `finish` is one tail chunk plus one flush — 51-54 ms measured, flat
+    // from a 5 s utterance to a 2-minute one, against 514 ms / 4200 ms /
+    // 11512 ms for the from-scratch decode of the same 4.7 s / 39.6 s /
+    // 119.7 s clips.
+    //
+    // `None` (degraded session, decode error, timeout) and an EMPTY transcript
+    // both fall through to the untouched speculation/one-shot path below. The
+    // empty case matters: one-shot Nemotron returns an empty decode often
+    // enough that `chunker` carries a dedicated retry for it, so a blank live
+    // result must never become a silent `DroppedNoise`.
+    let live_final = if live_invalidated {
+        None
+    } else if let Some(live) = live_stream.as_mut() {
+        let started_finish = std::time::Instant::now();
+        let out = live.finish(&speech_samples, crate::always::live_stream::FINISH_TIMEOUT);
+        tracing::info!(
+            finish_ms = started_finish.elapsed().as_millis() as u64,
+            chars = out.as_ref().map_or(0, |t| t.chars().count()),
+            "live_stream_finalized"
+        );
+        out.filter(|t| !t.trim().is_empty())
+    } else {
+        None
+    };
+
+    let speculation = if live_final.is_some() {
+        None
+    } else if speculation_pending {
         let started_wait = std::time::Instant::now();
         let audio_secs = speech_samples.len() as f64 / 16_000.0;
         // Floor 2s → 0.35s. The 2s was still sized for a cloud round trip, and
@@ -2191,6 +2763,23 @@ fn record_with_local_vad(
     };
 
     let (result, speculation_used) = match speculation {
+        _ if live_final.is_some() => {
+            event::global_broadcaster().transcribing_stopped();
+            let text = live_final.unwrap_or_default().trim().to_string();
+            (
+                crate::stt::TranscriptionResult {
+                    text,
+                    duration: speech_samples.len() as f64 / 16_000.0,
+                    language: cfg.lang.clone(),
+                    // Deliberately empty, exactly as `finalize_chunked` does:
+                    // there are no per-segment timings to expose, and the
+                    // segment-based hallucination heuristics must not judge a
+                    // transcript that never had segments.
+                    segments: vec![],
+                },
+                true,
+            )
+        }
         Some(Ok(r)) => {
             event::global_broadcaster().transcribing_stopped();
             (r, true)
@@ -2526,12 +3115,109 @@ fn looks_mid_sentence(loc: &crate::always::localization::Localization, text: &st
     !loc.sentence_terminators.contains(&last_char)
 }
 
+/// `looks_mid_sentence` for a transcript whose punctuation carries no
+/// information — i.e. the LIVE streaming path.
+///
+/// Identical to [`looks_mid_sentence`] except it drops the final
+/// "no sentence terminator ⇒ unfinished" clause. That clause is right for the
+/// cloud/Whisper speculation path (those engines punctuate reliably) and
+/// catastrophic here: Nemotron does not punctuate dictation, so EVERY live
+/// transcript ended without a terminator, `looks_mid_sentence` was true on
+/// every utterance, and it short-circuited the `else if` that owns early
+/// finalization. Measured consequence: `early_finalize_decision` fired 0
+/// times ever, while every ordinary sentence silently took the EXTENDED
+/// window (2 × 0.9 s = 1.8 s) instead of the configured 0.9 s.
+///
+/// What is left is the part that actually signals "still going" and does not
+/// depend on the decoder punctuating: an explicitly unfinished trailing mark
+/// (`,` `;` `:` `—` `-`) or a dangling connector / hesitation filler as the
+/// last word. Both keep the long window, so a user who trails off with "and"
+/// or thinks out loud with "uh" is still never cut off.
+fn looks_mid_sentence_live(loc: &crate::always::localization::Localization, text: &str) -> bool {
+    let trimmed = text.trim();
+    let Some(last_char) = trimmed.chars().last() else {
+        return false;
+    };
+    if matches!(last_char, ',' | ';' | ':' | '—' | '-') {
+        return true;
+    }
+    let last_word: String = trimmed
+        .trim_end_matches(|c: char| !c.is_alphanumeric())
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    let _ = loc;
+    TRAILING_CONNECTORS.contains(&last_word.as_str())
+}
+
+/// Does the live transcript read as a FINISHED thought — i.e. is it safe to
+/// end the utterance early instead of waiting out the full silence window?
+///
+/// The inverse of [`looks_mid_sentence`] plus a length floor. `!mid_sentence`
+/// already means "ends on a sentence terminator and the last word is not a
+/// connector or a hesitation filler"; the extra word-count guard keeps the
+/// aggressive cut away from one-word fragments, where the decoder's habitual
+/// period carries no information about whether the user is done.
+///
+/// False negatives are benign — the window stays at its configured length,
+/// exactly as before this existed.
+fn looks_complete_utterance(loc: &crate::always::localization::Localization, text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Deliberately NOT `!looks_mid_sentence`. That helper treats a missing
+    // sentence terminator as "unfinished", which is right for deciding whether
+    // to EXTEND a window but fatal as a precondition for finalizing EARLY:
+    // Nemotron does not reliably punctuate dictation, so real utterances read
+    //   "How do you think it working"
+    //   "That still took like five to six seconds"
+    // and the fast path was unreachable -- measured `early_finalize_decision`
+    // = 0 across a live session, i.e. the optimisation never once fired.
+    //
+    // What actually signals "still going" is the LAST WORD: a dangling
+    // connector ("and", "to", "because") or a hesitation filler ("uh", "um").
+    // Those keep the long window. Anything else, with enough words to be a
+    // real thought, is treated as finishable. Punctuation, when present,
+    // still counts -- it just is not required.
+    let last_word: String = trimmed
+        .trim_end_matches(|c: char| !c.is_alphanumeric())
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    if TRAILING_CONNECTORS.contains(&last_word.as_str()) {
+        return false;
+    }
+    if let Some(last_char) = trimmed.chars().last()
+        && matches!(last_char, ',' | ';' | ':' | '—' | '-')
+    {
+        return false;
+    }
+    let _ = loc;
+    trimmed.split_whitespace().count() >= COMPLETE_UTTERANCE_MIN_WORDS
+}
+
+/// Shortened final-silence window used once `looks_complete_utterance` fires.
+///
+/// Clamped to the configured window at the top so this can only ever make the
+/// wait SHORTER, never longer — a user who deliberately sets a very small
+/// `stt_silence` keeps it.
+fn complete_utterance_silence_frames(final_silence_frames: usize) -> usize {
+    let floor = ((COMPLETE_UTTERANCE_SILENCE_MS as f64) / FRAME_MS as f64).ceil() as usize;
+    floor.max(1).min(final_silence_frames)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        chunk_target_secs, early_voice_frame_ok, extended_silence_frames, fast_energy_check,
-        fast_normalized_energy, looks_mid_sentence, normal_silence_frames, normalized_energy,
-        speaker_gate_allows_score, speaker_gate_allows_stt, speaker_gate_allows_transcription,
+        chunk_target_secs, complete_utterance_silence_frames, early_voice_frame_ok,
+        effective_chunk_hard_max_secs, effective_chunk_target_secs, extended_silence_frames,
+        fast_energy_check, fast_normalized_energy, live_carrying_state, live_session_carrying,
+        looks_complete_utterance, looks_mid_sentence, looks_mid_sentence_live,
+        normal_silence_frames, normalized_energy, speaker_gate_allows_score,
+        speaker_gate_allows_stt, speaker_gate_allows_transcription,
         speaker_gate_dependencies_ready, speaker_gate_should_reject_unavailable,
         voice_activity_energy_threshold,
     };
@@ -2639,6 +3325,219 @@ mod tests {
         assert_eq!(extended_silence_frames(100), 150);
     }
 
+    /// The early window is a FLOOR clamped to the configured window: it may
+    /// only ever shorten the wait, never lengthen it.
+    #[test]
+    fn complete_utterance_window_shortens_but_never_lengthens() {
+        // User's 0.6s window → 20 frames → early cut at 300 ms = 10 frames.
+        assert_eq!(complete_utterance_silence_frames(20), 10);
+        // 0.9s default → 30 frames → still 10.
+        assert_eq!(complete_utterance_silence_frames(30), 10);
+        // A user who configured something SHORTER than the early window keeps
+        // their own setting — the clamp must not stretch it.
+        assert_eq!(complete_utterance_silence_frames(7), 7);
+        assert_eq!(complete_utterance_silence_frames(1), 1);
+        for base in 1..=120usize {
+            assert!(
+                complete_utterance_silence_frames(base) <= base,
+                "early window must never exceed the configured window (base {base})"
+            );
+            assert!(complete_utterance_silence_frames(base) >= 1);
+        }
+    }
+
+    /// The early cut fires only on text that reads as a finished thought.
+    /// Every case here is the difference between pasting now and waiting out
+    /// the rest of the configured silence, so the truth table is explicit.
+    #[test]
+    fn looks_complete_utterance_truth_table() {
+        let loc = &crate::always::localization::Localization::ENGLISH;
+
+        // Finished sentences: terminator, no trailing connector, 3+ words.
+        assert!(looks_complete_utterance(loc, "Send the email now."));
+        assert!(looks_complete_utterance(loc, "Is that correct?"));
+        assert!(looks_complete_utterance(loc, "Stop the build now!"));
+        assert!(looks_complete_utterance(
+            loc,
+            "  I went to the store yesterday.  "
+        ));
+
+        // Unpunctuated but finished. Nemotron does not reliably punctuate
+        // dictation, so requiring a terminator made this path unreachable:
+        // measured `early_finalize_decision` = 0 across a live session while
+        // the user's real transcripts read "How do you think it working" and
+        // "That still took like five to six seconds".
+        assert!(looks_complete_utterance(loc, "I went to the store"));
+        assert!(looks_complete_utterance(loc, "How do you think it working"));
+        assert!(looks_complete_utterance(
+            loc,
+            "That still took like five to six seconds"
+        ));
+        // Unfinished: explicit continuation punctuation.
+        assert!(!looks_complete_utterance(loc, "first item,"));
+        assert!(!looks_complete_utterance(loc, "the following items:"));
+        // Terminator present but the last word is a connector — the decoder's
+        // habitual period, not the user's full stop.
+        assert!(!looks_complete_utterance(
+            loc,
+            "I want to change the file and."
+        ));
+        // Hesitation fillers must NOT finalize early: they are the user's own
+        // signal that they are still thinking.
+        for filler in ["uh", "um", "hmm", "er", "like"] {
+            assert!(
+                !looks_complete_utterance(loc, &format!("so the thing is {filler}.")),
+                "trailing filler {filler:?} must not trigger an early cut"
+            );
+        }
+
+        // Too short to trust: a lone "Okay." is what a mid-thought pause looks
+        // like to the decoder. Short utterances have their own fast path.
+        assert!(!looks_complete_utterance(loc, "Okay."));
+        assert!(!looks_complete_utterance(loc, "Got it."));
+        // Three words is the threshold, not four.
+        assert!(looks_complete_utterance(loc, "Yes it is."));
+
+        // Degenerate input.
+        assert!(!looks_complete_utterance(loc, ""));
+        assert!(!looks_complete_utterance(loc, "   "));
+    }
+
+    /// The two verdicts must never both fire on the same text: one lengthens
+    /// the window, the other shortens it.
+    #[test]
+    fn complete_never_fires_while_the_user_is_still_going() {
+        // These are NOT inverses any more. `looks_mid_sentence` treats a
+        // missing terminator as unfinished (right for EXTENDING a window);
+        // `looks_complete_utterance` does not (required for finalizing EARLY,
+        // since dictation is largely unpunctuated -- measured
+        // `early_finalize_decision` = 0 while the terminator was required).
+        // The invariant that still holds is one-directional.
+        let loc = &crate::always::localization::Localization::ENGLISH;
+        for text in [
+            "so the thing is uh",
+            "I want to change the file and",
+            "first item,",
+            "the following items:",
+            "",
+            "   ",
+        ] {
+            assert!(
+                !looks_complete_utterance(loc, text),
+                "must not finalize early on {text:?}"
+            );
+        }
+        // And unpunctuated real dictation MUST now be finalizable.
+        for text in [
+            "I went to the store",
+            "How do you think it working",
+            "That still took like five to six seconds",
+        ] {
+            assert!(
+                looks_complete_utterance(loc, text),
+                "unpunctuated dictation must finalize early: {text:?}"
+            );
+        }
+    }
+
+    /// The live path's extension rule must not depend on punctuation.
+    ///
+    /// This is the regression that made `early_finalize_decision` = 0. The
+    /// verdict ladder checks the mid-sentence branch FIRST, so as long as
+    /// `looks_mid_sentence` was used there, any unpunctuated transcript
+    /// latched `midsentence_extended` and the early branch was dead code —
+    /// and the window silently DOUBLED (2 x 0.9 s) instead of shortening.
+    #[test]
+    fn live_mid_sentence_ignores_missing_punctuation() {
+        let loc = &crate::always::localization::Localization::ENGLISH;
+        for text in [
+            "I went to the store",
+            "How do you think it working",
+            "That still took like five to six seconds",
+        ] {
+            // The old rule: unfinished purely because Nemotron did not
+            // punctuate. This is the blocker, asserted so it cannot come back.
+            assert!(
+                looks_mid_sentence(loc, text),
+                "precondition of the bug: {text:?}"
+            );
+            assert!(
+                !looks_mid_sentence_live(loc, text),
+                "live path must not call unpunctuated dictation mid-sentence: {text:?}"
+            );
+        }
+    }
+
+    /// Everything that genuinely signals "still talking" must keep extending.
+    /// Cutting the user off mid-thought is far worse than waiting, so this is
+    /// the half of the rule that must never be relaxed.
+    #[test]
+    fn live_mid_sentence_still_extends_on_real_signals() {
+        let loc = &crate::always::localization::Localization::ENGLISH;
+        for text in [
+            "first item,",
+            "the following items:",
+            "one thing;",
+            "I want to change the file and",
+            "I want to change the file and.",
+            "we need to",
+            "the reason is because",
+        ] {
+            assert!(
+                looks_mid_sentence_live(loc, text),
+                "must keep waiting on {text:?}"
+            );
+        }
+        // Hesitation fillers: the user says "uh" WHILE THINKING. Punctuated or
+        // not, they buy time and never finalize.
+        for filler in ["uh", "um", "uhh", "umm", "er", "erm", "hmm", "mmm", "like"] {
+            assert!(
+                looks_mid_sentence_live(loc, &format!("so the thing is {filler}")),
+                "bare filler {filler:?} must extend the window"
+            );
+            assert!(
+                looks_mid_sentence_live(loc, &format!("so the thing is {filler}.")),
+                "punctuated filler {filler:?} must extend the window"
+            );
+        }
+        // Empty transcript is not a verdict either way.
+        assert!(!looks_mid_sentence_live(loc, ""));
+        assert!(!looks_mid_sentence_live(loc, "   "));
+    }
+
+    /// The live ladder is `extend` -> else `finalize early` -> else wait.
+    /// Both branches firing on one text would be a contradiction; neither
+    /// firing is the safe default (configured window, unchanged).
+    #[test]
+    fn live_verdicts_are_mutually_exclusive() {
+        let loc = &crate::always::localization::Localization::ENGLISH;
+        for text in [
+            "I went to the store",
+            "How do you think it working",
+            "so the thing is uh",
+            "I want to change the file and",
+            "first item,",
+            "Okay.",
+            "Yes it is.",
+            "",
+        ] {
+            assert!(
+                !(looks_mid_sentence_live(loc, text) && looks_complete_utterance(loc, text)),
+                "contradictory verdict on {text:?}"
+            );
+        }
+        // And on ordinary dictation the ladder must actually REACH the early
+        // branch — the whole point of the fix.
+        assert!(!looks_mid_sentence_live(loc, "How do you think it working"));
+        assert!(looks_complete_utterance(loc, "How do you think it working"));
+    }
+
+    #[test]
+    fn live_carrying_reason_names_the_failure() {
+        assert_eq!(super::live_carrying_reason(None, false), "no_session");
+        assert_eq!(super::live_carrying_reason(None, true), "no_session");
+    }
+
     #[test]
     fn chunk_target_defaults_to_liveish_chunks() {
         let _guard = CHUNK_TARGET_ENV_LOCK
@@ -2647,6 +3546,75 @@ mod tests {
         unsafe { std::env::remove_var("ALWAYS_CHUNK_TARGET_SECS") };
 
         assert_eq!(chunk_target_secs(), 6);
+    }
+
+    /// A live session must suppress rolling chunking: every flush resets the
+    /// session, so chunking a streaming utterance converts a flat ~130 ms
+    /// finalization into one from-scratch decode per 6 s of speech.
+    #[test]
+    fn live_session_suppresses_rolling_chunking() {
+        let _guard = CHUNK_TARGET_ENV_LOCK
+            .lock()
+            .expect("CHUNK_TARGET_ENV_LOCK poisoned");
+        unsafe { std::env::remove_var("ALWAYS_CHUNK_TARGET_SECS") };
+
+        // No live session (cloud engine, or a non-streaming local one):
+        // unchanged — 6 s target, 15 s mid-speech ceiling.
+        assert_eq!(effective_chunk_target_secs(false), 6);
+        assert_eq!(effective_chunk_hard_max_secs(false), 15);
+
+        // Live session carrying the utterance: effectively no chunking until
+        // the 120 s safety valve.
+        assert_eq!(effective_chunk_target_secs(true), 120);
+        assert_eq!(effective_chunk_hard_max_secs(true), 120);
+
+        // The ceiling can never sit below the target, or every chunk would
+        // flush mid-speech instead of at a pause.
+        for streaming in [false, true] {
+            assert!(
+                effective_chunk_hard_max_secs(streaming) >= effective_chunk_target_secs(streaming)
+            );
+        }
+    }
+
+    /// The test override has to keep working even on a streaming engine, or
+    /// the end-to-end chunk test can never flush.
+    #[test]
+    fn chunk_env_override_still_wins_while_streaming() {
+        let _guard = CHUNK_TARGET_ENV_LOCK
+            .lock()
+            .expect("CHUNK_TARGET_ENV_LOCK poisoned");
+        unsafe { std::env::set_var("ALWAYS_CHUNK_TARGET_SECS", "4") };
+
+        assert_eq!(effective_chunk_target_secs(true), 4);
+        assert_eq!(effective_chunk_target_secs(false), 4);
+        assert_eq!(effective_chunk_hard_max_secs(true), 15);
+
+        unsafe { std::env::remove_var("ALWAYS_CHUNK_TARGET_SECS") };
+    }
+
+    /// Both live-session failure modes must hand the utterance back to the
+    /// chunker: it is the only path that still produces text.
+    #[test]
+    fn broken_live_session_restores_chunking() {
+        // Healthy session, buffer intact: the only case that suppresses
+        // chunking.
+        assert!(live_carrying_state(Some(false), false));
+        // Worker dead or hopelessly behind — finalization goes one-shot, so
+        // chunks are worth their cost again.
+        assert!(!live_carrying_state(Some(true), false));
+        // Audio truncated out from under the session (speaker-gate cut): its
+        // decoded state no longer describes the buffer.
+        assert!(!live_carrying_state(Some(false), true));
+        assert!(!live_carrying_state(Some(true), true));
+        // No session at all — every cloud engine, and every local engine
+        // except Nemotron.
+        assert!(!live_carrying_state(None, false));
+        assert!(!live_carrying_state(None, true));
+
+        // The Option-taking wrapper agrees on the no-session cases.
+        assert!(!live_session_carrying(None, false));
+        assert!(!live_session_carrying(None, true));
     }
 
     #[test]
@@ -2673,11 +3641,20 @@ mod tests {
                 "{f} must extend the silence window"
             );
         }
-        assert_eq!(super::strip_trailing_filler("so the thing is uh"), "so the thing is");
-        assert_eq!(super::strip_trailing_filler("send it now, um."), "send it now");
+        assert_eq!(
+            super::strip_trailing_filler("so the thing is uh"),
+            "so the thing is"
+        );
+        assert_eq!(
+            super::strip_trailing_filler("send it now, um."),
+            "send it now"
+        );
         assert_eq!(super::strip_trailing_filler("wait uh um"), "wait");
         // A real trailing word the user meant must survive untouched.
-        assert_eq!(super::strip_trailing_filler("meet me at the"), "meet me at the");
+        assert_eq!(
+            super::strip_trailing_filler("meet me at the"),
+            "meet me at the"
+        );
         assert_eq!(super::strip_trailing_filler("done."), "done.");
         // Never strip a filler that is the ENTIRE utterance into nothing
         // unexpected -- callers already reject empty transcripts.
@@ -3034,10 +4011,37 @@ mod tests {
 
     /// With no media playing, nothing changes for the user.
     #[test]
-    fn window_threshold_is_untouched_when_nothing_is_playing() {
+    fn window_bar_is_permissive_when_nothing_else_is_playing() {
+        // The per-window bar decides only WHEN to start transcribing; the
+        // whole-utterance confirmation decides whether the text is kept.
+        // Keeping them equal cost the user 12.6s of discarded speech while
+        // their own windows scored 0.024-0.318 before one hit 0.617.
         for base in [0.30f32, 0.35, 0.45, 0.50] {
-            assert_eq!(super::speaker_gate_window_threshold(base, false), base);
+            let w = super::speaker_gate_window_threshold(base, false);
+            assert!(w < base, "window bar must be permissive vs the real bar");
+            assert!(
+                w <= super::WINDOW_THRESHOLD_CEILING,
+                "raising the main threshold must not restore the stall"
+            );
+            // Must still sit above the noise floor: ambient rejects measured
+            // -0.10..0.10, so a bar at/below 0 would admit silence.
+            assert!(w > 0.0, "window bar must stay above the noise floor");
         }
+        // The user's own worst observed windows must now be admitted.
+        let w = super::speaker_gate_window_threshold(0.35, false);
+        for observed in [0.318f32, 0.617, 0.532, 0.502] {
+            assert!(observed > w, "{observed} was the user and must pass");
+        }
+    }
+
+    #[test]
+    fn window_bar_stays_strict_while_audio_is_playing() {
+        // With media present the fast bar must NOT be relaxed -- that is the
+        // path a YouTube narrator used to latch an utterance through.
+        let base = 0.35f32;
+        let playing = super::speaker_gate_window_threshold(base, true);
+        assert!(playing > base);
+        assert!(0.404 < playing, "the score that leaked must still fail");
     }
 
     /// THE REGRESSION. A single 1.5s window crossing the bar latches
