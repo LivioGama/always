@@ -51,3 +51,35 @@ and handling digits outside the model.
   (kjartansson-etal-sltu2018)
 - Aksharantar — AI4Bharat
 - Nemotron 3.5 ASR — NVIDIA, OpenMDW-1.1
+
+## What actually shipped
+
+Step 4 (fine-tuning Nemotron on Nepali audio) was never needed to stop
+Devanagari reaching the editor. The model resolves Nepali acoustics onto
+`hi-IN` and emits Devanagari; rewriting that Devanagari after the fact solves
+the user-visible problem without touching the ASR model at all.
+
+`build_tables.py` runs the v2 transliterator **once, offline**, over SLR54 and
+word-aligns the result back onto the Devanagari source, producing a static
+answer sheet that `src/always/translit.rs` compiles in:
+
+    resources/translit/dev_roman.tsv     49,064 Devanagari -> his Roman
+    resources/translit/roman_freq.tsv     9,730 Roman tokens he has typed
+
+Model quality at binary-search latency: 28 ns for an English utterance, 7.2 µs
+for a full Devanagari sentence, against a ~870 ms decode. No Python, no ONNX,
+no model load on the paste path.
+
+`rules3.py` mirrors the Rust rule engine that handles words the table lacks.
+Change the rules in `src/always/translit.rs`, mirror them there, re-run
+`build_tables.py`.
+
+Regenerate with:
+
+    python3 training/nepali-nemotron/build_tables.py [ARTIFACT_DIR]
+
+Two entries in that table were badly wrong before the attestation repair step —
+`छ -> xaxa` (his 6th commonest word) and `म -> mam`. The model is weak on
+one- and two-character inputs, which the 1,844 supervised pairs happened not to
+cover. The repair only fires where the rule engine and his own typing agree
+against an output he has never written: 39 entries, all fixes.

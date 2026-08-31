@@ -640,6 +640,47 @@ recognition. Requires no API key and never uploads audio on macOS 26+.
 
 Between transcription and the keyboard:
 
+0. **Script normalisation (Devanagari → Roman Nepali).** The first thing that
+   happens to a transcript, ahead of every filter and every judgment below.
+
+   Nemotron supports 40 language-locales and **Nepali is not one of them**:
+   `ne-NP` is prompt slot 46 and its embedding is untrained, returning empty
+   for every input. So Nepali speech — and English/Nepali code-switching — is
+   resolved onto the nearest locale the model does know, Hindi (`hi-IN`), and
+   comes back as **Devanagari even when `lang = "en"`**. The language prompt
+   biases decoding; it does not constrain the output alphabet, so configuring
+   the language correctly is necessary but not sufficient.
+
+   The user writes Nepali in Latin script and never wants Devanagari pasted.
+   Every Devanagari run is therefore rewritten into **his own romanisation**
+   (`छ → x`, `भ → v` — he writes `hunxa`, `xaina`, `vayo`, `maa`, not
+   `hunchha`/`bhayo`). Everything else — English words, punctuation, spacing,
+   emoji, code — passes through **byte-identical**, so a code-switched
+   sentence comes out uniformly Latin rather than half-transliterated.
+
+   Two tiers: an exact table of 49,064 entries, built offline by running the
+   trained transliteration model (99.0% exact on held-out pairs of his own
+   spellings) over the SLR54 Nepali corpus and word-aligning the result, with
+   his 1,844 hand-mined pairs overriding it; then a rule engine for anything
+   the table lacks. The table is `include_str!`-ed and binary-searched in
+   place, so there is no init cost and no allocation for Latin-only text.
+   Measured: **28 ns** for an English utterance, **7.2 µs** for a full
+   Devanagari sentence, against a ~870 ms decode.
+
+   **Invariant: no codepoint in U+0900..U+097F ever reaches the clipboard.**
+   Unmapped Devanagari is dropped rather than passed through. The pass is
+   idempotent, and it runs *before* snippet expansion, so user-authored
+   snippet text is never transliterated.
+
+   Ordering note: this deliberately precedes the hallucination filter, which
+   rejects mixed Latin/Devanagari as "mixed-script gibberish" — precisely what
+   a genuine code-switched sentence looks like. Filtering first would discard
+   the utterances this step exists to rescue. One gap remains: the
+   hallucination detector reads the raw transcription object rather than the
+   romanised string, so on the **remote Groq backend** (the only backend where
+   content filtering runs at all) a code-switched utterance is still dropped.
+   Local backends are unaffected. Escape hatch: `ALWAYS_NO_ROMANIZE=1`.
+
 1. **Hallucination filter** — rejects the known failure modes of speech models:
    empty output, "thank you"/"bye" family, subtitle credits, repeated tokens,
    gibberish, low-confidence segments.

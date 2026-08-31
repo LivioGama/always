@@ -38,6 +38,9 @@ fn bench_config() -> AlwaysConfig {
         project_root: None,
         learning_enabled: false,
         groq_stt_api_key: Some("test-key".to_string()),
+        // Pre-existing drift: `AlwaysConfig` grew this field and the bench
+        // fixture was never updated, so `cargo bench` did not compile.
+        stt_live_preview: true,
         transcriber_backend: TranscriberBackendChoice::Groq,
         vad_mode: VadMode::Local,
         silero_threshold: 0.5,
@@ -150,5 +153,39 @@ fn bench_merge(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_in_cooldown, bench_classify, bench_merge);
+/// Script normalisation sits inside `classify_transcription`, so it is on the
+/// critical path between the last audio frame and the paste. The decode it
+/// follows costs ~870 ms; the budget here is single-digit milliseconds, and
+/// the point of these three cases is to show where the real cost lands:
+///
+///   - `romanize_latin_only` — every English utterance. One scan, no
+///     allocation, `Cow::Borrowed` returned.
+///   - `romanize_mixed_utterance` — the reported failure, code-switched.
+///   - `romanize_pure_devanagari` — worst realistic case, all lookups.
+fn bench_romanize(c: &mut Criterion) {
+    use always::always::translit::romanize;
+
+    let english = "send the quarterly report to Bob before five and cc the team";
+    c.bench_function("romanize_latin_only", |b| {
+        b.iter(|| romanize(black_box(english)));
+    });
+
+    let mixed = "so the हुन्छ thing is मलाई going to वायो work fine tomorrow";
+    c.bench_function("romanize_mixed_utterance", |b| {
+        b.iter(|| romanize(black_box(mixed)));
+    });
+
+    let devanagari = "अच्छी बात है, एक स्पीकिंग ना चाह इट गोस";
+    c.bench_function("romanize_pure_devanagari", |b| {
+        b.iter(|| romanize(black_box(devanagari)));
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_in_cooldown,
+    bench_classify,
+    bench_merge,
+    bench_romanize
+);
 criterion_main!(benches);
