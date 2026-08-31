@@ -18,6 +18,9 @@ final class AudioOutputMonitor {
     private var deviceID: AudioDeviceID = kAudioObjectUnknown
     private var listenerInstalled = false
     private weak var stateMonitor: StateMonitor?
+    /// Last state actually sent, so the poll below only emits on change.
+    private var lastPlaying: Bool?
+    private var pollTimer: DispatchSourceTimer?
 
     private init() {}
 
@@ -33,6 +36,7 @@ final class AudioOutputMonitor {
         installListener(on: device)
         // Push initial state so daemon's view is correct from t=0.
         notify(playing: isRunningSomewhere(device: device))
+        startPolling()
     }
 
     private func defaultOutputDevice() -> AudioDeviceID? {
@@ -85,12 +89,50 @@ final class AudioOutputMonitor {
 
     /// Re-push output-device playback state after UDS reconnect.
     func resyncToDaemon() {
+        // Force a re-push: after a UDS reconnect the daemon's view is reset,
+        // so the change-guard in `notify` must not suppress the first send.
+        lastPlaying = nil
         let device = deviceID != kAudioObjectUnknown ? deviceID : defaultOutputDevice()
         guard let device else { return }
         notify(playing: isRunningSomewhere(device: device))
     }
 
+    /// Poll as well as listen.
+    ///
+    /// The property listener alone was not enough: the daemon received ZERO
+    /// `NotifySystemAudioState` commands in a full day of use, and YouTube
+    /// audio was transcribed and pasted as if the user had spoken it. Two
+    /// reasons the callback can never fire:
+    ///
+    ///  1. `kAudioDevicePropertyDeviceIsRunningSomewhere` does not flip for
+    ///     every producer on every macOS version.
+    ///  2. `deviceID` is captured ONCE at startup. Switching output (AirPods,
+    ///     headphones, an external display's speakers) leaves the listener
+    ///     bound to a device that is no longer the default, so it goes quiet
+    ///     permanently.
+    ///
+    /// A 2s poll that re-resolves the default device each tick fixes both,
+    /// costs nothing measurable, and only emits on an actual change.
+    private func startPolling() {
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        t.schedule(deadline: .now() + 2, repeating: 2)
+        t.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            guard let device = self.defaultOutputDevice() else { return }
+            if device != self.deviceID {
+                // Output device changed: rebind the listener to the new one.
+                self.deviceID = device
+                self.installListener(on: device)
+            }
+            self.notify(playing: self.isRunningSomewhere(device: device))
+        }
+        t.resume()
+        pollTimer = t
+    }
+
     private func notify(playing: Bool) {
+        guard playing != lastPlaying else { return }   // only on change
+        lastPlaying = playing
         logger.info("system audio playing=\(playing) — notifying daemon")
         stateMonitor?.sendCommandWithData(
             "NotifySystemAudioState",

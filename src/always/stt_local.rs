@@ -252,7 +252,11 @@ const MAX_WAV_BYTES: usize = 16_000 * 2 * MAX_LOCAL_STT_SECS;
 
 /// Nemotron's cache-aware encoder expects 560 ms audio windows.
 const NEMOTRON_CHUNK_SAMPLES: usize = 8_960;
-const NEMOTRON_FLUSH_CHUNKS: usize = 3;
+// One fed chunk produces exactly 56 new mel frames, which is one full encoder
+// window (parakeet-rs CHUNK_SIZE = 56), so a single flush chunk already drains
+// the decoder. Three cost three FULL encoder runs at 110-270ms each -- measured
+// 220-540ms of pure tail latency on EVERY utterance, for nothing.
+const NEMOTRON_FLUSH_CHUNKS: usize = 1;
 
 impl Transcriber for LocalTranscriber {
     fn supports_streaming(&self) -> bool {

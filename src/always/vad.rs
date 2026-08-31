@@ -118,7 +118,23 @@ pub enum RecordResult {
 struct SpeakerGate {
     embedder: std::sync::Arc<crate::always::speaker_embed::SpeakerEmbedder>,
     voiceprint: std::sync::Arc<crate::always::voiceprint::VoiceProfile>,
+    /// Bar for WHOLE-UTTERANCE judgements — the early (~2s) check, the
+    /// tentative-silence check, the final check, and the mandatory
+    /// end-of-utterance confirmation. Always exactly the user's
+    /// configured pref: a whole utterance of the user's own voice must
+    /// clear the bar they chose, with or without music playing, so
+    /// dictating over media keeps working.
     threshold: f32,
+    /// Bar for the SINGLE trailing-window verification in the ladder.
+    /// Same as `threshold`, plus `AUDIO_PLAYING_GATE_BUMP` while system
+    /// audio is playing. The window check is a Bernoulli trial repeated
+    /// every 0.5s of voice against the max over four voiceprint targets,
+    /// so it is the leaky statistic — media only has to get lucky once.
+    /// Raising it while media plays costs the user nothing but latency:
+    /// a genuine utterance that misses the raised window bar is still
+    /// admitted by the whole-utterance check at ~2s, at the unraised
+    /// `threshold`.
+    window_threshold: f32,
 }
 
 struct SpeakerGateContext {
@@ -151,6 +167,82 @@ fn speaker_gate_allows_transcription(requested: bool, score: Option<f32>, thresh
 /// elsewhere.) The threshold is `cfg.speaker_gate_threshold` (a pref); lower it
 /// if the user's own voice sits too close to the cutoff, rather than disabling.
 const SPEAKER_GATE_ENFORCE_DROP: bool = true;
+
+/// Verdict of the mandatory whole-utterance speaker confirmation.
+///
+/// The ladder verifies the user from a single trailing 1.5s window and
+/// then LATCHES: `speaker_checked` is never cleared, so everything that
+/// follows is treated as the user's speech and judged only against the
+/// heavily relaxed tail bar (0.6x). That is one Bernoulli trial, retried
+/// every 0.5s of voice, scored as the max over four voiceprint targets —
+/// against continuous media it eventually fires, and when it does the
+/// whole utterance is pasted.
+///
+/// Measured on the incident (2026-08-31 18:40:30-18:43:30 UTC, YouTube
+/// playing, threshold 0.35): of ~50 single-window scores, three crossed
+/// 0.35 (0.3623, 0.3655, 0.3751) and each leaked an entire utterance. Of
+/// 42 WHOLE-UTTERANCE scores over the same audio, the maximum was 0.3407
+/// — every one of them below the bar. The whole-utterance embedding is
+/// simply the better statistic: a lucky 1.5s window is diluted by the
+/// seconds of media around it, while the user's own utterance is their
+/// voice end to end and scores at its usual level.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SpeakerConfirmation {
+    /// The whole utterance matched. Transcribe it.
+    Confirmed(f32),
+    /// The whole utterance did NOT match. Drop it, no matter what a
+    /// single window said earlier.
+    Refuted(f32),
+    /// Too little voiced audio (or the embedder failed) to form an
+    /// opinion. Defer to whatever the ladder already decided — this must
+    /// not newly drop a genuine dictation whose tail happens to be short
+    /// or whose embedding call errored.
+    Insufficient,
+}
+
+/// Pure decision half of `speaker_gate_confirm_utterance`.
+///
+/// `scored` is false when there was not enough voiced audio to bother
+/// embedding; `score` is `None` when the embedder itself failed. Both
+/// mean "no opinion" — deliberately NOT a rejection, so a transient
+/// embed error or a short trailing fragment can never newly discard
+/// speech the ladder already accepted.
+fn speaker_confirmation(scored: bool, score: Option<f32>, threshold: f32) -> SpeakerConfirmation {
+    if !scored {
+        return SpeakerConfirmation::Insufficient;
+    }
+    match score {
+        Some(score) if score >= threshold => SpeakerConfirmation::Confirmed(score),
+        Some(score) => SpeakerConfirmation::Refuted(score),
+        None => SpeakerConfirmation::Insufficient,
+    }
+}
+
+/// Re-score the audio that is about to be transcribed against the
+/// enrolled voiceprint, as a whole.
+fn speaker_gate_confirm_utterance(
+    gate: &SpeakerGate,
+    samples: &[i16],
+    voiced_samples: usize,
+) -> SpeakerConfirmation {
+    let min = crate::always::speaker_embed::MIN_EMBED_SAMPLES;
+    let scored = voiced_samples >= min && samples.len() >= min;
+    let score = scored.then(|| speaker_gate_score(gate, samples)).flatten();
+    speaker_confirmation(scored, score, gate.threshold)
+}
+
+/// Bar for the ladder's single trailing-window verification.
+///
+/// Raised by `AUDIO_PLAYING_GATE_BUMP` while the Mac is playing audio.
+/// The whole-utterance threshold is deliberately NOT raised — see
+/// `SpeakerGate::window_threshold`.
+fn speaker_gate_window_threshold(threshold: f32, system_audio_playing: bool) -> f32 {
+    if system_audio_playing {
+        threshold + AUDIO_PLAYING_GATE_BUMP
+    } else {
+        threshold
+    }
+}
 
 fn speaker_gate_allows_stt(requested: bool, speaker_verified: bool) -> bool {
     // "Only me": when the gate is requested, STT/speculation/preview must wait
@@ -189,10 +281,35 @@ fn speaker_gate_ctx(cfg: &AlwaysConfig) -> SpeakerGateContext {
         profile_complete,
         embedder.is_some(),
     );
+    // While system audio is playing we are, by definition, hearing at least
+    // one voice that is not the user's. The wake-on-voice path in
+    // `event_loop` deliberately records ONE utterance through an
+    // audio-output pause so the user can dictate over music -- but that same
+    // path let a YouTube narrator through: it scored 0.404 against a 0.35
+    // threshold and was transcribed and pasted as if the user had said it.
+    //
+    // So the SINGLE-WINDOW verification gets stricter exactly when competing
+    // audio is present. The bump lands on `window_threshold` only, never on
+    // `threshold`: whole-utterance judgements keep the user's configured bar,
+    // so dictating over music still works even when the user's voice sits
+    // near the cutoff (their Nepali scores ~0.45-0.52 against a 0.35 pref --
+    // a bumped whole-utterance bar of 0.50 would have rejected half of it).
+    // The cost of the raised window bar is at most ~1.5s of extra latency
+    // before the badge lights: the whole-utterance check at ~2s admits them.
+    //
+    // NOTE: this reads `is_system_audio_playing()` -- the FACT -- not
+    // `is_audio_output_paused()`, the pause SOURCE. The pause source is
+    // force-cleared by the UDS handler whenever this gate is ready, so
+    // keying off it made the bump unreachable in the only configuration
+    // that needs it. See `pause::SYSTEM_AUDIO_PLAYING`.
+    let threshold = cfg.speaker_gate_threshold as f32;
+    let window_threshold =
+        speaker_gate_window_threshold(threshold, crate::always::pause::is_system_audio_playing());
     let gate = ready.then(|| SpeakerGate {
         embedder: embedder.expect("ready speaker gate must have an embedder"),
         voiceprint: profile.expect("ready speaker gate must have a voiceprint"),
-        threshold: cfg.speaker_gate_threshold as f32,
+        threshold,
+        window_threshold,
     });
     SpeakerGateContext { requested, gate }
 }
@@ -455,7 +572,13 @@ const CONSUME_STREAM_MIN_SAMPLES: usize = 4_000;
 /// a long chunk's preview held the engine for seconds and stalled the final
 /// transcription (a major source of consume-mode/Iris latency). 10s shows the
 /// recent words while keeping every preview cheap; the final is always complete.
-const CONSUME_STREAM_PREVIEW_MAX_SAMPLES: usize = 10 * 16_000;
+// 10s → 3s. Each preview re-decodes this much audio FROM SCRATCH on the same
+// model mutex the final transcription needs, and on a local engine that is
+// real CPU, not a network wait. Measured during one 30s utterance: seven
+// previews at 318-1966ms each, and the final decode queued behind them for
+// 1911ms. The overlay only needs the recent words to feel live; the paste
+// needs the lock. 3s keeps the preview useful at a third of the cost.
+const CONSUME_STREAM_PREVIEW_MAX_SAMPLES: usize = 3 * 16_000;
 /// Live mid-speech preview cadence for NON-streaming backends (Groq)
 /// during normal dictation, gated by the `stt_live_preview` pref. Each
 /// tick is a full cloud round trip (~250-400ms typical, up to ~1.5s),
@@ -464,6 +587,10 @@ const CONSUME_STREAM_PREVIEW_MAX_SAMPLES: usize = 10 * 16_000;
 /// text feels live, slow enough that a minute of dictation costs tens
 /// of extra API calls, not hundreds.
 const LIVE_PREVIEW_INTERVAL_MS: u64 = 1_500;
+/// How much stricter the speaker gate gets while system audio is playing.
+/// See `build_speaker_gate_context`.
+const AUDIO_PLAYING_GATE_BUMP: f32 = 0.15;
+
 /// Live preview cadence for a LOCAL streaming engine (Nemotron).
 ///
 /// `CONSUME_STREAM_INTERVAL_MS` above is 200ms and explicitly relies on a
@@ -478,7 +605,10 @@ const LIVE_PREVIEW_INTERVAL_MS: u64 = 1_500;
 /// 700ms is above Nemotron's 560ms chunk period, so a preview still lands
 /// roughly per chunk and the overlay stays live, while the engine gets real
 /// idle time between passes.
-const LOCAL_STREAM_INTERVAL_MS: u64 = 700;
+// 700ms → 1400ms. Previews measured 318-1966ms on this machine, so at 700ms
+// they ran effectively back-to-back and never released the model lock. The
+// interval must exceed the typical preview cost or the queue never drains.
+const LOCAL_STREAM_INTERVAL_MS: u64 = 1_400;
 /// Minimum NEW voiced audio before another local-streaming preview fires.
 /// The 200ms path sets this to 0, so it re-decodes IDENTICAL audio when the
 /// user pauses mid-sentence — pure waste on a compute-bound engine. 0.5s.
@@ -509,7 +639,49 @@ const MIDSENTENCE_DECISION_GRACE_FRAMES: usize = 20;
 const TRAILING_CONNECTORS: &[&str] = &[
     "and", "but", "or", "so", "because", "which", "that", "to", "the", "a", "an", "with", "for",
     "of", "in", "on", "at", "by",
+    // Hesitation fillers. The user reports saying "uh" precisely WHEN STILL
+    // THINKING -- it is the most reliable signal in the transcript that more
+    // speech is coming, and cutting there truncates the thought. Treating it
+    // as a connector extends the silence window exactly as "and" or "to" do.
+    // The filler itself is stripped from the final text by
+    // `strip_trailing_filler`; it should buy thinking time, not appear.
+    "uh", "um", "uhh", "umm", "er", "erm", "hmm", "mmm", "like",
 ];
+
+/// Fillers to remove from the END of a finished transcript.
+///
+/// Deliberately the hesitation subset of `TRAILING_CONNECTORS` -- a real
+/// trailing "and" or "to" is the user's word and must survive; a trailing
+/// "uh" is them thinking out loud and is never wanted in the pasted text.
+const TRAILING_FILLERS: &[&str] = &["uh", "um", "uhh", "umm", "er", "erm", "hmm", "mmm"];
+
+/// Strip trailing hesitation fillers (and any punctuation they trail) from a
+/// finished transcript. Applied once at finalization, never to previews.
+pub(crate) fn strip_trailing_filler(text: &str) -> String {
+    let mut out = text.trim_end().to_string();
+    let mut removed_any = false;
+    loop {
+        // Look past whitespace/comma/period to find the last real word.
+        let stripped = out.trim_end_matches(|c: char| c == ',' || c == '.' || c.is_whitespace());
+        let last = stripped.rsplit(char::is_whitespace).next().unwrap_or("");
+        let norm = last
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase();
+        if norm.is_empty() || !TRAILING_FILLERS.contains(&norm.as_str()) {
+            break;
+        }
+        out = stripped[..stripped.len() - last.len()].trim_end().to_string();
+        removed_any = true;
+    }
+    if removed_any {
+        // Only now trim punctuation the removed filler orphaned. A transcript
+        // that legitimately ends "done." must keep its period.
+        out = out
+            .trim_end_matches(|c: char| c == ',' || c.is_whitespace())
+            .to_string();
+    }
+    out
+}
 
 /// How the mid-speech live-preview loop ticks for the current
 /// mode/engine/pref combination. `None` = no live preview at all.
@@ -1206,7 +1378,9 @@ fn record_with_local_vad(
                     let window = &speech_samples[speech_samples.len() - tail_len..];
                     if !speaker_checked {
                         let score = speaker_gate_score(gate, window);
-                        if speaker_gate_allows_score(score, gate.threshold) {
+                        // `window_threshold`, not `threshold`: this is the
+                        // single-window trial, raised while media plays.
+                        if speaker_gate_allows_score(score, gate.window_threshold) {
                             let score = score.expect("accepted speaker score must be present");
                             speaker_checked = true;
                             confirmed_user_len = speech_samples.len();
@@ -1392,6 +1566,27 @@ fn record_with_local_vad(
                 if speech_samples.len() >= CHUNK_HARD_MAX_SECS as usize * 16_000
                     && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
                 {
+                    // A chunk leaves this buffer for good, so the
+                    // end-of-utterance confirmation below can never see it.
+                    // Confirm it as a whole here instead: a latched
+                    // `speaker_checked` must not be able to commit 15s of
+                    // media into the chunker. Refuted → cut at the last
+                    // window-verified boundary and finalize, exactly like
+                    // `speaker_gate_tail_cut`.
+                    if let Some(gate) = &speaker_gate
+                        && SPEAKER_GATE_ENFORCE_DROP
+                        && let SpeakerConfirmation::Refuted(score) =
+                            speaker_gate_confirm_utterance(gate, &speech_samples, voiced_samples)
+                    {
+                        tracing::info!(
+                            score,
+                            threshold = gate.threshold,
+                            kept_secs = confirmed_user_len as f64 / 16_000.0,
+                            "speaker_gate_chunk_refuted"
+                        );
+                        speech_samples.truncate(confirmed_user_len);
+                        break;
+                    }
                     tracing::info!(
                         chunk_secs = speech_samples.len() / 16_000,
                         "chunk_hard_flush"
@@ -1467,6 +1662,23 @@ fn record_with_local_vad(
                 && speech_samples.len() >= chunk_target_secs() as usize * 16_000
                 && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
             {
+                // Same reason as the hard flush above: confirm the chunk as
+                // a whole before it leaves the buffer, so a single latched
+                // window cannot commit media speech into the chunker.
+                if let Some(gate) = &speaker_gate
+                    && SPEAKER_GATE_ENFORCE_DROP
+                    && let SpeakerConfirmation::Refuted(score) =
+                        speaker_gate_confirm_utterance(gate, &speech_samples, voiced_samples)
+                {
+                    tracing::info!(
+                        score,
+                        threshold = gate.threshold,
+                        kept_secs = confirmed_user_len as f64 / 16_000.0,
+                        "speaker_gate_chunk_refuted"
+                    );
+                    speech_samples.truncate(confirmed_user_len);
+                    break;
+                }
                 committed_samples += speech_samples.len();
                 let grammar = if cfg.postprocess_available() {
                     cfg.post_processor.clone()
@@ -1852,6 +2064,69 @@ fn record_with_local_vad(
         }
     }
 
+    // "My Voice" END-OF-UTTERANCE CONFIRMATION — the check the leak got
+    // past. The block above only runs when the ladder never verified;
+    // once a single 1.5s window latched `speaker_checked`, NOTHING
+    // re-examined the audio, and the tail monitor's 0.6x bar (0.21 at
+    // the user's 0.35 pref) is cleared by ordinary media speech, so the
+    // recording kept growing and the whole thing was pasted.
+    //
+    // Observed live (2026-08-31 18:41:47 UTC): one window scored 0.3655,
+    // latched, and 6.3s of Hindi YouTube dialogue was transcribed and
+    // pasted — while the tail check on the very same audio was reporting
+    // 0.1667. Re-scoring the kept buffer as a whole is what catches
+    // that: it is the same statistic the early/tentative/final checks
+    // already use, at the same threshold the user configured, and across
+    // the whole incident window it never once accepted media (42 samples,
+    // max 0.3407).
+    //
+    // Scope is deliberately narrow: this can only turn an ACCEPT into a
+    // reject, and only on positive evidence that the audio is not the
+    // user's. `Insufficient` (too short to embed, or the embedder
+    // errored) defers to the ladder exactly as before.
+    if speaker_gate_requested
+        && speaker_checked
+        && let Some(gate) = &speaker_gate
+        && let SpeakerConfirmation::Refuted(score) =
+            speaker_gate_confirm_utterance(gate, &speech_samples, voiced_samples)
+        && SPEAKER_GATE_ENFORCE_DROP
+    {
+        if has_chunks {
+            // Committed chunks were each confirmed at flush time, so the
+            // user's already-transcribed speech is NOT thrown away — only
+            // this unverified tail is.
+            tracing::info!(
+                score,
+                threshold = gate.threshold,
+                tail_secs = speech_samples.len() as f64 / 16_000.0,
+                "speaker_gate_tail_refuted_keeping_chunks"
+            );
+            // The chunks still get assembled and pasted, so the badge must
+            // say Transcribing exactly as it does on the silent-tail path.
+            flip_to_transcribing!();
+            return finalize_chunked(
+                &chunker,
+                transcriber,
+                String::new(),
+                &crate::stt::TranscriptionResult::default(),
+                committed_samples,
+                speech_energy.max(cfg.energy_threshold),
+                speech_end_at,
+                false,
+            )
+            .map(|r| apply_mic_conflict_preemption(r, mic_conflict_preempted));
+        }
+        tracing::info!(
+            score,
+            threshold = gate.threshold,
+            secs = speech_samples.len() as f64 / 16_000.0,
+            "speaker_gate_utterance_refuted"
+        );
+        event::global_broadcaster().voice_activity_ended();
+        flip_to_listening!();
+        return Ok(RecordResult::DroppedSpeaker { score });
+    }
+
     // Guarantee Transcribing overlay (speculation usually already flipped).
     flip_to_transcribing!();
 
@@ -1882,10 +2157,16 @@ fn record_with_local_vad(
     let speculation = if speculation_pending {
         let started_wait = std::time::Instant::now();
         let audio_secs = speech_samples.len() as f64 / 16_000.0;
-        // Floor lowered 10s → 2s: a local re-transcribe costs ~300ms, so waiting
-        // a full 10s for a stalled speculative result before falling back is
-        // pure dead time. 2s is plenty for a healthy speculation to land.
-        let max_wait = std::time::Duration::from_secs_f64((audio_secs * 0.5).clamp(2.0, 60.0));
+        // Floor 2s → 0.35s. The 2s was still sized for a cloud round trip, and
+        // the comment's own reasoning ("a local re-transcribe costs ~300ms")
+        // argues against it: on a miss we wait 2s and THEN spend ~300ms
+        // re-decoding, so the floor is ~1.7s of pure dead time.
+        //
+        // This is not a rare path. Measured over 56 real utterances the
+        // speculation landed exactly ONCE (stt_wait_ms < 50ms); 32 took over
+        // 1.5s. 2000ms floor + ~900ms re-decode ≈ the observed 2920ms median.
+        // 0.35s still covers a healthy local speculation and caps the miss.
+        let max_wait = std::time::Duration::from_secs_f64((audio_secs * 0.5).clamp(0.35, 60.0));
         let mut taken: Option<Result<crate::stt::TranscriptionResult>> = None;
         let mut last_heartbeat = std::time::Instant::now();
         loop {
@@ -2109,6 +2390,12 @@ fn finalize_chunked(
     // utterances, and the only segment stats available here would describe
     // the tail — letting them judge a multi-minute joined transcript could
     // drop it wholesale.
+    // Drop the hesitation filler the user trails off with while thinking.
+    // It has already done its job by extending the silence window (see
+    // TRAILING_CONNECTORS); it should not reach the clipboard. Applied at
+    // finalization only -- previews keep it, so the overlay still reflects
+    // what was actually said while speaking.
+    let full_text = strip_trailing_filler(&full_text);
     let transcription = crate::stt::TranscriptionResult {
         text: full_text.clone(),
         duration: total_samples as f64 / 16_000.0,
@@ -2372,6 +2659,29 @@ mod tests {
         assert_eq!(chunk_target_secs(), 3);
 
         unsafe { std::env::remove_var("ALWAYS_CHUNK_TARGET_SECS") };
+    }
+
+    /// "uh" is the user's own tell that they are still thinking. Cutting on
+    /// it truncates the thought; it must extend the window like any other
+    /// connector -- and must never survive into the pasted text.
+    #[test]
+    fn hesitation_fillers_extend_the_window_but_are_stripped() {
+        let loc = &crate::always::localization::Localization::ENGLISH;
+        for f in ["uh", "um", "hmm", "erm"] {
+            assert!(
+                looks_mid_sentence(loc, &format!("so the thing is {f}")),
+                "{f} must extend the silence window"
+            );
+        }
+        assert_eq!(super::strip_trailing_filler("so the thing is uh"), "so the thing is");
+        assert_eq!(super::strip_trailing_filler("send it now, um."), "send it now");
+        assert_eq!(super::strip_trailing_filler("wait uh um"), "wait");
+        // A real trailing word the user meant must survive untouched.
+        assert_eq!(super::strip_trailing_filler("meet me at the"), "meet me at the");
+        assert_eq!(super::strip_trailing_filler("done."), "done.");
+        // Never strip a filler that is the ENTIRE utterance into nothing
+        // unexpected -- callers already reject empty transcripts.
+        assert_eq!(super::strip_trailing_filler("uh"), "");
     }
 
     #[test]
@@ -2665,6 +2975,166 @@ mod tests {
     /// each re-decoding up to 10s of audio on this machine's own cores.
     /// Observed: load average >90 and `rec_coreaudio_overrun` as the
     /// recorder was starved.
+    /// A voice coming out of the speakers must not clear the gate just
+    /// because the threshold was lowered to help the user's own quieter
+    /// speech. Observed leak: a YouTube narrator scored 0.404 against a
+    /// 0.35 threshold and was pasted as if the user had spoken it.
+    #[test]
+    fn audio_playing_raises_the_speaker_gate() {
+        let base = 0.35f32;
+        let bumped = super::speaker_gate_window_threshold(base, true);
+        // The observed leak must not clear the raised bar.
+        assert!(0.404 < bumped, "the exact score that leaked must now fail");
+        // The user's own typical score must still clear it, so dictating
+        // over music keeps working.
+        assert!(0.55 > bumped, "user's own voice must still pass");
+        // And the bump must exceed the margin by which the leak passed.
+        assert!(super::AUDIO_PLAYING_GATE_BUMP > 0.404 - base);
+    }
+
+    /// Single-window scores measured off the incident log
+    /// (~/Library/Logs/Always/always.2026-08-31, 18:40:30-18:43:30 UTC,
+    /// Hindi YouTube playing, `speaker_gate_threshold` = 0.35). Each of
+    /// these leaked an entire utterance to the paste path.
+    const MEDIA_LEAKING_WINDOW_SCORES: [f32; 3] = [0.3622653, 0.3654983, 0.3751205];
+    /// Highest WHOLE-UTTERANCE score media reached over the same window
+    /// (n = 42, from the `speaker_gate_early_reject` /
+    /// `speaker_gate_tentative_reject` lines, which score the full
+    /// buffer). Every one of the 42 was below the 0.35 threshold.
+    const MEDIA_MAX_WHOLE_UTTERANCE_SCORE: f32 = 0.3407;
+    /// Lowest score the USER's own speech reached while verifying on the
+    /// same day (`speaker_gate_verified`, 14:46-14:57 UTC), and their
+    /// typical range dictating over media.
+    const USER_MIN_OBSERVED_SCORE: f32 = 0.3552;
+
+    /// The bump must land on the single-window bar ONLY.
+    ///
+    /// Raising the whole-utterance bar to 0.50 would reject the user's
+    /// own Nepali (0.45-0.52 against their 0.35 pref) — that is the
+    /// "dictate while music plays" promise, and it must survive.
+    #[test]
+    fn audio_playing_bump_never_raises_the_whole_utterance_bar() {
+        let base = 0.35f32;
+        let window = super::speaker_gate_window_threshold(base, true);
+        assert!(window > base, "window bar rises while media plays");
+        for user_nepali in [0.45f32, 0.47, 0.52] {
+            assert_eq!(
+                super::speaker_confirmation(true, Some(user_nepali), base),
+                super::SpeakerConfirmation::Confirmed(user_nepali),
+                "dictating over music must still be confirmed at {user_nepali}"
+            );
+        }
+        // Sanity: had the bump reached the whole-utterance bar, it would
+        // have rejected exactly that speech. This is the regression.
+        assert!(
+            0.45 < window,
+            "0.45 vs the bumped bar is why the bump must not apply here"
+        );
+    }
+
+    /// With no media playing, nothing changes for the user.
+    #[test]
+    fn window_threshold_is_untouched_when_nothing_is_playing() {
+        for base in [0.30f32, 0.35, 0.45, 0.50] {
+            assert_eq!(super::speaker_gate_window_threshold(base, false), base);
+        }
+    }
+
+    /// THE REGRESSION. A single 1.5s window crossing the bar latches
+    /// `speaker_checked` for the rest of the utterance, and the tail
+    /// monitor then judges everything after it at 0.6x — which ordinary
+    /// media speech clears. The end-of-utterance confirmation re-scores
+    /// the kept buffer AS A WHOLE, and that is the statistic that
+    /// separates the two populations.
+    #[test]
+    fn whole_utterance_confirmation_refutes_media_that_won_one_window() {
+        let threshold = 0.35f32;
+        for leak in MEDIA_LEAKING_WINDOW_SCORES {
+            // Each of these DID pass the single-window check...
+            assert!(
+                super::speaker_gate_allows_score(Some(leak), threshold),
+                "{leak} passed the window check in the field"
+            );
+        }
+        // ...but the same audio, scored whole, never reached the bar.
+        assert_eq!(
+            super::speaker_confirmation(true, Some(MEDIA_MAX_WHOLE_UTTERANCE_SCORE), threshold),
+            super::SpeakerConfirmation::Refuted(MEDIA_MAX_WHOLE_UTTERANCE_SCORE),
+            "the worst media utterance must be refuted"
+        );
+        // And a latched `speaker_checked` is no defence: STT is still
+        // "allowed" by the ladder, so the confirmation is the only thing
+        // standing between media audio and the clipboard.
+        assert!(super::speaker_gate_allows_stt(true, true));
+    }
+
+    /// The confirmation must not become a new way to lose the user's
+    /// speech.
+    #[test]
+    fn whole_utterance_confirmation_keeps_the_users_own_speech() {
+        let threshold = 0.35f32;
+        assert_eq!(
+            super::speaker_confirmation(true, Some(USER_MIN_OBSERVED_SCORE), threshold),
+            super::SpeakerConfirmation::Confirmed(USER_MIN_OBSERVED_SCORE),
+            "the user's quietest verified utterance must still pass"
+        );
+        // Exactly at the bar counts as a match, same as every other
+        // speaker-gate comparison.
+        assert_eq!(
+            super::speaker_confirmation(true, Some(threshold), threshold),
+            super::SpeakerConfirmation::Confirmed(threshold)
+        );
+    }
+
+    /// No evidence is not evidence of guilt: too little voiced audio, or
+    /// an embedder error, must defer to the ladder rather than drop.
+    #[test]
+    fn whole_utterance_confirmation_defers_when_it_cannot_judge() {
+        let threshold = 0.35f32;
+        assert_eq!(
+            super::speaker_confirmation(false, None, threshold),
+            super::SpeakerConfirmation::Insufficient,
+            "a tail too short to embed must not discard committed speech"
+        );
+        assert_eq!(
+            super::speaker_confirmation(false, Some(0.01), threshold),
+            super::SpeakerConfirmation::Insufficient
+        );
+        assert_eq!(
+            super::speaker_confirmation(true, None, threshold),
+            super::SpeakerConfirmation::Insufficient,
+            "an embed failure must not newly drop a verified utterance"
+        );
+    }
+
+    /// The two populations, as measured, must be separable by the
+    /// whole-utterance bar the user already configured. If this ever
+    /// stops holding, the fix is a better statistic — not a threshold
+    /// nudge, which provably cannot separate the single-window scores
+    /// (media 0.362-0.375 sits inside the user's 0.355-0.451).
+    #[test]
+    fn media_and_user_are_separable_whole_utterance_but_not_per_window() {
+        let threshold = 0.35f32;
+        // Per window: the populations overlap, so NO threshold works.
+        let media_window_max = MEDIA_LEAKING_WINDOW_SCORES
+            .iter()
+            .copied()
+            .fold(f32::MIN, f32::max);
+        assert!(
+            media_window_max > USER_MIN_OBSERVED_SCORE,
+            "single-window scores overlap — a threshold alone can never fix this"
+        );
+        // Whole utterance: they separate, with the bar inside the gap.
+        assert!(
+            MEDIA_MAX_WHOLE_UTTERANCE_SCORE < threshold,
+            "every media utterance scored below the bar"
+        );
+        assert!(
+            USER_MIN_OBSERVED_SCORE >= threshold,
+            "the user's own speech scored at or above it"
+        );
+    }
+
     #[test]
     fn preview_cadence_throttles_local_streaming_engine() {
         for consume in [false, true] {

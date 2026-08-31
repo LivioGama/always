@@ -34,6 +34,23 @@ static MASTER_PAUSED: AtomicBool = AtomicBool::new(false);
 /// `NotifySystemAudioState`). Auto-clears when playback stops.
 static AUDIO_OUTPUT_PAUSED: AtomicBool = AtomicBool::new(false);
 
+/// FACT, not policy: the Mac is currently playing audio out of its
+/// speakers, as last reported by Swift's `NotifySystemAudioState`.
+///
+/// Deliberately separate from `AUDIO_OUTPUT_PAUSED` above. That flag is
+/// a *pause source*, and the UDS handler intentionally refuses to set it
+/// while the "My Voice" gate is ready — the whole point of the gate is
+/// that dictation keeps working over music. But the handler also
+/// `return`ed at that point, which threw the underlying fact away, and
+/// the speaker gate's `AUDIO_PLAYING_GATE_BUMP` keyed off the pause
+/// flag. Net effect: "get stricter while audio plays" was unreachable in
+/// exactly the configuration it was written for, and media audio was
+/// transcribed and pasted as if the user had spoken it.
+///
+/// This is NOT a pause source: `compute_effective()` never reads it and
+/// it can never stop capture. It only informs the speaker gate.
+static SYSTEM_AUDIO_PLAYING: AtomicBool = AtomicBool::new(false);
+
 /// Watchdog source: another app (Zoom, FaceTime, …) holds the
 /// microphone. Auto-clears when the app releases it.
 static MIC_CONFLICT_PAUSED: AtomicBool = AtomicBool::new(false);
@@ -215,6 +232,21 @@ pub fn set_audio_output_paused(paused: bool) -> (bool, bool) {
 
 pub fn is_audio_output_paused() -> bool {
     AUDIO_OUTPUT_PAUSED.load(Ordering::Relaxed)
+}
+
+/// Record whether the Mac is playing audio. Pure fact — never
+/// recomputes the effective pause state, never gates capture.
+pub fn set_system_audio_playing(playing: bool) {
+    SYSTEM_AUDIO_PLAYING.store(playing, Ordering::Relaxed);
+}
+
+/// Is the Mac playing audio out of its speakers right now?
+///
+/// The speaker gate uses this to raise the bar for the single-window
+/// verification while competing audio is in the room. Read it for that
+/// kind of judgement only — it is not a pause source.
+pub fn is_system_audio_playing() -> bool {
+    SYSTEM_AUDIO_PLAYING.load(Ordering::Relaxed)
 }
 
 /// Set/clear the mic-conflict watchdog pause source. Never touches

@@ -198,12 +198,25 @@ impl Drop for DownloadCleanup<'_> {
 type VerifyCache = Arc<Mutex<HashMap<(PathBuf, u64, SystemTime), bool>>>;
 
 /// On-disk row of the persisted verify cache (`.verify-cache.json`).
-/// `SystemTime` flattens to unix seconds so the JSON stays portable.
+///
+/// mtime is stored in NANOSECONDS. It used to be whole seconds, which made
+/// the cache permanently useless: the live key comes from `meta.modified()`,
+/// and on APFS that carries sub-second precision, so a truncated key could
+/// never equal the key it was meant to match. Every daemon start logged
+/// `model_verify_cache_loaded entries=1` and then re-hashed anyway --
+/// measured at 31-32s on EVERY start, 47 starts over three days, all of it
+/// re-hashing a 1.08 GB Whisper checkpoint the user was not even using.
+///
+/// `mtime_unix_secs` is still accepted on read so an existing cache file
+/// does not have to be discarded.
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedVerdict {
     path: PathBuf,
     len: u64,
+    #[serde(default)]
     mtime_unix_secs: u64,
+    #[serde(default)]
+    mtime_unix_nanos: u128,
     verdict: bool,
 }
 
@@ -418,7 +431,14 @@ impl ModelRegistry {
         };
         let mut cache = self.verify_cache.lock();
         for e in entries {
-            let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(e.mtime_unix_secs);
+            // Prefer the nanosecond field; fall back to the legacy seconds
+            // field so an old cache file still loads (its entries simply
+            // will not match, exactly as before, and get rewritten).
+            let mtime = if e.mtime_unix_nanos > 0 {
+                SystemTime::UNIX_EPOCH + Duration::from_nanos(e.mtime_unix_nanos as u64)
+            } else {
+                SystemTime::UNIX_EPOCH + Duration::from_secs(e.mtime_unix_secs)
+            };
             cache.insert((e.path, e.len, mtime), e.verdict);
         }
         tracing::info!(entries = cache.len(), "model_verify_cache_loaded");
@@ -434,9 +454,10 @@ impl ModelRegistry {
             .map(|((path, len, mtime), &verdict)| PersistedVerdict {
                 path: path.clone(),
                 len: *len,
-                mtime_unix_secs: mtime
+                mtime_unix_secs: 0,
+                mtime_unix_nanos: mtime
                     .duration_since(SystemTime::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
+                    .map(|d| d.as_nanos())
                     .unwrap_or(0),
                 verdict,
             })
@@ -1849,8 +1870,10 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
     // NVIDIA Nemotron-3.5-ASR Streaming 0.6B — multilingual streaming ASR.
     // Now implemented via parakeet-rs 0.3.6 (pinned for ort 2.0.0-rc.12 compatibility).
     // Uses the ONNX export from HuggingFace: pantinor/nemotron-3.5-asr-streaming-0.6b-onnx
-    // Files: encoder.onnx + encoder.onnx.data (~2.4 GB), decoder_joint.onnx (93 MB), tokenizer.model (0.4 MB)
-    // Total size: ~2500 MB. Supports 40 language-locales with streaming inference.
+    // INT8 build (smcleod/...-int8): byte-compatible filenames and graph, same
+    // multilingual tokenizer, verified prompt_index present and left_context 56.
+    // 651 MB vs 2.59 GB fp32; measured 2.28x faster per encoder chunk (37.3ms
+    // vs 85.2ms) and 1.6x faster to load on an M3.
     let nemotron_languages: Vec<String> = [
         "en", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "zh", "ja", "ko", "ar", "hi", "tr",
         "vi", "th", "id", "ms", "sv", "da", "no", "fi", "cs", "ro", "hu", "uk", "el", "he", "ca",
@@ -1881,7 +1904,7 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             // hash.
             sha256: None,
             // 2_594_566_700 bytes across the four files below.
-            size_mb: 2474,
+            size_mb: 651,
             is_downloaded: false,
             is_downloading: false,
             partial_size: 0,
@@ -1903,23 +1926,23 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
                 ModelFile {
                     name: "encoder.onnx".into(),
                     url: NEMOTRON_FILE_BASE.to_string() + "encoder.onnx",
-                    sha256: "d569fbe78b48fbb04e169d324f5d25463838ceed7b5fc3bfe209872441979bd9"
+                    sha256: "a6fd0bbedae97047cb444dba928273b66b9cae36249cf697f4bf7b6f0e167c5d"
                         .into(),
-                    size_bytes: 42_164_972,
+                    size_bytes: 42_963_073,
                 },
                 ModelFile {
                     name: "encoder.onnx.data".into(),
                     url: NEMOTRON_FILE_BASE.to_string() + "encoder.onnx.data",
-                    sha256: "7584f85df76bc9ae6fbdfa53aa8d97b07a842525d1c501d536d77fd9e4f57ac7"
+                    sha256: "c2f230b026aa4f29b1b5ce099b2fba853db361773157d478d67127b877f64c42"
                         .into(),
-                    size_bytes: 2_454_405_120,
+                    size_bytes: 614_649_600,
                 },
                 ModelFile {
                     name: "decoder_joint.onnx".into(),
                     url: NEMOTRON_FILE_BASE.to_string() + "decoder_joint.onnx",
-                    sha256: "634dfadf24cb4f73c2fae170b36611d68db48186426882cbc8f7e02ed9f2bb29"
+                    sha256: "7fe1a8c2e247b55bbb8ca917ef64cf60227909c6fe63be2da7ea6fc3858d6a69"
                         .into(),
-                    size_bytes: 97_590_054,
+                    size_bytes: 24_483_962,
                 },
                 ModelFile {
                     name: "tokenizer.model".into(),
@@ -1951,7 +1974,7 @@ fn remove_path_any_kind(path: &Path) -> std::io::Result<()> {
 
 /// Where the Nemotron ONNX export's files live.
 const NEMOTRON_FILE_BASE: &str =
-    "https://huggingface.co/pantinor/nemotron-3.5-asr-streaming-0.6b-onnx/resolve/main/";
+    "https://huggingface.co/smcleod/nemotron-3.5-asr-streaming-0.6b-int8/resolve/main/";
 
 #[cfg(test)]
 mod tests {

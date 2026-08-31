@@ -56,6 +56,12 @@ un-authorise speech already given. This is what lets master pause keep the
 in-flight utterance (§7) without weakening the rule. It does not loosen I6:
 audio captured *during* suppression is still never transcribed or pasted.
 
+**I3a. Under My Voice, no audio reaches transcription unless the utterance
+matches the enrolled voiceprint *as a whole*.**
+A single matching window during capture is not sufficient authority — it is one
+trial in a series, and background media wins it eventually. Every path to STT is
+covered: the final transcript and each committed chunk. See §6.
+
 **I4. Only one recorder.** One `rec` process, driven from a single thread. Two
 readers of the microphone deadlock or starve each other.
 
@@ -256,6 +262,37 @@ above the threshold, it is the user.
   not when the room goes quiet.
 - Audio that fails is discarded before any transcription is paid for.
 
+**A single matching moment never authorises an utterance.** Verification during
+capture is scored on a 1.5 s trailing window, retried every 0.5 s, against the
+best of four enrolled embeddings. That is a repeated trial, and against
+continuous media it eventually succeeds by chance: measured on 2026-08-31 with a
+Hindi video playing, three windows crossed a 0.35 threshold (0.362, 0.365,
+0.375) and each one released a whole utterance to the clipboard. So the audio is
+re-scored **as a whole** before it can be transcribed, at the same threshold, and
+is discarded if the utterance does not match — no matter what an individual
+window said. Over the same recording, 42 whole-utterance scores peaked at 0.341;
+none reached the bar. Chunks of a long dictation are confirmed the same way
+before they are committed, since a committed chunk leaves the buffer for good.
+
+Rejecting requires positive evidence. A fragment too short to embed, or an
+embedder error, defers to whatever the in-capture checks already decided — the
+confirmation can turn an accept into a reject, never the reverse, and it never
+discards chunks that were already confirmed.
+
+**The gate gets stricter while the Mac is playing audio**, but only for the
+single-window check: `AUDIO_PLAYING_GATE_BUMP` (0.15) is added to the window bar
+and never to the whole-utterance bar. Dictating over music must keep working, and
+the owner's Nepali scores 0.45–0.52 — a raised whole-utterance bar of 0.50 would
+reject half of it. Missing the raised window bar costs the user latency, not
+their words: the whole-utterance check at ~2 s still admits them at the
+unraised threshold.
+
+"Is audio playing" is tracked as a **fact**, separately from the audio-output
+*pause source* below. The two were the same flag, and because the pause source is
+deliberately suppressed whenever My Voice is on (§7), the fact was suppressed
+with it — the strictness bump was unreachable in the only configuration that
+needed it, for as long as it existed.
+
 **No trust window.** An earlier build remembered a confirmed match for a period
 (10 s, later 5 min) and let the badge appear on voice onset without re-verifying
 inside that window. That made the overlay flash on every non-user voice —
@@ -292,7 +329,7 @@ the `ReloadShortcuts` UDS command — the daemon re-reads the prefs DB
 and swaps the live keyboard listener's combo set without a restart.
 | Per-app | Focused app is on the paused list | Focus moves to an allowed app |
 | Mic conflict | Another app holds the microphone | Mic free for ~3 s (§7.1) |
-| Audio output | System audio is playing | Playback stops |
+| Audio output | System audio is playing (suppressed entirely when My Voice is on — the gate already ignores non-user voices, so music must not stop dictation) | Playback stops |
 | Idle | No voice for `idle_pause_secs` | Voice detected again |
 | No GUI | Daemon lost its last client | A client connects |
 
