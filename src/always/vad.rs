@@ -458,6 +458,25 @@ const CONSUME_STREAM_PREVIEW_MAX_SAMPLES: usize = 10 * 16_000;
 /// text feels live, slow enough that a minute of dictation costs tens
 /// of extra API calls, not hundreds.
 const LIVE_PREVIEW_INTERVAL_MS: u64 = 1_500;
+/// Live preview cadence for a LOCAL streaming engine (Nemotron).
+///
+/// `CONSUME_STREAM_INTERVAL_MS` above is 200ms and explicitly relies on a
+/// Groq round trip to self-limit the rate ("the effective cadence
+/// self-limits to ≈ one Groq round-trip"). A local engine has NO network
+/// latency, so nothing throttles it: previews run back-to-back, each
+/// re-decoding up to `CONSUME_STREAM_PREVIEW_MAX_SAMPLES` (10s) through the
+/// model on this machine's own cores, continuously, for as long as the user
+/// keeps talking. Observed effect: load average >90 and the recorder starved
+/// of CPU (`rec_coreaudio_overrun`).
+///
+/// 700ms is above Nemotron's 560ms chunk period, so a preview still lands
+/// roughly per chunk and the overlay stays live, while the engine gets real
+/// idle time between passes.
+const LOCAL_STREAM_INTERVAL_MS: u64 = 700;
+/// Minimum NEW voiced audio before another local-streaming preview fires.
+/// The 200ms path sets this to 0, so it re-decodes IDENTICAL audio when the
+/// user pauses mid-sentence — pure waste on a compute-bound engine. 0.5s.
+const LOCAL_STREAM_MIN_NEW_SAMPLES: usize = 8_000;
 /// Minimum NEW voiced audio (samples at 16kHz, ~1s) accumulated since
 /// the last live-preview kickoff before the next tick may fire.
 /// Re-transcribing near-identical audio is a wasted round trip.
@@ -520,8 +539,22 @@ struct PreviewCadence {
 fn preview_cadence(
     consume_mode: bool,
     streaming_engine: bool,
+    local_engine: bool,
     live_preview_pref: bool,
 ) -> Option<PreviewCadence> {
+    // A LOCAL streaming engine is compute-bound, not network-bound. It must
+    // be throttled explicitly — see `LOCAL_STREAM_INTERVAL_MS`. Checked
+    // BEFORE the consume/streaming branch so a local streaming engine never
+    // falls into the unthrottled cloud cadence, in consume mode or out of it.
+    if streaming_engine && local_engine {
+        return Some(PreviewCadence {
+            interval_ms: LOCAL_STREAM_INTERVAL_MS,
+            min_new_samples: LOCAL_STREAM_MIN_NEW_SAMPLES,
+            require_speculation_idle: true,
+            flip_overlay: true,
+            prefix_settled_chunks: false,
+        });
+    }
     if consume_mode || streaming_engine {
         return Some(PreviewCadence {
             interval_ms: CONSUME_STREAM_INTERVAL_MS,
@@ -1249,6 +1282,7 @@ fn record_with_local_vad(
                 if let Some(cadence) = preview_cadence(
                     crate::always::pause::is_consume_mode(),
                     transcriber.supports_streaming(),
+                    cfg.transcriber_backend.is_local(),
                     cfg.stt_live_preview,
                 ) && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
                     && speech_samples.len() >= CONSUME_STREAM_MIN_SAMPLES
@@ -2565,7 +2599,7 @@ mod tests {
         // Consume mode keeps the original fast cadence regardless of
         // engine or pref — external consumers (Iris) depend on it.
         for (streaming, pref) in [(false, false), (false, true), (true, false), (true, true)] {
-            let cadence = super::preview_cadence(true, streaming, pref)
+            let cadence = super::preview_cadence(true, streaming, false, pref)
                 .expect("consume mode always arms the preview");
             assert_eq!(cadence.interval_ms, super::CONSUME_STREAM_INTERVAL_MS);
             assert_eq!(cadence.min_new_samples, 0);
@@ -2573,9 +2607,11 @@ mod tests {
             assert!(cadence.flip_overlay);
             assert!(!cadence.prefix_settled_chunks);
         }
-        // A genuinely-streaming engine gets the same fast path even with
-        // the live-preview pref off (streaming previews are local + free).
-        let cadence = super::preview_cadence(false, true, false)
+        // A REMOTE streaming engine keeps the fast path: its own round-trip
+        // latency is what limits the rate. (This used to read "streaming
+        // previews are local + free" — that assumption is what let a local
+        // streaming engine run previews back-to-back and peg every core.)
+        let cadence = super::preview_cadence(false, true, false, false)
             .expect("streaming engine always arms the preview");
         assert_eq!(cadence.interval_ms, super::CONSUME_STREAM_INTERVAL_MS);
     }
@@ -2583,7 +2619,7 @@ mod tests {
     #[test]
     fn preview_cadence_slow_cloud_path_gated_on_pref() {
         // Groq (non-streaming) + pref ON → slow, starvation-safe cadence.
-        let cadence = super::preview_cadence(false, false, true)
+        let cadence = super::preview_cadence(false, false, false, true)
             .expect("live-preview pref arms the slow cloud cadence");
         assert_eq!(cadence.interval_ms, super::LIVE_PREVIEW_INTERVAL_MS);
         assert_eq!(cadence.min_new_samples, super::LIVE_PREVIEW_MIN_NEW_SAMPLES);
@@ -2597,6 +2633,46 @@ mod tests {
         assert!(cadence.min_new_samples >= 8_000);
 
         // Pref OFF (and no consume/streaming) → no live preview at all.
-        assert_eq!(super::preview_cadence(false, false, false), None);
+        assert_eq!(super::preview_cadence(false, false, false, false), None);
+    }
+
+    /// A LOCAL streaming engine (Nemotron) must never get the 200ms cloud
+    /// cadence. That cadence explicitly relies on network round-trip latency
+    /// to self-limit; a local engine has none, so previews ran back-to-back,
+    /// each re-decoding up to 10s of audio on this machine's own cores.
+    /// Observed: load average >90 and `rec_coreaudio_overrun` as the
+    /// recorder was starved.
+    #[test]
+    fn preview_cadence_throttles_local_streaming_engine() {
+        for consume in [false, true] {
+            for pref in [false, true] {
+                let cadence = super::preview_cadence(consume, true, true, pref)
+                    .expect("local streaming engine arms a throttled preview");
+
+                // The three throttles the cloud path gives up.
+                assert_eq!(cadence.interval_ms, super::LOCAL_STREAM_INTERVAL_MS);
+                assert_eq!(cadence.min_new_samples, super::LOCAL_STREAM_MIN_NEW_SAMPLES);
+                assert!(
+                    cadence.require_speculation_idle,
+                    "a local preview must yield to speculation — they share the engine"
+                );
+
+                // The properties that actually bound CPU. Stated as
+                // inequalities so tuning the constants can't silently
+                // reintroduce the unthrottled behaviour.
+                assert!(
+                    cadence.interval_ms >= 560,
+                    "must not fire faster than one Nemotron chunk period"
+                );
+                assert!(
+                    cadence.interval_ms > super::CONSUME_STREAM_INTERVAL_MS,
+                    "must be strictly slower than the network-bound cadence"
+                );
+                assert!(
+                    cadence.min_new_samples > 0,
+                    "min_new_samples: 0 re-decodes identical audio on a compute-bound engine"
+                );
+            }
+        }
     }
 }

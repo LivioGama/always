@@ -266,6 +266,18 @@ pub enum TranscriberBackendChoice {
     Local { model_id: String },
 }
 
+impl TranscriberBackendChoice {
+    /// Does this backend run the model on THIS machine?
+    ///
+    /// The live-preview cadence needs it: a cloud backend's own round-trip
+    /// latency limits how often previews can fire, but a local engine has no
+    /// such brake and must be throttled explicitly. See
+    /// `vad::LOCAL_STREAM_INTERVAL_MS`.
+    pub fn is_local(&self) -> bool {
+        matches!(self, TranscriberBackendChoice::Local { .. })
+    }
+}
+
 impl std::fmt::Display for TranscriberBackendChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

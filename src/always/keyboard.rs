@@ -526,9 +526,15 @@ pub fn start_keyboard_listener() -> Result<()> {
         let mut alt_pressed = false;
 
         let result = listen(move |event| {
-                if matches!(event.event_type, EventType::KeyPress(_) | EventType::KeyRelease(_)) {
-                    tracing::info!(?event.event_type, "rdev_event");
-                }
+                // NOTHING that can block belongs in here. This closure IS the
+                // CGEventTap callback: macOS runs it synchronously on the
+                // WindowServer event-dispatch path and gives it a strict time
+                // budget. A `tracing::info!` here serialised a JSON record and
+                // wrote it to disk on EVERY key press and release; under disk
+                // or CPU contention that overran the budget, macOS killed the
+                // tap with kCGEventTapDisabledByTimeout, and the restart loop
+                // below immediately rebuilt it into the same overrun. Keep this
+                // callback to atomics and cheap comparisons only.
                 match event.event_type {
                 EventType::KeyPress(Key::ControlLeft) | EventType::KeyPress(Key::ControlRight) => {
                     ctrl_pressed = true;
@@ -730,6 +736,15 @@ fn start_fn_listener() {
         fn CFRunLoopRun();
         fn CFRelease(cf: *mut c_void);
         fn CFStringCreateWithCString(alloc: *mut c_void, cs: *const u8, enc: u32) -> *mut c_void;
+        /// THE CoreFoundation global — not a string that merely spells the
+        /// same thing. `kCFRunLoopCommonModes` is a pseudo-mode CF matches by
+        /// POINTER IDENTITY against this symbol. Passing a separately
+        /// allocated CFString with identical characters (which is what this
+        /// code used to do) files the source under an ordinary custom mode
+        /// that no run loop ever runs — so `CFRunLoopRun()` finds no sources
+        /// in the default mode and returns `kCFRunLoopRunFinished` instantly,
+        /// spinning the restart loop below. Measured: 264 restarts in 60s.
+        static kCFRunLoopCommonModes: *const c_void;
     }
 
     const FLAGS_CHANGED: u64 = 1 << 12;
@@ -798,13 +813,9 @@ fn start_fn_listener() {
                     break;
                 }
                 let rl = CFRunLoopGetCurrent();
-                let mode_str = b"kCFRunLoopCommonModes\0";
-                let mode = CFStringCreateWithCString(
-                    std::ptr::null_mut(),
-                    mode_str.as_ptr(),
-                    0x08000100,
-                );
-                CFRunLoopAddSource(rl, source, mode as *const c_void);
+                // Use the real constant (see the extern above). Nothing to
+                // release: this global is owned by CoreFoundation.
+                CFRunLoopAddSource(rl, source, kCFRunLoopCommonModes);
                 CGEventTapEnable(tap, true);
                 if restart_count == 0 {
                     tracing::info!("fn_listener_started");
@@ -815,8 +826,20 @@ fn start_fn_listener() {
                 // Release and recreate.
                 CFRelease(source);
                 CFRelease(tap);
-                CFRelease(mode);
-                tracing::debug!(restart_count, "fn_listener_restarting");
+                // Back off before rebuilding the tap. Without this the loop
+                // is unbounded: a tap that dies immediately (callback overrun,
+                // WindowServer under load) is recreated as fast as the CPU
+                // allows, and CGEventTapCreate at kCGHIDEventTap level is a
+                // synchronous call into WindowServer — hammering it starves
+                // system-wide input dispatch and freezes the machine.
+                // A healthy tap lives ~10s, so 250ms costs nothing in the
+                // normal case and hard-caps a pathological one at 4 Hz.
+                //
+                // Logged at INFO (was DEBUG, i.e. invisible in shipped logs)
+                // because the restart RATE is the only signal that
+                // distinguishes a healthy tap from a spinning one.
+                tracing::info!(restart_count, "fn_listener_restarting");
+                thread::sleep(Duration::from_millis(250));
             }
         }
     });
