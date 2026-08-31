@@ -322,6 +322,41 @@ pub fn set_auto_enter_enabled(enabled: bool) {
 static LAST_FILTERED: std::sync::LazyLock<Mutex<Option<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(None));
 
+/// True when MASTER is the **only** reason the daemon is paused.
+///
+/// The paste-drop in `event_loop::handle_speech` needs to tell the user's
+/// own mute apart from the other sources. Per-app / idle / mic-conflict /
+/// audio-output pauses all mean "this window must not receive dictation",
+/// so dropping the in-flight paste is correct for them. MASTER means only
+/// "stop listening" — words the user already spoke still belong in the app
+/// they were dictated into. Paired with `dictation_origin_app()` so the
+/// paste can only land where the words came from.
+pub fn paused_only_by_master() -> bool {
+    MASTER_PAUSED.load(Ordering::Relaxed)
+        && !AUDIO_OUTPUT_PAUSED.load(Ordering::Relaxed)
+        && !MIC_CONFLICT_PAUSED.load(Ordering::Relaxed)
+        && !NO_GUI_PAUSED.load(Ordering::Relaxed)
+        && !IDLE_AUTO_PAUSED.load(Ordering::Relaxed)
+        && !crate::always::per_app::effective_paused_for_current_app()
+}
+
+/// Bundle id of the app that was focused when the current utterance began
+/// recording. Captured by `event_loop::process_one` immediately before
+/// `vad::record_utterance`, and compared against the live focused app at
+/// paste time: a master-pause paste is only allowed to land when focus
+/// never left the originating window. `None` (no GUI, focus never
+/// reported) fails the comparison and keeps the conservative drop.
+static DICTATION_ORIGIN_APP: std::sync::LazyLock<Mutex<Option<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+pub fn set_dictation_origin_app(bundle_id: Option<String>) {
+    *DICTATION_ORIGIN_APP.lock() = bundle_id;
+}
+
+pub fn dictation_origin_app() -> Option<String> {
+    DICTATION_ORIGIN_APP.lock().clone()
+}
+
 pub fn set_last_filtered(text: impl Into<String>) {
     *LAST_FILTERED.lock() = Some(text.into());
 }
@@ -680,6 +715,60 @@ mod tests {
         let (_, _) = set_paused(true);
         assert!(is_master_paused());
         assert!(is_paused());
+    }
+
+    /// The user's own mute must be distinguishable from every other pause
+    /// source, because only MASTER keeps the in-flight paste (see the
+    /// `master_mute_same_app` branch in `event_loop::handle_speech`).
+    #[test]
+    fn paused_only_by_master_isolates_the_user_mute() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        reset_pause_state_for_test();
+        // Allowlist the focused app so per-app pause is not the reason.
+        set_current_app(Some("com.example.editor".into()));
+        per_app::set_cache_for_test(HashMap::from([(
+            "com.example.editor".to_string(),
+            AppOverride {
+                paused: Some(false),
+                ..Default::default()
+            },
+        )]));
+
+        // Not paused at all → not a master-only pause.
+        assert!(!paused_only_by_master());
+
+        // User hits mute → master-only.
+        set_paused(true);
+        assert!(is_paused());
+        assert!(paused_only_by_master());
+
+        // A watchdog joins in → no longer master-only, so the paste drops.
+        set_mic_conflict_paused(true);
+        assert!(!paused_only_by_master());
+        set_mic_conflict_paused(false);
+        assert!(paused_only_by_master());
+
+        set_idle_auto_paused(true);
+        assert!(!paused_only_by_master());
+        set_idle_auto_paused(false);
+
+        // Focus moves to an app that is paused by the per-app rule →
+        // dictation must NOT land there even though the user also muted.
+        set_current_app(Some("com.example.other".into()));
+        assert!(!paused_only_by_master());
+    }
+
+    /// The origin-app slot is what stops a master-pause paste from landing
+    /// in a window the user switched to after muting.
+    #[test]
+    fn dictation_origin_app_roundtrips() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        set_dictation_origin_app(None);
+        assert_eq!(dictation_origin_app(), None);
+        set_dictation_origin_app(Some("com.example.editor".into()));
+        assert_eq!(dictation_origin_app().as_deref(), Some("com.example.editor"));
+        set_dictation_origin_app(None);
+        assert_eq!(dictation_origin_app(), None);
     }
 
     #[test]

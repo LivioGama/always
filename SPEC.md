@@ -42,8 +42,16 @@ has failed, and every internal signal saying otherwise is irrelevant.
 Minimum 600 ms once shown. Bursts of internal state changes must not tear it
 down before a human can see it.
 
-**I3. Nothing is typed into the focused application unless the daemon is
-listening, unpaused, and — when My Voice is on — the speaker was verified.**
+**I3. Nothing is typed into the focused application unless the words were
+captured while the daemon was listening, unpaused, and — when My Voice is on —
+the speaker was verified.**
+The test binds on **capture time, not paste time** (reworded 2026-08-31 at the
+product owner's request). What makes a paste legitimate is that the user
+authorised the words by speaking them under those conditions; a pause that
+arrives afterwards suppresses further *listening*, and does not retroactively
+un-authorise speech already given. This is what lets master pause keep the
+in-flight utterance (§7) without weakening the rule. It does not loosen I6:
+audio captured *during* suppression is still never transcribed or pasted.
 
 **I4. Only one recorder.** One `rec` process, driven from a single thread. Two
 readers of the microphone deadlock or starve each other.
@@ -285,6 +293,24 @@ not `keyDown`, so a dedicated `CGEventTap` catches it alongside `rdev`.
 - On resume, audio queued by the recorder during the suppressed period is
   **discarded** (I6). The recorder never stops, so its buffer holds several
   seconds of exactly the audio Always was meant to ignore.
+- An utterance already being recorded when a pause source fires is **not**
+  aborted mid-capture (only a mic conflict does that, §7.1). It finishes
+  recording and is transcribed in full; the pause decides only whether the
+  result is pasted.
+- **A pause that arrives mid-utterance normally drops the paste**, so a
+  transcript cannot leak into a window the user has since moved to. The text
+  is not lost — it is held in the single-slot filtered buffer and the overlay
+  offers "press ⌃⌥V to paste anyway".
+- **Exception — master pause with unchanged focus (changed 2026-08-31, at the
+  product owner's request):** when Master is the *only* active source and the
+  focused app is still the one the utterance began in, the transcript **is
+  pasted** rather than dropped. Muting means "stop listening", not "discard
+  what I already said", and with focus unchanged there is no other window to
+  leak into. The originating bundle id is captured before the first frame is
+  recorded (`pause::set_dictation_origin_app`) and compared at paste time; an
+  unknown origin fails closed to the drop. Every other source — per-app, idle,
+  mic conflict, audio output, no-GUI — keeps the drop unchanged, because those
+  genuinely mean "this window must not receive dictation".
 - Focus-driven pause/resume must be silent — switching windows must not flash
   badges.
 

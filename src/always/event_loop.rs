@@ -388,6 +388,11 @@ fn process_one(
     transcriber: &Arc<dyn Transcriber>,
 ) -> Result<()> {
     let cfg = active_cfg.read();
+    // Snapshot the window this utterance is being dictated into, before a
+    // single frame is captured. `handle_speech` compares it against the
+    // live focused app so a master-pause paste can only ever land back in
+    // the app the words came from. See `pause::dictation_origin_app`.
+    pause::set_dictation_origin_app(crate::always::focus_state::load());
     let record_result = match vad::record_utterance(&cfg, log, transcriber, rt) {
         Ok(r) => r,
         Err(e) => {
@@ -781,7 +786,26 @@ fn handle_speech(
             // user gets there. Surface as `transcription_filtered` so the
             // GUI flashes a "not pasted" overlay — same channel as the
             // cmd-held drop below.
-            if pause::is_paused() {
+            //
+            // EXCEPTION: when MASTER pause is the only active source AND
+            // focus never left the app this utterance was dictated into,
+            // paste anyway. The user hitting their own mute means "stop
+            // listening", not "throw away what I already said" — and with
+            // focus unchanged there is no other window to leak into, which
+            // is the entire risk the drop above exists to prevent. Every
+            // other pause source (per-app, idle, mic-conflict,
+            // audio-output, no-GUI) keeps the drop unchanged.
+            let master_mute_same_app = pause::paused_only_by_master()
+                && pause::dictation_origin_app().is_some_and(|origin| {
+                    crate::always::focus_state::load().as_deref() == Some(origin.as_str())
+                });
+            if pause::is_paused() && master_mute_same_app {
+                tracing::info!(
+                    text = %paste_payload,
+                    "paste_kept_master_pause_focus_unchanged"
+                );
+            }
+            if pause::is_paused() && !master_mute_same_app {
                 tracing::info!(
                     text = %paste_payload,
                     "paste_dropped_paused_mid_utterance"
