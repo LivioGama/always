@@ -812,14 +812,22 @@ fn default_log_path() -> PathBuf {
 }
 
 /// Resolve the active STT backend from the prefs DB, with env override.
-/// Order: `ALWAYS_TRANSCRIBER` env var → DB pref → default Groq.
-/// An invalid stored value falls back to Groq with a warning rather
-/// than refusing to start the daemon.
+/// Order: `ALWAYS_TRANSCRIBER` env var → DB pref → default (local).
+/// An invalid stored value falls back to the default with a warning
+/// rather than refusing to start the daemon.
 fn resolve_transcriber_backend(prefs: &Preferences) -> TranscriberBackendChoice {
-    if let Ok(env_val) = std::env::var("ALWAYS_TRANSCRIBER")
-        && let Ok(parsed) = env_val.parse()
-    {
-        return parsed;
+    if let Ok(env_val) = std::env::var("ALWAYS_TRANSCRIBER") {
+        match env_val.parse() {
+            Ok(parsed) => return parsed,
+            // Previously silent. A typo'd override (`grok`, `nemotron`)
+            // dropped the user onto the default backend with no trace in
+            // the log, which is indistinguishable from "my setting was
+            // ignored for no reason" when you are debugging why dictation
+            // went to the wrong engine.
+            Err(e) => {
+                tracing::warn!(env_val, error = %e, "ignoring_invalid_ALWAYS_TRANSCRIBER")
+            }
+        }
     }
     if let Some(stored) = prefs.transcriber_backend.as_deref() {
         match stored.parse() {

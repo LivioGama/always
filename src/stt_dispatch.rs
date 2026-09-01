@@ -268,14 +268,25 @@ impl Transcriber for FallbackTranscriber {
     }
 }
 
+/// Registry id of the local model the daemon prefers when the user has
+/// expressed no explicit choice.
+///
+/// On-device is the default because the remote path carries a hard
+/// external dependency (a live, funded Groq key) whose failure mode is
+/// silent and user-hostile: the circuit breaker opens and the chunker
+/// pastes `[audio saved: chunk N]` where the words should be. A local
+/// model has no such cliff. This is a *preference*, not a requirement —
+/// [`build_transcriber`] still degrades to Groq when the model is not
+/// downloaded.
+pub const DEFAULT_LOCAL_MODEL_ID: &str = "nemotron-3.5-asr-streaming-0.6b";
+
 /// User's transcription backend pick. Serialises to a single TEXT
 /// column in the prefs DB (`groq` or `local:<model_id>`). The
 /// FromStr/Display impls own that wire format so the DB layer and the
 /// UDS server stay in sync.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriberBackendChoice {
     /// Remote Groq Whisper API. Requires `GROQ_API_KEY`.
-    #[default]
     Groq,
     /// Local model identified by the registry id (e.g.
     /// `parakeet-tdt-0.6b-v3`). Must be downloaded before it can be
@@ -285,6 +296,16 @@ pub enum TranscriberBackendChoice {
     /// On-device Apple SFSpeechRecognizer. Requires macOS and a
     /// downloaded on-device language model.
     Apple,
+}
+
+/// Prefer the local model over Groq. Hand-written rather than
+/// `#[derive(Default)]` because the default variant carries a payload.
+impl Default for TranscriberBackendChoice {
+    fn default() -> Self {
+        Self::Local {
+            model_id: DEFAULT_LOCAL_MODEL_ID.to_string(),
+        }
+    }
 }
 
 impl TranscriberBackendChoice {

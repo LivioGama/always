@@ -23,7 +23,7 @@ required-features = ["overlay"]
 # audio capture, paste, and key listener implementations are stubs that
 # return `NotImplemented`. The split lets CI build for Linux/Windows
 # without dragging in `core-graphics` or `oslog`.
-default = ["macos"]
+default = ["macos", "local-stt"]
 macos = ["dep:core-graphics", "dep:oslog", "dep:rdev"]
 linux = []
 windows = []
@@ -36,7 +36,15 @@ overlay = ["dep:x11", "x11/xlib"]
 # `whisper-cpp + onnx`. The `onnx` feature unlocks Parakeet, Moonshine,
 # Canary, SenseVoice, GigaAM, and Cohere engines via ONNX Runtime.
 # `parakeet-rs` adds Nemotron 3.5 multilingual streaming support.
-# Enable locally with `cargo build --features local-stt`.
+# ON BY DEFAULT. It used to be opt-in, and that cost a day of dictation:
+# `build-and-run.sh` runs a plain `cargo build --release`, so the app
+# installed into /Applications was compiled with the feature OFF while
+# the prefs DB said `local:nemotron-3.5-asr-streaming-0.6b`. The daemon
+# logged `local-stt feature not compiled in; falling back to Groq`,
+# Groq 401'd, the circuit breaker opened, and every utterance came out
+# as `[audio saved: chunk N]`. A default build must be able to honour a
+# local backend choice. Linux/Windows CI already passes
+# `--no-default-features --features linux`, so they are unaffected.
 local-stt = ["dep:transcribe-rs", "dep:parakeet-rs"]
 
 [dependencies]
