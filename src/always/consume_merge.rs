@@ -128,7 +128,18 @@ pub fn fold(loc: &Localization, previous: Option<&str>, addition: &str) -> Strin
 /// this degrades to exactly the previous behaviour: one immediate
 /// `TranscriptFinal` per fragment.
 pub fn accept(rt: &Handle, loc: &Localization, stream_enabled: bool, text: &str) {
-    let window = merge_window_ms();
+    accept_with_window(rt, loc, stream_enabled, text, merge_window_ms());
+}
+
+/// [`accept`] with the window supplied explicitly, so tests can drive the
+/// timer without touching process-global configuration.
+fn accept_with_window(
+    rt: &Handle,
+    loc: &Localization,
+    stream_enabled: bool,
+    text: &str,
+    window: u64,
+) {
     if window == 0 {
         commit_text(stream_enabled, text.to_string());
         return;
@@ -271,6 +282,98 @@ mod tests {
         unsafe { std::env::remove_var("ALWAYS_CONSUME_MERGE_WINDOW_MS") };
         assert_eq!(w, 0);
         assert_eq!(merge_window_ms(), MERGE_WINDOW_MS);
+    }
+
+    /// Serialises the tests that drive the module's global state, so the
+    /// async ones cannot interleave with each other under `cargo test`.
+    static STATE_LOCK: Mutex<()> = Mutex::new(());
+
+    fn reset() {
+        GENERATION.fetch_add(1, Ordering::AcqRel);
+        *PENDING.lock() = None;
+    }
+
+    fn pending_text() -> Option<String> {
+        PENDING.lock().as_ref().map(|p| p.text.clone())
+    }
+
+    /// THE FIX, end to end through the real timer. Three fragments of one
+    /// spoken request arrive inside the window; the sentence stays open and
+    /// keeps growing, and exactly one commit happens — carrying all three.
+    #[tokio::test]
+    async fn a_continuation_supersedes_the_pending_commit() {
+        let _guard = STATE_LOCK.lock();
+        reset();
+        let rt = Handle::current();
+        let loc = loc();
+        let window = 300;
+
+        accept_with_window(&rt, &loc, false, "Iris, open the", window);
+        assert_eq!(pending_text().as_deref(), Some("Iris, open the"));
+
+        // Second fragment lands well inside the window.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        accept_with_window(&rt, &loc, false, "browser and then", window);
+        assert_eq!(
+            pending_text().as_deref(),
+            Some("Iris, open the browser and then")
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        accept_with_window(&rt, &loc, false, "close the tab", window);
+        assert_eq!(
+            pending_text().as_deref(),
+            Some("Iris, open the browser and then close the tab")
+        );
+
+        // The first two commit tasks have now passed their own deadlines.
+        // If either had fired, the sentence would have been committed early
+        // and `PENDING` would be empty — that is the bug this asserts away.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(
+            pending_text().as_deref(),
+            Some("Iris, open the browser and then close the tab"),
+            "a superseded task must not commit a half-finished request"
+        );
+
+        // Silence past the window: the last fragment's task commits.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(
+            pending_text(),
+            None,
+            "the request must be committed once the user stops continuing"
+        );
+    }
+
+    /// A held request is never stranded: losing the controller commits it
+    /// immediately rather than waiting out a window nobody is listening to.
+    #[tokio::test]
+    async fn flush_now_commits_whatever_is_held() {
+        let _guard = STATE_LOCK.lock();
+        reset();
+        let rt = Handle::current();
+        accept_with_window(&rt, &loc(), false, "half a sentence", 60_000);
+        assert_eq!(pending_text().as_deref(), Some("half a sentence"));
+
+        flush_now();
+        assert_eq!(pending_text(), None, "flush must drain the buffer");
+
+        // And the superseded timer must not resurrect or re-commit it.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(pending_text(), None);
+        flush_now(); // idempotent
+    }
+
+    /// With merging off, nothing is ever held — the previous behaviour,
+    /// one commit per fragment, exactly.
+    #[tokio::test]
+    async fn a_zero_window_never_holds_anything() {
+        let _guard = STATE_LOCK.lock();
+        reset();
+        let rt = Handle::current();
+        accept_with_window(&rt, &loc(), false, "one", 0);
+        accept_with_window(&rt, &loc(), false, "two", 0);
+        assert_eq!(pending_text(), None);
     }
 
     /// The window must clear the floor a genuine continuation cannot beat:
