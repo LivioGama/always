@@ -699,12 +699,18 @@ fn handle_speech(
             // makes them measurable.
             let pasting_logged_at = Instant::now();
 
+            // Read the lease ONCE. Both the broadcast below and the routing
+            // decision after it depend on it, and a lease that dropped
+            // between two reads would either skip the final entirely or
+            // emit a fragment final that `consume_merge` then duplicates.
+            let consuming = pause::is_consume_mode();
+
             // Consume mode owns its own commit: `consume_merge` rejoins
             // fragments of one request and emits the single `TranscriptFinal`
             // itself, so broadcasting a per-fragment final here would deliver
             // the pieces AND the whole (the consumer's dedupe is an exact
             // string match and would not collapse them).
-            if !pause::is_consume_mode() {
+            if !consuming {
                 event::global_broadcaster().transcript_final(final_text.clone());
             }
 
@@ -716,7 +722,7 @@ fn handle_speech(
             // connected. Only a live per-connection consume lease may suppress
             // paste; otherwise a controller crash could silently drop a wake
             // word instead of dictating it normally.
-            if pause::is_consume_mode() {
+            if consuming {
                 // Fold into the request being assembled. This publishes the
                 // cumulative text as a `TranscriptChunk` now and commits one
                 // `TranscriptFinal` (plus the stream line) once the user has
