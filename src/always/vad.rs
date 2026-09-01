@@ -132,9 +132,47 @@ struct SpeakerGate {
     /// so it is the leaky statistic — media only has to get lucky once.
     /// Raising it while media plays costs the user nothing but latency:
     /// a genuine utterance that misses the raised window bar is still
-    /// admitted by the whole-utterance check at ~2s, at the unraised
-    /// `threshold`.
+    /// admitted by the whole-utterance check at ~2s, at the
+    /// `early_abort_threshold` below.
     window_threshold: f32,
+    /// Bar for the ~2s EARLY ABORT, and for that alone.
+    ///
+    /// The early abort is the only speaker check that DESTROYS an
+    /// in-flight recording (`RecordResult::DroppedSpeaker`: the buffer is
+    /// gone and capture restarts empty). Every other check either delays
+    /// transcription or trims a tail. A bar that is wrong here does not
+    /// cost latency — it costs the user the sentence they were speaking.
+    ///
+    /// It used to be `threshold`, on the reasoning that a 2s prefix is a
+    /// "whole-utterance judgement". Measurement falsified that premise.
+    /// Across 2026-08-31 and 2026-09-01 `speaker_gate_early_reject` fired
+    /// 11,541 times and the whole-buffer score reached the user's 0.35
+    /// pref exactly 5 times (max 0.4741; on 09-01 alone, 6,951 rejects
+    /// and a maximum of 0.3330 — not one). The branch had become an
+    /// unconditional kill. The user's own voice is why: `bc0ffb5`
+    /// measured it at 0.024, -0.031, 0.071, 0.040, 0.318 across 12.6
+    /// SECONDS before a window reached 0.617, and `speaker_embed`'s
+    /// `MIN_EMBED_SAMPLES` already documents that scores get noisy below
+    /// ~1s. A 2s prefix is a long window, not a short utterance, and
+    /// `threshold` is calibrated for the latter.
+    ///
+    /// Observed consequence, 2026-09-01 11:37:17-11:37:31 UTC: the user
+    /// spoke ~12.5s continuously, the abort fired at 0.1448 and again at
+    /// 0.1931 destroying 5.7s of it, and what reached the clipboard and
+    /// the UDS stream was the mid-sentence fragment
+    /// "end to achieve this vision."
+    ///
+    /// So this bar is the permissive one, and deliberately NOT bumped
+    /// while system audio plays: the bump exists to make a *leaky,
+    /// repeated* trial stricter, and applying it to a destructive
+    /// one-shot would delete the buffer of anyone dictating over music.
+    /// The hostage case the abort exists for is untouched — media sits at
+    /// p50 0.0116 / p90 0.1240, so ~90% of aborts still fire on the same
+    /// audio. Whatever now survives to finalization still faces
+    /// `threshold` at the mandatory whole-utterance confirmation, whose
+    /// measured media ceiling is 0.3407, so this cannot paste anything
+    /// the gate previously blocked.
+    early_abort_threshold: f32,
 }
 
 struct SpeakerGateContext {
@@ -333,6 +371,8 @@ fn speaker_gate_ctx(cfg: &AlwaysConfig) -> SpeakerGateContext {
         voiceprint: profile.expect("ready speaker gate must have a voiceprint"),
         threshold,
         window_threshold,
+        // Unbumped on purpose — see `SpeakerGate::early_abort_threshold`.
+        early_abort_threshold: speaker_gate_window_threshold(threshold, false),
     });
     SpeakerGateContext { requested, gate }
 }
@@ -1699,13 +1739,18 @@ fn record_with_local_vad(
                         } else if voiced_samples >= SPEAKER_GATE_EARLY_SAMPLES {
                             speaker_checked = true;
                             let score = speaker_gate_score(gate, &speech_samples);
+                            // `early_abort_threshold`, NOT `threshold`: this
+                            // is the one check that destroys the buffer, and
+                            // a 2s prefix of the user's own voice does not
+                            // clear a whole-utterance bar. See the field doc.
                             if SPEAKER_GATE_ENFORCE_DROP
-                                && !speaker_gate_allows_score(score, gate.threshold)
+                                && !speaker_gate_allows_score(score, gate.early_abort_threshold)
                             {
                                 let score = score.unwrap_or(-1.0);
                                 tracing::info!(
                                     score,
-                                    threshold = gate.threshold,
+                                    threshold = gate.early_abort_threshold,
+                                    utterance_threshold = gate.threshold,
                                     "speaker_gate_early_reject"
                                 );
                                 event::global_broadcaster().voice_activity_ended();
@@ -4273,6 +4318,96 @@ mod tests {
         for observed in [0.318f32, 0.617, 0.532, 0.502] {
             assert!(observed > w, "{observed} was the user and must pass");
         }
+    }
+
+    /// Whole-buffer scores logged by `speaker_gate_early_reject` while the
+    /// USER was demonstrably mid-sentence, 2026-09-01 11:37:17-11:37:22 UTC.
+    /// The utterance either side of them was `speaker_gate_verified` at
+    /// 0.5764 and pasted, so these are the same voice, ~4s apart. Each one
+    /// destroyed the in-flight buffer; together they cost 5.7s of a 12.5s
+    /// sentence, and what reached the user was "end to achieve this vision."
+    const USER_PREFIX_SCORES_THAT_WERE_DESTROYED: [f32; 2] = [0.1448, 0.1931];
+
+    /// THE TRUNCATION. The ~2s early abort is the only speaker check that
+    /// throws away an in-flight recording, and it was judging a 2s prefix
+    /// against the WHOLE-UTTERANCE bar. Measured over 11,541 firings on
+    /// 2026-08-31/09-01, the whole-buffer score reached 0.35 five times
+    /// (0 times on 09-01, max 0.3330) — it had become an unconditional
+    /// kill, and the words it killed were the user's.
+    #[test]
+    fn early_abort_does_not_destroy_the_user_mid_sentence() {
+        let base = 0.35f32;
+        let abort = super::speaker_gate_window_threshold(base, false);
+
+        // The regression, stated directly: at the whole-utterance bar every
+        // one of these prefixes was destroyed.
+        for score in USER_PREFIX_SCORES_THAT_WERE_DESTROYED {
+            assert!(
+                !super::speaker_gate_allows_score(Some(score), base),
+                "{score} is why the whole-utterance bar cannot govern the abort"
+            );
+            assert!(
+                super::speaker_gate_allows_score(Some(score), abort),
+                "the user mid-sentence at {score} must survive to finalization"
+            );
+        }
+
+        // And the abort must still do its job: it exists so background
+        // dialogue cannot hold the recorder hostage for a whole scene.
+        // Media measured p50 0.0116 / p90 0.1240 over 6,951 aborts, so the
+        // bulk of them still fire on exactly the same audio.
+        for media in [-1.0f32, 0.0, 0.0116, 0.05, 0.10] {
+            assert!(
+                !super::speaker_gate_allows_score(Some(media), abort),
+                "media at {media} must still abort the recording"
+            );
+        }
+        // An embedder error is still no opinion, and must still fail closed
+        // here — this branch cannot verify anyone.
+        assert!(!super::speaker_gate_allows_score(None, abort));
+    }
+
+    /// The abort is destructive, so the media bump must not reach it: it
+    /// would delete the buffer of anyone dictating over music, which is the
+    /// exact promise `audio_playing_bump_never_raises_the_whole_utterance_bar`
+    /// protects on the other bar.
+    #[test]
+    fn early_abort_bar_is_never_raised_by_system_audio() {
+        let base = 0.35f32;
+        let abort = super::speaker_gate_window_threshold(base, false);
+        let bumped = super::speaker_gate_window_threshold(base, true);
+        assert!(abort < bumped, "the abort bar must be the unbumped one");
+        for score in USER_PREFIX_SCORES_THAT_WERE_DESTROYED {
+            assert!(
+                !super::speaker_gate_allows_score(Some(score), bumped),
+                "{score} shows what bumping the abort bar would cost"
+            );
+        }
+    }
+
+    /// Relaxing the abort must not paste anything new. Anything that now
+    /// survives it still meets the unchanged whole-utterance confirmation,
+    /// whose measured media ceiling is `MEDIA_MAX_WHOLE_UTTERANCE_SCORE`.
+    #[test]
+    fn early_abort_relaxation_cannot_leak_media_to_the_paste() {
+        let base = 0.35f32;
+        let abort = super::speaker_gate_window_threshold(base, false);
+        // The loudest media score ever observed clears the relaxed abort...
+        assert!(super::speaker_gate_allows_score(
+            Some(MEDIA_MAX_WHOLE_UTTERANCE_SCORE),
+            abort
+        ));
+        // ...and is still refuted where it counts.
+        assert_eq!(
+            super::speaker_confirmation(true, Some(MEDIA_MAX_WHOLE_UTTERANCE_SCORE), base),
+            super::SpeakerConfirmation::Refuted(MEDIA_MAX_WHOLE_UTTERANCE_SCORE),
+            "the authoritative gate is unchanged and still blocks the leak"
+        );
+        // The user's own whole utterance is unaffected in both directions.
+        assert_eq!(
+            super::speaker_confirmation(true, Some(USER_MIN_OBSERVED_SCORE), base),
+            super::SpeakerConfirmation::Confirmed(USER_MIN_OBSERVED_SCORE)
+        );
     }
 
     #[test]
