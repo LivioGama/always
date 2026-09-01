@@ -173,6 +173,40 @@ struct SpeakerGate {
     /// measured media ceiling is 0.3407, so this cannot paste anything
     /// the gate previously blocked.
     early_abort_threshold: f32,
+    /// Bar for the TAIL MONITOR, which decides where a verified utterance
+    /// stops being the user — and then TRUNCATES the buffer there.
+    ///
+    /// The second destructive decision in this file, and the same category
+    /// of error as `early_abort_threshold`: a 1.5s window judged against a
+    /// bar derived from the whole-utterance one. It was
+    /// `threshold * SPEAKER_TAIL_THRESHOLD_FACTOR` — 0.21 against the
+    /// user's 0.35 pref, not the 0.30 its comment claims, which was written
+    /// when the default was 0.50.
+    ///
+    /// Its own doc already named the failure — "a mixed user+media window
+    /// can dip well below the gate threshold while the user is genuinely
+    /// still talking (observed live: mid-sentence cuts with a video
+    /// playing)" — and the logs show it costing real speech: 185 cuts
+    /// across 2026-08-31/09-01 discarded 243.9 SECONDS of audio, firing on
+    /// 98% of the tails it examined.
+    ///
+    /// The decisive case is a single utterance contradicting itself. At
+    /// 2026-09-01 11:37:30Z `speaker_gate_tail_cut` trimmed 1.02s at a
+    /// window score of 0.1447, and 8s earlier the same utterance had been
+    /// `speaker_gate_verified` at 0.5764 — the authoritative statistic said
+    /// "this is the user" while the noisy one deleted the end of their
+    /// sentence. A destructive decision must not be taken on the weaker
+    /// statistic.
+    ///
+    /// So the tail monitor moves onto the permissive bar too. Media tails
+    /// measure ~0.05 through real speakers and the observed cut scores sit
+    /// at p25 0.0454, so the majority of genuine media tails are still cut;
+    /// what stops being cut is the 0.12-0.26 band where the user's own
+    /// trailing words live. Nothing new can be pasted: the kept buffer
+    /// still faces the mandatory whole-utterance confirmation at
+    /// `threshold`, so an utterance that is really media is still refuted
+    /// whole rather than trimmed and kept.
+    tail_threshold: f32,
 }
 
 struct SpeakerGateContext {
@@ -373,6 +407,8 @@ fn speaker_gate_ctx(cfg: &AlwaysConfig) -> SpeakerGateContext {
         window_threshold,
         // Unbumped on purpose — see `SpeakerGate::early_abort_threshold`.
         early_abort_threshold: speaker_gate_window_threshold(threshold, false),
+        // Also destructive, also a 1.5s window — same bar, same reason.
+        tail_threshold: speaker_gate_window_threshold(threshold, false),
     });
     SpeakerGateContext { requested, gate }
 }
@@ -482,13 +518,15 @@ const SPEAKER_TAIL_WINDOW_SAMPLES: usize = 24_000;
 /// they chose applies to media-covered pauses too — a fixed 2-check
 /// (~1s) cut felt "immediate" against a 2.2s configured window.
 const SPEAKER_TAIL_FAIL_STREAK: usize = 2;
-/// Tail windows are short and often carry media bleed UNDER the user's
-/// live voice, so they score far noisier than full utterances — a mixed
-/// user+media window can dip well below the gate threshold while the
-/// user is genuinely still talking (observed live: mid-sentence cuts
-/// with a video playing). Judge tails against a heavily relaxed
-/// fraction: 0.6 × the default 0.50 = 0.30, still ~6× the measured
-/// media-only tail score (~0.05 through real speakers).
+/// The bar the tail monitor used to judge against: a fraction of the
+/// whole-utterance threshold. Retained only so the regression it caused
+/// stays testable and named — see `SpeakerGate::tail_threshold`, which
+/// replaced it. Its own comment already knew the failure mode ("a mixed
+/// user+media window can dip well below the gate threshold while the user
+/// is genuinely still talking") and its arithmetic was stale: it claims
+/// 0.6 × 0.50 = 0.30, but against the user's actual 0.35 pref it produced
+/// 0.21, and it cut 243.9 seconds of audio across 185 firings in two days.
+#[cfg(test)]
 const SPEAKER_TAIL_THRESHOLD_FACTOR: f32 = 0.6;
 
 pub fn record_utterance(
@@ -1768,7 +1806,12 @@ fn record_with_local_vad(
                             }
                         }
                     } else {
-                        let tail_threshold = gate.threshold * SPEAKER_TAIL_THRESHOLD_FACTOR;
+                        // `tail_threshold`, not a fraction of the
+                        // whole-utterance bar: this branch truncates the
+                        // buffer, and a 1.5s window of the user's own
+                        // trailing words does not clear a bar meant for
+                        // whole utterances. See the field doc.
+                        let tail_threshold = gate.tail_threshold;
                         let score = speaker_gate_score(gate, window);
                         if speaker_gate_allows_score(score, tail_threshold) {
                             tail_fail_streak = 0;
@@ -4408,6 +4451,85 @@ mod tests {
             super::speaker_confirmation(true, Some(USER_MIN_OBSERVED_SCORE), base),
             super::SpeakerConfirmation::Confirmed(USER_MIN_OBSERVED_SCORE)
         );
+    }
+
+    /// The self-contradicting utterance, 2026-09-01 11:37:22-11:37:30Z.
+    /// `speaker_gate_verified` put the whole thing at 0.5764 — the user,
+    /// unambiguously — and eight seconds later `speaker_gate_tail_cut`
+    /// deleted its last 1.02s on a window scoring 0.1447.
+    const USER_TAIL_SCORE_THAT_WAS_CUT: f32 = 0.1447;
+    const SAME_UTTERANCE_WHOLE_SCORE: f32 = 0.5764;
+
+    /// THE MISSING END OF THE SENTENCE. The tail monitor truncates the
+    /// buffer, so it is destructive, so it must not run on a bar derived
+    /// from the whole-utterance statistic. 185 cuts over 2026-08-31/09-01
+    /// discarded 243.9s of audio and fired on 98% of tails examined.
+    #[test]
+    fn tail_cut_does_not_delete_the_end_of_the_users_sentence() {
+        let base = 0.35f32;
+        let old = base * super::SPEAKER_TAIL_THRESHOLD_FACTOR;
+        let new = super::speaker_gate_window_threshold(base, false);
+
+        // The stale arithmetic: the old comment claimed 0.30, but against
+        // the user's real pref it was 0.21.
+        assert!((old - 0.21).abs() < 1e-6, "old bar was 0.21, not 0.30");
+
+        // The contradiction, in one utterance.
+        assert!(
+            !super::speaker_gate_allows_score(Some(USER_TAIL_SCORE_THAT_WAS_CUT), old),
+            "0.1447 is why the old bar deleted the user's last words"
+        );
+        assert!(
+            super::speaker_gate_allows_score(Some(USER_TAIL_SCORE_THAT_WAS_CUT), new),
+            "the tail of a 0.5764 utterance must survive"
+        );
+        assert_eq!(
+            super::speaker_confirmation(true, Some(SAME_UTTERANCE_WHOLE_SCORE), base),
+            super::SpeakerConfirmation::Confirmed(SAME_UTTERANCE_WHOLE_SCORE),
+            "the same utterance was simultaneously confirmed as the user"
+        );
+
+        // Media tails measure ~0.05 through real speakers, and observed cut
+        // scores sit at p25 0.0454 — those must still be cut, or background
+        // dialogue reopens the end-of-utterance problem this monitor solves.
+        for media_tail in [-0.1263f32, 0.0, 0.0454, 0.05, 0.10] {
+            assert!(
+                !super::speaker_gate_allows_score(Some(media_tail), new),
+                "media tail at {media_tail} must still be cut"
+            );
+        }
+    }
+
+    /// Keeping more tail cannot leak media into the paste: the kept buffer
+    /// still meets the mandatory whole-utterance confirmation, which judges
+    /// a media-dominated utterance as a whole rather than trimming it.
+    #[test]
+    fn relaxed_tail_cut_cannot_leak_media_to_the_paste() {
+        let base = 0.35f32;
+        let new = super::speaker_gate_window_threshold(base, false);
+        // A media tail loud enough to survive the relaxed cut...
+        let loud_media_tail = 0.2649f32; // max observed cut score
+        assert!(super::speaker_gate_allows_score(Some(loud_media_tail), new));
+        // ...still cannot carry the utterance past the authoritative gate.
+        assert_eq!(
+            super::speaker_confirmation(true, Some(MEDIA_MAX_WHOLE_UTTERANCE_SCORE), base),
+            super::SpeakerConfirmation::Refuted(MEDIA_MAX_WHOLE_UTTERANCE_SCORE)
+        );
+    }
+
+    /// Both destructive decisions now share one bar. If they ever diverge
+    /// again, one of them is judging a short window by a whole-utterance
+    /// statistic — which is the bug this pair of fixes exists to remove.
+    #[test]
+    fn every_destructive_speaker_decision_uses_the_permissive_bar() {
+        for base in [0.30f32, 0.35, 0.45, 0.50] {
+            let permissive = super::speaker_gate_window_threshold(base, false);
+            assert!(
+                permissive < base,
+                "a destructive decision must never borrow the authoritative bar"
+            );
+            assert!(permissive > 0.0, "and must stay above the noise floor");
+        }
     }
 
     #[test]
