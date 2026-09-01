@@ -1,53 +1,50 @@
-<!-- gitnexus:start -->
-# GitNexus — Code Intelligence
+<!-- gitpixel:start -->
+# GitPixel — Agent Workflow Contract
 
-This project is indexed by GitNexus as **always** (4867 symbols, 12129 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+> Before the first file read of any feature/bug task, run
+> `gitpixel targets "<task>"`. It returns a closed prioritized file list
+> (P0/P1/P2) and activates `.gitpixel/targets.json`. Work P0 first; P2 is
+> droppable. While the manifest is active, never read, grep, or edit repo
+> files outside the list — if a file seems missing, the task description was
+> wrong: re-run `gitpixel targets` with a refined task. Run
+> `gitpixel targets --clear` when the task ends.
+> When the user says something **was working before** (or the fix is in git
+> history), run `gitpixel rescue "<problem>"` — never `git reset --hard`,
+> never raw historical checkouts over in-progress work.
 
-> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
+Claude Code additionally enforces all of this mechanically via the
+`gitpixel-targets-guard` PreToolUse hook (off-list reads/edits blocked,
+edits without an active manifest blocked, `git reset --hard` blocked).
+Kill switch for debugging the guard: `GITPIXEL_TARGETS_GUARD=0`.
 
-## Always Do
+## CLI Reference
 
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "develop"})`.
-- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
-- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
+| Task                                         | Command                                              |
+| -------------------------------------------- | ---------------------------------------------------- |
+| Rebuild index + graph                        | `gitpixel ready . --no-daemon`                       |
+| Regex search                                 | `gitpixel search '<regex>' .`                        |
+| Symbol lookup                                | `gitpixel symbol <name> .`                           |
+| 360° context (token-budgeted)                | `gitpixel context <uid> . --budget 4000`             |
+| Blast radius / "What breaks if I change X?"  | `gitpixel impact <symbol> . --direction upstream`    |
+| Callers / callees                            | `gitpixel uses <symbol> . --role callers`            |
+| Trace A→B                                    | `gitpixel trace <a> <b> .`                           |
+| Execution flows                              | `gitpixel processes .`                               |
+| Functional clusters                          | `gitpixel clusters .`                                |
+| Git-diff → affected flows                    | `gitpixel changes .`                                 |
+| Task scoping (closed file list)              | `gitpixel targets "<task>" .`                        |
+| Surgical revert planner                      | `gitpixel rescue "<problem>" .`                      |
+| Error capture (wrap a command)               | `gitpixel sniper run -- <cmd>`                       |
+| Newest errors                                | `gitpixel sniper last`                               |
 
-## Never Do
+`lower_bound: true` in a response = the resolver gave up on N same-name call sites; returned edges are a **lower bound**, not the full set. Treat "0 callers" + `lower_bound: true` as "unknown", not "unused".
 
-- NEVER edit a function, class, or method without first running `impact` on it.
-- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
-- NEVER commit changes without running `detect_changes()` to check affected scope.
+<!-- gitpixel:end -->
 
-## Resources
-
-| Resource | Use for |
-|----------|---------|
-| `gitnexus://repo/always/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/always/clusters` | All functional areas |
-| `gitnexus://repo/always/processes` | All execution flows |
-| `gitnexus://repo/always/process/{name}` | Step-by-step execution trace |
-
-## CLI
-
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
-
-<!-- gitnexus:end -->
-
-# GitNexus Index-Powered Development
+# GitPixel Index-Powered Development
 
 ## Golden Rule: Think in Processes, Not Files
 
-After running `npx gitnexus analyze`, **always use GitNexus tools instead of grep/find/manual exploration**. The index understands execution flows, dependencies, and impact — grep does not.
+After running `gitpixel ready .`, **always use the `gitpixel` CLI instead of grep/find/manual exploration**. The index understands execution flows, dependencies, and impact — grep does not.
 
 ## Required Before Any Edit
 
@@ -55,11 +52,11 @@ After running `npx gitnexus analyze`, **always use GitNexus tools instead of gre
 
 Before modifying ANY function, class, method, or file:
 
-```
-gitnexus_impact({target: "symbolName", direction: "upstream"})
+```bash
+gitpixel impact <symbol> . --direction upstream
 ```
 
-**Report to user**: Direct callers, affected processes, risk level.
+**Report to user**: Direct callers (d1 WILL BREAK), affected flows, risk level.
 
 **Why**: A 1-line change might break 5 distant call sites. Without impact analysis, you ship silent bugs.
 
@@ -67,15 +64,15 @@ gitnexus_impact({target: "symbolName", direction: "upstream"})
 
 After making changes:
 
-```
-gitnexus_detect_changes()
+```bash
+gitpixel changes .
 ```
 
 Verify your changes only touch expected symbols and execution flows.
 
 **Why**: Prevents accidental scope creep and unintended modifications.
 
-## Replacing grep/find with GitNexus Queries
+## Replacing grep/find with GitPixel
 
 ### Never Do This Anymore
 
@@ -90,117 +87,93 @@ find . -name "*Auth*" -type f
 grep -r "getUserData" --include="*.ts"
 ```
 
-### Use GitNexus Instead
+### Use GitPixel Instead
 
-**Search by execution flow** (replaces grep):
+**Search** (replaces grep — trigram-indexed, sound by construction):
 
+```bash
+gitpixel search 'handleClick' .
 ```
-gitnexus_query({query: "handle user authentication"})
-```
-
-Returns: process-grouped results ranked by relevance. Includes call graph context.
 
 **Understand a symbol** (replaces manual exploration):
 
-```
-gitnexus_context({name: "getUserData"})
+```bash
+gitpixel symbol getUserData .
+gitpixel uses getUserData . --role callers
 ```
 
-Returns: all callers, callees, which processes it participates in, and data flow.
+Returns: all callers, callees, with confidence tiers.
 
 **Find related code** (replaces find + grep):
 
-```
-gitnexus_clusters()   # All functional areas
-gitnexus_processes()  # All execution flows by business logic
-```
-
-## Refactoring with GitNexus (Safe by Definition)
-
-Instead of find-and-replace + manual checking:
-
-**Rename a symbol safely**:
-
-```
-gitnexus_rename({target: "oldName", newName: "newName"})
+```bash
+gitpixel clusters .    # All functional areas
+gitpixel processes .   # All execution flows by business logic
 ```
 
-Updates all call sites in the call graph. No orphaned references.
-
-**Extract a function**:
-
-```
-gitnexus_extract({source: "filePath:line", target: "newFile", symbol: "extractedFunctionName"})
-```
-
-Automatically updates all callers.
-
-**Understand what can be split**:
-
-```
-gitnexus_impact({target: "moduleName", direction: "bidirectional"})
-```
-
-Shows if a module can be split without breaking dependencies.
-
-## Debugging with GitNexus
+## Debugging with GitPixel
 
 When tracing a bug:
 
 **Don't**: Grep for error message, manually trace call stacks.
 **Do**:
 
+```bash
+gitpixel search 'null pointer' .
+gitpixel sniper last    # check the error sink for recent failures
 ```
-gitnexus_query({query: "error: null pointer in payment flow"})
-```
-
-Returns all execution paths that can trigger this error, ranked by likelihood.
 
 **Trace execution from entry point**:
 
-```
-gitnexus_process({name: "checkoutFlow"})
+```bash
+gitpixel processes .
+gitpixel trace <entrySymbol> <targetSymbol> .
 ```
 
-Shows step-by-step execution: where it enters, every function called, data transformations, where it exits.
+## Task Scoping
 
-## Exploration by Business Logic (Not Files)
+Before the first file read of any feature/bug task:
 
-Replace "understanding the codebase" grep-and-read sessions:
-
+```bash
+gitpixel targets "<task description>" .
 ```
-gitnexus_clusters()                       # functional areas
-gitnexus_processes()                      # core business flows
-gitnexus_process({name: "userLoginFlow"}) # trace a flow
-gitnexus_query({query: "session validation"})
+
+Returns a closed prioritized file list (P0 = start here, P1 = likely, P2 = droppable). Clear with `gitpixel targets --clear .` when done.
+
+## Surgical Revert ("was working before")
+
+```bash
+gitpixel rescue "<problem>" .
 ```
+
+Never `git reset --hard` — use `rescue` to find and revert the breaking commit.
 
 ## Enforcement Rules (NEVER violate)
 
-1. NEVER grep for symbols — use `gitnexus_context()` or `gitnexus_query()`.
-2. NEVER use find for code exploration — use `gitnexus_clusters()` or `gitnexus_processes()`.
-3. NEVER edit a symbol without `gitnexus_impact()` first.
-4. NEVER rename with find-and-replace — use `gitnexus_rename()`.
-5. NEVER commit without `gitnexus_detect_changes()` to verify scope.
-6. NEVER manually trace code flows — use `gitnexus_process()` or `gitnexus_query()`.
+1. NEVER grep for symbols — use `gitpixel symbol` or `gitpixel search`.
+2. NEVER use find for code exploration — use `gitpixel clusters` or `gitpixel processes`.
+3. NEVER edit a symbol without `gitpixel impact` first.
+4. NEVER commit without `gitpixel changes .` to verify scope.
+5. NEVER manually trace code flows — use `gitpixel trace` or `gitpixel processes`.
+6. NEVER `git reset --hard` over in-progress work — use `gitpixel rescue`.
 
 ## Quick Reference
 
-| Task | Tool | Bad Alternative |
-|------|------|-----------------|
-| Find callers of a function | `gitnexus_context({name: "foo"})` | `grep -r "foo(" src/` |
-| Search by concept | `gitnexus_query({query: "auth"})` | `grep -r "auth" src/` |
-| Understand a process | `gitnexus_process({name: "checkout"})` | Read files manually |
-| Find impact before edit | `gitnexus_impact({target: "foo"})` | Change + test + pray |
-| Rename safely | `gitnexus_rename(...)` | Find-and-replace |
-| Verify changes are scoped | `gitnexus_detect_changes()` | Manual review |
-| Explore architecture | `gitnexus_clusters()` | Read file tree |
-| Extract a function | `gitnexus_extract(...)` | Manual refactoring |
+| Task | Command | Bad Alternative |
+|------|---------|-----------------|
+| Find callers of a function | `gitpixel uses foo . --role callers` | `grep -r "foo(" src/` |
+| Search by regex | `gitpixel search 'auth' .` | `grep -r "auth" src/` |
+| Understand a flow | `gitpixel processes .` | Read files manually |
+| Find impact before edit | `gitpixel impact foo . --direction upstream` | Change + test + pray |
+| Verify changes are scoped | `gitpixel changes .` | Manual review |
+| Explore architecture | `gitpixel clusters .` | Read file tree |
+| Scope a task | `gitpixel targets "<task>" .` | Read everything |
+| Revert surgically | `gitpixel rescue "<problem>" .` | `git reset --hard` |
 
 ## Why This Matters
 
-**Before GitNexus**: code exploration = slow grep sessions, missed dependencies, silent bugs.
-**After GitNexus**: code exploration = semantic search, full call graph, safe refactoring by definition.
+**Before GitPixel**: code exploration = slow grep sessions, missed dependencies, silent bugs.
+**After GitPixel**: code exploration = indexed regex search, call graph, blast-radius analysis, task scoping, surgical reverts.
 
 The index understands your code's execution model. Use it.
 

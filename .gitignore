@@ -25,4 +25,8 @@ Always/Always.app/
 # JetBrains IDE config
 .idea/
 
+
+# Local tool state, not part of the app.
+.gitpixel/
 .pixel/
+.a5c/
