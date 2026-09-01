@@ -7,6 +7,7 @@ pub mod chunker;
 pub mod clipboard_watcher;
 pub mod common_words;
 pub mod config;
+pub mod consume_merge;
 pub mod context_heuristics;
 pub mod correction;
 pub mod correction_extract;

@@ -11,8 +11,9 @@ use crate::always::speech_action::{
     paste_dedupe_window,
 };
 use crate::always::{
-    AlwaysConfig, audio, auto_enter_countdown, clipboard_watcher, daemon, event, filter,
-    idle_watcher, keyboard, mic_watcher, paste, pause, per_app, transcript_stream, uds_server, vad,
+    AlwaysConfig, audio, auto_enter_countdown, clipboard_watcher, consume_merge, daemon, event,
+    filter, idle_watcher, keyboard, mic_watcher, paste, pause, per_app, transcript_stream,
+    uds_server, vad,
 };
 use crate::managers::model_registry::ModelRegistry;
 use crate::stt::Transcriber;
@@ -698,20 +699,35 @@ fn handle_speech(
             // makes them measurable.
             let pasting_logged_at = Instant::now();
 
-            event::global_broadcaster().transcript_final(final_text.clone());
+            // Consume mode owns its own commit: `consume_merge` rejoins
+            // fragments of one request and emits the single `TranscriptFinal`
+            // itself, so broadcasting a per-fragment final here would deliver
+            // the pieces AND the whole (the consumer's dedupe is an exact
+            // string match and would not collapse them).
+            if !pause::is_consume_mode() {
+                event::global_broadcaster().transcript_final(final_text.clone());
+            }
 
             // Route to Iris: the transcript has already been broadcast over UDS
-            // (TranscriptChunk previews during speech + TranscriptFinal above).
-            // Route it to the file stream too, then STOP — no clipboard, no
-            // paste, no Enter. Nothing is inserted into any app.
+            // (TranscriptChunk previews during speech + the cumulative chunk
+            // `consume_merge` publishes per fragment). Then STOP — no
+            // clipboard, no paste, no Enter. Nothing is inserted into any app.
             // A persisted stream setting is not proof that a controller is
             // connected. Only a live per-connection consume lease may suppress
             // paste; otherwise a controller crash could silently drop a wake
             // word instead of dictating it normally.
             if pause::is_consume_mode() {
-                if cfg.transcript_stream_enabled {
-                    transcript_stream::append(&final_text);
-                }
+                // Fold into the request being assembled. This publishes the
+                // cumulative text as a `TranscriptChunk` now and commits one
+                // `TranscriptFinal` (plus the stream line) once the user has
+                // stopped continuing — the same rejoining the paste path
+                // below does, which consume mode used to return above.
+                consume_merge::accept(
+                    rt,
+                    &cfg.localization,
+                    cfg.transcript_stream_enabled,
+                    &final_text,
+                );
                 pause::dictation_buffer_clear();
                 event::global_broadcaster().voice_activity_ended();
                 tracing::info!(

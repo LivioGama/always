@@ -110,8 +110,14 @@ pub fn acquire_consume_mode(lease: &AtomicBool) {
 /// Release this connection's consume-mode lease. Safe to call repeatedly
 /// from the reader shutdown path and its connection guard.
 pub fn release_consume_mode(lease: &AtomicBool) {
-    if lease.swap(false, Ordering::AcqRel) {
-        CONSUME_MODE_LEASES.fetch_sub(1, Ordering::AcqRel);
+    if lease.swap(false, Ordering::AcqRel)
+        && CONSUME_MODE_LEASES.fetch_sub(1, Ordering::AcqRel) == 1
+    {
+        // Last controller gone. Anything `consume_merge` was holding open
+        // for a continuation will never get one, and a controller that
+        // armed itself on a partial is waiting on that final to release
+        // it — so commit now rather than strand a half-assembled request.
+        crate::always::consume_merge::flush_now();
     }
 }
 
