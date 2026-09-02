@@ -526,20 +526,21 @@ pub fn start_keyboard_listener() -> Result<()> {
         let mut alt_pressed = false;
 
         let result = listen(move |event| {
-                // NOTHING that can block belongs in here. This closure IS the
-                // CGEventTap callback: macOS runs it synchronously on the
-                // WindowServer event-dispatch path and gives it a strict time
-                // budget. A `tracing::info!` here serialised a JSON record and
-                // wrote it to disk on EVERY key press and release; under disk
-                // or CPU contention that overran the budget, macOS killed the
-                // tap with kCGEventTapDisabledByTimeout, and the restart loop
-                // below immediately rebuilt it into the same overrun. Keep this
-                // callback to atomics and cheap comparisons only.
-                match event.event_type {
+            // NOTHING that can block belongs in here. This closure IS the
+            // CGEventTap callback: macOS runs it synchronously on the
+            // WindowServer event-dispatch path and gives it a strict time
+            // budget. A `tracing::info!` here serialised a JSON record and
+            // wrote it to disk on EVERY key press and release; under disk
+            // or CPU contention that overran the budget, macOS killed the
+            // tap with kCGEventTapDisabledByTimeout, and the restart loop
+            // below immediately rebuilt it into the same overrun. Keep this
+            // callback to atomics and cheap comparisons only.
+            match event.event_type {
                 EventType::KeyPress(Key::ControlLeft) | EventType::KeyPress(Key::ControlRight) => {
                     ctrl_pressed = true;
                 }
-                EventType::KeyRelease(Key::ControlLeft) | EventType::KeyRelease(Key::ControlRight) => {
+                EventType::KeyRelease(Key::ControlLeft)
+                | EventType::KeyRelease(Key::ControlRight) => {
                     ctrl_pressed = false;
                 }
                 EventType::KeyPress(Key::ShiftLeft) | EventType::KeyPress(Key::ShiftRight) => {
@@ -580,9 +581,19 @@ pub fn start_keyboard_listener() -> Result<()> {
                         pause::countdown_request_cancel();
                         pause::dictation_buffer_clear();
                     }
-                    if master_pause_combo.matches_name(ctrl_pressed, shift_pressed, alt_pressed, name) {
+                    if master_pause_combo.matches_name(
+                        ctrl_pressed,
+                        shift_pressed,
+                        alt_pressed,
+                        name,
+                    ) {
                         handle_master_pause_hotkey();
-                    } else if pause_combo.matches_name(ctrl_pressed, shift_pressed, alt_pressed, name) {
+                    } else if pause_combo.matches_name(
+                        ctrl_pressed,
+                        shift_pressed,
+                        alt_pressed,
+                        name,
+                    ) {
                         match pause_chord_action(pause::current_app().as_deref()) {
                             ChordAction::TogglePerApp(bundle) => {
                                 handle_per_app_pause_hotkey(&bundle);
@@ -597,7 +608,10 @@ pub fn start_keyboard_listener() -> Result<()> {
                             }
                         }
                     } else if auto_enter_combo.matches_name(
-                        ctrl_pressed, shift_pressed, alt_pressed, name,
+                        ctrl_pressed,
+                        shift_pressed,
+                        alt_pressed,
+                        name,
                     ) {
                         let new_state = pause::toggle_auto_enter();
                         if new_state {
@@ -611,7 +625,10 @@ pub fn start_keyboard_listener() -> Result<()> {
                             logger.write(log::Event::AutoEnterToggled { enabled: new_state });
                         }
                     } else if force_paste_combo.matches_name(
-                        ctrl_pressed, shift_pressed, alt_pressed, name,
+                        ctrl_pressed,
+                        shift_pressed,
+                        alt_pressed,
+                        name,
                     ) {
                         if let Some(text) = pause::take_last_filtered() {
                             let chars = text.len();
@@ -637,7 +654,10 @@ pub fn start_keyboard_listener() -> Result<()> {
                                 .transcription_filtered("Nothing to paste — no held transcript");
                         }
                     } else if log_correction_combo.matches_name(
-                        ctrl_pressed, shift_pressed, alt_pressed, name,
+                        ctrl_pressed,
+                        shift_pressed,
+                        alt_pressed,
+                        name,
                     ) {
                         match correction::capture_via_hotkey(clipboard_watcher::PASTE_WINDOW) {
                             Ok(correction::CaptureOutcome::Applied { pairs, applied }) => {
@@ -668,7 +688,10 @@ pub fn start_keyboard_listener() -> Result<()> {
                             }
                         }
                     } else if correction_dialog_combo.matches_name(
-                        ctrl_pressed, shift_pressed, alt_pressed, name,
+                        ctrl_pressed,
+                        shift_pressed,
+                        alt_pressed,
+                        name,
                     ) {
                         let last = pause::last_transcript_for_correction().unwrap_or_default();
                         event::global_broadcaster().correction_dialog_requested(last);
@@ -683,7 +706,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                     }
                 }
             }
-            });
+        });
 
         if let Err(error) = result {
             tracing::error!(?error, "keyboard_listener_error");
@@ -723,14 +746,21 @@ fn start_fn_listener() {
 
     unsafe extern "C" {
         fn CGEventTapCreate(
-            tap: u32, place: u32, options: u32, events: u64,
+            tap: u32,
+            place: u32,
+            options: u32,
+            events: u64,
             cb: unsafe extern "C" fn(*mut c_void, u32, *mut c_void, *mut c_void) -> *mut c_void,
             info: *mut c_void,
         ) -> *mut c_void;
         fn CGEventTapEnable(tap: *mut c_void, enable: bool);
         fn CGEventGetIntegerValueField(event: *mut c_void, field: u32) -> i64;
         fn CGEventGetFlags(event: *mut c_void) -> u64;
-        fn CFMachPortCreateRunLoopSource(alloc: *mut c_void, port: *mut c_void, order: c_int) -> *mut c_void;
+        fn CFMachPortCreateRunLoopSource(
+            alloc: *mut c_void,
+            port: *mut c_void,
+            order: c_int,
+        ) -> *mut c_void;
         fn CFRunLoopAddSource(rl: *mut c_void, src: *mut c_void, mode: *const c_void);
         fn CFRunLoopGetCurrent() -> *mut c_void;
         fn CFRunLoopRun();

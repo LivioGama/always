@@ -766,7 +766,10 @@ mod tests {
         set_dictation_origin_app(None);
         assert_eq!(dictation_origin_app(), None);
         set_dictation_origin_app(Some("com.example.editor".into()));
-        assert_eq!(dictation_origin_app().as_deref(), Some("com.example.editor"));
+        assert_eq!(
+            dictation_origin_app().as_deref(),
+            Some("com.example.editor")
+        );
         set_dictation_origin_app(None);
         assert_eq!(dictation_origin_app(), None);
     }

@@ -5,12 +5,12 @@ import CoreGraphics
 // MARK: - Shortcut parsing / formatting helpers
 
 /// Split `"ctrl+alt+shift+p"` → `["ctrl", "alt", "shift", "p"]`
-private func parseShortcutParts(_ s: String) -> [String] {
+func parseShortcutParts(_ s: String) -> [String] {
     s.lowercased().split(separator: "+").map { $0.trimmingCharacters(in: .whitespaces) }
 }
 
 /// Map a part string to its display symbol.
-private func partSymbol(_ part: String) -> String {
+func partSymbol(_ part: String) -> String {
     switch part {
     case "ctrl", "control": return "⌃"
     case "alt", "option": return "⌥"
@@ -43,6 +43,7 @@ struct KeyCaptureButton: View {
     @State private var eventTap: CFMachPort?
     @State private var runLoopSource: CFRunLoopSource?
     @State private var nseventMonitor: Any?
+    @State private var captureCtxPointer: UnsafeMutableRawPointer?
 
     init(label: String,
          description: String? = nil,
@@ -212,6 +213,7 @@ struct KeyCaptureButton: View {
         }
 
         let pointer = Unmanaged.passRetained(captureCtx).toOpaque()
+        captureCtxPointer = pointer
 
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -261,6 +263,7 @@ struct KeyCaptureButton: View {
             userInfo: pointer
         ) else {
             Unmanaged<CaptureContext>.fromOpaque(pointer).release()
+            captureCtxPointer = nil
             startNSEventFallback()
             return
         }
@@ -305,6 +308,10 @@ struct KeyCaptureButton: View {
         if let monitor = nseventMonitor {
             NSEvent.removeMonitor(monitor)
             nseventMonitor = nil
+        }
+        if let pointer = captureCtxPointer {
+            Unmanaged<CaptureContext>.fromOpaque(pointer).release()
+            captureCtxPointer = nil
         }
         captureCtx.handler = nil
     }

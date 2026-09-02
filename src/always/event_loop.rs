@@ -521,10 +521,9 @@ fn handle_speech(
             // utterances below are excluded — whisper noise artifacts would
             // clobber the clipboard on every false VAD trigger.
             match paste::copy_to_clipboard(text.to_string()) {
-                Ok(()) => tracing::info!(
-                    chars = text.chars().count(),
-                    "filtered_copied_to_clipboard"
-                ),
+                Ok(()) => {
+                    tracing::info!(chars = text.chars().count(), "filtered_copied_to_clipboard")
+                }
                 Err(error) => {
                     tracing::warn!(error = %error, "filtered_clipboard_copy_failed")
                 }

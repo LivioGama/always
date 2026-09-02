@@ -69,6 +69,7 @@ final class AlwaysTests: XCTestCase {
             "shortcutAutoEnter": "ctrl+alt+a",
             "shortcutForcePaste": "ctrl+alt+v",
             "shortcutCorrectionDialog": "ctrl+alt+w",
+            "shortcutMasterPause": "ctrl+alt+shift+p",
             "postprocessEnabled": true,
             "idlePauseSecs": 600,
             "idlePauseAction": "pause",
@@ -132,9 +133,13 @@ final class AlwaysTests: XCTestCase {
     // MARK: - Pure settings/onboarding helpers
 
     func testFormatShortcutUsesMacModifierSymbols() throws {
-        XCTAssertEqual(formatShortcut("ctrl+alt+p"), "⌃⌥P")
-        XCTAssertEqual(formatShortcut("shift+meta+space"), "⇧⌘SPACE")
-        XCTAssertEqual(formatShortcut("control+option+a"), "⌃⌥A")
+        // `formatShortcut` was replaced by `parseShortcutParts` + `partSymbol`.
+        // Verify the new helpers produce the same keycap symbols.
+        XCTAssertEqual(parseShortcutParts("ctrl+alt+p").map(partSymbol).joined(), "⌃⌥P")
+        XCTAssertEqual(parseShortcutParts("shift+meta+space").map(partSymbol).joined(), "⇧⌘Space")
+        XCTAssertEqual(parseShortcutParts("control+option+a").map(partSymbol).joined(), "⌃⌥A")
+        // Fn key — the new modifier-less shortcut the old function didn't handle.
+        XCTAssertEqual(parseShortcutParts("fn").map(partSymbol).joined(), "Fn")
     }
 
     func testMaskedApiKeyIsNotPersisted() throws {

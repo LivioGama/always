@@ -1,44 +1,44 @@
-<!-- gitpixel:start -->
-# GitPixel — Agent Workflow Contract
+<!-- pixel:start -->
+# Pixel — Agent Workflow Contract
 
 > Before the first file read of any feature/bug task, run
-> `gitpixel targets "<task>"`. It returns a closed prioritized file list
-> (P0/P1/P2) and activates `.gitpixel/targets.json`. Work P0 first; P2 is
+> `pixel targets "<task>"`. It returns a closed prioritized file list
+> (P0/P1/P2) and activates `.pixel/targets.json`. Work P0 first; P2 is
 > droppable. While the manifest is active, never read, grep, or edit repo
 > files outside the list — if a file seems missing, the task description was
-> wrong: re-run `gitpixel targets` with a refined task. Run
-> `gitpixel targets --clear` when the task ends.
+> wrong: re-run `pixel targets` with a refined task. Run
+> `pixel targets --clear` when the task ends.
 > When the user says something **was working before** (or the fix is in git
-> history), run `gitpixel rescue "<problem>"` — never `git reset --hard`,
+> history), run `pixel rescue "<problem>"` — never `git reset --hard`,
 > never raw historical checkouts over in-progress work.
 
 Claude Code additionally enforces all of this mechanically via the
-`gitpixel-targets-guard` PreToolUse hook (off-list reads/edits blocked,
+`pixel-targets-guard` PreToolUse hook (off-list reads/edits blocked,
 edits without an active manifest blocked, `git reset --hard` blocked).
-Kill switch for debugging the guard: `GITPIXEL_TARGETS_GUARD=0`.
+Kill switch for debugging the guard: `PIXEL_TARGETS_GUARD=0`.
 
 ## CLI Reference
 
 | Task                                         | Command                                              |
 | -------------------------------------------- | ---------------------------------------------------- |
-| Rebuild index + graph                        | `gitpixel ready . --no-daemon`                       |
-| Regex search                                 | `gitpixel search '<regex>' .`                        |
-| Symbol lookup                                | `gitpixel symbol <name> .`                           |
-| 360° context (token-budgeted)                | `gitpixel context <uid> . --budget 4000`             |
-| Blast radius / "What breaks if I change X?"  | `gitpixel impact <symbol> . --direction upstream`    |
-| Callers / callees                            | `gitpixel uses <symbol> . --role callers`            |
-| Trace A→B                                    | `gitpixel trace <a> <b> .`                           |
-| Execution flows                              | `gitpixel processes .`                               |
-| Functional clusters                          | `gitpixel clusters .`                                |
-| Git-diff → affected flows                    | `gitpixel changes .`                                 |
-| Task scoping (closed file list)              | `gitpixel targets "<task>" .`                        |
-| Surgical revert planner                      | `gitpixel rescue "<problem>" .`                      |
-| Error capture (wrap a command)               | `gitpixel sniper run -- <cmd>`                       |
-| Newest errors                                | `gitpixel sniper last`                               |
+| Rebuild index + graph                        | `pixel ready . --no-daemon`                       |
+| Regex search                                 | `pixel search '<regex>' .`                        |
+| Symbol lookup                                | `pixel symbol <name> .`                           |
+| 360° context (token-budgeted)                | `pixel context <uid> . --budget 4000`             |
+| Blast radius / "What breaks if I change X?"  | `pixel impact <symbol> . --direction upstream`    |
+| Callers / callees                            | `pixel uses <symbol> . --role callers`            |
+| Trace A→B                                    | `pixel trace <a> <b> .`                           |
+| Execution flows                              | `pixel processes .`                               |
+| Functional clusters                          | `pixel clusters .`                                |
+| Git-diff → affected flows                    | `pixel changes .`                                 |
+| Task scoping (closed file list)              | `pixel targets "<task>" .`                        |
+| Surgical revert planner                      | `pixel rescue "<problem>" .`                      |
+| Error capture (wrap a command)               | `pixel sniper run -- <cmd>`                       |
+| Newest errors                                | `pixel sniper last`                               |
 
 `lower_bound: true` in a response = the resolver gave up on N same-name call sites; returned edges are a **lower bound**, not the full set. Treat "0 callers" + `lower_bound: true` as "unknown", not "unused".
 
-<!-- gitpixel:end -->
+<!-- pixel:end -->
 
 # Always Project Rules
 
@@ -119,11 +119,11 @@ reported "I see no change". Hours were lost on both sides.
 - `./scripts/dev-rebuild.sh --no-daemon` - Skip daemon restart (use sparingly; the
   GUI is still restarted and verified)
 
-# GitPixel Index-Powered Development
+# Pixel Index-Powered Development
 
 ## Golden Rule: Think in Processes, Not Files
 
-After running `gitpixel ready .`, **always use the `gitpixel` CLI instead of grep/find/manual exploration**. The index understands execution flows, dependencies, and impact — grep does not.
+After running `pixel ready .`, **always use the `pixel` CLI instead of grep/find/manual exploration**. The index understands execution flows, dependencies, and impact — grep does not.
 
 ## Required Before Any Edit
 
@@ -132,7 +132,7 @@ After running `gitpixel ready .`, **always use the `gitpixel` CLI instead of gre
 Before modifying ANY function, class, method, or file:
 
 ```bash
-gitpixel impact <symbol> . --direction upstream
+pixel impact <symbol> . --direction upstream
 ```
 
 **Report to user**: Direct callers (d1 WILL BREAK), affected flows, risk level.
@@ -144,14 +144,14 @@ gitpixel impact <symbol> . --direction upstream
 After making changes:
 
 ```bash
-gitpixel changes .
+pixel changes .
 ```
 
 Verify your changes only touch expected symbols and execution flows.
 
 **Why**: Prevents accidental scope creep and unintended modifications.
 
-## Replacing grep/find with GitPixel
+## Replacing grep/find with Pixel
 
 ### Never Do This Anymore
 
@@ -166,19 +166,19 @@ find . -name "*Auth*" -type f
 grep -r "getUserData" --include="*.ts"
 ```
 
-### Use GitPixel Instead
+### Use Pixel Instead
 
 **Search** (replaces grep — trigram-indexed, sound by construction):
 
 ```bash
-gitpixel search 'handleClick' .
+pixel search 'handleClick' .
 ```
 
 **Understand a symbol** (replaces manual exploration):
 
 ```bash
-gitpixel symbol getUserData .
-gitpixel uses getUserData . --role callers
+pixel symbol getUserData .
+pixel uses getUserData . --role callers
 ```
 
 Returns: all callers, callees, with confidence tiers.
@@ -186,11 +186,11 @@ Returns: all callers, callees, with confidence tiers.
 **Find related code** (replaces find + grep):
 
 ```bash
-gitpixel clusters .    # All functional areas
-gitpixel processes .   # All execution flows by business logic
+pixel clusters .    # All functional areas
+pixel processes .   # All execution flows by business logic
 ```
 
-## Debugging with GitPixel
+## Debugging with Pixel
 
 When tracing a bug:
 
@@ -198,15 +198,15 @@ When tracing a bug:
 **Do**:
 
 ```bash
-gitpixel search 'null pointer' .
-gitpixel sniper last    # check the error sink for recent failures
+pixel search 'null pointer' .
+pixel sniper last    # check the error sink for recent failures
 ```
 
 **Trace execution from entry point**:
 
 ```bash
-gitpixel processes .
-gitpixel trace <entrySymbol> <targetSymbol> .
+pixel processes .
+pixel trace <entrySymbol> <targetSymbol> .
 ```
 
 ## Task Scoping
@@ -214,45 +214,45 @@ gitpixel trace <entrySymbol> <targetSymbol> .
 Before the first file read of any feature/bug task:
 
 ```bash
-gitpixel targets "<task description>" .
+pixel targets "<task description>" .
 ```
 
-Returns a closed prioritized file list (P0 = start here, P1 = likely, P2 = droppable). Clear with `gitpixel targets --clear .` when done.
+Returns a closed prioritized file list (P0 = start here, P1 = likely, P2 = droppable). Clear with `pixel targets --clear .` when done.
 
 ## Surgical Revert ("was working before")
 
 ```bash
-gitpixel rescue "<problem>" .
+pixel rescue "<problem>" .
 ```
 
 Never `git reset --hard` — use `rescue` to find and revert the breaking commit.
 
 ## Enforcement Rules (NEVER violate)
 
-1. NEVER grep for symbols — use `gitpixel symbol` or `gitpixel search`.
-2. NEVER use find for code exploration — use `gitpixel clusters` or `gitpixel processes`.
-3. NEVER edit a symbol without `gitpixel impact` first.
-4. NEVER commit without `gitpixel changes .` to verify scope.
-5. NEVER manually trace code flows — use `gitpixel trace` or `gitpixel processes`.
-6. NEVER `git reset --hard` over in-progress work — use `gitpixel rescue`.
+1. NEVER grep for symbols — use `pixel symbol` or `pixel search`.
+2. NEVER use find for code exploration — use `pixel clusters` or `pixel processes`.
+3. NEVER edit a symbol without `pixel impact` first.
+4. NEVER commit without `pixel changes .` to verify scope.
+5. NEVER manually trace code flows — use `pixel trace` or `pixel processes`.
+6. NEVER `git reset --hard` over in-progress work — use `pixel rescue`.
 
 ## Quick Reference
 
 | Task | Command | Bad Alternative |
 |------|---------|-----------------|
-| Find callers of a function | `gitpixel uses foo . --role callers` | `grep -r "foo(" src/` |
-| Search by regex | `gitpixel search 'auth' .` | `grep -r "auth" src/` |
-| Understand a flow | `gitpixel processes .` | Read files manually |
-| Find impact before edit | `gitpixel impact foo . --direction upstream` | Change + test + pray |
-| Verify changes are scoped | `gitpixel changes .` | Manual review |
-| Explore architecture | `gitpixel clusters .` | Read file tree |
-| Scope a task | `gitpixel targets "<task>" .` | Read everything |
-| Revert surgically | `gitpixel rescue "<problem>" .` | `git reset --hard` |
+| Find callers of a function | `pixel uses foo . --role callers` | `grep -r "foo(" src/` |
+| Search by regex | `pixel search 'auth' .` | `grep -r "auth" src/` |
+| Understand a flow | `pixel processes .` | Read files manually |
+| Find impact before edit | `pixel impact foo . --direction upstream` | Change + test + pray |
+| Verify changes are scoped | `pixel changes .` | Manual review |
+| Explore architecture | `pixel clusters .` | Read file tree |
+| Scope a task | `pixel targets "<task>" .` | Read everything |
+| Revert surgically | `pixel rescue "<problem>" .` | `git reset --hard` |
 
 ## Why This Matters
 
-**Before GitPixel**: code exploration = slow grep sessions, missed dependencies, silent bugs.
-**After GitPixel**: code exploration = indexed regex search, call graph, blast-radius analysis, task scoping, surgical reverts.
+**Before Pixel**: code exploration = slow grep sessions, missed dependencies, silent bugs.
+**After Pixel**: code exploration = indexed regex search, call graph, blast-radius analysis, task scoping, surgical reverts.
 
 The index understands your code's execution model. Use it.
 
