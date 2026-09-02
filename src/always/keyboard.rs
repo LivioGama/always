@@ -20,8 +20,6 @@
 #[cfg(feature = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "macos")]
-use std::sync::mpsc;
-#[cfg(feature = "macos")]
 use std::thread;
 #[cfg(feature = "macos")]
 use std::time::Duration;
@@ -764,8 +762,7 @@ fn start_fn_listener() {
         fn CFRunLoopAddSource(rl: *mut c_void, src: *mut c_void, mode: *const c_void);
         fn CFRunLoopGetCurrent() -> *mut c_void;
         fn CFRunLoopRun();
-        fn CFRelease(cf: *mut c_void);
-        fn CFStringCreateWithCString(alloc: *mut c_void, cs: *const u8, enc: u32) -> *mut c_void;
+        fn CFRelease(cf: *const c_void);
         /// THE CoreFoundation global — not a string that merely spells the
         /// same thing. `kCFRunLoopCommonModes` is a pseudo-mode CF matches by
         /// POINTER IDENTITY against this symbol. Passing a separately
@@ -790,7 +787,7 @@ fn start_fn_listener() {
         if type_ == 0xFFFFFFFE || type_ == 0xFFFFFFFF {
             let tap = FN_TAP.load(Ordering::Relaxed);
             if !tap.is_null() {
-                CGEventTapEnable(tap, true);
+                unsafe { CGEventTapEnable(tap, true) };
             }
             return event;
         }
@@ -798,8 +795,8 @@ fn start_fn_listener() {
         if type_ != 12 {
             return event;
         }
-        let keycode = CGEventGetIntegerValueField(event, 9);
-        let flags = CGEventGetFlags(event);
+        let keycode = unsafe { CGEventGetIntegerValueField(event, 9) };
+        let flags = unsafe { CGEventGetFlags(event) };
 
         if keycode == FN_KEYCODE {
             let fn_held = (flags & FN_FLAG) != 0;
@@ -839,7 +836,7 @@ fn start_fn_listener() {
                 if source.is_null() {
                     tracing::error!("fn_listener_runloop_source_failed");
                     set_input_monitoring_status(false);
-                    CFRelease(tap);
+                    CFRelease(tap as *const c_void);
                     break;
                 }
                 let rl = CFRunLoopGetCurrent();
@@ -854,8 +851,8 @@ fn start_fn_listener() {
                 CFRunLoopRun();
                 // Run loop exited — tap was disabled by timeout.
                 // Release and recreate.
-                CFRelease(source);
-                CFRelease(tap);
+                CFRelease(source as *const c_void);
+                CFRelease(tap as *const c_void);
                 // Back off before rebuilding the tap. Without this the loop
                 // is unbounded: a tap that dies immediately (callback overrun,
                 // WindowServer under load) is recreated as fast as the CPU
