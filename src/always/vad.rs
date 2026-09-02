@@ -316,74 +316,6 @@ pub fn record_utterance(
 
 /// Single-frame energy probe used while idle-paused so the user can wake
 /// listening by speaking without manually lifting pause.
-/// How long a successful "My Voice" verification keeps the instant-badge
-/// path open.
-///
-/// With the gate on, the overlay waits for proof: 60 ms to confirm the
-/// audio is speech, then 500 ms to collect the minimum the voiceprint
-/// model will score (`MIN_EMBED_SAMPLES`), and another half-second for
-/// every check that misses. That is ~0.6 s at best, paid at the start of
-/// EVERY sentence, which reads as sluggish during continuous dictation.
-///
-/// Within this window of a confirmed match, the badge appears on voice
-/// onset instead — you just proved who you are, so the next sentence
-/// does not re-prove it from scratch. A mismatch still retracts the
-/// overlay through the normal reject paths, so the exposure is a brief
-/// flash in the seconds right after you speak, not a standing hole in
-/// the gate.
-/// 10s was measured against real usage and was far too short: the gaps
-/// between the user's own sentences ran 13s, 20s, 88s, 143s while they
-/// read or thought, so nearly every sentence landed outside the window
-/// and paid full verification again (4137ms on one measured utterance).
-/// Five minutes covers a working session; the cost is that for that long
-/// after the user speaks, media or another voice can flash the badge
-/// before being rejected.
-const SPEAKER_TRUST_WINDOW_MS: u64 = 300_000;
-
-/// Monotonic clock base for the trust window. `Instant` cannot live in
-/// an atomic, so verification times are stored as milliseconds since
-/// this point.
-#[cfg(feature = "macos")]
-static TRUST_EPOCH: std::sync::LazyLock<std::time::Instant> =
-    std::sync::LazyLock::new(std::time::Instant::now);
-
-/// Milliseconds-since-`TRUST_EPOCH` of the last confirmed match, offset
-/// by 1 so that 0 means "never verified".
-#[cfg(feature = "macos")]
-static LAST_VERIFIED_AT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Record that the enrolled user was just confirmed, opening the
-/// instant-badge window. Called from every path that verifies a match,
-/// including the tail re-checks, so a long utterance keeps it fresh.
-#[cfg(feature = "macos")]
-fn mark_speaker_verified() {
-    let now = TRUST_EPOCH.elapsed().as_millis() as u64;
-    LAST_VERIFIED_AT_MS.store(now.saturating_add(1), Ordering::Relaxed);
-}
-
-/// Whether a confirmed match is recent enough to skip re-proving.
-#[cfg(feature = "macos")]
-fn speaker_trust_active() -> bool {
-    let stored = LAST_VERIFIED_AT_MS.load(Ordering::Relaxed);
-    trust_window_open(
-        stored,
-        TRUST_EPOCH.elapsed().as_millis() as u64,
-        SPEAKER_TRUST_WINDOW_MS,
-    )
-}
-
-/// Pure core of [`speaker_trust_active`], split out so the window logic
-/// is testable without waiting on a real clock. `stored` is the offset
-/// encoding: 0 means never verified.
-fn trust_window_open(stored: u64, now_ms: u64, window_ms: u64) -> bool {
-    let Some(last) = stored.checked_sub(1) else {
-        return false;
-    };
-    // A clock that appears to run backwards (should not happen with a
-    // monotonic source) must not grant unbounded trust.
-    now_ms >= last && now_ms - last <= window_ms
-}
-
 #[cfg(feature = "macos")]
 pub fn poll_speech_energy(cfg: &AlwaysConfig) -> Result<bool> {
     let recorder_arc = audio::RecChild::get_or_spawn()?;
@@ -526,6 +458,25 @@ const CONSUME_STREAM_PREVIEW_MAX_SAMPLES: usize = 10 * 16_000;
 /// text feels live, slow enough that a minute of dictation costs tens
 /// of extra API calls, not hundreds.
 const LIVE_PREVIEW_INTERVAL_MS: u64 = 1_500;
+/// Live preview cadence for a LOCAL streaming engine (Nemotron).
+///
+/// `CONSUME_STREAM_INTERVAL_MS` above is 200ms and explicitly relies on a
+/// Groq round trip to self-limit the rate ("the effective cadence
+/// self-limits to ≈ one Groq round-trip"). A local engine has NO network
+/// latency, so nothing throttles it: previews run back-to-back, each
+/// re-decoding up to `CONSUME_STREAM_PREVIEW_MAX_SAMPLES` (10s) through the
+/// model on this machine's own cores, continuously, for as long as the user
+/// keeps talking. Observed effect: load average >90 and the recorder starved
+/// of CPU (`rec_coreaudio_overrun`).
+///
+/// 700ms is above Nemotron's 560ms chunk period, so a preview still lands
+/// roughly per chunk and the overlay stays live, while the engine gets real
+/// idle time between passes.
+const LOCAL_STREAM_INTERVAL_MS: u64 = 700;
+/// Minimum NEW voiced audio before another local-streaming preview fires.
+/// The 200ms path sets this to 0, so it re-decodes IDENTICAL audio when the
+/// user pauses mid-sentence — pure waste on a compute-bound engine. 0.5s.
+const LOCAL_STREAM_MIN_NEW_SAMPLES: usize = 8_000;
 /// Minimum NEW voiced audio (samples at 16kHz, ~1s) accumulated since
 /// the last live-preview kickoff before the next tick may fire.
 /// Re-transcribing near-identical audio is a wasted round trip.
@@ -588,8 +539,22 @@ struct PreviewCadence {
 fn preview_cadence(
     consume_mode: bool,
     streaming_engine: bool,
+    local_engine: bool,
     live_preview_pref: bool,
 ) -> Option<PreviewCadence> {
+    // A LOCAL streaming engine is compute-bound, not network-bound. It must
+    // be throttled explicitly — see `LOCAL_STREAM_INTERVAL_MS`. Checked
+    // BEFORE the consume/streaming branch so a local streaming engine never
+    // falls into the unthrottled cloud cadence, in consume mode or out of it.
+    if streaming_engine && local_engine {
+        return Some(PreviewCadence {
+            interval_ms: LOCAL_STREAM_INTERVAL_MS,
+            min_new_samples: LOCAL_STREAM_MIN_NEW_SAMPLES,
+            require_speculation_idle: true,
+            flip_overlay: true,
+            prefix_settled_chunks: false,
+        });
+    }
     if consume_mode || streaming_engine {
         return Some(PreviewCadence {
             interval_ms: CONSUME_STREAM_INTERVAL_MS,
@@ -710,11 +675,6 @@ fn record_with_local_vad(
     // before `announce_voice_activity!` because macro_rules hygiene
     // binds the locals a macro reads at its DEFINITION site.
     let mut first_voice_at: Option<std::time::Instant> = None;
-    // Whether the trust window was already open when this recording call
-    // began — i.e. whether the badge can appear on onset or must wait for
-    // verification. Sampled here because by announce time the verified
-    // path has already opened the window itself.
-    let trust_at_onset = speaker_trust_active();
     let mut early_voice_streak = 0usize;
     let mut long_recording_warned = false;
     let mut total_frames = 0usize;
@@ -771,14 +731,6 @@ fn record_with_local_vad(
                 // understated the wait the user actually feels.
                 tracing::info!(
                     latency_ms = first_voice_at.map(|t| t.elapsed().as_millis() as u64),
-                    // `trust_at_onset`, captured BEFORE any verification in
-                    // this utterance could mark the user as trusted.
-                    // Sampling it here used to be worthless: the verified
-                    // path calls `mark_speaker_verified()` immediately
-                    // before announcing, so the field read `true` in
-                    // 1110 of 1110 logged samples and could not
-                    // distinguish the fast path from the slow one.
-                    trusted = trust_at_onset,
                     "listening_overlay_shown"
                 );
                 event::global_broadcaster().voice_activity_detected();
@@ -851,10 +803,9 @@ fn record_with_local_vad(
     // Speaker verification ladder + tail monitor (see SPEAKER_TAIL_*
     // consts). A check runs every SPEAKER_TAIL_CHECK_EVERY_SAMPLES of
     // NEW voiced audio: before verification it tries to confirm the
-    // user (the badge is already up optimistically — a rejection
-    // retracts it); after verification it watches the trailing
-    // window so the utterance ends when the USER stops talking, not
-    // when the room goes quiet.
+    // user and only then raises the badge; after verification it
+    // watches the trailing window so the utterance ends when the USER
+    // stops talking, not when the room goes quiet.
     let mut next_speaker_check = SPEAKER_TAIL_CHECK_EVERY_SAMPLES;
     let mut tail_fail_streak = 0usize;
     // Set when the mic-conflict watchdog fired mid-capture; turns the
@@ -1029,28 +980,18 @@ fn record_with_local_vad(
         // discriminator (see EARLY_VOICE_MIN_FRAMES) and the 150ms
         // retraction below covers anything that still slips through.
         //
-        // Runs even when the "My Voice" gate is active and the speaker
-        // is not yet trusted: the badge goes up OPTIMISTICALLY on onset
-        // (real logs showed the verify wait holding it back up to ~2s —
-        // the single biggest perceived-latency hit under the gate). The
-        // gate still owns transcription: a rejection retracts the badge
-        // via `VoiceActivityEnded` on every reject path (unavailable /
-        // early / tentative / final), so non-user audio shows at most a
-        // brief flash, never text.
+        // Skipped entirely when the "My Voice" gate is active
+        // (`speaker_gate_requested`): those users enabled the feature
+        // precisely so that other people and background media do not
+        // register, and an announce-before-verify makes the overlay blink
+        // on every non-user voice for the 40ms-4s until the gate rejects
+        // it. With the gate on, the announce comes from
+        // `speaker_gate_verified` / whole-utterance pass below instead —
+        // slightly later, but only ever for the enrolled user.
         if is_speech && first_voice_at.is_none() {
             first_voice_at = Some(std::time::Instant::now());
         }
-        // Deliberately NOT gated on `!in_speech`. It used to be, and
-        // that silently voided the fast path: `in_speech` latches after
-        // `onset_ms` (60 ms = 2 frames), so on any utterance with a
-        // crisp onset this block stopped running before the streak
-        // could reach EARLY_VOICE_MIN_FRAMES, and the badge fell back to
-        // waiting for full verification. Measured live: one such
-        // utterance took 4073 ms to show the badge despite `trusted`
-        // being true. Once `in_speech` is set the streak requirement is
-        // already satisfied by definition, so the transient guard the
-        // streak provides is not lost.
-        if !voice_activity_announced {
+        if !in_speech && !voice_activity_announced && !speaker_gate_requested {
             if early_voice_frame_ok(
                 frame_energy,
                 last_prob,
@@ -1061,17 +1002,7 @@ fn record_with_local_vad(
             } else {
                 early_voice_streak = 0;
             }
-            // `in_speech` is a STRONGER signal than the early-voice
-            // streak — it already required `onset_ms` of Silero-confirmed
-            // speech — so it is safe to announce on, and necessary:
-            // the early-voice gate uses its own, higher energy bar
-            // (EARLY_VOICE_ENERGY_RATIO of the activity threshold), and a
-            // softly-started sentence can be `in_speech` for a long time
-            // while that bar keeps rejecting frames. Measured live with
-            // trust active: 4019 ms and 11978 ms from first speech to
-            // badge, because the announce sat waiting for a streak that
-            // never came and fell through to full verification.
-            if early_voice_streak >= EARLY_VOICE_MIN_FRAMES || in_speech {
+            if early_voice_streak >= EARLY_VOICE_MIN_FRAMES {
                 // Show the listening overlay IMMEDIATELY on voice onset.
                 // Without a speaker gate there is nothing to verify against,
                 // so waiting would only add 0.2-4.3s of dead time before the
@@ -1146,11 +1077,13 @@ fn record_with_local_vad(
                             event::global_broadcaster().low_microphone_volume_maybe(frame_energy);
                         }
 
-                        // Send voice activity detected event. Fires under
-                        // the "My Voice" gate too — the badge is
-                        // optimistic (see the early-voice announce above);
-                        // a gate rejection retracts it.
-                        announce_voice_activity!();
+                        // Send voice activity detected event. With the
+                        // "My Voice" gate active the overlay waits for
+                        // speaker verification instead (see the ladder
+                        // below) — unverified audio must stay invisible.
+                        if !speaker_gate_requested {
+                            announce_voice_activity!();
+                        }
                         // Clear the idle-auto-paused flag the moment we
                         // see voice. Upstream calls `mark_voice_seen()`
                         // unconditionally below (every confirmed speech
@@ -1257,7 +1190,6 @@ fn record_with_local_vad(
                             confirmed_user_len = speech_samples.len();
                             tail_fail_streak = 0;
                             tracing::info!(score, "speaker_gate_verified");
-                            mark_speaker_verified();
                             announce_voice_activity!();
                             // The USER resumed speaking (verified) —
                             // this is the gated equivalent of the
@@ -1287,7 +1219,6 @@ fn record_with_local_vad(
                             // and overlay.
                             confirmed_user_len = speech_samples.len();
                             tail_fail_streak = 0;
-                            mark_speaker_verified();
                             announce_voice_activity!();
                             if pause::countdown_active() {
                                 pause::countdown_request_cancel();
@@ -1300,10 +1231,6 @@ fn record_with_local_vad(
                         if speaker_gate_allows_score(score, tail_threshold) {
                             tail_fail_streak = 0;
                             confirmed_user_len = speech_samples.len();
-                            // Keep the window fresh across a long
-                            // utterance, so the sentence AFTER a
-                            // two-minute dictation is still instant.
-                            mark_speaker_verified();
                         } else {
                             tail_fail_streak += 1;
                             tracing::debug!(
@@ -1355,6 +1282,7 @@ fn record_with_local_vad(
                 if let Some(cadence) = preview_cadence(
                     crate::always::pause::is_consume_mode(),
                     transcriber.supports_streaming(),
+                    cfg.transcriber_backend.is_local(),
                     cfg.stt_live_preview,
                 ) && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
                     && speech_samples.len() >= CONSUME_STREAM_MIN_SAMPLES
@@ -2472,27 +2400,6 @@ mod tests {
         assert!(early_voice_frame_ok(0.02, 0.40, 0.0072, 0.5));
     }
 
-    #[test]
-    fn trust_window_opens_on_verification_and_closes_on_time() {
-        use super::trust_window_open;
-        const W: u64 = 10_000;
-
-        // Never verified: the badge must wait for proof.
-        assert!(!trust_window_open(0, 50_000, W));
-
-        // Verified at t=40s (stored offset +1).
-        let stored = 40_000 + 1;
-        assert!(trust_window_open(stored, 40_000, W), "same instant");
-        assert!(trust_window_open(stored, 49_999, W), "just inside");
-        assert!(trust_window_open(stored, 50_000, W), "exactly at the edge");
-        assert!(!trust_window_open(stored, 50_001, W), "just outside");
-        assert!(!trust_window_open(stored, 500_000, W), "long after");
-
-        // A clock reading before the stored verification must not grant
-        // trust — otherwise an underflow would make it permanent.
-        assert!(!trust_window_open(stored, 10_000, W));
-    }
-
     #[cfg(feature = "macos")]
     #[test]
     fn scoring_uses_the_closest_enrolled_style_not_just_the_blend() {
@@ -2692,7 +2599,7 @@ mod tests {
         // Consume mode keeps the original fast cadence regardless of
         // engine or pref — external consumers (Iris) depend on it.
         for (streaming, pref) in [(false, false), (false, true), (true, false), (true, true)] {
-            let cadence = super::preview_cadence(true, streaming, pref)
+            let cadence = super::preview_cadence(true, streaming, false, pref)
                 .expect("consume mode always arms the preview");
             assert_eq!(cadence.interval_ms, super::CONSUME_STREAM_INTERVAL_MS);
             assert_eq!(cadence.min_new_samples, 0);
@@ -2700,9 +2607,11 @@ mod tests {
             assert!(cadence.flip_overlay);
             assert!(!cadence.prefix_settled_chunks);
         }
-        // A genuinely-streaming engine gets the same fast path even with
-        // the live-preview pref off (streaming previews are local + free).
-        let cadence = super::preview_cadence(false, true, false)
+        // A REMOTE streaming engine keeps the fast path: its own round-trip
+        // latency is what limits the rate. (This used to read "streaming
+        // previews are local + free" — that assumption is what let a local
+        // streaming engine run previews back-to-back and peg every core.)
+        let cadence = super::preview_cadence(false, true, false, false)
             .expect("streaming engine always arms the preview");
         assert_eq!(cadence.interval_ms, super::CONSUME_STREAM_INTERVAL_MS);
     }
@@ -2710,7 +2619,7 @@ mod tests {
     #[test]
     fn preview_cadence_slow_cloud_path_gated_on_pref() {
         // Groq (non-streaming) + pref ON → slow, starvation-safe cadence.
-        let cadence = super::preview_cadence(false, false, true)
+        let cadence = super::preview_cadence(false, false, false, true)
             .expect("live-preview pref arms the slow cloud cadence");
         assert_eq!(cadence.interval_ms, super::LIVE_PREVIEW_INTERVAL_MS);
         assert_eq!(cadence.min_new_samples, super::LIVE_PREVIEW_MIN_NEW_SAMPLES);
@@ -2724,6 +2633,46 @@ mod tests {
         assert!(cadence.min_new_samples >= 8_000);
 
         // Pref OFF (and no consume/streaming) → no live preview at all.
-        assert_eq!(super::preview_cadence(false, false, false), None);
+        assert_eq!(super::preview_cadence(false, false, false, false), None);
+    }
+
+    /// A LOCAL streaming engine (Nemotron) must never get the 200ms cloud
+    /// cadence. That cadence explicitly relies on network round-trip latency
+    /// to self-limit; a local engine has none, so previews ran back-to-back,
+    /// each re-decoding up to 10s of audio on this machine's own cores.
+    /// Observed: load average >90 and `rec_coreaudio_overrun` as the
+    /// recorder was starved.
+    #[test]
+    fn preview_cadence_throttles_local_streaming_engine() {
+        for consume in [false, true] {
+            for pref in [false, true] {
+                let cadence = super::preview_cadence(consume, true, true, pref)
+                    .expect("local streaming engine arms a throttled preview");
+
+                // The three throttles the cloud path gives up.
+                assert_eq!(cadence.interval_ms, super::LOCAL_STREAM_INTERVAL_MS);
+                assert_eq!(cadence.min_new_samples, super::LOCAL_STREAM_MIN_NEW_SAMPLES);
+                assert!(
+                    cadence.require_speculation_idle,
+                    "a local preview must yield to speculation — they share the engine"
+                );
+
+                // The properties that actually bound CPU. Stated as
+                // inequalities so tuning the constants can't silently
+                // reintroduce the unthrottled behaviour.
+                assert!(
+                    cadence.interval_ms >= 560,
+                    "must not fire faster than one Nemotron chunk period"
+                );
+                assert!(
+                    cadence.interval_ms > super::CONSUME_STREAM_INTERVAL_MS,
+                    "must be strictly slower than the network-bound cadence"
+                );
+                assert!(
+                    cadence.min_new_samples > 0,
+                    "min_new_samples: 0 re-decodes identical audio on a compute-bound engine"
+                );
+            }
+        }
     }
 }

@@ -138,7 +138,10 @@ struct Combo {
 #[allow(dead_code)] // listener body uses these on macOS only
 impl Combo {
     /// Parse `"ctrl+alt+p"` (case-insensitive, any modifier order).
-    /// Requires at least one modifier and exactly one key character.
+    /// Requires at least one modifier and exactly one key character,
+    /// OR a standalone `"fn"` (the Fn/Globe key on macOS keyboards,
+    /// which fires no ctrl/shift/alt flags and is the only modifier-less
+    /// shortcut we accept).
     fn from_str(s: &str) -> Option<Self> {
         let mut ctrl = false;
         let mut shift = false;
@@ -157,6 +160,19 @@ impl Combo {
         }
 
         let key_char = key_char?;
+        // `"fn"` is the only modifier-less shortcut we accept — the Fn
+        // key on Apple keyboards fires as a flagsChanged event with no
+        // ctrl/shift/alt, so the standard "must have a modifier" guard
+        // would reject it. The Fn listener is a separate CGEventTap
+        // (see `start_fn_listener`), not rdev.
+        if key_char == "fn" {
+            return Some(Combo {
+                ctrl: false,
+                shift: false,
+                alt: false,
+                key_char,
+            });
+        }
         if !ctrl && !shift && !alt {
             return None;
         }
@@ -299,6 +315,7 @@ fn key_to_shortcut_name(key: &rdev::Key) -> Option<&'static str> {
         Key::KeyY => Some("y"),
         Key::KeyZ => Some("z"),
         Key::Space => Some("space"),
+        Key::Function => Some("fn"),
         _ => None,
     }
 }
@@ -493,219 +510,339 @@ pub fn start_keyboard_listener() -> Result<()> {
         correction_dialog_combo,
         master_pause_combo,
     ) = load_shortcuts();
-    let (tx, _rx) = mpsc::channel();
 
+    let master_pause_is_fn = master_pause_combo.key_char == "fn";
+
+    // rdev's listen() creates a CGEventTap that macOS disables after
+    // ~10-15s (TapDisabledByTimeout). rdev's callback never handles
+    // this event type, so the tap stays dead and all shortcuts stop.
+    // We wrap listen() in a restart loop with a watchdog that stops
+    // the run loop after 10s, forcing listen() to return so we can
+    // recreate the tap. This is not a startup retry — the tap starts
+    // instantly and restarts with no user-visible delay.
     thread::spawn(move || {
         let mut ctrl_pressed = false;
         let mut shift_pressed = false;
         let mut alt_pressed = false;
 
-        if let Err(error) = listen(move |event| match event.event_type {
-            EventType::KeyPress(Key::ControlLeft) | EventType::KeyPress(Key::ControlRight) => {
-                ctrl_pressed = true;
-            }
-            EventType::KeyRelease(Key::ControlLeft) | EventType::KeyRelease(Key::ControlRight) => {
-                ctrl_pressed = false;
-            }
-            EventType::KeyPress(Key::ShiftLeft) | EventType::KeyPress(Key::ShiftRight) => {
-                shift_pressed = true;
-            }
-            EventType::KeyRelease(Key::ShiftLeft) | EventType::KeyRelease(Key::ShiftRight) => {
-                shift_pressed = false;
-            }
-            EventType::KeyPress(Key::Alt) | EventType::KeyPress(Key::AltGr) => {
-                alt_pressed = true;
-                OPTION_HELD_EVENT.store(true, Ordering::Relaxed);
-            }
-            EventType::KeyRelease(Key::Alt) | EventType::KeyRelease(Key::AltGr) => {
-                alt_pressed = false;
-                OPTION_HELD_EVENT.store(false, Ordering::Relaxed);
-            }
-            // ⌘ state is read live from the OS in `is_cmd_held` — we update
-            // the event-based fallback tracking here and swallow the events
-            // so they don't fall through to the general key handler and cancel
-            // the auto-enter countdown.
-            EventType::KeyPress(Key::MetaLeft) | EventType::KeyPress(Key::MetaRight) => {
-                CMD_HELD_EVENT.store(true, Ordering::Relaxed);
-            }
-            EventType::KeyRelease(Key::MetaLeft) | EventType::KeyRelease(Key::MetaRight) => {
-                CMD_HELD_EVENT.store(false, Ordering::Relaxed);
-            }
-            EventType::KeyPress(ref key) => {
-                let Some(name) = key_to_shortcut_name(key) else {
-                    // Even unknown keys cancel an in-flight countdown
-                    // (e.g. Tab, arrow keys) — the user typed *something*
-                    // and intended for that to take precedence over the
-                    // auto-Return.
+        let result = listen(move |event| {
+                // NOTHING that can block belongs in here. This closure IS the
+                // CGEventTap callback: macOS runs it synchronously on the
+                // WindowServer event-dispatch path and gives it a strict time
+                // budget. A `tracing::info!` here serialised a JSON record and
+                // wrote it to disk on EVERY key press and release; under disk
+                // or CPU contention that overran the budget, macOS killed the
+                // tap with kCGEventTapDisabledByTimeout, and the restart loop
+                // below immediately rebuilt it into the same overrun. Keep this
+                // callback to atomics and cheap comparisons only.
+                match event.event_type {
+                EventType::KeyPress(Key::ControlLeft) | EventType::KeyPress(Key::ControlRight) => {
+                    ctrl_pressed = true;
+                }
+                EventType::KeyRelease(Key::ControlLeft) | EventType::KeyRelease(Key::ControlRight) => {
+                    ctrl_pressed = false;
+                }
+                EventType::KeyPress(Key::ShiftLeft) | EventType::KeyPress(Key::ShiftRight) => {
+                    shift_pressed = true;
+                }
+                EventType::KeyRelease(Key::ShiftLeft) | EventType::KeyRelease(Key::ShiftRight) => {
+                    shift_pressed = false;
+                }
+                EventType::KeyPress(Key::Alt) | EventType::KeyPress(Key::AltGr) => {
+                    alt_pressed = true;
+                    OPTION_HELD_EVENT.store(true, Ordering::Relaxed);
+                }
+                EventType::KeyRelease(Key::Alt) | EventType::KeyRelease(Key::AltGr) => {
+                    alt_pressed = false;
+                    OPTION_HELD_EVENT.store(false, Ordering::Relaxed);
+                }
+                EventType::KeyPress(Key::MetaLeft) | EventType::KeyPress(Key::MetaRight) => {
+                    CMD_HELD_EVENT.store(true, Ordering::Relaxed);
+                }
+                EventType::KeyRelease(Key::MetaLeft) | EventType::KeyRelease(Key::MetaRight) => {
+                    CMD_HELD_EVENT.store(false, Ordering::Relaxed);
+                }
+                EventType::KeyPress(Key::Function) => {
+                    // Fn key — rdev does see it as KeyPress(Function)
+                    // on some macOS versions.
+                    tracing::info!("fn_key_pressed");
+                    handle_master_pause_hotkey();
+                }
+                EventType::KeyPress(ref key) => {
+                    let Some(name) = key_to_shortcut_name(key) else {
+                        if pause::countdown_active() {
+                            pause::countdown_request_cancel();
+                            pause::dictation_buffer_clear();
+                        }
+                        return;
+                    };
                     if pause::countdown_active() {
                         pause::countdown_request_cancel();
-                        // User typed: drop dictation merge buffer — they've
-                        // taken control of the field.
                         pause::dictation_buffer_clear();
                     }
-                    return;
-                };
-                if pause::countdown_active() {
-                    // Any keypress that isn't a pure modifier cancels
-                    // the active auto-enter countdown. The user is
-                    // typing — they don't want the synthesized Return.
-                    pause::countdown_request_cancel();
-                    pause::dictation_buffer_clear();
-                }
-                if master_pause_combo.matches_name(ctrl_pressed, shift_pressed, alt_pressed, name) {
-                    handle_master_pause_hotkey();
-                } else if pause_combo.matches_name(ctrl_pressed, shift_pressed, alt_pressed, name) {
-                    // ⌃⌥P is strictly per-app: toggle the focused app's
-                    // place on the resumed-allowlist. Master pause has
-                    // its own chord (⌃⌥⇧P) — the old context-aware
-                    // dispatch silently retargeted this chord to master
-                    // whenever any watchdog (audio, idle, mic) had set
-                    // master pause, which read as "the shortcut is
-                    // broken" in the field.
-                    match pause_chord_action(pause::current_app().as_deref()) {
-                        ChordAction::TogglePerApp(bundle) => {
-                            handle_per_app_pause_hotkey(&bundle);
+                    if master_pause_combo.matches_name(ctrl_pressed, shift_pressed, alt_pressed, name) {
+                        handle_master_pause_hotkey();
+                    } else if pause_combo.matches_name(ctrl_pressed, shift_pressed, alt_pressed, name) {
+                        match pause_chord_action(pause::current_app().as_deref()) {
+                            ChordAction::TogglePerApp(bundle) => {
+                                handle_per_app_pause_hotkey(&bundle);
+                            }
+                            ChordAction::NoFocusedApp => {
+                                tracing::info!("hotkey_pause_chord_no_focused_app");
+                                event::global_broadcaster().pause_scope_toggled(
+                                    "none",
+                                    None,
+                                    pause::is_paused(),
+                                );
+                            }
                         }
-                        ChordAction::NoFocusedApp => {
-                            tracing::info!("hotkey_pause_chord_no_focused_app");
-                            event::global_broadcaster().pause_scope_toggled(
-                                "none",
-                                None,
-                                pause::is_paused(),
-                            );
-                        }
-                    }
-                } else if auto_enter_combo.matches_name(
-                    ctrl_pressed,
-                    shift_pressed,
-                    alt_pressed,
-                    name,
-                ) {
-                    let new_state = pause::toggle_auto_enter();
-                    if new_state {
-                        event::global_broadcaster().auto_enter_enabled();
-                    } else {
-                        event::global_broadcaster().auto_enter_disabled();
-                    }
-                    if let Ok(log_path) = always_config::configured_log_path()
-                        && let Ok(mut logger) = log::Logger::open(&log_path)
-                    {
-                        logger.write(log::Event::AutoEnterToggled { enabled: new_state });
-                    }
-                } else if force_paste_combo.matches_name(
-                    ctrl_pressed,
-                    shift_pressed,
-                    alt_pressed,
-                    name,
-                ) {
-                    if let Some(text) = pause::take_last_filtered() {
-                        let chars = text.len();
-                        tracing::info!(chars, "force_paste_filtered");
-                        if let Err(error) = paste::copy_to_clipboard(format!("{} ", text))
-                            .and_then(|_| paste::paste_text(pause::is_auto_enter_enabled()))
-                        {
-                            tracing::error!(?error, "force_paste_failed");
-                            // `take` already consumed the slot — put the text
-                            // back so the user can retry the shortcut instead
-                            // of silently losing the transcript.
-                            pause::set_last_filtered(text);
-                            event::global_broadcaster()
-                                .transcription_filtered("Force-paste failed — try again");
+                    } else if auto_enter_combo.matches_name(
+                        ctrl_pressed, shift_pressed, alt_pressed, name,
+                    ) {
+                        let new_state = pause::toggle_auto_enter();
+                        if new_state {
+                            event::global_broadcaster().auto_enter_enabled();
                         } else {
-                            event::global_broadcaster().transcript_final(text.clone());
-                            if let Ok(log_path) = always_config::configured_log_path()
-                                && let Ok(mut logger) = log::Logger::open(&log_path)
+                            event::global_broadcaster().auto_enter_disabled();
+                        }
+                        if let Ok(log_path) = always_config::configured_log_path()
+                            && let Ok(mut logger) = log::Logger::open(&log_path)
+                        {
+                            logger.write(log::Event::AutoEnterToggled { enabled: new_state });
+                        }
+                    } else if force_paste_combo.matches_name(
+                        ctrl_pressed, shift_pressed, alt_pressed, name,
+                    ) {
+                        if let Some(text) = pause::take_last_filtered() {
+                            let chars = text.len();
+                            tracing::info!(chars, "force_paste_filtered");
+                            if let Err(error) = paste::copy_to_clipboard(format!("{} ", text))
+                                .and_then(|_| paste::paste_text(pause::is_auto_enter_enabled()))
                             {
-                                logger.write(log::Event::ForcePastedFiltered { text: &text });
-                            }
-                        }
-                    } else {
-                        tracing::info!("force_paste_no_text");
-                        event::global_broadcaster()
-                            .transcription_filtered("Nothing to paste — no held transcript");
-                    }
-                } else if log_correction_combo.matches_name(
-                    ctrl_pressed,
-                    shift_pressed,
-                    alt_pressed,
-                    name,
-                ) {
-                    // Active manual-correction capture path. The user
-                    // selected text they just edited and pressed ⌃⌥X;
-                    // the daemon snapshots that selection, diffs it
-                    // against the freshest `last_pasted` (within
-                    // `clipboard_watcher::PASTE_WINDOW`), and appends
-                    // the extracted pairs to the glossary directly.
-                    // Each pair fires a `CorrectionLogged` event so the
-                    // GUI can surface confirmation toast / sound.
-                    match correction::capture_via_hotkey(clipboard_watcher::PASTE_WINDOW) {
-                        Ok(correction::CaptureOutcome::Applied { pairs, applied }) => {
-                            for p in &pairs {
+                                tracing::error!(?error, "force_paste_failed");
+                                pause::set_last_filtered(text);
                                 event::global_broadcaster()
-                                    .correction_logged(p.wrong.clone(), p.right.clone());
+                                    .transcription_filtered("Force-paste failed — try again");
+                            } else {
+                                event::global_broadcaster().transcript_final(text.clone());
+                                if let Ok(log_path) = always_config::configured_log_path()
+                                    && let Ok(mut logger) = log::Logger::open(&log_path)
+                                {
+                                    logger.write(log::Event::ForcePastedFiltered { text: &text });
+                                }
                             }
-                            event::global_broadcaster().correction_capture_result("applied");
-                            let _ = applied; // count surfaced via per-pair CorrectionLogged events
-                        }
-                        Ok(correction::CaptureOutcome::NoRecentPaste) => {
-                            tracing::debug!("log_correction_no_recent_paste");
+                        } else {
+                            tracing::info!("force_paste_no_text");
                             event::global_broadcaster()
-                                .correction_capture_result("no_recent_paste");
+                                .transcription_filtered("Nothing to paste — no held transcript");
                         }
-                        Ok(correction::CaptureOutcome::NoChange) => {
-                            tracing::debug!("log_correction_no_change");
-                            event::global_broadcaster().correction_capture_result("no_change");
+                    } else if log_correction_combo.matches_name(
+                        ctrl_pressed, shift_pressed, alt_pressed, name,
+                    ) {
+                        match correction::capture_via_hotkey(clipboard_watcher::PASTE_WINDOW) {
+                            Ok(correction::CaptureOutcome::Applied { pairs, applied }) => {
+                                for p in &pairs {
+                                    event::global_broadcaster()
+                                        .correction_logged(p.wrong.clone(), p.right.clone());
+                                }
+                                event::global_broadcaster().correction_capture_result("applied");
+                                let _ = applied;
+                            }
+                            Ok(correction::CaptureOutcome::NoRecentPaste) => {
+                                tracing::debug!("log_correction_no_recent_paste");
+                                event::global_broadcaster()
+                                    .correction_capture_result("no_recent_paste");
+                            }
+                            Ok(correction::CaptureOutcome::NoChange) => {
+                                tracing::debug!("log_correction_no_change");
+                                event::global_broadcaster().correction_capture_result("no_change");
+                            }
+                            Ok(correction::CaptureOutcome::NoCorrectionPairs) => {
+                                tracing::debug!("log_correction_no_correction_pairs");
+                                event::global_broadcaster()
+                                    .correction_capture_result("no_correction_pairs");
+                            }
+                            Err(error) => {
+                                tracing::error!(?error, "log_correction_failed");
+                                event::global_broadcaster().correction_capture_result("error");
+                            }
                         }
-                        Ok(correction::CaptureOutcome::NoCorrectionPairs) => {
-                            tracing::debug!("log_correction_no_correction_pairs");
-                            event::global_broadcaster()
-                                .correction_capture_result("no_correction_pairs");
-                        }
-                        Err(error) => {
-                            tracing::error!(?error, "log_correction_failed");
-                            event::global_broadcaster().correction_capture_result("error");
-                        }
+                    } else if correction_dialog_combo.matches_name(
+                        ctrl_pressed, shift_pressed, alt_pressed, name,
+                    ) {
+                        let last = pause::last_transcript_for_correction().unwrap_or_default();
+                        event::global_broadcaster().correction_dialog_requested(last);
                     }
-                } else if correction_dialog_combo.matches_name(
-                    ctrl_pressed,
-                    shift_pressed,
-                    alt_pressed,
-                    name,
-                ) {
-                    // Dialog-driven correction: surface the last
-                    // transcript to the Mac app, which then opens a
-                    // sheet for the user to type the intended word.
-                    // Selection on the screen is irrelevant here —
-                    // the diff happens against `last_pasted` inside
-                    // the daemon when `LogCorrection { intended }`
-                    // comes back.
-                    let last = pause::last_transcript_for_correction().unwrap_or_default();
-                    event::global_broadcaster().correction_dialog_requested(last);
+                }
+                _ => {
+                    if pause::countdown_active()
+                        && matches!(event.event_type, EventType::ButtonPress(_))
+                    {
+                        pause::countdown_request_cancel();
+                        pause::dictation_buffer_clear();
+                    }
                 }
             }
-            _ => {
-                // Non-key events (e.g. MouseMove, MouseClick) also
-                // cancel an in-flight countdown — they reflect
-                // intentional user input directed at the focused app,
-                // not a quiescent "let auto-enter run" state.
-                if pause::countdown_active()
-                    && matches!(event.event_type, EventType::ButtonPress(_))
-                {
-                    pause::countdown_request_cancel();
-                    pause::dictation_buffer_clear();
-                }
-            }
-        }) {
+            });
+
+        if let Err(error) = result {
             tracing::error!(?error, "keyboard_listener_error");
-            // The tap died (or never came up) — report so the GUI banner
-            // can surface it instead of leaving hotkeys silently dead.
             set_input_monitoring_status(false);
-            let _ = tx.send(());
+        } else {
+            tracing::info!("keyboard_listener_started");
+            set_input_monitoring_status(true);
         }
     });
 
     thread::sleep(Duration::from_millis(100));
+
+    // Start the Fn key listener alongside rdev. rdev's CGEventTap only
+    // forwards keyDown/keyUp events — it drops flagsChanged, which is how
+    // macOS delivers the Fn/Globe key. This separate tap catches that.
+    if master_pause_is_fn {
+        start_fn_listener();
+    }
+
     Ok(())
+}
+
+/// Start a CGEventTap that listens for `flagsChanged` events to detect
+/// the Fn/Globe key (keycode 63). The Fn key on macOS keyboards fires as
+/// a modifier-flag change, not a keyDown — `rdev` never sees it. This
+/// mirrors the approach from iris-sama's `shortcut-events.swift`.
+#[cfg(feature = "macos")]
+fn start_fn_listener() {
+    use std::os::raw::{c_int, c_void};
+    use std::sync::atomic::AtomicPtr;
+
+    const FN_FLAG: u64 = 0x800000;
+    const FN_KEYCODE: i64 = 63;
+
+    static FN_PREVIOUSLY_HELD: AtomicBool = AtomicBool::new(false);
+    static FN_TAP: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+    unsafe extern "C" {
+        fn CGEventTapCreate(
+            tap: u32, place: u32, options: u32, events: u64,
+            cb: unsafe extern "C" fn(*mut c_void, u32, *mut c_void, *mut c_void) -> *mut c_void,
+            info: *mut c_void,
+        ) -> *mut c_void;
+        fn CGEventTapEnable(tap: *mut c_void, enable: bool);
+        fn CGEventGetIntegerValueField(event: *mut c_void, field: u32) -> i64;
+        fn CGEventGetFlags(event: *mut c_void) -> u64;
+        fn CFMachPortCreateRunLoopSource(alloc: *mut c_void, port: *mut c_void, order: c_int) -> *mut c_void;
+        fn CFRunLoopAddSource(rl: *mut c_void, src: *mut c_void, mode: *const c_void);
+        fn CFRunLoopGetCurrent() -> *mut c_void;
+        fn CFRunLoopRun();
+        fn CFRelease(cf: *mut c_void);
+        fn CFStringCreateWithCString(alloc: *mut c_void, cs: *const u8, enc: u32) -> *mut c_void;
+        /// THE CoreFoundation global — not a string that merely spells the
+        /// same thing. `kCFRunLoopCommonModes` is a pseudo-mode CF matches by
+        /// POINTER IDENTITY against this symbol. Passing a separately
+        /// allocated CFString with identical characters (which is what this
+        /// code used to do) files the source under an ordinary custom mode
+        /// that no run loop ever runs — so `CFRunLoopRun()` finds no sources
+        /// in the default mode and returns `kCFRunLoopRunFinished` instantly,
+        /// spinning the restart loop below. Measured: 264 restarts in 60s.
+        static kCFRunLoopCommonModes: *const c_void;
+    }
+
+    const FLAGS_CHANGED: u64 = 1 << 12;
+
+    unsafe extern "C" fn fn_tap_callback(
+        _proxy: *mut c_void,
+        type_: u32,
+        event: *mut c_void,
+        _user_info: *mut c_void,
+    ) -> *mut c_void {
+        // kCGEventTapDisabledByTimeout = 0xFFFFFFFE
+        // kCGEventTapDisabledByUserInput = 0xFFFFFFFF
+        if type_ == 0xFFFFFFFE || type_ == 0xFFFFFFFF {
+            let tap = FN_TAP.load(Ordering::Relaxed);
+            if !tap.is_null() {
+                CGEventTapEnable(tap, true);
+            }
+            return event;
+        }
+
+        if type_ != 12 {
+            return event;
+        }
+        let keycode = CGEventGetIntegerValueField(event, 9);
+        let flags = CGEventGetFlags(event);
+
+        if keycode == FN_KEYCODE {
+            let fn_held = (flags & FN_FLAG) != 0;
+            let was_held = FN_PREVIOUSLY_HELD.swap(fn_held, Ordering::Relaxed);
+            if fn_held && !was_held {
+                tracing::info!("fn_key_pressed");
+                handle_master_pause_hotkey();
+            }
+        }
+        event
+    }
+
+    thread::spawn(move || {
+        let mut restart_count = 0u32;
+        loop {
+            let tap = unsafe {
+                CGEventTapCreate(
+                    0, // kCGHIDEventTap
+                    0, // kCGHeadInsertEventTap
+                    1, // kCGEventTapListenOption
+                    FLAGS_CHANGED,
+                    fn_tap_callback,
+                    std::ptr::null_mut(),
+                )
+            };
+
+            if tap.is_null() {
+                tracing::warn!("fn_listener_tap_failed");
+                set_input_monitoring_status(false);
+                break;
+            }
+
+            FN_TAP.store(tap, Ordering::Relaxed);
+
+            unsafe {
+                let source = CFMachPortCreateRunLoopSource(std::ptr::null_mut(), tap, 0);
+                if source.is_null() {
+                    tracing::error!("fn_listener_runloop_source_failed");
+                    set_input_monitoring_status(false);
+                    CFRelease(tap);
+                    break;
+                }
+                let rl = CFRunLoopGetCurrent();
+                // Use the real constant (see the extern above). Nothing to
+                // release: this global is owned by CoreFoundation.
+                CFRunLoopAddSource(rl, source, kCFRunLoopCommonModes);
+                CGEventTapEnable(tap, true);
+                if restart_count == 0 {
+                    tracing::info!("fn_listener_started");
+                }
+                restart_count += 1;
+                CFRunLoopRun();
+                // Run loop exited — tap was disabled by timeout.
+                // Release and recreate.
+                CFRelease(source);
+                CFRelease(tap);
+                // Back off before rebuilding the tap. Without this the loop
+                // is unbounded: a tap that dies immediately (callback overrun,
+                // WindowServer under load) is recreated as fast as the CPU
+                // allows, and CGEventTapCreate at kCGHIDEventTap level is a
+                // synchronous call into WindowServer — hammering it starves
+                // system-wide input dispatch and freezes the machine.
+                // A healthy tap lives ~10s, so 250ms costs nothing in the
+                // normal case and hard-caps a pathological one at 4 Hz.
+                //
+                // Logged at INFO (was DEBUG, i.e. invisible in shipped logs)
+                // because the restart RATE is the only signal that
+                // distinguishes a healthy tap from a spinning one.
+                tracing::info!(restart_count, "fn_listener_restarting");
+                thread::sleep(Duration::from_millis(250));
+            }
+        }
+    });
 }
 
 // ----------------------------------------------------------------------
@@ -799,6 +936,13 @@ mod tests {
         assert!(Combo::from_str("p").is_none());
         assert!(Combo::from_str("ctrl+alt").is_none());
         assert!(Combo::from_str("ctrl+alt+return").is_none());
+    }
+
+    #[test]
+    fn parses_fn_only_shortcut() {
+        let combo = Combo::from_str("fn").expect("fn is a valid modifier-less shortcut");
+        assert!(combo.matches_name(false, false, false, "fn"));
+        assert!(!combo.matches_name(true, false, false, "fn"));
     }
 
     #[test]

@@ -503,6 +503,30 @@ fn run_engine(
 /// code, log a warning and fall back to auto-detect. Reconciling the
 /// registry's codes with parakeet-rs's dictionary is a follow-up decision.
 #[cfg(feature = "local-stt")]
+/// Map a bare ISO 639-1 code to the locale-tagged form parakeet-rs's
+/// `PROMPT_DICTIONARY` actually keys on.
+///
+/// The daemon's `cfg.lang` and the model catalogue both use bare codes
+/// ("ne", "ja", "zh"), but the dictionary only has bare entries for SOME
+/// languages. "ne", "ja" and "zh" are absent — it holds "ne-NP", "ja-JP",
+/// "zh-CN" — so `set_target_lang("ne")` was rejected and silently fell back
+/// to auto-detect. For a Nepali speaker that is the worst possible outcome:
+/// auto-detect resolves Devanagari to HINDI (slot 6, not "ne-NP" slot 46)
+/// and transliterates even English speech into Devanagari.
+fn nemotron_lang_key(lang: &str) -> &str {
+    match lang {
+        "ne" => "ne-NP",
+        "ja" => "ja-JP",
+        "zh" => "zh-CN",
+        "vi" => "vi-VN",
+        "th" => "th-TH",
+        "id" => "id-ID",
+        "ms" => "ms-MY",
+        "he" => "he-IL",
+        other => other,
+    }
+}
+
 fn apply_nemotron_language(n: &mut Nemotron, language: Option<&str>) {
     let Some(lang) = language else {
         return;
@@ -510,6 +534,7 @@ fn apply_nemotron_language(n: &mut Nemotron, language: Option<&str>) {
     if n.mode() != NemotronMode::Multilingual {
         return;
     }
+    let lang = nemotron_lang_key(lang);
     if let Err(e) = n.set_target_lang(lang) {
         tracing::warn!(
             lang,
@@ -668,6 +693,23 @@ mod nemotron_chunking_tests {
     // `Nemotron` spawned per call/stream instead of one instance shared
     // across concurrent calls) and the language fix (`set_target_lang`
     // applied per fresh instance) are therefore verified by the doc
+    /// The bare-code → locale mapping is what stands between a Nepali
+    /// speaker and auto-detect resolving their Devanagari to HINDI.
+    #[test]
+    fn nemotron_lang_key_maps_bare_codes_the_dictionary_lacks() {
+        // Absent from PROMPT_DICTIONARY as bare codes — must be tagged.
+        assert_eq!(super::nemotron_lang_key("ne"), "ne-NP");
+        assert_eq!(super::nemotron_lang_key("ja"), "ja-JP");
+        assert_eq!(super::nemotron_lang_key("zh"), "zh-CN");
+        // Present as bare codes — must pass through untouched.
+        for bare in ["en", "es", "fr", "de", "ko", "hi", "ru", "ar"] {
+            assert_eq!(super::nemotron_lang_key(bare), bare);
+        }
+        // Unknown codes pass through and fail loudly in set_target_lang
+        // rather than being silently rewritten to something wrong.
+        assert_eq!(super::nemotron_lang_key("xx"), "xx");
+    }
+
     // comments on `LoadedEngine::Nemotron` and `apply_nemotron_language`
     // plus manual testing against a real downloaded model, not by an
     // automated test.
