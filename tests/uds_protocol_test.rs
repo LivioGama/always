@@ -14,7 +14,7 @@ fn protocol_version_matches_swift_client() {
     // one without the other will fail both this test and the Swift
     // `testProtocolVersionMatchesDaemon` mirror.
     assert_eq!(
-        PROTOCOL_VERSION, 11,
+        PROTOCOL_VERSION, 12,
         "protocol version bumped without updating UDSClient.swift?"
     );
 }
@@ -131,6 +131,11 @@ fn command_round_trip() {
             ..
         }
     ));
+
+    // RespawnRecorder is a unit variant — no `data` field, like TogglePause.
+    let json5 = r#"{"type":"RespawnRecorder"}"#;
+    let cmd5 = DaemonCommand::from_json_line(json5).unwrap();
+    assert!(matches!(cmd5, DaemonCommand::RespawnRecorder));
 }
 
 #[test]

@@ -342,6 +342,16 @@ When a respawn does happen, the old recorder is killed and reaped **before**
 the replacement is spawned, so two `rec` processes never hold the input device
 at the same time (I4).
 
+The recorder is also respawned when the macOS **default input device
+changes** while the daemon is running. The GUI installs a CoreAudio
+property listener on the system object for
+`kAudioHardwarePropertyDefaultInputDevice`; on change it sends a
+`RespawnRecorder` UDS command, and the daemon kills and re-spawns `rec`
+so it opens the newly selected mic. Without this, `rec` keeps capturing
+from the device it opened at spawn time and the user would have to
+relaunch Always to switch microphones. The respawn follows the same
+I4 "drop old before spawn new" discipline as a health-driven respawn.
+
 ---
 
 ## 8. Models and transcription backends

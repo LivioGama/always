@@ -50,7 +50,7 @@ static LAST_LOW_MIC_OVERLAY: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(||
 /// for streaming transcribers that emit progressive interim results
 /// followed by final committed text. The existing `TranscriptChunk` /
 /// `TranscriptFinal` remain for non-streaming chunk-based transcription.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Event types for daemon-to-GUI communication
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -583,6 +583,11 @@ pub enum DaemonCommand {
     /// Client (Settings tab open / reconnect) wants a fresh
     /// [`DaemonEvent::VoiceProfileStatus`] snapshot.
     GetVoiceProfileStatus,
+    /// macOS Swift app reports the system default input device changed
+    /// (user picked a different mic in System Settings). Daemon kills
+    /// and respawns the `rec` child so it opens the new default device
+    /// without requiring an app relaunch.
+    RespawnRecorder,
 }
 
 impl DaemonCommand {

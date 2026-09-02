@@ -322,6 +322,32 @@ impl RecChild {
         Ok(Arc::clone(&GLOBAL_RECORDER))
     }
 
+    /// Force-evict the current recorder and spawn a fresh one bound to
+    /// whatever macOS now reports as the default input device.
+    ///
+    /// Triggered by the `RespawnRecorder` UDS command when the Swift app
+    /// observes `kAudioHardwarePropertyDefaultInputDevice` change. The
+    /// running `rec` opened the input device at spawn time and will not
+    /// follow a default-input switch on its own, so without this the
+    /// user would have to relaunch Always to use a newly selected mic.
+    ///
+    /// Same I4 "drop old before spawn new" discipline as
+    /// [`get_or_spawn`]: the old `RecChild` is dropped (kill + wait)
+    /// before the replacement is spawned, so two `rec` processes never
+    /// hold the input device at the same time.
+    pub fn force_respawn() -> Result<()> {
+        let recorder_lock = Arc::clone(&GLOBAL_RECORDER);
+        let mut recorder = recorder_lock.lock();
+        if recorder.is_some() {
+            tracing::info!("rec_respawn_due_to_default_input_change");
+        }
+        // Drop (kill + wait) the old recorder BEFORE spawning the
+        // replacement — same I4 invariant as `get_or_spawn`.
+        *recorder = None;
+        *recorder = Some(Self::spawn()?);
+        Ok(())
+    }
+
     fn is_healthy(&mut self) -> bool {
         let overruns = self.overruns.windowed_count();
         if overruns >= REC_OVERRUN_RESPAWN_THRESHOLD {

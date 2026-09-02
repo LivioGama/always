@@ -204,6 +204,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.stateMonitor = monitor
             StatusOverlayController.shared.prewarm()
             AudioOutputMonitor.shared.start(stateMonitor: monitor)
+            AudioInputMonitor.shared.start(stateMonitor: monitor)
             FocusedAppMonitor.shared.start(stateMonitor: monitor)
         }
 
