@@ -36,6 +36,7 @@
 //! discontinuity is poisoned, and [`LiveStream::finish`] would return a
 //! transcript that does not match the audio the rest of the pipeline holds.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, sync_channel};
@@ -51,6 +52,16 @@ use crate::stt::Transcriber;
 /// one-shot path instead of accumulating unbounded audio.
 const MAX_QUEUE_LAG_CHUNKS: usize = 16;
 
+/// How many per-chunk transcript snapshots to retain for [`LiveStream::transcript_through`].
+///
+/// A speaker-gate tail cut re-bases the buffer backwards by the gate's own
+/// pause tolerance — measured at 1.02 s median and 2.46 s worst over 524 real
+/// cuts, i.e. under five 560 ms chunks. 32 covers ~18 s of rollback, which is
+/// far past anything the gate can ask for, and costs one cumulative transcript
+/// string per chunk. A cut deeper than this returns `None` and the caller
+/// falls back to its one-shot decode, exactly as before.
+const TRUNCATION_HISTORY_CHUNKS: usize = 32;
+
 /// Upper bound on the finalization wait. The flush is one encoder window
 /// (~54 ms measured) plus whatever is still queued; 5 s is "the worker is
 /// wedged", not "the worker is slow".
@@ -60,6 +71,10 @@ enum Msg {
     Chunk {
         generation: u64,
         samples: Vec<f32>,
+        /// Caller's `fed` count AFTER this chunk — the sample offset this
+        /// chunk's cumulative transcript describes. Recorded so a later
+        /// truncation can roll the transcript back to a chunk boundary.
+        fed_after: usize,
     },
     /// Drop the current decode state. Channel order already guarantees this
     /// lands between the two segments' chunks, so it carries no generation.
@@ -77,6 +92,11 @@ struct Shared {
     /// a straggler write from a discarded segment can never be read as
     /// current. Mirrors the `SpeculationSlot` generation trick in `vad.rs`.
     transcript: Mutex<(u64, String)>,
+    /// Bounded trail of `(generation, fed_after, cumulative transcript)`, one
+    /// entry per decoded chunk. Lets a caller that truncates its audio buffer
+    /// recover the transcript as it stood at a chunk boundary at or before the
+    /// cut, instead of throwing the whole session away.
+    history: Mutex<VecDeque<(u64, usize, String)>>,
     queued: AtomicUsize,
     processed: AtomicUsize,
     /// Latched on the first decode error: the session is unusable from then
@@ -173,6 +193,7 @@ impl LiveStream {
                 .send(Msg::Chunk {
                     generation: self.generation,
                     samples,
+                    fed_after: self.fed,
                 })
                 .is_err()
             {
@@ -200,7 +221,45 @@ impl LiveStream {
     pub fn reset(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.fed = 0;
+        self.shared.history.lock().clear();
         let _ = self.tx.send(Msg::Reset);
+    }
+
+    /// The cumulative transcript as it stood after the last chunk that ended
+    /// at or before `samples`, for the CURRENT segment.
+    ///
+    /// # Why this exists
+    ///
+    /// The speaker gate can truncate the caller's audio buffer mid-utterance
+    /// (`speaker_gate_tail_cut`, `speaker_gate_chunk_refuted`). The session has
+    /// already decoded past the cut, so it cannot keep streaming — but the
+    /// audio *before* the cut was decoded correctly, and that prefix transcript
+    /// is still exactly right. Recovering it turns a tail cut from "re-decode
+    /// the whole utterance from scratch" (measured 7.3-40.0 s on real
+    /// utterances) into a lock and a clone.
+    ///
+    /// Rolling back to a chunk BOUNDARY is what makes this safe rather than a
+    /// guess: the returned transcript describes only audio ending at or before
+    /// the cut, so no rejected trailing audio can reach the output. The cost is
+    /// that up to one 560 ms chunk of *confirmed* speech before the cut is
+    /// dropped along with it — the same direction of error the gate itself
+    /// already chose, and the gate cuts at a 500 ms cadence anyway.
+    ///
+    /// `None` when the session is degraded, when nothing was decoded, or when
+    /// the cut reaches back further than the retained history — all of which
+    /// leave the caller on its unchanged one-shot path.
+    pub fn transcript_through(&self, samples: usize) -> Option<String> {
+        if self.shared.failed.load(Ordering::Relaxed) {
+            return None;
+        }
+        let history = self.shared.history.lock();
+        history
+            .iter()
+            .rev()
+            .find(|(generation, fed_after, text)| {
+                *generation == self.generation && *fed_after <= samples && !text.is_empty()
+            })
+            .map(|(_, _, text)| text.clone())
     }
 
     /// Feed `tail` (the un-fed remainder of the segment), flush the decoder,
@@ -232,6 +291,7 @@ impl LiveStream {
                 .send(Msg::Chunk {
                     generation: self.generation,
                     samples,
+                    fed_after: self.fed,
                 })
                 .is_err()
             {
@@ -292,12 +352,20 @@ fn run_worker(
             Msg::Chunk {
                 generation,
                 samples,
+                fed_after,
             } => {
                 let Some(s) = ensure_session(&mut session, &transcriber, &shared) else {
                     continue;
                 };
                 match s.push_chunk(&samples) {
                     Ok(text) => {
+                        {
+                            let mut history = shared.history.lock();
+                            if history.len() == TRUNCATION_HISTORY_CHUNKS {
+                                history.pop_front();
+                            }
+                            history.push_back((generation, fed_after, text.clone()));
+                        }
                         let mut guard = shared.transcript.lock();
                         *guard = (generation, text);
                     }
@@ -471,6 +539,39 @@ mod tests {
         s.feed(&vec![1i16; CHUNK * 5 / 2]);
         assert_eq!(s.fed(), CHUNK * 2);
         assert_eq!(fed.lock().len(), 2);
+    }
+
+    /// The speaker-gate rescue path: a truncation must be answerable from the
+    /// chunk history WITHOUT a re-decode, and must never hand back a
+    /// transcript that describes audio past the cut.
+    #[test]
+    fn transcript_through_rolls_back_to_the_chunk_boundary_at_or_before_a_cut() {
+        let (t, fed) = streaming_transcriber();
+        let mut s = LiveStream::start(&t).unwrap();
+        s.feed(&vec![1i16; CHUNK * 3]);
+        assert!(wait_for(|| fed.lock().len() == 3));
+
+        // Exactly on a boundary: everything decoded up to it.
+        assert_eq!(s.transcript_through(CHUNK * 3).as_deref(), Some("w0 w1 w2"));
+        // A cut one sample before the third boundary must NOT include w2 —
+        // that chunk covers audio the gate rejected.
+        assert_eq!(
+            s.transcript_through(CHUNK * 3 - 1).as_deref(),
+            Some("w0 w1")
+        );
+        // A cut mid-second-chunk falls back to the first boundary.
+        assert_eq!(s.transcript_through(CHUNK + 1).as_deref(), Some("w0"));
+        // A cut before any boundary has nothing to offer — caller re-decodes.
+        assert_eq!(s.transcript_through(CHUNK - 1), None);
+        // A cut past the end still cannot invent audio.
+        assert_eq!(
+            s.transcript_through(usize::MAX).as_deref(),
+            Some("w0 w1 w2")
+        );
+
+        // A re-based segment must never answer with the old one's text.
+        s.reset();
+        assert_eq!(s.transcript_through(CHUNK * 3), None);
     }
 
     #[test]

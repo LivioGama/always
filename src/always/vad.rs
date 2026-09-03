@@ -1285,6 +1285,11 @@ fn record_with_local_vad(
     // no longer matches `speech_samples` and finalization must fall back to a
     // one-shot decode of the truncated buffer.
     let mut live_invalidated = false;
+    // Transcript rescued from the live session when the speaker gate re-bases
+    // the buffer. `Some` means "the session cannot keep streaming, but this
+    // prefix is a correct final for the truncated audio" — see
+    // `LiveStream::transcript_through`.
+    let mut live_truncated_transcript: Option<String> = None;
     // Throttle + budget for the re-open attempt below.
     let mut live_start_retry_at: Option<std::time::Instant> = None;
     let mut live_reopens: u32 = 0;
@@ -1836,11 +1841,21 @@ fn record_with_local_vad(
                                     "speaker_gate_tail_cut"
                                 );
                                 speech_samples.truncate(confirmed_user_len);
-                                // The session already decoded the audio we
-                                // just cut off; its transcript no longer
-                                // describes `speech_samples`. Fall back to a
-                                // one-shot decode of the truncated buffer —
-                                // correctness beats the ~50 ms.
+                                // The session already decoded past the cut, so it cannot keep
+                                // streaming this segment. Its transcript as of the last chunk
+                                // boundary at or before the cut is still exactly right, though,
+                                // and describes only audio the gate confirmed — take that rather
+                                // than re-decode the whole utterance from scratch.
+                                //
+                                // The "~50 ms" this comment used to weigh against correctness was
+                                // the cost of the LIVE path, not of the one-shot path that
+                                // replaces it. Measured over the eight real utterances of
+                                // 2026-09-02: live finalization 0.15-0.23 s, from-scratch
+                                // fallback 7.30 / 9.05 / 12.65 / 40.01 s — to avoid a median
+                                // 1.02 s of rejected tail.
+                                live_truncated_transcript = live_stream
+                                    .as_ref()
+                                    .and_then(|live| live.transcript_through(confirmed_user_len));
                                 live_invalidated = true;
                                 break;
                             }
@@ -1992,11 +2007,21 @@ fn record_with_local_vad(
                             "speaker_gate_chunk_refuted"
                         );
                         speech_samples.truncate(confirmed_user_len);
-                        // The session already decoded the audio we
-                        // just cut off; its transcript no longer
-                        // describes `speech_samples`. Fall back to a
-                        // one-shot decode of the truncated buffer —
-                        // correctness beats the ~50 ms.
+                        // The session already decoded past the cut, so it cannot keep
+                        // streaming this segment. Its transcript as of the last chunk
+                        // boundary at or before the cut is still exactly right, though,
+                        // and describes only audio the gate confirmed — take that rather
+                        // than re-decode the whole utterance from scratch.
+                        //
+                        // The "~50 ms" this comment used to weigh against correctness was
+                        // the cost of the LIVE path, not of the one-shot path that
+                        // replaces it. Measured over the eight real utterances of
+                        // 2026-09-02: live finalization 0.15-0.23 s, from-scratch
+                        // fallback 7.30 / 9.05 / 12.65 / 40.01 s — to avoid a median
+                        // 1.02 s of rejected tail.
+                        live_truncated_transcript = live_stream
+                            .as_ref()
+                            .and_then(|live| live.transcript_through(confirmed_user_len));
                         live_invalidated = true;
                         break;
                     }
@@ -2125,11 +2150,21 @@ fn record_with_local_vad(
                         "speaker_gate_chunk_refuted"
                     );
                     speech_samples.truncate(confirmed_user_len);
-                    // The session already decoded the audio we
-                    // just cut off; its transcript no longer
-                    // describes `speech_samples`. Fall back to a
-                    // one-shot decode of the truncated buffer —
-                    // correctness beats the ~50 ms.
+                    // The session already decoded past the cut, so it cannot keep
+                    // streaming this segment. Its transcript as of the last chunk
+                    // boundary at or before the cut is still exactly right, though,
+                    // and describes only audio the gate confirmed — take that rather
+                    // than re-decode the whole utterance from scratch.
+                    //
+                    // The "~50 ms" this comment used to weigh against correctness was
+                    // the cost of the LIVE path, not of the one-shot path that
+                    // replaces it. Measured over the eight real utterances of
+                    // 2026-09-02: live finalization 0.15-0.23 s, from-scratch
+                    // fallback 7.30 / 9.05 / 12.65 / 40.01 s — to avoid a median
+                    // 1.02 s of rejected tail.
+                    live_truncated_transcript = live_stream
+                        .as_ref()
+                        .and_then(|live| live.transcript_through(confirmed_user_len));
                     live_invalidated = true;
                     break;
                 }
@@ -2974,7 +3009,19 @@ fn record_with_local_vad(
         "live_final_state"
     );
     let live_final = if live_invalidated {
-        None
+        // A speaker-gate truncation. Not a dead end any more: the session's
+        // transcript at the last chunk boundary at or before the cut is a
+        // correct final for the audio that survived, and costs a clone
+        // instead of a full re-decode. `None` here (deep cut, degraded
+        // session, nothing decoded yet) still falls through unchanged.
+        let rescued = live_truncated_transcript.take();
+        tracing::info!(
+            rescued = rescued.is_some(),
+            chars = rescued.as_ref().map_or(0, |t| t.chars().count()),
+            kept_secs = speech_samples.len() as f64 / 16_000.0,
+            "live_truncation_rollback"
+        );
+        rescued.filter(|t| !t.trim().is_empty())
     } else if let Some(live) = live_stream.as_mut() {
         let started_finish = std::time::Instant::now();
         let out = live.finish(&speech_samples, crate::always::live_stream::FINISH_TIMEOUT);
