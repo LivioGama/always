@@ -38,7 +38,7 @@ struct Always: App {
         Window("Welcome to Always", id: "onboarding") {
             OnboardingView()
         }
-        .defaultSize(width: 500, height: 400)
+        .defaultSize(width: 580, height: 640)
 
         // Known-good menu-bar lineage: SwiftUI owns the status item so the
         // system positions it in the real menu bar. A manual NSStatusItem
@@ -96,7 +96,7 @@ class OnboardingState: ObservableObject {
         }
         Task {
             let config = try? await CLIService().getConfig()
-            let hasAPIKey = !(config?.groqApiKey?.isEmpty ?? true)
+            let hasAPIKey = config?.groqKeySaved ?? false
             let hasVoiceProfile = UserDefaults.standard.bool(
                 forKey: "voiceEnrollmentIsEnrolled"
             )
@@ -115,6 +115,16 @@ class OnboardingState: ObservableObject {
                 self.openOnboardingWindow()
             }
         }
+    }
+
+    /// Force the onboarding tutorial to show, bypassing the pre-existing
+    /// install check. Used for testing or when the user explicitly wants
+    /// to re-watch the tutorial.
+    @MainActor
+    func forceOnboarding() {
+        OnboardingCompletion.reset()
+        showOnboarding = true
+        openOnboardingWindow()
     }
 
     @MainActor
@@ -175,10 +185,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         cliService = CLIService()
         NSLog("Always: MenuBarExtra installed")
 
+        // Close the Settings window if it auto-opened on launch. The
+        // app should start in the background (menu bar only); Settings
+        // opens on explicit user action (Dock click, menu bar item).
+        DispatchQueue.main.async {
+            if let settingsWindow = NSApp.windows.first(where: {
+                $0.title == "Always Settings" || $0.identifier?.rawValue == "settings"
+            }) {
+                settingsWindow.orderOut(nil)
+            }
+        }
+
         // Onboarding gating: if no saved Groq API key exists, the state
         // object opens the onboarding window itself once the async key
         // check resolves (see OnboardingState.checkAndShowOnboardingIfNeeded).
-        onboardingState?.checkAndShowOnboardingIfNeeded()
+        // A `forceOnboarding` UserDefaults flag bypasses the pre-existing
+        // install check for explicit re-triggering.
+        if UserDefaults.standard.bool(forKey: "forceOnboarding") {
+            UserDefaults.standard.set(false, forKey: "forceOnboarding")
+            UserDefaults.standard.synchronize()
+            onboardingState?.forceOnboarding()
+        } else {
+            onboardingState?.checkAndShowOnboardingIfNeeded()
+        }
 
         // Permission flow lives in `PermissionsManager`. It seeds the
         // current status (silent — no prompts) and triggers the system
