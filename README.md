@@ -4,11 +4,10 @@
 
 ### **Speak. It types. Anywhere.**
 
-The always-on dictation app for macOS. No push-to-talk, no window to open — just talk.
+The always-on dictation app. No push-to-talk, no window to open — just talk.
 
 [![Release](https://img.shields.io/github/v/release/LivioGama/always)](https://github.com/LivioGama/always/releases/latest)
 [![License](https://img.shields.io/github/license/LivioGama/always)](LICENSE)
-[![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)](#)
 
 </div>
 
@@ -16,7 +15,7 @@ The always-on dictation app for macOS. No push-to-talk, no window to open — ju
 
 ## ✨ What It Is
 
-You speak. Your words appear at your cursor — in any app, any text field, anywhere on macOS. There's nothing to press, nothing to click, nothing to remember. Always lives in your menu bar, listens to your voice, and types what you say.
+You speak. Your words appear at your cursor — in any app, any text field, anywhere. There's nothing to press, nothing to click, nothing to remember. Always lives in your menu bar, listens to your voice, and types what you say.
 
 But Always is more than a speech-to-text tool — it's a philosophy. The idea is that your hands should be free. That speaking should be as natural as thinking, and that the technology should disappear so completely you forget it's there. It's hard to explain in words. You have to try it to understand — and once you do, you get used to it faster than you'd expect.
 
