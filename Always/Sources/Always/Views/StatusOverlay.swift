@@ -783,8 +783,18 @@ class StatusOverlayWindow: NSPanel {
     }
 
     func show(state: OverlayState, instant: Bool = false) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
+        if Thread.isMainThread {
+            showOnMain(state: state, instant: instant)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.showOnMain(state: state, instant: instant)
+            }
+        }
+    }
+
+    /// Apply immediately when already on the main thread. StateMonitor receives
+    /// daemon events on main, so another async hop only adds trigger latency.
+    private func showOnMain(state: OverlayState, instant: Bool) {
             if case .voiceActivity = state { overlayTimingLog("show-main") }
 
             // Create overlay view if needed (or rebuild on mode change).
@@ -836,7 +846,6 @@ class StatusOverlayWindow: NSPanel {
                     self.animator().alphaValue = 1.0
                 })
             }
-        }
     }
 
     func hide() {

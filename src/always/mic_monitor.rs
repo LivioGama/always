@@ -139,6 +139,46 @@ mod coreaudio_probe {
         fn CFRelease(cf: *const c_void);
     }
 
+    #[link(name = "CoreServices", kind = "framework")]
+    unsafe extern "C" {
+        // LaunchServices: resolve a bundle id to the installed .app URL.
+        fn LSCopyApplicationURLsForBundleIdentifier(
+            bundle_id: *const c_void, // CFString
+            error: *mut *mut c_void,   // CFErrorRef *
+        ) -> *const c_void; // CFArrayRef
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFArrayGetCount(array: *const c_void) -> isize;
+        fn CFArrayGetValueAtIndex(array: *const c_void, idx: isize) -> *const c_void;
+        fn CFURLGetFileSystemRepresentation(
+            url: *const c_void,
+            resolve_against_base: u8,
+            buffer: *mut u8,
+            max_buf_len: isize,
+        ) -> u8;
+        fn CFStringCreateWithCString(
+            alloc: *const c_void,
+            c_str: *const u8,
+            encoding: u32,
+        ) -> *const c_void;
+        fn CFBundleCreate(
+            alloc: *const c_void,
+            bundle_url: *const c_void,
+        ) -> *const c_void;
+        fn CFBundleGetValueForInfoDictionaryKey(
+            bundle: *const c_void,
+            key: *const c_void, // CFString
+        ) -> *const c_void;
+        fn CFURLCreateFromFileSystemRepresentation(
+            alloc: *const c_void,
+            buffer: *const u8,
+            size: isize,
+            is_directory: u8,
+        ) -> *const c_void;
+    }
+
     unsafe extern "C" {
         // libproc (part of libSystem — no extra link needed).
         fn proc_pidpath(pid: i32, buffer: *mut u8, buffer_size: u32) -> i32;
@@ -153,6 +193,13 @@ mod coreaudio_probe {
         "com.apple.siriactionsd",
         "com.apple.SiriNCService",
     ];
+
+    /// macOS Settings extensions that open a capture stream only to drive
+    /// an input-level meter, not to record. The Sound extension in
+    /// particular can outlive the visible System Settings window and keep
+    /// the stream open, which would permanently pause Always if treated as
+    /// a real conflict.
+    const METERING_ONLY_BUNDLES: &[&str] = &["com.apple.Sound-Settings.extension"];
 
     /// Our own capture chain: the daemon (`always` / `always-daemon`)
     /// records through a spawned `rec`/`sox` child, and coreaudiod is
@@ -246,6 +293,126 @@ mod coreaudio_probe {
         path.rsplit('/').next().map(str::to_string)
     }
 
+    /// Resolve a bundle id to a human-readable display name via
+    /// LaunchServices + the app's Info.plist. Falls back to the last
+    /// path component of the bundle id if resolution fails.
+    fn bundle_display_name(bundle_id: &str) -> String {
+        let display = resolve_bundle_display_name(bundle_id);
+        display.unwrap_or_else(|| {
+            // "com.superduper.superwhisper" → "superwhisper"
+            bundle_id
+                .rsplit('.')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(bundle_id)
+                .to_string()
+        })
+    }
+
+    fn resolve_bundle_display_name(bundle_id: &str) -> Option<String> {
+        unsafe {
+            let cf_bundle_id = CFStringCreateWithCString(
+                std::ptr::null(),
+                bundle_id.as_ptr(),
+                CF_STRING_ENCODING_UTF8,
+            );
+            if cf_bundle_id.is_null() {
+                return None;
+            }
+            let mut error: *mut c_void = std::ptr::null_mut();
+            let urls = LSCopyApplicationURLsForBundleIdentifier(cf_bundle_id, &raw mut error);
+            CFRelease(cf_bundle_id);
+            if !error.is_null() {
+                CFRelease(error);
+            }
+            if urls.is_null() {
+                return None;
+            }
+            let count = CFArrayGetCount(urls);
+            if count == 0 {
+                CFRelease(urls);
+                return None;
+            }
+            let url = CFArrayGetValueAtIndex(urls, 0);
+            if url.is_null() {
+                CFRelease(urls);
+                return None;
+            }
+            let mut path_buf = [0u8; 4096];
+            let ok = CFURLGetFileSystemRepresentation(url, 1, path_buf.as_mut_ptr(), path_buf.len() as isize);
+            CFRelease(urls);
+            if ok == 0 {
+                return None;
+            }
+            let path_end = path_buf.iter().position(|&b| b == 0).unwrap_or(path_buf.len());
+            let app_url = String::from_utf8_lossy(&path_buf[..path_end]).into_owned();
+
+            // Create a CFBundle from the .app URL and read the display
+            // name from its Info.plist.
+            let cf_url = create_cf_url_from_path(&app_url)?;
+            let bundle = CFBundleCreate(std::ptr::null(), cf_url);
+            if bundle.is_null() {
+                CFRelease(cf_url);
+                return None;
+            }
+            let cf_key = CFStringCreateWithCString(
+                std::ptr::null(),
+                b"CFBundleDisplayName\0".as_ptr(),
+                CF_STRING_ENCODING_UTF8,
+            );
+            let mut value = CFBundleGetValueForInfoDictionaryKey(bundle, cf_key);
+            CFRelease(cf_key);
+            // Fall back to CFBundleName if CFBundleDisplayName is absent.
+            if value.is_null() {
+                let cf_key2 = CFStringCreateWithCString(
+                    std::ptr::null(),
+                    b"CFBundleName\0".as_ptr(),
+                    CF_STRING_ENCODING_UTF8,
+                );
+                value = CFBundleGetValueForInfoDictionaryKey(bundle, cf_key2);
+                CFRelease(cf_key2);
+            }
+            let result = if !value.is_null() {
+                cf_string_to_string(value)
+            } else {
+                None
+            };
+            CFRelease(bundle);
+            CFRelease(cf_url);
+            result
+        }
+    }
+
+    /// Wrap a POSIX path in a CFURLRef (file URL).
+    unsafe fn create_cf_url_from_path(path: &str) -> Option<*const c_void> {
+        let url = unsafe {
+            CFURLCreateFromFileSystemRepresentation(
+                std::ptr::null(),
+                path.as_ptr(),
+                path.len() as isize,
+                1, // .app is a directory
+            )
+        };
+        if url.is_null() {
+            None
+        } else {
+            Some(url)
+        }
+    }
+
+    unsafe fn cf_string_to_string(cf: *const c_void) -> Option<String> {
+        let mut buf = [0u8; 512];
+        let ok = unsafe {
+            CFStringGetCString(cf, buf.as_mut_ptr(), buf.len() as isize, CF_STRING_ENCODING_UTF8)
+        };
+        if ok == 0 {
+            return None;
+        }
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        let s = String::from_utf8_lossy(&buf[..end]).into_owned();
+        (!s.is_empty()).then_some(s)
+    }
+
     /// Human-facing labels of processes other than Always (and always-on
     /// system listeners) that are running audio input right now. Empty =
     /// no call / no foreign capture in progress.
@@ -293,13 +460,20 @@ mod coreaudio_probe {
             }
             let bundle = get_bundle_id(object);
             if let Some(b) = &bundle
-                && SYSTEM_LISTENER_BUNDLES
+                && (SYSTEM_LISTENER_BUNDLES
                     .iter()
                     .any(|s| s.eq_ignore_ascii_case(b))
+                    || METERING_ONLY_BUNDLES
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case(b)))
             {
                 continue;
             }
-            let label = bundle.or(basename).unwrap_or_else(|| format!("pid {pid}"));
+            let label = if let Some(b) = &bundle {
+                bundle_display_name(b)
+            } else {
+                basename.unwrap_or_else(|| format!("pid {pid}"))
+            };
             if !captors.contains(&label) {
                 captors.push(label);
             }
@@ -332,6 +506,12 @@ mod coreaudio_probe {
                         .iter()
                         .any(|s| s.eq_ignore_ascii_case(label)),
                     "system listener leaked into captors: {label}"
+                );
+                assert!(
+                    !METERING_ONLY_BUNDLES
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case(label)),
+                    "metering-only bundle leaked into captors: {label}"
                 );
             }
         }

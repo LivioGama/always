@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use serde_json::Value;
 
-use super::config::PostprocessConfig;
+use super::config::{PostprocessConfig, PostprocessProvider};
 
 /// Maximum number of cached (input → corrected) entries before we
 /// evict the oldest. Each entry is bounded by the LLM's max_tokens
@@ -55,10 +55,19 @@ impl PostProcessor {
     }
 
     /// True when a grammar call will actually reach the LLM (feature on
-    /// AND an API key configured). Drives glossary tiering: fuzzy
+    /// AND a provider is available). Drives glossary tiering: fuzzy
     /// matches defer to the LLM only when the LLM will really run.
     pub fn can_correct(&self) -> bool {
-        self.config.grammar_correction_enabled && self.groq_api_key.is_some()
+        if !self.config.grammar_correction_enabled {
+            return false;
+        }
+        match self.config.provider {
+            PostprocessProvider::Groq => self.groq_api_key.is_some(),
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            PostprocessProvider::Apple => super::apple_intelligence::check_availability(),
+            #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+            PostprocessProvider::Apple => false,
+        }
     }
 
     /// Single optional cleanup pass.
@@ -117,17 +126,29 @@ impl PostProcessor {
         if !self.config.grammar_correction_enabled {
             return Ok((transcript.to_string(), false));
         }
-        let Some(ref api_key) = self.groq_api_key else {
-            return Ok((transcript.to_string(), false));
-        };
         let cache_hit = self.cache.lock().contains_key(user_message);
-        let corrected = self
-            .correct_grammar(user_message, transcript, api_key, context)
-            .await?;
+        let corrected = match self.config.provider {
+            PostprocessProvider::Groq => {
+                let Some(ref api_key) = self.groq_api_key else {
+                    return Ok((transcript.to_string(), false));
+                };
+                self.correct_grammar_groq(user_message, transcript, api_key, context)
+                    .await?
+            }
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            PostprocessProvider::Apple => {
+                self.correct_grammar_apple(user_message, transcript, context)
+                    .await?
+            }
+            #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+            PostprocessProvider::Apple => {
+                return Ok((transcript.to_string(), false));
+            }
+        };
         Ok((corrected, cache_hit))
     }
 
-    async fn correct_grammar(
+    async fn correct_grammar_groq(
         &self,
         user_message: &str,
         transcript: &str,
@@ -161,8 +182,87 @@ impl PostProcessor {
         outcome
     }
 
+    /// Apple Intelligence correction path — same caching/single-flight
+    /// pattern as Groq, but the actual LLM call goes through the
+    /// Swift bridge (`apple_intelligence::process_text_with_system_prompt`).
+    /// The Swift call is blocking, so we wrap it in
+    /// `spawn_blocking` to avoid stalling the async runtime.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    async fn correct_grammar_apple(
+        &self,
+        user_message: &str,
+        transcript: &str,
+        context: Option<&str>,
+    ) -> Result<String> {
+        // Check cache first.
+        if let Some(cached) = self.cache.lock().get(user_message) {
+            tracing::debug!(stage = "grammar_correction", "apple grammar cache hit");
+            return Ok(cached.clone());
+        }
+
+        // Single-flight.
+        let cell = {
+            let mut inflight = self.inflight.lock();
+            Arc::clone(
+                inflight
+                    .entry(user_message.to_string())
+                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+            )
+        };
+        let outcome = cell
+            .get_or_try_init(|| self.fetch_correction_apple(user_message, transcript, context))
+            .await
+            .cloned();
+        self.inflight.lock().remove(user_message);
+        outcome
+    }
+
+    /// The actual Apple Intelligence round-trip + response sanitation + cache insert.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    async fn fetch_correction_apple(
+        &self,
+        user_message: &str,
+        transcript: &str,
+        context: Option<&str>,
+    ) -> Result<String> {
+        let started = std::time::Instant::now();
+        let system_prompt = crate::glossary::postprocess_system_prompt();
+        let user_msg = user_message.to_string();
+
+        // The Swift bridge is blocking — run on a blocking thread.
+        let result = tokio::task::spawn_blocking(move || {
+            super::apple_intelligence::process_text_with_system_prompt(
+                &system_prompt,
+                &user_msg,
+                500,
+            )
+        })
+        .await
+        .context("Apple Intelligence task panicked")?;
+
+        let raw_corrected = result
+            .map_err(|e| anyhow::anyhow!("Apple Intelligence call failed: {e}"))?;
+        let corrected = sanitize_corrected_text(transcript, &raw_corrected)
+            .filter(|cleaned| {
+                let echoed = context.is_some_and(|ctx| echoes_context(ctx, cleaned));
+                if echoed {
+                    tracing::warn!(stage = "grammar_correction", "rejected context echo (apple)");
+                }
+                !echoed
+            })
+            .unwrap_or_else(|| transcript.trim().to_string());
+
+        tracing::info!(
+            grammar_api_ms = started.elapsed().as_millis() as u64,
+            provider = "apple",
+            "grammar_api_call"
+        );
+        self.insert_cached(user_message.to_string(), corrected.clone());
+        Ok(corrected)
+    }
+
     /// The actual Groq round-trip + response sanitation + cache insert.
-    /// Only ever reached via the single-flight cell in `correct_grammar`.
+    /// Only ever reached via the single-flight cell in `correct_grammar_groq`.
     async fn fetch_correction(
         &self,
         user_message: &str,
@@ -287,6 +387,14 @@ fn sanitize_corrected_text(input: &str, output: &str) -> Option<String> {
         return None;
     }
 
+    // Correction models sometimes append conversational filler to an otherwise
+    // valid transcript. Treat that as a failed correction so the caller falls
+    // back to the words the user actually spoke. Do not strip it from the
+    // acoustic input: "thanks" can be intentional dictation.
+    if has_appended_gratitude(input, cleaned) {
+        return None;
+    }
+
     let input_words = word_count(input);
     let output_words = word_count(cleaned);
     if input_words > 0 {
@@ -299,6 +407,34 @@ fn sanitize_corrected_text(input: &str, output: &str) -> Option<String> {
     }
 
     Some(cleaned.to_string())
+}
+
+fn has_appended_gratitude(input: &str, output: &str) -> bool {
+    let input_words = normalized_words(input);
+    let output_words = normalized_words(output);
+    [
+        &["thank", "you"][..],
+        &["thanks"][..],
+        &["thanks", "a", "lot"][..],
+        &["thank", "you", "very", "much"][..],
+    ]
+    .iter()
+    .any(|suffix| ends_with_words(&output_words, suffix) && !ends_with_words(&input_words, suffix))
+}
+
+fn normalized_words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_ascii_lowercase())
+        .collect()
+}
+
+fn ends_with_words(words: &[String], suffix: &[&str]) -> bool {
+    words.len() >= suffix.len()
+        && words[words.len() - suffix.len()..]
+            .iter()
+            .zip(suffix)
+            .all(|(word, expected)| word == expected)
 }
 
 fn extract_tagged<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
@@ -454,6 +590,27 @@ mod tests {
             "Sure, the issue is probably caused by your microphone, and here are several steps you can try.",
         );
         assert!(out.is_none());
+    }
+
+    #[test]
+    fn sanitize_corrected_text_rejects_model_appended_gratitude() {
+        assert!(
+            sanitize_corrected_text("Send the report.", "Send the report. Thank you.").is_none()
+        );
+        assert!(sanitize_corrected_text("Run the tests", "Run the tests. Thanks a lot.").is_none());
+    }
+
+    #[test]
+    fn sanitize_corrected_text_preserves_spoken_gratitude() {
+        assert_eq!(
+            sanitize_corrected_text("Send the report, thank you.", "Send the report, thank you.")
+                .as_deref(),
+            Some("Send the report, thank you.")
+        );
+        assert_eq!(
+            sanitize_corrected_text("Thanks", "Thanks").as_deref(),
+            Some("Thanks")
+        );
     }
 
     #[test]

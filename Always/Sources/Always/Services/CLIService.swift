@@ -117,6 +117,10 @@ class CLIService: ObservableObject {
         try await runCLI(arguments: ["config", "set", key, value])
     }
 
+    func deleteConfig(key: String) async throws -> String {
+        try await runCLI(arguments: ["config", "delete-key", key])
+    }
+
     func togglePause() async throws -> String {
         try await runCLI(arguments: ["toggle-pause"])
     }

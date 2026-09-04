@@ -367,8 +367,16 @@ class StateMonitor: ObservableObject {
             $partialTranscript.map { _ in () }.eraseToAnyPublisher(),
         ]
         Publishers.MergeMany(inputs)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.updateOverlay() }
+            .sink { [weak self] _ in
+                guard let self else { return }
+                if Thread.isMainThread {
+                    self.updateOverlay()
+                } else {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.updateOverlay()
+                    }
+                }
+            }
             .store(in: &cancellables)
 
         // Subscribe to ModelManagerClient to track streaming support

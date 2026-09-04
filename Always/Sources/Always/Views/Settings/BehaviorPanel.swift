@@ -12,8 +12,6 @@ struct BehaviorPanel: View {
                 Divider()
                 autoEnterSection
                 Divider()
-                postprocessSection
-                Divider()
                 idleAutoPauseSection
             }
             .padding(20)
@@ -41,6 +39,10 @@ struct BehaviorPanel: View {
                 .frame(width: 280)
             }
 
+            if currentPreset == nil {
+                customSensitivityHint
+            }
+
             HStack {
                 Text("Pause Tolerance")
                     .font(.body)
@@ -60,6 +62,11 @@ struct BehaviorPanel: View {
                 .labelsHidden()
                 .frame(width: 280)
             }
+
+            if currentPauseTolerance == nil {
+                customPauseToleranceHint
+            }
+
             Toggle(
                 "Extend automatically when a sentence sounds unfinished",
                 isOn: $config.sttAdaptiveSilence
@@ -78,56 +85,120 @@ struct BehaviorPanel: View {
             .font(.caption)
 
             DisclosureGroup("Advanced thresholds") {
-                VStack(alignment: .leading, spacing: 8) {
-                    NumericSettingRow(
-                        title: "STT Energy Threshold",
-                        help: "Lower = more sensitive to quiet speech",
-                        formatter: SettingsWindow.energyFormatter,
-                        value: $config.sttEnergyThreshold,
-                        defaultValue: 0.012,
-                        range: 0.0001...0.5
-                    )
-                    NumericSettingRow(
-                        title: "Hear Energy Threshold",
-                        help: "Lower = picks up quieter background voice",
-                        formatter: SettingsWindow.energyFormatter,
-                        value: $config.hearEnergyThreshold,
-                        defaultValue: 0.001,
-                        range: 0.0001...0.5
-                    )
-                    NumericSettingRow(
-                        title: "Silence Timeout",
-                        help: "Seconds of silence before utterance ends",
-                        unit: "s",
-                        formatter: SettingsWindow.secondsFormatter,
-                        value: $config.sttSilence,
-                        defaultValue: 0.9,
-                        range: 0.3...15
-                    )
-                    NumericSettingRow(
-                        title: "Cooldown",
-                        help: "Min seconds between consecutive pastes",
-                        unit: "s",
-                        formatter: SettingsWindow.cooldownSecondsFormatter,
-                        value: Binding(
-                            get: { Double(config.sttCooldownMs) / 1000.0 },
-                            set: { config.sttCooldownMs = Int(($0 * 1000).rounded()) }
-                        ),
-                        defaultValue: 0.150,
-                        range: 0...60.0
-                    )
-                    NumericSettingRow(
-                        title: "Silero VAD Threshold",
-                        help: "Higher = stricter speech detection",
-                        formatter: SettingsWindow.probabilityFormatter,
-                        value: $config.sileroThreshold,
-                        defaultValue: 0.5,
-                        range: 0...1
-                    )
-                }
-                .padding(.top, 6)
+                advancedThresholdsContent
             }
         }
+    }
+
+    // MARK: - Custom preset hints
+
+    private var customSensitivityHint: some View {
+        let hint = closestSensitivityHint()
+        return HStack(spacing: 6) {
+            Image(systemName: "wand.and.stars")
+                .font(.caption2)
+                .foregroundColor(.orange)
+            Text(hint)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .padding(.leading, 4)
+    }
+
+    private func closestSensitivityHint() -> String {
+        let stt = config.sttEnergyThreshold
+        let hear = config.hearEnergyThreshold
+        var best: SensitivityPreset = .normal
+        var bestDist = Double.infinity
+        for p in SensitivityPreset.allCases {
+            let (s, h) = p.thresholds
+            let dist = abs(s - stt) + abs(h - hear)
+            if dist < bestDist { bestDist = dist; best = p }
+        }
+        let (ps, ph) = best.thresholds
+        return "Custom — closest to \(best.label) (STT \(String(format: "%.4f", ps)), Hear \(String(format: "%.4f", ph))). Yours: STT \(String(format: "%.4f", stt)), Hear \(String(format: "%.4f", hear))."
+    }
+
+    private var customPauseToleranceHint: some View {
+        let closest = closestPauseTolerancePreset()
+        return HStack(spacing: 6) {
+            Image(systemName: "wand.and.stars")
+                .font(.caption2)
+                .foregroundColor(.orange)
+            Text(closest)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .padding(.leading, 4)
+    }
+
+    private func closestPauseTolerancePreset() -> String {
+        let val = config.sttSilence
+        var best: PauseTolerancePreset = .balanced
+        var bestDist = Double.infinity
+        for p in PauseTolerancePreset.allCases {
+            let dist = abs(p.silenceSecs - val)
+            if dist < bestDist { bestDist = dist; best = p }
+        }
+        return "Custom — closest to \(best.label) (\(String(format: "%.1f", best.silenceSecs))s). Yours: \(String(format: "%.2f", val))s."
+    }
+
+    // MARK: - Advanced thresholds
+
+    private var advancedThresholdsContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            NumericSettingRow(
+                title: "STT Energy Threshold",
+                help: "How loud your voice needs to be for Always to start transcribing. Lower = picks up quieter speech (but also more background noise). Higher = only loud, clear speech.",
+                explanation: "How loud your voice needs to be for Always to start transcribing. Think of it as the 'volume gate' — below this level, Always stays silent. Lower if you speak softly, raise it if it's transcribing background noise.",
+                formatter: SettingsWindow.energyFormatter,
+                value: $config.sttEnergyThreshold,
+                defaultValue: 0.012,
+                range: 0.0001...0.5
+            )
+            NumericSettingRow(
+                title: "Hear Energy Threshold",
+                help: "How quiet a sound can be for Always to 'hear' that someone is speaking (before deciding if it's you). Lower = more sensitive to distant/quiet voices. Higher = ignores background chatter.",
+                explanation: "A pre-check that decides 'is anyone speaking at all?' before running the full transcriber. Lower = catches quiet or distant voices. Higher = ignores background chatter and only reacts to clear, nearby speech.",
+                formatter: SettingsWindow.energyFormatter,
+                value: $config.hearEnergyThreshold,
+                defaultValue: 0.001,
+                range: 0.0001...0.5
+            )
+            NumericSettingRow(
+                title: "Silence Timeout",
+                help: "How many seconds of silence before Always finalizes what you said and pastes it. Lower = faster paste but may split sentences. Higher = waits longer so sentences stay together.",
+                explanation: "How many seconds of silence before Always finalizes what you said and pastes it. Short = snappy but may cut you off mid-sentence. Long = patient, keeps sentences together, but slower to paste.",
+                unit: "s",
+                formatter: SettingsWindow.secondsFormatter,
+                value: $config.sttSilence,
+                defaultValue: 0.9,
+                range: 0.3...15
+            )
+            NumericSettingRow(
+                title: "Cooldown",
+                help: "Minimum seconds between consecutive pastes. Prevents rapid-fire double-pastes. Lower = more responsive. Higher = more deliberate.",
+                explanation: "A safety pause between consecutive pastes so two sentences don't get mashed together. Usually leave at default. Lower = more responsive, higher = more deliberate.",
+                unit: "s",
+                formatter: SettingsWindow.cooldownSecondsFormatter,
+                value: Binding(
+                    get: { Double(config.sttCooldownMs) / 1000.0 },
+                    set: { config.sttCooldownMs = Int(($0 * 1000).rounded()) }
+                ),
+                defaultValue: 0.150,
+                range: 0...60.0
+            )
+            NumericSettingRow(
+                title: "Silero VAD Threshold",
+                help: "How confident the voice activity detector must be that it hears actual speech (not noise). 0 = always on, 1 = only crystal-clear speech. 0.5 is a good middle ground.",
+                explanation: "How confident the AI voice detector must be that it hears actual speech (not a door slam, keyboard, or fan). 0 = always on, 1 = only crystal-clear speech. 0.5 is a good middle ground. Raise it if it's transcribing background noise.",
+                formatter: SettingsWindow.probabilityFormatter,
+                value: $config.sileroThreshold,
+                defaultValue: 0.5,
+                range: 0...1
+            )
+        }
+        .padding(.top, 6)
     }
 
     private var pauseToleranceBinding: Binding<PauseTolerancePreset?> {
@@ -195,20 +266,6 @@ struct BehaviorPanel: View {
         }
     }
 
-    private var postprocessSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Postprocessing").font(.headline)
-            Toggle(
-                "Smart Postprocess (LLM grammar + glossary fixes)",
-                isOn: $config.postprocessEnabled
-            )
-            Text("Runs after each transcription. Requires a Groq API key (Advanced tab).")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
     private var idleAutoPauseSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Idle Auto-Pause").font(.headline)
@@ -228,19 +285,6 @@ struct BehaviorPanel: View {
                 defaultValue: 600,
                 range: 0...86_400
             )
-
-            HStack {
-                Text("On Idle Timeout:")
-                    .help("What happens when idle timeout occurs. 'Pause' just pauses listening. 'Pause + Mute' also mutes input audio.")
-                Picker("", selection: $config.idlePauseAction) {
-                    Text("Pause Only").tag("pause")
-                    Text("Pause + Mute").tag("pause_and_mute")
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                Spacer()
-            }
-            .padding(.top, 2)
         }
     }
 }

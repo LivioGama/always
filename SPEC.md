@@ -1,5 +1,8 @@
 # Always — Product Specification
 
+> The first speech-to-text software designed to be always on and free your hands
+> from the affordance.
+
 The behaviour Always is expected to have. Written from the code as it stands, so
 it describes what the product *does*, and — where marked — what it *must* do.
 
@@ -280,7 +283,10 @@ The master pause shortcut is configurable via Settings → Shortcuts →
 "Master Pause / Mute" or `always config set shortcut_master_pause <combo>`.
 Default: `ctrl+alt+shift+p`. Supports the Fn/Globe key as a standalone
 shortcut (`fn`) — the Fn key fires as a `flagsChanged` event on macOS,
-not `keyDown`, so a dedicated `CGEventTap` catches it alongside `rdev`.
+not `keyDown`, so a dedicated `CGEventTap` catches it (rdev's `keyDown`
+tap does not see it). All shortcut changes take effect immediately via
+the `ReloadShortcuts` UDS command — the daemon re-reads the prefs DB
+and swaps the live keyboard listener's combo set without a restart.
 | Per-app | Focused app is on the paused list | Focus moves to an allowed app |
 | Mic conflict | Another app holds the microphone | Mic free for ~3 s (§7.1) |
 | Audio output | System audio is playing | Playback stops |
@@ -289,7 +295,8 @@ not `keyDown`, so a dedicated `CGEventTap` catches it alongside `rdev`.
 
 **Rules:**
 - Any active source suppresses capture. The explicit global resume clears all of
-  them at once.
+  them at once — including the idle auto-pause, so pressing the master chord
+  after an idle timeout resumes immediately without needing a separate action.
 - On resume, audio queued by the recorder during the suppressed period is
   **discarded** (I6). The recorder never stops, so its buffer holds several
   seconds of exactly the audio Always was meant to ignore.
@@ -325,6 +332,16 @@ Another application taking the microphone is detected within about a second.
   about 3 s. Dictation apps release the mic between phrases; resuming on the
   first free moment means Always starts listening to speech still aimed at the
   other app.
+- The conflicting app is logged and surfaced to the GUI by its **display
+  name** (resolved via LaunchServices from the bundle id), not the raw bundle
+  id — e.g. "superwhisper" instead of "com.superduper.superwhisper".
+
+The following are **not** treated as conflicts even though they open an input
+stream: always-on system listeners (Siri/CoreSpeech/assistantd), and macOS
+Settings extensions that use the mic only for level-metering
+(`com.apple.Sound-Settings.extension`). The Sound extension can outlive the
+visible System Settings window and keep the stream open; without the exclusion
+it would permanently pause Always.
 
 ### 7.2 Recorder health and respawn
 
@@ -468,6 +485,133 @@ Between transcription and the keyboard:
 
 ---
 
+## 9b. Vocabulary and correction system
+
+The vocabulary-import, correction-learning, and transcript-replacement system
+combines Whisper biasing, deterministic learned corrections, context-aware
+decisions, optional LLM assistance, and safe no-LLM operation.
+
+### Data model
+
+Glossary entries in `~/.always/glossary.json`:
+
+```json
+{
+  "term": "Kubernetes",
+  "mistranscriptions": ["kubernetics", "cuber netties"],
+  "frequency": 200,
+  "weight": 1,
+  "provenance": "hotkey"
+}
+```
+
+- `term` — canonical desired spelling.
+- `mistranscriptions` — observed incorrect forms to be replaced.
+- `frequency` — usage count, incremented when the term is successfully applied.
+  Bumps are debounced (30s flush interval) to avoid disk churn.
+- `weight` — user-curated priority (default 1).
+- `provenance` — where the correction came from: `manual`, `hotkey`, `passive`,
+  `llm`, `import`. Optional for backward compatibility — existing entries
+  without this field are left unchanged.
+
+### Hot reload
+
+The glossary is loaded with modification-time-gated reloads. Writing to
+`glossary.json` (via `apply_pairs_to_glossary`, `bump_frequency`, or external
+edit) invalidates the in-memory cache, and the next access reloads from disk.
+No daemon restart is needed for new corrections to take effect.
+
+### Auto-learning toggle
+
+The `auto_learn_corrections` preference (default `true`) controls whether
+corrections captured via the ⌃⌥X hotkey and the passive clipboard watcher are
+automatically written to the glossary. When `false`, pairs are still extracted
+and surfaced (for the pending-review queue and event broadcast) but NOT
+applied — the user curates the glossary manually.
+
+Explicit user actions (approving from the review queue, typing in the
+correction dialog) always apply regardless of this toggle.
+
+### Frequency feedback loop
+
+When a glossary substitution is successfully applied to a transcript, the
+term's `frequency` is bumped. Bumps are accumulated in memory and flushed to
+disk at most every 30 seconds to avoid write churn. Frequency influences
+ordering in the Whisper bias prompt.
+
+### Ambiguous vs unambiguous classification
+
+Mistranscriptions that are also common English words (e.g. "cloud" as a
+mistranscription of "Claude") are classified as **ambiguous** via an embedded
+common-word list (`common_words.rs`). Ambiguous exact hits are NOT rewritten
+unconditionally — they become `ExactAmbiguous` substitutions and defer to the
+LLM for context arbitration.
+
+Unambiguous learned forms (e.g. "kubernetics" → "Kubernetes") are deterministic
+and apply immediately, even with an LLM available.
+
+### Confidence-tiered fuzzy matching
+
+Fuzzy matches (Soundex/Levenshtein) use three confidence bands:
+
+- **High confidence** (score < 0.10): applied automatically, even without an
+  LLM, unless the heard word is ambiguous.
+- **Marginal confidence** (score 0.10–0.18): deferred to the LLM when
+  available; skipped when no LLM is available.
+- **Ambiguous/low confidence**: the heard word is a common English word —
+  always deferred to the LLM. Without an LLM, context heuristics (Phase 4)
+  may permit application.
+
+### LLM-assisted diff extraction
+
+After the deterministic `diff_words` extraction, a background LLM "second
+opinion" runs asynchronously. It receives `(original, corrected)` and extracts
+genuine STT mishearings — not style edits or grammar fixes. New pairs are
+deduplicated against the deterministic output and written to the glossary with
+`llm` provenance.
+
+The LLM path is non-blocking: the user gets immediate feedback from
+`diff_words`, and may get additional pairs from the LLM a few seconds later.
+If no API key is configured, extraction is skipped silently.
+
+### Dedicated correction model
+
+The `correction_model` preference allows a separate Groq model for LLM-assisted
+correction extraction (e.g. a cheaper/faster model). When unset, falls back to
+the post-processing `groq_model`.
+
+### Back-correction / negative learning
+
+When a user correction reverses a previously learned mapping (e.g. the glossary
+has `cloud → Claude` and the user corrects "Claude" back to "cloud"), the bad
+mistranscription is removed from the glossary. The reverse mapping is NOT
+learned — this prevents false-positive rules from accumulating.
+
+### No-LLM context heuristics
+
+When no LLM is configured, ambiguous-term resolution uses lightweight context
+heuristics (`context_heuristics.rs`):
+
+- **Product-context verbs** ("ask", "tell", "prompt", "call") preceding the
+  ambiguous word strongly suggest the product/person meaning → apply.
+- **Ordinary-context prepositions** ("to the", "in the", "on the") or
+  **ordinary-context following nouns** ("storage", "computing") suggest the
+  ordinary meaning → skip.
+- **No strong cue** → fail safe, leave the text unchanged.
+
+Example: "ask cloud to fix it" → "ask Claude to fix it" (product context).
+Example: "deploy to the cloud" → "deploy to the cloud" (ordinary context).
+
+### Correction effectiveness metrics
+
+Atomic counters track correction pipeline decisions: exact applied/deferred,
+fuzzy applied/deferred/rejected, back-corrections, pairs written, LLM
+extraction found/empty/failed. Metrics are logged via `correction_metrics` and
+do not record transcript content — only aggregate counts and glossary term
+pairs.
+
+---
+
 ## 9a. First-run setup
 
 Shown **once**, to someone who has never been through it, and never again.
@@ -525,8 +669,9 @@ Stored in the daemon's database, editable from Settings and the CLI
 | `audible_status_sound` | off | Sound cues |
 | `per_app_settings_json` | — | Per-application pause rules |
 
-Shortcuts: pause `ctrl+alt+p` · auto-enter `ctrl+alt+a` · force paste
-`ctrl+alt+v` · log correction `ctrl+alt+x` · correction dialog `ctrl+alt+w`.
+Shortcuts: pause `ctrl+alt+p` · master pause/mute `ctrl+alt+shift+p` ·
+auto-enter `ctrl+alt+a` · force paste `ctrl+alt+v` · log correction
+`ctrl+alt+x` · correction dialog `ctrl+alt+w`.
 
 ---
 

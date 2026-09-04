@@ -41,6 +41,11 @@ pub enum SubstitutionTier {
     /// The window literally matched a user-taught mistranscription —
     /// deterministic, applied immediately.
     Exact,
+    /// The window matched a user-taught mistranscription, but the
+    /// mistranscription is also a common English word (e.g. "cloud"
+    /// as a mistranscription of "Claude"). NOT applied immediately —
+    /// deferred to the LLM for context arbitration, same as Fuzzy.
+    ExactAmbiguous,
     /// Soundex/Levenshtein similarity only. The heard word might be a
     /// perfectly good English word ("cloud", "idea") — needs sentence
     /// context to decide, which only the grammar LLM has.
@@ -64,6 +69,28 @@ pub struct Substitution {
 /// so 0.18 accepts strong typos and any phonetic match within ~60% edit
 /// distance.
 pub const DEFAULT_THRESHOLD: f64 = 0.18;
+
+/// Score below which a fuzzy match is considered high-confidence enough
+/// to apply even without an LLM. Matches scoring between
+/// `HIGH_CONFIDENCE_THRESHOLD` and `DEFAULT_THRESHOLD` are marginal —
+/// they defer to the LLM when available, and are skipped (not applied)
+/// when no LLM is available.
+const HIGH_CONFIDENCE_THRESHOLD: f64 = 0.10;
+
+/// How the caller wants fuzzy matches handled, based on LLM availability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FuzzyMode {
+    /// An LLM is available downstream. Fuzzy matches are NOT applied to
+    /// the text — they ride along as deferred candidates for the LLM to
+    /// arbitrate with sentence context.
+    LlmAvailable,
+    /// No LLM available. High-confidence fuzzy matches (score <
+    /// [`HIGH_CONFIDENCE_THRESHOLD`]) are applied directly. Marginal
+    /// matches (score between the two thresholds) are skipped — better
+    /// to leave the text unchanged than to rewrite blindly. Ambiguous-
+    /// word fuzzy matches are always skipped (fail safe).
+    NoLlm,
+}
 
 /// Maximum n-gram window size. 3 covers cases like `Charge B too` where
 /// the third token might still be relevant; longer windows risk
@@ -91,7 +118,7 @@ pub fn apply_glossary_tiered(
     text: &str,
     entries: &[GlossaryMatchEntry],
     threshold: f64,
-    apply_fuzzy: bool,
+    fuzzy_mode: FuzzyMode,
 ) -> (String, Vec<Substitution>) {
     if entries.is_empty() || text.trim().is_empty() {
         return (text.to_string(), Vec::new());
@@ -140,15 +167,57 @@ pub fn apply_glossary_tiered(
             let cased = preserve_case_pattern(window[0], &terms[idx]);
             let original_window = window.join(" ");
             let rewritten = format!("{prefix}{cased}{suffix}");
+
+            // Check if the matched mistranscription is a common English
+            // word. If so, this is an ambiguous exact hit — defer to
+            // the LLM instead of rewriting unconditionally.
+            // Strip punctuation before checking — "cloud," → "cloud".
+            let check_word: String = original_window
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == ' ')
+                .collect::<String>()
+                .to_lowercase();
+            let is_ambiguous = super::common_words::is_common_word(&check_word);
+
             if original_window.to_lowercase() != rewritten.to_lowercase() {
-                subs.push(Substitution {
-                    original: original_window,
-                    replacement: rewritten.clone(),
-                    tier: SubstitutionTier::Exact,
-                    applied: true,
-                });
+                if is_ambiguous {
+                    // Ambiguous exact hit. When an LLM is available,
+                    // defer to it. When no LLM, check context heuristics
+                    // — apply only if the surrounding sentence strongly
+                    // suggests the product/person meaning.
+                    let apply_anyway = matches!(fuzzy_mode, FuzzyMode::NoLlm)
+                        && super::context_heuristics::decide(&original_window, text)
+                            == super::context_heuristics::HeuristicDecision::Apply;
+                    if apply_anyway {
+                        subs.push(Substitution {
+                            original: original_window,
+                            replacement: rewritten.clone(),
+                            tier: SubstitutionTier::Exact,
+                            applied: true,
+                        });
+                        result.push(rewritten);
+                    } else {
+                        subs.push(Substitution {
+                            original: original_window.clone(),
+                            replacement: rewritten.clone(),
+                            tier: SubstitutionTier::ExactAmbiguous,
+                            applied: false,
+                        });
+                        // Leave the original text unchanged.
+                        result.push(original_window);
+                    }
+                } else {
+                    subs.push(Substitution {
+                        original: original_window,
+                        replacement: rewritten.clone(),
+                        tier: SubstitutionTier::Exact,
+                        applied: true,
+                    });
+                    result.push(rewritten);
+                }
+            } else {
+                result.push(rewritten);
             }
-            result.push(rewritten);
             i += n;
             continue;
         }
@@ -168,7 +237,7 @@ pub fn apply_glossary_tiered(
             }
         }
 
-        let Some((n, replacement, _score)) = best else {
+        let Some((n, replacement, score)) = best else {
             result.push(words[i].to_string());
             i += 1;
             continue;
@@ -188,24 +257,59 @@ pub fn apply_glossary_tiered(
             continue;
         }
 
-        if apply_fuzzy {
-            subs.push(Substitution {
-                original: original_window,
-                replacement: rewritten.clone(),
-                tier: SubstitutionTier::Fuzzy,
-                applied: true,
-            });
-            result.push(rewritten);
-        } else {
-            subs.push(Substitution {
-                original: original_window.clone(),
-                replacement: rewritten,
-                tier: SubstitutionTier::Fuzzy,
-                applied: false,
-            });
-            // Text untouched — the LLM decides with sentence context.
-            for w in window {
-                result.push(w.to_string());
+        // Check if the heard word is a common English word — ambiguous
+        // fuzzy matches always defer, even at high confidence, even
+        // without an LLM (fail safe).
+        let check_word: String = original_window
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == ' ')
+            .collect::<String>()
+            .to_lowercase();
+        let is_ambiguous_word = super::common_words::is_common_word(&check_word);
+
+        match fuzzy_mode {
+            FuzzyMode::LlmAvailable => {
+                // LLM available: always defer fuzzy matches as candidates.
+                subs.push(Substitution {
+                    original: original_window.clone(),
+                    replacement: rewritten,
+                    tier: SubstitutionTier::Fuzzy,
+                    applied: false,
+                });
+                for w in window {
+                    result.push(w.to_string());
+                }
+            }
+            FuzzyMode::NoLlm => {
+                // No LLM: apply high-confidence non-ambiguous matches.
+                // For ambiguous words, check context heuristics —
+                // only apply if the surrounding sentence strongly
+                // suggests the product/person meaning.
+                let should_apply = if is_ambiguous_word {
+                    super::context_heuristics::decide(&original_window, text)
+                        == super::context_heuristics::HeuristicDecision::Apply
+                } else {
+                    score < HIGH_CONFIDENCE_THRESHOLD
+                };
+                if should_apply {
+                    subs.push(Substitution {
+                        original: original_window,
+                        replacement: rewritten.clone(),
+                        tier: SubstitutionTier::Fuzzy,
+                        applied: true,
+                    });
+                    result.push(rewritten);
+                } else {
+                    subs.push(Substitution {
+                        original: original_window.clone(),
+                        replacement: rewritten,
+                        tier: SubstitutionTier::Fuzzy,
+                        applied: false,
+                    });
+                    for w in window {
+                        result.push(w.to_string());
+                    }
+                }
             }
         }
         i += n;
@@ -589,7 +693,7 @@ mod tests {
     fn tiered_exact_mistranscription_rewrites_immediately() {
         let glossary = entries(&[("Claude Code", &["cloud code"])]);
         let (out, subs) =
-            apply_glossary_tiered("open cloud code now", &glossary, DEFAULT_THRESHOLD, false);
+            apply_glossary_tiered("open cloud code now", &glossary, DEFAULT_THRESHOLD, FuzzyMode::LlmAvailable);
         assert_eq!(out, "open Claude Code now");
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].tier, SubstitutionTier::Exact);
@@ -606,8 +710,7 @@ mod tests {
             "deploy this to the cloud today",
             &glossary,
             DEFAULT_THRESHOLD,
-            false,
-        );
+            FuzzyMode::LlmAvailable,        );
         assert_eq!(out, "deploy this to the cloud today");
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].tier, SubstitutionTier::Fuzzy);
@@ -617,13 +720,28 @@ mod tests {
     }
 
     #[test]
-    fn tiered_fuzzy_applies_when_no_llm() {
-        // Grammar disabled: nobody downstream to arbitrate, keep the
-        // legacy rewrite-in-place behavior.
+    fn tiered_fuzzy_skips_ambiguous_word_without_llm() {
+        // "cloud" is a common English word — even without an LLM, the
+        // new confidence bands skip ambiguous fuzzy matches rather than
+        // blindly rewriting "cloud" → "Claude". "the cloud today" has
+        // no product-context verb, so the heuristic skips it.
         let glossary = entries(&[("Claude", &[])]);
         let (out, subs) =
-            apply_glossary_tiered("I love cloud today", &glossary, DEFAULT_THRESHOLD, true);
-        assert_eq!(out, "I love Claude today");
+            apply_glossary_tiered("the cloud today is great", &glossary, DEFAULT_THRESHOLD, FuzzyMode::NoLlm);
+        assert_eq!(out, "the cloud today is great");
+        assert_eq!(subs.len(), 1);
+        assert!(!subs[0].applied);
+    }
+
+    #[test]
+    fn tiered_fuzzy_applies_high_confidence_without_llm() {
+        // "kubernetics" is NOT a common word and has a very low fuzzy
+        // score against "Kubernetes" — high confidence, applies even
+        // without an LLM.
+        let glossary = entries(&[("Kubernetes", &[])]);
+        let (out, subs) =
+            apply_glossary_tiered("deploy kubernetics now", &glossary, DEFAULT_THRESHOLD, FuzzyMode::NoLlm);
+        assert_eq!(out, "deploy Kubernetes now");
         assert_eq!(subs.len(), 1);
         assert!(subs[0].applied);
     }
@@ -637,17 +755,79 @@ mod tests {
             "deploy kubernetics today",
             &glossary,
             DEFAULT_THRESHOLD,
-            false,
-        );
+            FuzzyMode::LlmAvailable,        );
         assert_eq!(out, "deploy Kubernetes today");
         assert_eq!(subs[0].tier, SubstitutionTier::Exact);
     }
 
     #[test]
-    fn tiered_preserves_punctuation_on_exact() {
+    fn tiered_ambiguous_exact_defers_to_llm() {
+        // "cloud" is a common English word AND a taught mistranscription
+        // of "Claude". The exact hit must defer to the LLM rather than
+        // rewriting unconditionally — "deploy to the cloud" should stay.
         let glossary = entries(&[("Claude", &["cloud"])]);
-        let (out, _) =
-            apply_glossary_tiered("Hi cloud, hello!", &glossary, DEFAULT_THRESHOLD, false);
-        assert_eq!(out, "Hi Claude, hello!");
+        let (out, subs) =
+            apply_glossary_tiered("Hi cloud, hello!", &glossary, DEFAULT_THRESHOLD, FuzzyMode::LlmAvailable);
+        assert_eq!(out, "Hi cloud, hello!");
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].tier, SubstitutionTier::ExactAmbiguous);
+        assert!(!subs[0].applied);
+        assert_eq!(subs[0].original, "cloud,");
+        assert_eq!(subs[0].replacement, "Claude,");
+    }
+
+    #[test]
+    fn tiered_unambiguous_exact_still_rewrites() {
+        // "kubernetics" is NOT a common English word — the exact hit
+        // rewrites immediately even with the LLM available.
+        let glossary = entries(&[("Kubernetes", &["kubernetics"])]);
+        let (out, subs) = apply_glossary_tiered(
+            "deploy kubernetics now",
+            &glossary,
+            DEFAULT_THRESHOLD,
+            FuzzyMode::LlmAvailable,        );
+        assert_eq!(out, "deploy Kubernetes now");
+        assert_eq!(subs[0].tier, SubstitutionTier::Exact);
+        assert!(subs[0].applied);
+    }
+
+    #[test]
+    fn tiered_ambiguous_exact_applies_with_context_heuristic() {
+        // Without an LLM, "ask cloud" triggers the context heuristic
+        // which recognizes "ask" as a product-context verb and applies.
+        let glossary = entries(&[("Claude", &["cloud"])]);
+        let (out, subs) =
+            apply_glossary_tiered("ask cloud to help", &glossary, DEFAULT_THRESHOLD, FuzzyMode::NoLlm);
+        assert_eq!(out, "ask Claude to help");
+        assert_eq!(subs[0].tier, SubstitutionTier::Exact);
+        assert!(subs[0].applied);
+    }
+
+    #[test]
+    fn tiered_ambiguous_exact_skips_without_product_context() {
+        // "deploy to the cloud" — no product-context verb, skip.
+        let glossary = entries(&[("Claude", &["cloud"])]);
+        let (out, subs) = apply_glossary_tiered(
+            "deploy to the cloud today",
+            &glossary,
+            DEFAULT_THRESHOLD,
+            FuzzyMode::NoLlm,
+        );
+        assert_eq!(out, "deploy to the cloud today");
+        assert_eq!(subs[0].tier, SubstitutionTier::ExactAmbiguous);
+        assert!(!subs[0].applied);
+    }
+
+    #[test]
+    fn tiered_multiword_mistranscription_checked_for_ambiguity() {
+        // "cloud code" as a mistranscription of "Claude Code" — the
+        // multi-word window is checked as a whole. "cloud code" is not
+        // a common English phrase, so it rewrites immediately.
+        let glossary = entries(&[("Claude Code", &["cloud code"])]);
+        let (out, subs) =
+            apply_glossary_tiered("open cloud code now", &glossary, DEFAULT_THRESHOLD, FuzzyMode::LlmAvailable);
+        assert_eq!(out, "open Claude Code now");
+        assert_eq!(subs[0].tier, SubstitutionTier::Exact);
+        assert!(subs[0].applied);
     }
 }

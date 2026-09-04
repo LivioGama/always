@@ -109,33 +109,6 @@ fn compute_effective() -> bool {
     crate::always::per_app::effective_paused_for_current_app()
 }
 
-/// Shared mute state that can be toggled from anywhere
-pub struct MuteState {
-    muted: AtomicBool,
-}
-
-impl MuteState {
-    pub fn new() -> Self {
-        Self {
-            muted: AtomicBool::new(false),
-        }
-    }
-
-    pub fn is_muted(&self) -> bool {
-        self.muted.load(Ordering::Relaxed)
-    }
-
-    pub fn set_muted(&self, muted: bool) {
-        self.muted.store(muted, Ordering::Relaxed);
-    }
-}
-
-impl Default for MuteState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Shared auto-enter state that can be toggled from anywhere
 pub struct AutoEnterState {
     auto_enter: AtomicBool,
@@ -164,10 +137,6 @@ impl AutoEnterState {
     }
 }
 
-/// Global mute state instance
-static MUTE_STATE: std::sync::LazyLock<Arc<MuteState>> =
-    std::sync::LazyLock::new(|| Arc::new(MuteState::new()));
-
 /// Global auto-enter state instance
 static AUTO_ENTER_STATE: std::sync::LazyLock<Arc<AutoEnterState>> =
     std::sync::LazyLock::new(|| Arc::new(AutoEnterState::new(false)));
@@ -175,11 +144,6 @@ static AUTO_ENTER_STATE: std::sync::LazyLock<Arc<AutoEnterState>> =
 /// Initialize the auto-enter state with the config value
 pub fn init_auto_enter(initial_value: bool) {
     AUTO_ENTER_STATE.set_enabled(initial_value);
-}
-
-/// Get the global mute state
-pub fn global_mute_state() -> Arc<MuteState> {
-    Arc::clone(&MUTE_STATE)
 }
 
 /// Get the global auto-enter state
@@ -290,16 +254,6 @@ pub fn clear_global_pauses() -> (bool, bool) {
     AUDIO_OUTPUT_PAUSED.store(false, Ordering::Relaxed);
     MIC_CONFLICT_PAUSED.store(false, Ordering::Relaxed);
     recompute_effective()
-}
-
-/// Check if the system is currently muted
-pub fn is_muted() -> bool {
-    MUTE_STATE.is_muted()
-}
-
-/// Set the mute state
-pub fn set_muted(muted: bool) {
-    MUTE_STATE.set_muted(muted);
 }
 
 /// Check if auto-enter is currently enabled
@@ -772,6 +726,81 @@ mod tests {
         );
         set_dictation_origin_app(None);
         assert_eq!(dictation_origin_app(), None);
+    }
+
+    /// The idle watchdog fires after `idle_pause_secs` with no voice,
+    /// setting IDLE_AUTO_PAUSED (not MASTER). The master-pause chord
+    /// must resume from an idle-only pause — the old code checked
+    /// `is_any_global_pause()` which excludes idle, so it MUTED instead
+    /// of resuming. Even when it did resume (master was also set), it
+    /// cleared idle AFTER `clear_global_pauses` recomputed effective,
+    /// leaving EFFECTIVE_PAUSED stale at true.
+    #[test]
+    fn master_chord_resumes_from_idle_only_pause() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        reset_pause_state_for_test();
+        focus_allowlisted_app("com.example.editor");
+        assert!(!is_paused());
+
+        // Idle watchdog fires.
+        set_idle_auto_paused(true);
+        let (eff, changed) = recompute_effective();
+        assert!(eff);
+        assert!(changed);
+        assert!(!is_master_paused());
+        assert!(!is_any_global_pause());
+
+        // Master chord: resume path. The fix checks idle too and clears
+        // it BEFORE clear_global_pauses so the recompute sees idle=false.
+        let (effective, changed) = {
+            set_idle_auto_paused(false);
+            mark_voice_seen();
+            clear_global_pauses()
+        };
+        assert!(
+            !effective,
+            "idle-only pause must be cleared by the master chord"
+        );
+        assert!(changed);
+        assert!(!is_paused(), "daemon must be effectively resumed");
+        assert!(!is_idle_auto_paused());
+        assert!(!is_master_paused());
+    }
+
+    /// The UDS TogglePause path (used by the UI's idle-resume widget and
+    /// the CLI `toggle-pause` command) must also clear idle BEFORE
+    /// toggling, so the recompute inside `toggle_pause` sees idle=false.
+    #[test]
+    fn toggle_pause_clears_idle_before_recompute() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        reset_pause_state_for_test();
+        focus_allowlisted_app("com.example.editor");
+        assert!(!is_paused());
+
+        // User mutes, then idle watchdog also fires.
+        set_paused(true);
+        set_idle_auto_paused(true);
+        recompute_effective();
+        assert!(is_paused());
+        assert!(is_master_paused());
+        assert!(is_idle_auto_paused());
+
+        // TogglePause resume: clear idle BEFORE toggle_pause so the
+        // recompute inside sees idle=false.
+        let was_master = is_master_paused();
+        if was_master {
+            set_idle_auto_paused(false);
+            mark_voice_seen();
+        }
+        let (effective, changed) = toggle_pause();
+        assert!(
+            !effective,
+            "toggling master off with idle pre-cleared must resume"
+        );
+        assert!(changed);
+        assert!(!is_paused());
+        assert!(!is_master_paused());
+        assert!(!is_idle_auto_paused());
     }
 
     #[test]

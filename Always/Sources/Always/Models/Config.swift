@@ -66,6 +66,9 @@ struct Config: Codable {
     /// wire and DB columns are always ms.
     var autoEnterDelayMs: Int
     var groqApiKey: String?
+    /// True when the daemon reports the key is saved (`*** (saved)`),
+    /// even though the actual value is masked and not sent to the GUI.
+    var groqKeySaved: Bool
     var sileroThreshold: Float
     var shortcutPause: String
     var shortcutAutoEnter: String
@@ -73,11 +76,17 @@ struct Config: Codable {
     var shortcutCorrectionDialog: String
     var shortcutMasterPause: String
     var postprocessEnabled: Bool
+    /// Post-processing LLM provider: "groq" (remote, needs API key) or
+    /// "apple" (on-device Apple Intelligence, keyless). Default "groq".
+    var postprocessProvider: String
+    /// Whether Apple's on-device language model is ready on this machine.
+    /// The daemon reports it via `config show`; when false, selecting the
+    /// Apple provider can't actually run. Defaults true so older daemons
+    /// don't spuriously warn.
+    var appleIntelligenceAvailable: Bool
     var perAppSettingsJson: String?
     /// Seconds of no voice before daemon auto-pauses. 0 = disabled.
     var idlePauseSecs: Int
-    /// Action on idle timeout: "pause" or "pause_and_mute".
-    var idlePauseAction: String
     /// Status sound setting: off, low, medium, or high.
     var audibleStatusSound: String
     /// Language code for transcription ("auto", "en", "fr", etc.) or nil if not set.
@@ -95,6 +104,7 @@ struct Config: Codable {
         sttAutoEnter: true,
         autoEnterDelayMs: 4000,
         groqApiKey: nil,
+        groqKeySaved: false,
         sileroThreshold: 0.5,
         shortcutPause: "ctrl+alt+p",
         shortcutAutoEnter: "ctrl+alt+a",
@@ -102,9 +112,10 @@ struct Config: Codable {
         shortcutCorrectionDialog: "ctrl+alt+w",
         shortcutMasterPause: "ctrl+alt+shift+p",
         postprocessEnabled: true,
+        postprocessProvider: "groq",
+        appleIntelligenceAvailable: true,
         perAppSettingsJson: nil,
         idlePauseSecs: 600,
-        idlePauseAction: "pause",
         audibleStatusSound: "off",
         lang: nil
     )
@@ -150,8 +161,13 @@ struct Config: Codable {
                         config.autoEnterDelayMs = Int((secs * 1000).rounded())
                     }
                 case "groq_api_key":
-                    if !value.contains("(not set)") && !isMaskedApiKeyPlaceholder(value) {
-                        config.groqApiKey = value
+                    if !value.contains("(not set)") {
+                        if isMaskedApiKeyPlaceholder(value) {
+                            config.groqKeySaved = true
+                        } else {
+                            config.groqApiKey = value
+                            config.groqKeySaved = true
+                        }
                     }
                 case "silero_threshold":
                     config.sileroThreshold = Float(value) ?? defaultConfig.sileroThreshold
@@ -177,14 +193,18 @@ struct Config: Codable {
                     }
                 case "postprocess_enabled":
                     config.postprocessEnabled = (value == "true" || value == "1")
+                case "postprocess_provider":
+                    // Accept only known providers; ignore anything else to
+                    // avoid persisting a value the daemon can't parse.
+                    if ["groq", "apple"].contains(value) {
+                        config.postprocessProvider = value
+                    }
+                case "apple_intelligence_available":
+                    config.appleIntelligenceAvailable = (value == "true" || value == "1")
                 case "per_app_settings_json":
                     config.perAppSettingsJson = value == "{}" ? nil : value
                 case "idle_pause_secs":
                     config.idlePauseSecs = Int(value) ?? defaultConfig.idlePauseSecs
-                case "idle_pause_action":
-                    if value == "pause" || value == "pause_and_mute" {
-                        config.idlePauseAction = value
-                    }
                 case "audible_status_sound":
                     if ["off", "low", "medium", "high"].contains(value) {
                         config.audibleStatusSound = value

@@ -11,7 +11,7 @@
 //! so "key equality" and "prompt equality" cannot drift apart.
 
 use crate::always::text_match::{
-    DEFAULT_THRESHOLD, Substitution, SubstitutionTier, apply_glossary_tiered,
+    DEFAULT_THRESHOLD, FuzzyMode, Substitution, SubstitutionTier, apply_glossary_tiered,
 };
 
 /// One fully-prepared grammar-correction request.
@@ -38,12 +38,39 @@ pub struct CorrectionRequest {
 pub fn build(text: &str, llm_available: bool) -> CorrectionRequest {
     let entries = crate::glossary::glossary_match_entries();
     let (acoustic_text, substitutions) =
-        apply_glossary_tiered(text, &entries, DEFAULT_THRESHOLD, !llm_available);
+        apply_glossary_tiered(text, &entries, DEFAULT_THRESHOLD, if llm_available { FuzzyMode::LlmAvailable } else { FuzzyMode::NoLlm });
     log_substitutions(text, &acoustic_text, &substitutions);
+
+    // Bump frequency for applied substitutions so frequently-used terms
+    // rise in the Whisper bias prompt ordering. Debounced via mtime check.
+    for sub in &substitutions {
+        if sub.applied {
+            crate::glossary::bump_frequency(&sub.replacement);
+        }
+        // Record metrics for each substitution decision.
+        use crate::always::correction_metrics::{MetricEvent, record};
+        match (sub.tier, sub.applied) {
+            (crate::always::text_match::SubstitutionTier::Exact, true) => {
+                record(MetricEvent::ExactApplied);
+            }
+            (crate::always::text_match::SubstitutionTier::Exact, false) => {
+                record(MetricEvent::ExactDeferred);
+            }
+            (crate::always::text_match::SubstitutionTier::ExactAmbiguous, _) => {
+                record(MetricEvent::ExactDeferred);
+            }
+            (crate::always::text_match::SubstitutionTier::Fuzzy, true) => {
+                record(MetricEvent::FuzzyApplied);
+            }
+            (crate::always::text_match::SubstitutionTier::Fuzzy, false) => {
+                record(MetricEvent::FuzzyDeferred);
+            }
+        }
+    }
 
     let deferred_candidates: Vec<(String, String)> = substitutions
         .iter()
-        .filter(|s| s.tier == SubstitutionTier::Fuzzy && !s.applied)
+        .filter(|s| !s.applied && matches!(s.tier, SubstitutionTier::Fuzzy | SubstitutionTier::ExactAmbiguous))
         .map(|s| (s.original.clone(), s.replacement.clone()))
         .collect();
 

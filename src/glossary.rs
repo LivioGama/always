@@ -1,17 +1,25 @@
 //! Shared glossary loader. Provides the niche-term list both for Whisper's
 //! `prompt` parameter (vocabulary biasing at transcription time) and for the
 //! LLM post-processor's system prompt (term-aware cleanup).
+//!
+//! **Hot-reload:** the glossary is cached in an `RwLock` keyed on the file's
+//! mtime. When `apply_pairs_to_glossary` (or any writer) updates
+//! `~/.always/glossary.json`, the cache is invalidated and the next access
+//! reloads from disk — no daemon restart needed.
 
 use anyhow::{Context, Result};
+use parking_lot::RwLock;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Instant, SystemTime};
 
 /// Whisper's `prompt` field has a 224-token hard limit; ~120 words leaves a
 /// comfortable safety margin.
 const WHISPER_WORD_BUDGET: usize = 120;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct Entry {
     term: String,
     #[serde(default)]
@@ -30,37 +38,193 @@ fn default_weight() -> i64 {
     1
 }
 
-static ENTRIES: OnceLock<Vec<Entry>> = OnceLock::new();
-static WHISPER_PROMPT: OnceLock<Option<String>> = OnceLock::new();
-static POSTPROCESS_PROMPT: OnceLock<String> = OnceLock::new();
-fn entries() -> &'static [Entry] {
-    ENTRIES.get_or_init(|| match load_entries() {
-        Ok(mut v) => {
-            // Primary sort: weight (user-curated importance). Secondary:
-            // frequency (auto-tracked usage). Both descending — the
-            // most-trusted terms go first into the prompt budget.
-            v.sort_by(|a, b| b.weight.cmp(&a.weight).then(b.frequency.cmp(&a.frequency)));
-            v
+/// Cached glossary state — entries plus everything derived from them.
+/// Stored behind an `RwLock` and reloaded when the file mtime changes.
+struct GlossaryCache {
+    entries: Vec<Entry>,
+    whisper_prompt: Option<String>,
+    postprocess_prompt: String,
+    /// mtime of the file this cache was built from. `None` when the
+    /// file didn't exist (empty glossary).
+    loaded_mtime: Option<SystemTime>,
+}
+
+impl GlossaryCache {
+    fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+            whisper_prompt: None,
+            postprocess_prompt: build_postprocess_prompt(&[]),
+            loaded_mtime: None,
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load glossary.json");
-            Vec::new()
+    }
+
+    fn from_entries(mut entries: Vec<Entry>, mtime: Option<SystemTime>) -> Self {
+        entries.sort_by(|a, b| {
+            b.weight
+                .cmp(&a.weight)
+                .then(b.frequency.cmp(&a.frequency))
+        });
+        let whisper_prompt = build_whisper_bias_prompt(&entries);
+        let postprocess_prompt = build_postprocess_prompt(&entries);
+        Self {
+            entries,
+            whisper_prompt,
+            postprocess_prompt,
+            loaded_mtime: mtime,
         }
-    })
+    }
+}
+
+static CACHE: OnceLock<RwLock<GlossaryCache>> = OnceLock::new();
+
+fn cache() -> &'static RwLock<GlossaryCache> {
+    CACHE.get_or_init(|| RwLock::new(GlossaryCache::empty()))
+}
+
+/// Current mtime of the glossary file, or `None` if it doesn't exist.
+fn current_mtime() -> Option<SystemTime> {
+    locate_glossary()
+        .and_then(|p| std::fs::metadata(&p).ok())
+        .and_then(|m| m.modified().ok())
+}
+
+/// Reload the cache if the file mtime changed (or on first access).
+/// Returns `true` if a reload happened.
+fn ensure_fresh() -> bool {
+    let mtime = current_mtime();
+    let needs_reload = {
+        let guard = cache().read();
+        guard.loaded_mtime != mtime
+    };
+    if needs_reload {
+        let new_cache = match load_entries() {
+            Ok(v) => GlossaryCache::from_entries(v, mtime),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load glossary.json");
+                let mut c = GlossaryCache::empty();
+                c.loaded_mtime = mtime;
+                c
+            }
+        };
+        *cache().write() = new_cache;
+        tracing::debug!(mtime = ?mtime, "glossary cache reloaded");
+        true
+    } else {
+        false
+    }
+}
+
+/// Force a reload on the next access. Called by writers
+/// (`apply_pairs_to_glossary`, `add_or_bump_term`, `bump_frequency`) after
+/// they update the file.
+pub fn invalidate_cache() {
+    let mut guard = cache().write();
+    *guard = GlossaryCache::empty();
+}
+
+// ---------------------------------------------------------------------------
+// Frequency feedback loop
+// ---------------------------------------------------------------------------
+
+/// Minimum interval between frequency-bump flushes to disk. Frequent
+/// bumps are accumulated in memory and flushed as a single write to
+/// avoid disk churn on every utterance.
+const FREQ_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Pending frequency bumps: `term → delta` accumulated since last flush.
+static PENDING_BUMPS: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+/// Timestamp of the last disk flush.
+static LAST_FLUSH: OnceLock<Mutex<Instant>> = OnceLock::new();
+
+fn pending_bumps() -> &'static Mutex<HashMap<String, i64>> {
+    PENDING_BUMPS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn last_flush() -> &'static Mutex<Instant> {
+    LAST_FLUSH.get_or_init(|| Mutex::new(Instant::now()))
+}
+
+/// Record that a glossary term was successfully applied to a transcript.
+/// Bumps are accumulated and flushed to disk at most every
+/// [`FREQ_FLUSH_INTERVAL`], or immediately when [`flush_bumps`] is called.
+pub fn bump_frequency(term: &str) {
+    {
+        let mut bumps = pending_bumps().lock().unwrap();
+        *bumps.entry(term.to_lowercase()).or_insert(0) += 1;
+    }
+    maybe_flush_bumps();
+}
+
+/// Flush pending bumps if the flush interval has elapsed.
+fn maybe_flush_bumps() {
+    let should_flush = {
+        let last = *last_flush().lock().unwrap();
+        last.elapsed() >= FREQ_FLUSH_INTERVAL
+    };
+    if should_flush {
+        let _ = flush_bumps();
+    }
+}
+
+/// Write all pending frequency bumps to `glossary.json` and reset the
+/// accumulator. Returns the number of entries updated.
+pub fn flush_bumps() -> Result<usize> {
+    let bumps: HashMap<String, i64> = {
+        let mut bumps = pending_bumps().lock().unwrap();
+        if bumps.is_empty() {
+            return Ok(0);
+        }
+        std::mem::take(&mut *bumps)
+    };
+
+    let path = locate_glossary().context("locate glossary.json for frequency bump")?;
+    let raw = std::fs::read_to_string(&path).context("read glossary.json for bump")?;
+    let mut entries: Vec<serde_json::Value> =
+        serde_json::from_str(&raw).context("parse glossary.json for bump")?;
+
+    let mut updated = 0;
+    for entry in entries.iter_mut() {
+        if let Some(term) = entry.get("term").and_then(|t| t.as_str())
+            && let Some(&delta) = bumps.get(&term.to_lowercase())
+        {
+            let freq = entry
+                .get("frequency")
+                .and_then(|f| f.as_i64())
+                .unwrap_or(100);
+            entry["frequency"] = serde_json::json!(freq + delta);
+            updated += 1;
+        }
+    }
+
+    if updated > 0 {
+        let json = serde_json::to_string_pretty(&entries)?;
+        std::fs::write(&path, json).context("write glossary.json after bump")?;
+        invalidate_cache();
+        tracing::debug!(updated, "glossary_frequency_bumped");
+    }
+
+    *last_flush().lock().unwrap() = Instant::now();
+    Ok(updated)
+}
+
+fn entries() -> Vec<Entry> {
+    ensure_fresh();
+    cache().read().entries.clone()
 }
 
 /// Vocabulary-biasing string for Whisper's `prompt` field. Returns `None`
 /// when the glossary is empty or unavailable.
-pub fn whisper_bias_prompt() -> Option<&'static String> {
-    WHISPER_PROMPT
-        .get_or_init(|| build_whisper_bias_prompt(entries()))
-        .as_ref()
+pub fn whisper_bias_prompt() -> Option<String> {
+    ensure_fresh();
+    cache().read().whisper_prompt.clone()
 }
 
 /// System prompt for the LLM post-processor. Falls back to grammar-only rules
 /// when the glossary is empty.
-pub fn postprocess_system_prompt() -> &'static str {
-    POSTPROCESS_PROMPT.get_or_init(|| build_postprocess_prompt(entries()))
+pub fn postprocess_system_prompt() -> String {
+    ensure_fresh();
+    cache().read().postprocess_prompt.clone()
 }
 
 /// All canonical `term` strings from the loaded glossary that are safe
@@ -74,7 +238,8 @@ pub fn postprocess_system_prompt() -> &'static str {
 /// speech. Explicit mistranscriptions and user-bumped standalone terms
 /// are trusted enough to rewrite acoustically.
 pub fn user_glossary_terms() -> Vec<String> {
-    collect_user_glossary_terms(entries())
+    let e = entries();
+    collect_user_glossary_terms(&e)
 }
 
 /// Same curation rules as [`user_glossary_terms`] but carrying each
@@ -82,7 +247,8 @@ pub fn user_glossary_terms() -> Vec<String> {
 /// (exact wrong-form hits rewrite deterministically; fuzzy hits defer
 /// to the grammar LLM).
 pub fn glossary_match_entries() -> Vec<crate::always::text_match::GlossaryMatchEntry> {
-    collect_glossary_match_entries(entries())
+    let e = entries();
+    collect_glossary_match_entries(&e)
 }
 
 fn collect_glossary_match_entries(
@@ -145,7 +311,7 @@ pub fn strip_bias_prompt_echo(text: &str) -> String {
     let Some(prompt) = whisper_bias_prompt() else {
         return text.to_string();
     };
-    strip_prompt_echo_with(text, prompt)
+    strip_prompt_echo_with(text, &prompt)
 }
 
 /// Testable core of [`strip_bias_prompt_echo`].

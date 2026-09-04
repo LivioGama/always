@@ -622,17 +622,19 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
     match cmd {
         DaemonCommand::TogglePause => {
             // toggle_pause flips MASTER and returns (effective, changed).
-            // We always reset idle/voice bookkeeping on a master flip,
-            // even when effective didn't change — the user clearly wants
-            // a "fresh start" timing-wise. Broadcasting is gated on
-            // `changed` so we don't spam UDS subscribers when the
-            // per-app rule kept effective the same as before the flip.
-            let (effective, changed) = pause::toggle_pause();
-            let master = pause::is_master_paused();
-            if !master {
+            // We clear idle BEFORE the toggle so the recompute inside
+            // toggle_pause sees idle=false and produces the correct
+            // effective state. The old order (toggle → set_idle) left
+            // EFFECTIVE_PAUSED stale when master flipped to false while
+            // idle was set — the daemon stayed "effectively paused" even
+            // though every source was cleared.
+            let was_master = pause::is_master_paused();
+            if was_master {
                 pause::set_idle_auto_paused(false);
                 pause::mark_voice_seen();
             }
+            let (effective, changed) = pause::toggle_pause();
+            let master = pause::is_master_paused();
             // Master always changed (we just toggled it) — broadcast so
             // the UI can label the global toggle correctly.
             global_broadcaster().master_pause_changed(master);
@@ -698,11 +700,14 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
         DaemonCommand::RejectCorrection { id } => handle_reject_correction(&id),
         DaemonCommand::CaptureCorrection => handle_capture_correction(),
         DaemonCommand::SetPaused { paused, reason } => {
-            let (effective, changed) = pause::set_paused(paused);
+            // Clear idle BEFORE set_paused so the recompute inside sees
+            // idle=false. The old order (set_paused → set_idle) left
+            // EFFECTIVE_PAUSED stale when resuming while idle was set.
             if !paused {
                 pause::set_idle_auto_paused(false);
                 pause::mark_voice_seen();
             }
+            let (effective, changed) = pause::set_paused(paused);
             global_broadcaster().master_pause_changed(paused);
             if changed {
                 if effective {
@@ -1003,6 +1008,11 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                 tracing::debug!("RespawnRecorder ignored — no recorder on this build");
             }
         }
+        DaemonCommand::ReloadShortcuts => {
+            // Settings → Shortcuts saved a new combo. Re-read the prefs
+            // DB and swap the live keyboard listener's shortcut set.
+            crate::always::keyboard::reload_shortcuts();
+        }
     }
 }
 
@@ -1187,19 +1197,123 @@ fn handle_reject_correction(id_str: &str) {
 
 fn handle_capture_correction() {
     use crate::always::correction;
-    let outcome =
-        match correction::capture_via_hotkey(crate::always::clipboard_watcher::PASTE_WINDOW) {
-            Ok(o) => o,
+    let auto_learn = auto_learn_corrections_enabled();
+    let outcome = match correction::capture_via_hotkey(
+        crate::always::clipboard_watcher::PASTE_WINDOW,
+        auto_learn,
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::error!(error = %e, "uds_capture_correction_failed");
+            return;
+        }
+    };
+    match outcome {
+        correction::CaptureOutcome::Applied {
+            pairs,
+            applied: _,
+            original,
+            corrected,
+        } => {
+            for p in &pairs {
+                global_broadcaster().correction_logged(&p.wrong, &p.right);
+            }
+            spawn_llm_extraction(original, corrected, pairs, auto_learn);
+        }
+        correction::CaptureOutcome::Extracted {
+            pairs,
+            original,
+            corrected,
+        } => {
+            for p in &pairs {
+                global_broadcaster().correction_logged(&p.wrong, &p.right);
+            }
+            spawn_llm_extraction(original, corrected, pairs, auto_learn);
+        }
+        _ => {}
+    }
+}
+
+/// Spawn a background LLM second-opinion extraction (UDS path).
+fn spawn_llm_extraction(
+    original: String,
+    corrected: String,
+    already_found: Vec<crate::always::correction::CorrectionPair>,
+    auto_apply: bool,
+) {
+    use crate::always::correction_extract;
+
+    let Some(api_key) = correction_extract::get_extraction_api_key() else {
+        return;
+    };
+
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
             Err(e) => {
-                tracing::error!(error = %e, "uds_capture_correction_failed");
+                tracing::error!(error = %e, "llm_extraction_runtime_failed");
                 return;
             }
         };
-    if let correction::CaptureOutcome::Applied { pairs, applied: _ } = outcome {
-        for p in pairs {
-            global_broadcaster().correction_logged(&p.wrong, &p.right);
+
+        let model = correction_extract::get_extraction_model();
+        let result = rt.block_on(correction_extract::extract_corrections_via_llm(
+            &original,
+            &corrected,
+            &api_key,
+            &model,
+            &already_found,
+        ));
+
+        match result {
+            Ok(new_pairs) if !new_pairs.is_empty() => {
+                tracing::info!(
+                    count = new_pairs.len(),
+                    "llm_extraction_found_additional_pairs"
+                );
+                crate::always::correction_metrics::record(
+                    crate::always::correction_metrics::MetricEvent::LlmExtractionFound,
+                );
+                if auto_apply {
+                    for p in &new_pairs {
+                        global_broadcaster().correction_logged(&p.wrong, &p.right);
+                    }
+                    if let Err(e) = crate::always::correction::apply_pairs_to_glossary_with_provenance(
+                        &new_pairs,
+                        crate::always::correction::Provenance::Llm,
+                    ) {
+                        tracing::error!(error = %e, "llm_extraction_apply_failed");
+                    }
+                }
+            }
+            Ok(_) => {
+                crate::always::correction_metrics::record(
+                    crate::always::correction_metrics::MetricEvent::LlmExtractionEmpty,
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "llm_extraction_failed");
+                crate::always::correction_metrics::record(
+                    crate::always::correction_metrics::MetricEvent::LlmExtractionFailed,
+                );
+            }
         }
-    }
+    });
+}
+
+/// Read the `auto_learn_corrections` preference from the DB.
+/// Defaults to `true` when unavailable.
+fn auto_learn_corrections_enabled() -> bool {
+    let Ok(conn) = crate::db::open() else {
+        return true;
+    };
+    let Ok(prefs) = crate::db::get_preferences(&conn) else {
+        return true;
+    };
+    prefs.auto_learn_corrections.unwrap_or(true)
 }
 
 /// Handle the dialog-driven correction: the user typed the intended

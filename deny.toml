@@ -15,8 +15,9 @@ ignore = [
 ]
 
 [licenses]
-# Allow only OSI-approved permissive + LGPL-2.1+ (transitive). Reject GPL
-# (would force the daemon copyleft).
+# Allow only OSI-approved permissive licenses for dependencies. The daemon
+# itself is AGPL-3.0 (copyleft); deps must remain permissive so they don't
+# impose stricter copyleft terms on the combined work.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",

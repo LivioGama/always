@@ -1,9 +1,7 @@
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 
 use super::localization::Localization;
 use super::postprocess::PostProcessor;
@@ -28,38 +26,6 @@ pub const DEFAULT_SILENCE_SECS: f64 = 0.9;
 /// Ten minutes of no voice before idle auto-pause. Short values (e.g. 120s)
 /// felt like the daemon "randomly" paused during normal desk work.
 const DEFAULT_IDLE_PAUSE_SECS: u32 = 600;
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Serialize, Deserialize)]
-pub enum IdlePauseAction {
-    #[default]
-    #[serde(rename = "pause")]
-    Pause,
-    #[serde(rename = "pause_and_mute")]
-    PauseAndMute,
-}
-
-impl FromStr for IdlePauseAction {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "pause" => Ok(Self::Pause),
-            "pause_and_mute" => Ok(Self::PauseAndMute),
-            _ => {
-                anyhow::bail!("invalid idle pause action: {s}, must be 'pause' or 'pause_and_mute'")
-            }
-        }
-    }
-}
-
-impl std::fmt::Display for IdlePauseAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Pause => write!(f, "pause"),
-            Self::PauseAndMute => write!(f, "pause_and_mute"),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Default)]
 pub enum VadMode {
@@ -237,6 +203,12 @@ pub struct AlwaysConfig {
     pub post_processor: Option<Arc<PostProcessor>>,
     pub project_root: Option<PathBuf>,
     pub learning_enabled: bool,
+    /// When `true` (default), corrections captured via the ⌃⌥X hotkey
+    /// and the passive clipboard watcher are automatically written to
+    /// `~/.always/glossary.json`. When `false`, pairs are still
+    /// extracted and surfaced (for the pending-review queue) but NOT
+    /// applied — the user curates the glossary manually.
+    pub auto_learn_corrections: bool,
     /// Groq Whisper API key. `None` when no key is configured — valid
     /// state once local models exist (user can run fully offline).
     /// The Groq backend refuses to start without one; local backends
@@ -257,8 +229,6 @@ pub struct AlwaysConfig {
     /// Auto-pause the daemon after this many seconds with no voice
     /// activity. `0` = disabled. Default 120 (matches requirement).
     pub idle_pause_secs: u32,
-    /// What action to take when idle timeout occurs: pause only, or pause+mute.
-    pub idle_pause_action: IdlePauseAction,
     /// Locale-specific heuristics for post-processing (sentence-terminator
     /// detection + "safe to lowercase mid-sentence" word list). Defaults
     /// to [`Localization::ENGLISH`]; overridable so non-English users
@@ -298,12 +268,46 @@ impl Default for VocabConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PostprocessProvider {
+    Groq,
+    Apple,
+}
+
+impl Default for PostprocessProvider {
+    fn default() -> Self {
+        Self::Groq
+    }
+}
+
+impl std::fmt::Display for PostprocessProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Groq => write!(f, "groq"),
+            Self::Apple => write!(f, "apple"),
+        }
+    }
+}
+
+impl std::str::FromStr for PostprocessProvider {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "groq" => Ok(Self::Groq),
+            "apple" => Ok(Self::Apple),
+            other => Err(format!("unknown postprocess provider: {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PostprocessConfig {
     pub groq_model: String,
     pub learning_history_limit: usize,
     pub grammar_correction_enabled: bool,
     pub cache_ttl_seconds: u64,
+    pub provider: PostprocessProvider,
 }
 
 impl Default for PostprocessConfig {
@@ -327,6 +331,7 @@ impl Default for PostprocessConfig {
             // surface to iterate on when transcripts are wrong.
             grammar_correction_enabled: true,
             cache_ttl_seconds: 300,
+            provider: PostprocessProvider::default(),
         }
     }
 }
@@ -380,6 +385,13 @@ impl AlwaysConfig {
             .unwrap_or(postprocess_config.grammar_correction_enabled);
         let mut effective_postprocess = postprocess_config.clone();
         effective_postprocess.grammar_correction_enabled = postprocess_enabled;
+
+        // Honor user pref for postprocess provider: DB > env > default (groq).
+        if let Some(ref provider_str) = prefs.postprocess_provider {
+            if let Ok(provider) = provider_str.parse::<PostprocessProvider>() {
+                effective_postprocess.provider = provider;
+            }
+        }
 
         // Construct the post-processor whenever grammar_correction is
         // enabled. The previous gate required BOTH a loaded
@@ -438,6 +450,9 @@ impl AlwaysConfig {
             post_processor,
             project_root,
             learning_enabled: postprocess_config.learning_history_limit > 0,
+            auto_learn_corrections: prefs
+                .auto_learn_corrections
+                .unwrap_or(true),
             groq_stt_api_key,
             transcriber_backend,
             vad_mode,
@@ -461,11 +476,6 @@ impl AlwaysConfig {
                 .idle_pause_secs
                 .unwrap_or(DEFAULT_IDLE_PAUSE_SECS)
                 .min(86_400),
-            idle_pause_action: prefs
-                .idle_pause_action
-                .as_ref()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_default(),
             // English is the only built-in locale today; non-English
             // users can override at the call site (or via a future
             // CLI/preference) without touching the merge logic.
@@ -544,6 +554,7 @@ impl Default for AlwaysConfig {
             post_processor: None,
             project_root: detect_project_root(),
             learning_enabled: postprocess_config.learning_history_limit > 0,
+            auto_learn_corrections: true,
             groq_stt_api_key: None,
             transcriber_backend: TranscriberBackendChoice::default(),
             vad_mode: VadMode::default(),
@@ -552,7 +563,6 @@ impl Default for AlwaysConfig {
             postprocess_config,
             auto_enter_delay_ms: DEFAULT_AUTO_ENTER_DELAY_MS,
             idle_pause_secs: DEFAULT_IDLE_PAUSE_SECS,
-            idle_pause_action: IdlePauseAction::default(),
             localization: Localization::ENGLISH,
             transcript_stream_enabled: false,
             audible_status_sound: StatusSoundSetting::default(),
@@ -689,6 +699,11 @@ fn load_postprocess_config() -> PostprocessConfig {
         && let Ok(parsed) = ttl.parse()
     {
         cfg.cache_ttl_seconds = parsed;
+    }
+    if let Ok(provider) = std::env::var("ALWAYS_POSTPROCESS_PROVIDER")
+        && let Ok(parsed) = provider.parse::<PostprocessProvider>()
+    {
+        cfg.provider = parsed;
     }
     cfg
 }

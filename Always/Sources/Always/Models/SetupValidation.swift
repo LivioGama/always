@@ -24,7 +24,7 @@ func isMaskedApiKeyPlaceholder(_ apiKey: String) -> Bool {
     guard !trimmed.isEmpty else {
         return false
     }
-    if trimmed.contains("(in keychain)") {
+    if trimmed.contains("(in keychain)") || trimmed.contains("(saved)") {
         return true
     }
     return trimmed.allSatisfy { character in

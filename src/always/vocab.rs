@@ -387,6 +387,8 @@ fn save_to_glossary(terms: &HashSet<String>) -> Result<()> {
     let mut file = File::create(&path)?;
     file.write_all(json.as_bytes())?;
 
+    crate::glossary::invalidate_cache();
+
     tracing::info!(
         path = %path.display(),
         added,

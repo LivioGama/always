@@ -64,6 +64,7 @@ final class AlwaysTests: XCTestCase {
             "sttAutoEnter": true,
             "autoEnterDelayMs": 4000,
             "groqApiKey": null,
+            "groqKeySaved": false,
             "sileroThreshold": 0.5,
             "shortcutPause": "ctrl+alt+p",
             "shortcutAutoEnter": "ctrl+alt+a",
@@ -104,7 +105,6 @@ final class AlwaysTests: XCTestCase {
         auto_enter_delay_ms: 4000
         silero_threshold: 0.5
         idle_pause_secs: 600
-        idle_pause_action: pause
             audible_status_sound: high
         postprocess_enabled: true
         """
@@ -159,6 +159,7 @@ final class AlwaysTests: XCTestCase {
             return XCTFail("fromCLI returned nil")
         }
         XCTAssertNil(config.groqApiKey)
+        XCTAssertTrue(config.groqKeySaved)
     }
 
     func testGroqValidationStatusMapping() throws {

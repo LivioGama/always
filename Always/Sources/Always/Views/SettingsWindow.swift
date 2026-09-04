@@ -31,6 +31,7 @@ struct SettingsWindow: View {
     @State private var apiKey: String = ""
     @State private var showApiKey = false
     @State private var isSavingApiKey = false
+    @State private var isDeletingApiKey = false
     @FocusState private var focusedField: Field?
     @State private var selectedPanel: SettingsPanel = .general
 
@@ -111,8 +112,8 @@ struct SettingsWindow: View {
         .onChange(of: config.autoEnterDelayMs) { _, _ in saveConfig() }
         .onChange(of: config.sileroThreshold) { _, _ in saveConfig() }
         .onChange(of: config.postprocessEnabled) { _, _ in saveConfig() }
+        .onChange(of: config.postprocessProvider) { _, _ in saveConfig() }
         .onChange(of: config.idlePauseSecs) { _, _ in saveConfig() }
-        .onChange(of: config.idlePauseAction) { _, _ in saveConfig() }
         .onChange(of: config.audibleStatusSound) { _, _ in saveConfig() }
         .onChange(of: config.sttLivePreview) { _, _ in saveConfig() }
     }
@@ -133,13 +134,11 @@ struct SettingsWindow: View {
                 config: $config
             )
         case .shortcuts:
-            ShortcutsPanel(cliService: cliService, config: $config)
+            ShortcutsPanel(cliService: cliService, stateMonitor: stateMonitor, config: $config)
         case .permissions:
             PermissionsPanel()
-        case .vocabulary:
-            VocabularyPanel()
-        case .snippets:
-            SnippetsPanel()
+        case .library:
+            LibraryPanel()
         case .myVoice:
             MyVoicePanel(stateMonitor: stateMonitor)
         case .history:
@@ -150,8 +149,11 @@ struct SettingsWindow: View {
                 apiKey: $apiKey,
                 showApiKey: $showApiKey,
                 isSavingApiKey: $isSavingApiKey,
+                isDeletingApiKey: $isDeletingApiKey,
                 focusedField: $focusedField,
-                saveApiKey: saveApiKey
+                saveApiKey: saveApiKey,
+                deleteApiKey: deleteApiKey,
+                savePostprocessProvider: savePostprocessProvider
             )
         case .about:
             AboutPanel()
@@ -181,10 +183,30 @@ struct SettingsWindow: View {
                 }
                 // Add a small delay to make the loader visible for testing
                 try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
+                await loadConfig()
             } catch {
                 settingsLogger.error("saveApiKey failed: \(error.localizedDescription, privacy: .public)")
             }
             isSavingApiKey = false
+        }
+    }
+
+    private func deleteApiKey() {
+        isDeletingApiKey = true
+        Task {
+            do {
+                _ = try await cliService.deleteConfig(key: "groq_api_key")
+                _ = try await cliService.restartDaemon()
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                await loadConfig()
+                await MainActor.run {
+                    apiKey = ""
+                    showApiKey = false
+                }
+            } catch {
+                settingsLogger.error("deleteApiKey failed: \(error.localizedDescription, privacy: .public)")
+            }
+            isDeletingApiKey = false
         }
     }
 
@@ -200,14 +222,28 @@ struct SettingsWindow: View {
                 _ = try await cliService.setConfig(key: "auto_enter_delay_ms", value: String(config.autoEnterDelayMs))
                 _ = try await cliService.setConfig(key: "silero_threshold", value: String(config.sileroThreshold))
                 _ = try await cliService.setConfig(key: "postprocess_enabled", value: String(config.postprocessEnabled))
+                _ = try await cliService.setConfig(key: "postprocess_provider", value: config.postprocessProvider)
                 _ = try await cliService.setConfig(key: "idle_pause_secs", value: String(config.idlePauseSecs))
-                _ = try await cliService.setConfig(key: "idle_pause_action", value: config.idlePauseAction)
                 _ = try await cliService.setConfig(key: "audible_status_sound", value: config.audibleStatusSound)
                 await MainActor.run {
                     stateMonitor.applyRuntimePreferences(from: config)
                 }
             } catch {
                 settingsLogger.error("saveConfig failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// Provider changes are baked into the daemon's PostProcessor at
+    /// startup, so switching Groq <-> Apple Intelligence needs a daemon
+    /// relaunch to take effect (mirrors saveApiKey).
+    private func savePostprocessProvider() {
+        Task {
+            do {
+                _ = try await cliService.setConfig(key: "postprocess_provider", value: config.postprocessProvider)
+                _ = try await cliService.restartDaemon()
+            } catch {
+                settingsLogger.error("savePostprocessProvider failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }

@@ -2,7 +2,7 @@
 //!
 //! Default shortcuts: ⌃⌥P (pause), ⌃⌥A (auto-enter), ⌃⌥V (paste-anyway last filtered).
 //! All configurable via `always config set shortcut_pause ctrl+alt+p`
-//! (takes effect on daemon restart).
+//! (live-reloaded via the `ReloadShortcuts` UDS command — no restart).
 //!
 //! ## Cross-platform layout
 //!
@@ -20,6 +20,8 @@
 #[cfg(feature = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "macos")]
+use std::sync::Arc;
+#[cfg(feature = "macos")]
 use std::thread;
 #[cfg(feature = "macos")]
 use std::time::Duration;
@@ -28,6 +30,80 @@ use anyhow::Result;
 
 #[cfg(feature = "macos")]
 use super::{clipboard_watcher, config as always_config, correction, event, log, paste, pause};
+
+// ─── Live-reloadable shortcut state ───────────────────────────────────
+//
+// The keyboard listener's CGEventTap callback captures an `Arc<RwLock<Shortcuts>>`
+// and reads the current combos on every keypress. `reload_shortcuts()` swaps
+// the contents, so a Settings change takes effect immediately — no daemon
+// restart needed. The read lock is held for microseconds (copy 6 Combo
+// values), which is safe inside the time-budgeted CGEventTap callback.
+
+#[cfg(feature = "macos")]
+struct Shortcuts {
+    pause: Combo,
+    auto_enter: Combo,
+    force_paste: Combo,
+    log_correction: Combo,
+    correction_dialog: Combo,
+    master_pause: Combo,
+}
+
+#[cfg(feature = "macos")]
+static SHARED_SHORTCUTS: std::sync::OnceLock<Arc<parking_lot::RwLock<Shortcuts>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(feature = "macos")]
+fn shared_shortcuts() -> &'static Arc<parking_lot::RwLock<Shortcuts>> {
+    SHARED_SHORTCUTS.get_or_init(|| {
+        let (pause, auto_enter, force_paste, log_correction, correction_dialog, master_pause) =
+            load_shortcuts();
+        Arc::new(parking_lot::RwLock::new(Shortcuts {
+            pause,
+            auto_enter,
+            force_paste,
+            log_correction,
+            correction_dialog,
+            master_pause,
+        }))
+    })
+}
+
+/// Re-read shortcuts from the prefs DB and swap them into the live
+/// listener. Called by the `ReloadShortcuts` UDS command — safe to
+/// call any time after `start_keyboard_listener` has run.
+#[cfg(feature = "macos")]
+pub fn reload_shortcuts() {
+    let (pause, auto_enter, force_paste, log_correction, correction_dialog, master_pause) =
+        load_shortcuts();
+    let new = Shortcuts {
+        pause,
+        auto_enter,
+        force_paste,
+        log_correction,
+        correction_dialog,
+        master_pause,
+    };
+    // Check if Fn is now the master-pause shortcut — if the state
+    // transitioned to/from Fn, the Fn listener needs to start/stop.
+    let was_fn;
+    let is_fn = new.master_pause.key_char == "fn";
+    {
+        let shared = shared_shortcuts();
+        let mut guard = shared.write();
+        was_fn = guard.master_pause.key_char == "fn";
+        *guard = new;
+    }
+    if is_fn && !was_fn {
+        start_fn_listener();
+    }
+    tracing::info!("shortcuts_reloaded");
+}
+
+#[cfg(not(feature = "macos"))]
+pub fn reload_shortcuts() {
+    // No-op: keyboard shortcuts are not wired on non-macOS yet.
+}
 
 /// Event-based tracking of Command key state as a fallback when
 /// CGEventSourceFlagsState is unreliable. Updated by the keyboard listener.
@@ -393,23 +469,27 @@ fn handle_per_app_pause_hotkey(bundle: &str) {
 }
 
 /// ctrl+option+shift+P: global pause/resume. When ANY global source is
-/// pausing (user master pause, audio-output watchdog, mic conflict) the
-/// chord clears them ALL — an explicit user resume overrides the
-/// watchdogs until their next transition, so dictating over music or
-/// into notes during a call is one chord away. Otherwise it sets the
-/// user master pause.
+/// pausing (user master pause, audio-output watchdog, mic conflict) OR
+/// the idle watchdog has auto-paused, the chord clears them ALL — an
+/// explicit user resume overrides the watchdogs until their next
+/// transition, so dictating over music or into notes during a call is
+/// one chord away. Otherwise it sets the user master pause.
+///
+/// Idle is cleared BEFORE `clear_global_pauses` so the recompute inside
+/// sees idle=false and produces the correct effective state. The old
+/// order (clear_global_pauses → set_idle_auto_paused) left
+/// EFFECTIVE_PAUSED stale at true because `set_idle_auto_paused` is a
+/// plain setter that does not recompute.
 #[cfg(feature = "macos")]
 fn handle_master_pause_hotkey() {
-    let (effective, changed) = if pause::is_any_global_pause() {
+    let (effective, changed) = if pause::is_any_global_pause() || pause::is_idle_auto_paused() {
+        pause::set_idle_auto_paused(false);
+        pause::mark_voice_seen();
         pause::clear_global_pauses()
     } else {
         pause::set_paused(true)
     };
     let master = pause::is_master_paused();
-    if !master {
-        pause::set_idle_auto_paused(false);
-        pause::mark_voice_seen();
-    }
     event::global_broadcaster().master_pause_changed(master);
     event::global_broadcaster().pause_scope_toggled("master", None, master);
     if changed {
@@ -493,6 +573,99 @@ fn request_input_monitoring_access() {
     }
 }
 
+/// Read the `auto_learn_corrections` preference from the DB.
+/// Defaults to `true` when the DB or column is unavailable — the
+/// safe default is to learn, matching pre-toggle behavior.
+#[cfg(feature = "macos")]
+fn auto_learn_corrections_enabled() -> bool {
+    let Ok(conn) = crate::db::open() else {
+        return true;
+    };
+    let Ok(prefs) = crate::db::get_preferences(&conn) else {
+        return true;
+    };
+    prefs.auto_learn_corrections.unwrap_or(true)
+}
+
+/// Spawn a background LLM second-opinion extraction. Runs in a
+/// detached thread with its own tokio runtime so it doesn't block
+/// the keyboard listener. New pairs are written to the glossary
+/// (when `auto_apply` is true) or just logged for review.
+#[cfg(feature = "macos")]
+fn spawn_llm_extraction(
+    original: String,
+    corrected: String,
+    already_found: Vec<crate::always::correction::CorrectionPair>,
+    auto_apply: bool,
+) {
+    use crate::always::correction_extract;
+
+    // No API key → skip silently.
+    let Some(api_key) = correction_extract::get_extraction_api_key() else {
+        return;
+    };
+
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                tracing::error!(error = %e, "llm_extraction_runtime_failed");
+                return;
+            }
+        };
+
+        let model = correction_extract::get_extraction_model();
+        let result = rt.block_on(correction_extract::extract_corrections_via_llm(
+            &original,
+            &corrected,
+            &api_key,
+            &model,
+            &already_found,
+        ));
+
+        match result {
+            Ok(new_pairs) if !new_pairs.is_empty() => {
+                tracing::info!(
+                    count = new_pairs.len(),
+                    "llm_extraction_found_additional_pairs"
+                );
+                crate::always::correction_metrics::record(
+                    crate::always::correction_metrics::MetricEvent::LlmExtractionFound,
+                );
+                if auto_apply {
+                    for p in &new_pairs {
+                        event::global_broadcaster()
+                            .correction_logged(p.wrong.clone(), p.right.clone());
+                    }
+                    if let Err(e) = crate::always::correction::apply_pairs_to_glossary_with_provenance(
+                        &new_pairs,
+                        crate::always::correction::Provenance::Llm,
+                    ) {
+                        tracing::error!(error = %e, "llm_extraction_apply_failed");
+                    }
+                } else {
+                    tracing::info!("llm_extraction_skipped_apply_auto_learn_off");
+                }
+            }
+            Ok(_) => {
+                tracing::debug!("llm_extraction_no_additional_pairs");
+                crate::always::correction_metrics::record(
+                    crate::always::correction_metrics::MetricEvent::LlmExtractionEmpty,
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "llm_extraction_failed");
+                crate::always::correction_metrics::record(
+                    crate::always::correction_metrics::MetricEvent::LlmExtractionFailed,
+                );
+            }
+        }
+    });
+}
+
 #[cfg(feature = "macos")]
 pub fn start_keyboard_listener() -> Result<()> {
     use rdev::{EventType, Key, listen};
@@ -500,16 +673,11 @@ pub fn start_keyboard_listener() -> Result<()> {
     // Must run before the tap is created — see `request_input_monitoring_access`.
     request_input_monitoring_access();
 
-    let (
-        pause_combo,
-        auto_enter_combo,
-        force_paste_combo,
-        log_correction_combo,
-        correction_dialog_combo,
-        master_pause_combo,
-    ) = load_shortcuts();
-
-    let master_pause_is_fn = master_pause_combo.key_char == "fn";
+    // Initialize the shared shortcut state and capture an Arc to it.
+    // The listener closure reads from this on every keypress, so
+    // `reload_shortcuts()` can swap combos without restarting the tap.
+    let shortcuts = Arc::clone(shared_shortcuts());
+    let master_pause_is_fn = shortcuts.read().master_pause.key_char == "fn";
 
     // rdev's listen() creates a CGEventTap that macOS disables after
     // ~10-15s (TapDisabledByTimeout). rdev's callback never handles
@@ -561,12 +729,19 @@ pub fn start_keyboard_listener() -> Result<()> {
                 EventType::KeyRelease(Key::MetaLeft) | EventType::KeyRelease(Key::MetaRight) => {
                     CMD_HELD_EVENT.store(false, Ordering::Relaxed);
                 }
-                EventType::KeyPress(Key::Function) => {
-                    // Fn key — rdev does see it as KeyPress(Function)
-                    // on some macOS versions.
-                    tracing::info!("fn_key_pressed");
-                    handle_master_pause_hotkey();
-                }
+                // NOTE: Fn/Globe key is NOT handled here. rdev's CGEventTap
+                // forwards keyDown/keyUp but macOS delivers Fn as
+                // flagsChanged, which rdev drops. A dedicated CGEventTap
+                // (`start_fn_listener`) watches flagsChanged for keycode 63
+                // and is started only when Fn is the configured master-pause
+                // shortcut. Handling Fn here too caused two bugs:
+                //   1. When Fn was NOT the configured shortcut, every Fn
+                //      press (i.e. every function-key use under macOS's
+                //      default "Use F1-F12 as standard function keys = off")
+                //      toggled the master mute unintentionally.
+                //   2. When Fn WAS the configured shortcut, both this
+                //      handler and the Fn CGEventTap fired on a single press,
+                //      double-toggling and cancelling out.
                 EventType::KeyPress(ref key) => {
                     let Some(name) = key_to_shortcut_name(key) else {
                         if pause::countdown_active() {
@@ -579,19 +754,27 @@ pub fn start_keyboard_listener() -> Result<()> {
                         pause::countdown_request_cancel();
                         pause::dictation_buffer_clear();
                     }
-                    if master_pause_combo.matches_name(
+                    // Read the current shortcuts from shared state —
+                    // `reload_shortcuts()` may have swapped them since
+                    // the last keypress. The read lock is held for
+                    // microseconds (copy 6 Combo values), safe inside
+                    // the CGEventTap callback's time budget.
+                    let s = shortcuts.read();
+                    if s.master_pause.matches_name(
                         ctrl_pressed,
                         shift_pressed,
                         alt_pressed,
                         name,
                     ) {
+                        drop(s);
                         handle_master_pause_hotkey();
-                    } else if pause_combo.matches_name(
+                    } else if s.pause.matches_name(
                         ctrl_pressed,
                         shift_pressed,
                         alt_pressed,
                         name,
                     ) {
+                        drop(s);
                         match pause_chord_action(pause::current_app().as_deref()) {
                             ChordAction::TogglePerApp(bundle) => {
                                 handle_per_app_pause_hotkey(&bundle);
@@ -605,12 +788,13 @@ pub fn start_keyboard_listener() -> Result<()> {
                                 );
                             }
                         }
-                    } else if auto_enter_combo.matches_name(
+                    } else if s.auto_enter.matches_name(
                         ctrl_pressed,
                         shift_pressed,
                         alt_pressed,
                         name,
                     ) {
+                        drop(s);
                         let new_state = pause::toggle_auto_enter();
                         if new_state {
                             event::global_broadcaster().auto_enter_enabled();
@@ -622,12 +806,13 @@ pub fn start_keyboard_listener() -> Result<()> {
                         {
                             logger.write(log::Event::AutoEnterToggled { enabled: new_state });
                         }
-                    } else if force_paste_combo.matches_name(
+                    } else if s.force_paste.matches_name(
                         ctrl_pressed,
                         shift_pressed,
                         alt_pressed,
                         name,
                     ) {
+                        drop(s);
                         if let Some(text) = pause::take_last_filtered() {
                             let chars = text.len();
                             tracing::info!(chars, "force_paste_filtered");
@@ -651,20 +836,46 @@ pub fn start_keyboard_listener() -> Result<()> {
                             event::global_broadcaster()
                                 .transcription_filtered("Nothing to paste — no held transcript");
                         }
-                    } else if log_correction_combo.matches_name(
+                    } else if s.log_correction.matches_name(
                         ctrl_pressed,
                         shift_pressed,
                         alt_pressed,
                         name,
                     ) {
-                        match correction::capture_via_hotkey(clipboard_watcher::PASTE_WINDOW) {
-                            Ok(correction::CaptureOutcome::Applied { pairs, applied }) => {
+                        drop(s);
+                        let auto_learn = auto_learn_corrections_enabled();
+                        match correction::capture_via_hotkey(
+                            clipboard_watcher::PASTE_WINDOW,
+                            auto_learn,
+                        ) {
+                            Ok(correction::CaptureOutcome::Applied {
+                                pairs,
+                                applied,
+                                original,
+                                corrected,
+                            }) => {
                                 for p in &pairs {
                                     event::global_broadcaster()
                                         .correction_logged(p.wrong.clone(), p.right.clone());
                                 }
                                 event::global_broadcaster().correction_capture_result("applied");
                                 let _ = applied;
+                                // Spawn background LLM second-opinion extraction.
+                                spawn_llm_extraction(original, corrected, pairs, auto_learn);
+                            }
+                            Ok(correction::CaptureOutcome::Extracted {
+                                pairs,
+                                original,
+                                corrected,
+                            }) => {
+                                for p in &pairs {
+                                    event::global_broadcaster()
+                                        .correction_logged(p.wrong.clone(), p.right.clone());
+                                }
+                                event::global_broadcaster()
+                                    .correction_capture_result("extracted_not_applied");
+                                // Still run LLM extraction for review queue.
+                                spawn_llm_extraction(original, corrected, pairs, auto_learn);
                             }
                             Ok(correction::CaptureOutcome::NoRecentPaste) => {
                                 tracing::debug!("log_correction_no_recent_paste");
@@ -685,12 +896,13 @@ pub fn start_keyboard_listener() -> Result<()> {
                                 event::global_broadcaster().correction_capture_result("error");
                             }
                         }
-                    } else if correction_dialog_combo.matches_name(
+                    } else if s.correction_dialog.matches_name(
                         ctrl_pressed,
                         shift_pressed,
                         alt_pressed,
                         name,
                     ) {
+                        drop(s);
                         let last = pause::last_transcript_for_correction().unwrap_or_default();
                         event::global_broadcaster().correction_dialog_requested(last);
                     }

@@ -1,11 +1,16 @@
-//! Always-on voice activation.
+//! Always — the first speech-to-text software designed to be always on
+//! and free your hands from the affordance.
 
 pub mod audio;
 pub mod auto_enter_countdown;
 pub mod chunker;
 pub mod clipboard_watcher;
+pub mod common_words;
 pub mod config;
+pub mod context_heuristics;
 pub mod correction;
+pub mod correction_extract;
+pub mod correction_metrics;
 pub mod correction_queue;
 pub mod correction_request;
 pub mod daemon;
@@ -44,6 +49,9 @@ pub mod vad;
 pub mod vad_silero;
 pub mod vocab;
 pub mod voiceprint;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod apple_intelligence;
 
 pub use config::AlwaysConfig;
 pub use event_loop::run;

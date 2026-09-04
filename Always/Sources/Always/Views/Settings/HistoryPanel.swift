@@ -13,6 +13,7 @@ private struct TranscriptEntry: Identifiable {
 struct HistoryPanel: View {
     @State private var entries: [TranscriptEntry] = []
     @State private var isLoading = false
+    @State private var showDeleteConfirmation = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -27,6 +28,20 @@ struct HistoryPanel: View {
                 Spacer()
                 Button("Refresh") { Task { await loadHistory() } }
                     .controlSize(.small)
+                if !entries.isEmpty {
+                    Button {
+                        exportAll()
+                    } label: {
+                        Label("Export All", systemImage: "square.and.arrow.up")
+                    }
+                    .controlSize(.small)
+                    Button(role: .destructive) {
+                        showDeleteConfirmation = true
+                    } label: {
+                        Label("Delete All", systemImage: "trash")
+                    }
+                    .controlSize(.small)
+                }
             }
 
             if isLoading {
@@ -52,6 +67,18 @@ struct HistoryPanel: View {
         }
         .padding(20)
         .task { await loadHistory() }
+        .confirmationDialog(
+            "Delete all transcriptions from today's session?",
+            isPresented: $showDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete All", role: .destructive) {
+                Task { await deleteAllHistory() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently removes today's transcript history. This cannot be undone.")
+        }
     }
 
     private func loadHistory() async {
@@ -61,6 +88,39 @@ struct HistoryPanel: View {
             readTodayEntries()
         }.value
     }
+
+    private func deleteAllHistory() async {
+        await Task.detached(priority: .utility) {
+            clearTodayLog()
+        }.value
+        await loadHistory()
+    }
+
+    private func exportAll() {
+        let panel = NSSavePanel()
+        panel.title = "Export Transcript History"
+        panel.nameFieldStringValue = "always-transcripts-\(Self.exportDateFormatter.string(from: Date()))"
+        panel.allowedContentTypes = [.plainText]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        // Build plain-text export: one block per entry, separated by rules.
+        let iso = ISO8601DateFormatter()
+        let blocks = entries.map { entry in
+            """
+            [\(iso.string(from: entry.timestamp))]
+            \(entry.displayText)
+            """
+        }
+        let separator = String(repeating: "—", count: 40)
+        let text = blocks.joined(separator: "\n\n\(separator)\n\n")
+        try? text.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private static let exportDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
 }
 
 private struct HistoryEntryRow: View {
@@ -123,4 +183,17 @@ private func readTodayEntries() -> [TranscriptEntry] {
         result.append(TranscriptEntry(timestamp: ts, rawText: rawText, processedText: processedText))
     }
     return Array(result.suffix(20))
+}
+
+private func clearTodayLog() {
+    let dateStr = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: Date())
+    }()
+    let logURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/Always/always.\(dateStr)")
+    // Truncate the log file. The daemon holds an open file handle and will
+    // continue appending new entries at the new (zero) offset.
+    try? Data().write(to: logURL, options: .atomic)
 }

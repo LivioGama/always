@@ -274,6 +274,46 @@ fn longest_common_subsequence<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<&'a str> 
 /// Returns the number of *new* mistranscriptions actually written
 /// (entries that already had `pair.wrong` listed don't count).
 pub fn apply_pairs_to_glossary(pairs: &[CorrectionPair]) -> Result<usize> {
+    apply_pairs_to_glossary_with_provenance(pairs, Provenance::Manual)
+}
+
+/// Where a correction came from. Stored in the glossary entry for
+/// debugging and future UI display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Provenance {
+    /// User typed the intended word in the correction dialog.
+    Manual,
+    /// User pressed the ⌃⌥X correction-capture hotkey.
+    Hotkey,
+    /// Passive clipboard watcher noticed a re-copy.
+    Passive,
+    /// LLM-assisted extraction found additional pairs.
+    Llm,
+    /// Imported from Superwhisper, macOS app names, or other sources.
+    Import,
+}
+
+impl Provenance {
+    fn as_str(self) -> &'static str {
+        match self {
+            Provenance::Manual => "manual",
+            Provenance::Hotkey => "hotkey",
+            Provenance::Passive => "passive",
+            Provenance::Llm => "llm",
+            Provenance::Import => "import",
+        }
+    }
+}
+
+/// Same as [`apply_pairs_to_glossary`] but records the provenance of
+/// each correction in the glossary entry's `provenance` field.
+/// Existing entries without a `provenance` field are left unchanged
+/// (backward compatible).
+pub fn apply_pairs_to_glossary_with_provenance(
+    pairs: &[CorrectionPair],
+    provenance: Provenance,
+) -> Result<usize> {
     if pairs.is_empty() {
         return Ok(0);
     }
@@ -295,8 +335,52 @@ pub fn apply_pairs_to_glossary(pairs: &[CorrectionPair]) -> Result<usize> {
     };
 
     let mut written = 0usize;
+    let mut removed = 0usize;
 
     for pair in pairs {
+        // Back-correction detection (Phase 3.3): check if this pair
+        // reverses a previously learned mapping. If the glossary has
+        // term=pair.right with mistranscription=pair.wrong, that's a
+        // normal add. But if the glossary has term=pair.wrong with
+        // mistranscription=pair.right, the user is correcting BACK —
+        // the previous mapping was wrong and should be removed.
+        let back_corr_idx = entries.iter().position(|e| {
+            e.get("term").and_then(|v| v.as_str())
+                == Some(pair.wrong.as_str())
+                && e
+                    .get("mistranscriptions")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|arr| {
+                        arr.iter().any(|v| {
+                            v.as_str()
+                                .is_some_and(|s| s.eq_ignore_ascii_case(pair.right.as_str()))
+                        })
+                    })
+        });
+
+        if let Some(bi) = back_corr_idx {
+            // Remove the bad mistranscription from the existing entry.
+            let entry = &mut entries[bi];
+            if let Some(arr) = entry.get_mut("mistranscriptions").and_then(|v| v.as_array_mut()) {
+                let before = arr.len();
+                arr.retain(|v| {
+                    v.as_str()
+                        .is_some_and(|s| !s.eq_ignore_ascii_case(pair.right.as_str()))
+                });
+                removed += before - arr.len();
+            }
+            tracing::info!(
+                wrong = %pair.wrong,
+                right = %pair.right,
+                "back_correction_removed_bad_mapping"
+            );
+            crate::always::correction_metrics::record(
+                crate::always::correction_metrics::MetricEvent::BackCorrection,
+            );
+            // Don't learn the reverse — skip to next pair.
+            continue;
+        }
+
         // Find existing entry by term (case-sensitive — preserve the
         // user's exact capitalization).
         let idx = entries
@@ -324,6 +408,13 @@ pub fn apply_pairs_to_glossary(pairs: &[CorrectionPair]) -> Result<usize> {
                 if !already {
                     arr.push(serde_json::Value::String(pair.wrong.clone()));
                     written += 1;
+                    crate::always::correction_metrics::record(
+                        crate::always::correction_metrics::MetricEvent::PairWritten,
+                    );
+                }
+                // Update provenance if missing (backward compat).
+                if entry.get("provenance").is_none() {
+                    entry["provenance"] = serde_json::json!(provenance.as_str());
                 }
             }
             None => {
@@ -331,8 +422,12 @@ pub fn apply_pairs_to_glossary(pairs: &[CorrectionPair]) -> Result<usize> {
                     "term": pair.right,
                     "mistranscriptions": [pair.wrong],
                     "frequency": 100,
+                    "provenance": provenance.as_str(),
                 }));
                 written += 1;
+                crate::always::correction_metrics::record(
+                    crate::always::correction_metrics::MetricEvent::PairWritten,
+                );
             }
         }
     }
@@ -340,10 +435,14 @@ pub fn apply_pairs_to_glossary(pairs: &[CorrectionPair]) -> Result<usize> {
     let json = serde_json::to_string_pretty(&entries)?;
     std::fs::write(&path, json).context("write glossary.json")?;
 
+    // Invalidate the in-memory cache so the next access reloads from disk.
+    crate::glossary::invalidate_cache();
+
     tracing::info!(
         path = %path.display(),
         pairs = pairs.len(),
         written,
+        removed,
         "correction_glossary_updated"
     );
 
@@ -401,6 +500,7 @@ pub fn add_or_bump_term(term: &str) -> Result<()> {
 
     let json = serde_json::to_string_pretty(&entries)?;
     std::fs::write(&path, json).context("write glossary.json")?;
+    crate::glossary::invalidate_cache();
     tracing::info!(term, "glossary_term_bumped");
     Ok(())
 }
@@ -521,10 +621,23 @@ pub enum CaptureOutcome {
     NoCorrectionPairs,
     /// Pairs extracted and applied to glossary. `applied` counts new
     /// mistranscriptions actually written; pairs already present are
-    /// counted in `pairs.len()` but not in `applied`.
+    /// counted in `pairs.len()` but not in `applied`. `original` and
+    /// `corrected` are the diffed texts, retained for optional LLM
+    /// second-opinion extraction.
     Applied {
         pairs: Vec<CorrectionPair>,
         applied: usize,
+        original: String,
+        corrected: String,
+    },
+    /// Pairs extracted but NOT applied to glossary because
+    /// `auto_learn_corrections` is disabled. The caller may queue
+    /// them for manual review. `original` and `corrected` are the
+    /// diffed texts, retained for optional LLM second-opinion extraction.
+    Extracted {
+        pairs: Vec<CorrectionPair>,
+        original: String,
+        corrected: String,
     },
 }
 
@@ -535,8 +648,16 @@ pub enum CaptureOutcome {
 /// refuse to use it as the diff baseline — a long delay almost
 /// certainly means the user has moved on and any selection is
 /// unrelated.
+///
+/// When `auto_apply` is `false` (the `auto_learn_corrections` config
+/// is off), pairs are extracted and returned as `Extracted` but NOT
+/// written to the glossary — the caller may queue them for manual
+/// review instead.
 #[cfg(feature = "macos")]
-pub fn capture_via_hotkey(last_pasted_window: Duration) -> Result<CaptureOutcome> {
+pub fn capture_via_hotkey(
+    last_pasted_window: Duration,
+    auto_apply: bool,
+) -> Result<CaptureOutcome> {
     use crate::always::pause;
 
     let Some((last, _ts)) = pause::take_last_pasted_within(last_pasted_window) else {
@@ -559,12 +680,25 @@ pub fn capture_via_hotkey(last_pasted_window: Duration) -> Result<CaptureOutcome
         return Ok(CaptureOutcome::NoCorrectionPairs);
     }
 
-    let applied = apply_pairs_to_glossary(&pairs)?;
-    Ok(CaptureOutcome::Applied { pairs, applied })
+    if !auto_apply {
+        return Ok(CaptureOutcome::Extracted {
+            pairs,
+            original: last_clean,
+            corrected: selection_clean,
+        });
+    }
+
+    let applied = apply_pairs_to_glossary_with_provenance(&pairs, Provenance::Hotkey)?;
+    Ok(CaptureOutcome::Applied {
+        pairs,
+        applied,
+        original: last_clean,
+        corrected: selection_clean,
+    })
 }
 
 #[cfg(not(feature = "macos"))]
-pub fn capture_via_hotkey(_window: Duration) -> Result<CaptureOutcome> {
+pub fn capture_via_hotkey(_window: Duration, _auto_apply: bool) -> Result<CaptureOutcome> {
     Ok(CaptureOutcome::NoRecentPaste)
 }
 
@@ -781,6 +915,52 @@ mod tests {
         assert!(mistr.iter().any(|v| v.as_str() == Some("cuber netties")));
         // Pre-existing `frequency` preserved.
         assert_eq!(arr[0]["frequency"].as_u64(), Some(200));
+    }
+
+    #[test]
+    fn apply_pairs_back_correction_removes_bad_mapping() {
+        let _guard = home_lock();
+        let tmp = tempdir_under_target();
+        unsafe { std::env::set_var("HOME", &tmp) };
+        let glossary_path = tmp.join(".always/glossary.json");
+        std::fs::create_dir_all(glossary_path.parent().unwrap()).unwrap();
+        // Glossary has: term="Claude", mistranscriptions=["cloud"]
+        // — meaning "cloud" gets rewritten to "Claude".
+        std::fs::write(
+            &glossary_path,
+            r#"[{"term":"Claude","mistranscriptions":["cloud"],"frequency":100}]"#,
+        )
+        .unwrap();
+
+        // User corrects "Claude" back to "cloud" — this is a
+        // back-correction indicating the previous mapping was wrong.
+        let written = apply_pairs_to_glossary(&[CorrectionPair {
+            wrong: "Claude".to_string(),
+            right: "cloud".to_string(),
+        }])
+        .unwrap();
+        // No new entries written — the bad mapping was removed instead.
+        assert_eq!(written, 0);
+
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&glossary_path).unwrap()).unwrap();
+        let arr = parsed.as_array().unwrap();
+        // The "Claude" entry still exists but "cloud" is no longer a
+        // mistranscription.
+        let claude_entry = arr
+            .iter()
+            .find(|e| e.get("term").and_then(|v| v.as_str()) == Some("Claude"))
+            .expect("Claude entry should still exist");
+        let mistr = claude_entry["mistranscriptions"].as_array().unwrap();
+        assert!(
+            !mistr.iter().any(|v| v.as_str() == Some("cloud")),
+            "cloud should have been removed from Claude's mistranscriptions"
+        );
+        // The reverse mapping (cloud → Claude) should NOT have been learned.
+        assert!(
+            !arr.iter().any(|e| e.get("term").and_then(|v| v.as_str()) == Some("cloud")),
+            "should not have learned the reverse mapping"
+        );
     }
 
     /// Per-test scratch directory under `target/test-tmp/` — avoids

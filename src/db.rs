@@ -35,8 +35,6 @@ pub struct Preferences {
     pub auto_enter_delay_ms: Option<u32>,
     /// Auto-pause after no voice for this many seconds. 0 = disabled.
     pub idle_pause_secs: Option<u32>,
-    /// Action to take when idle timeout occurs: "pause" or "pause_and_mute".
-    pub idle_pause_action: Option<String>,
     /// Shortcut to open the manual correction dialog (intended-word input).
     pub shortcut_correction_dialog: Option<String>,
     /// JSON-encoded per-app overrides: `{ "<bundle_id>": { "auto_enter": bool, "paused": bool } }`.
@@ -69,6 +67,16 @@ pub struct Preferences {
     pub speaker_gate_threshold: Option<f64>,
     /// Status sound setting: off, low, medium, or high.
     pub audible_status_sound: Option<String>,
+    /// When true, corrections captured via hotkey/clipboard are
+    /// automatically written to the glossary. Default true.
+    pub auto_learn_corrections: Option<bool>,
+    /// Optional dedicated Groq model for LLM-assisted correction
+    /// extraction (Phase 3.2). When unset, falls back to the
+    /// post-processing `groq_model`. Allows a cheaper/faster model
+    /// for correction extraction vs grammar cleanup.
+    pub correction_model: Option<String>,
+    /// Post-processing LLM provider: "groq" or "apple". Default "groq".
+    pub postprocess_provider: Option<String>,
 }
 
 pub fn open() -> Result<Connection> {
@@ -216,13 +224,6 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN idle_pause_secs INTEGER;")?;
     }
 
-    let has_idle_pause_action = conn
-        .prepare("SELECT idle_pause_action FROM preferences LIMIT 0")
-        .is_ok();
-    if !has_idle_pause_action {
-        conn.execute_batch("ALTER TABLE preferences ADD COLUMN idle_pause_action TEXT;")?;
-    }
-
     let has_shortcut_correction_dialog = conn
         .prepare("SELECT shortcut_correction_dialog FROM preferences LIMIT 0")
         .is_ok();
@@ -314,6 +315,29 @@ fn migrate(conn: &Connection) -> Result<()> {
         }
     }
 
+    let has_auto_learn_corrections = conn
+        .prepare("SELECT auto_learn_corrections FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_auto_learn_corrections {
+        conn.execute_batch(
+            "ALTER TABLE preferences ADD COLUMN auto_learn_corrections INTEGER;",
+        )?;
+    }
+
+    let has_correction_model = conn
+        .prepare("SELECT correction_model FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_correction_model {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN correction_model TEXT;")?;
+    }
+
+    let has_postprocess_provider = conn
+        .prepare("SELECT postprocess_provider FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_postprocess_provider {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN postprocess_provider TEXT;")?;
+    }
+
     encode_plaintext_groq_key(conn)?;
 
     Ok(())
@@ -345,7 +369,7 @@ fn encode_plaintext_groq_key(conn: &Connection) -> Result<()> {
 
 pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
     let mut stmt = conn.prepare(
-        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, idle_pause_action, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream, stt_adaptive_silence, speaker_gate_enabled, speaker_gate_threshold, audible_status_sound, stt_live_preview FROM preferences WHERE id = 1",
+        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream, stt_adaptive_silence, speaker_gate_enabled, speaker_gate_threshold, audible_status_sound, stt_live_preview, auto_learn_corrections, correction_model, postprocess_provider FROM preferences WHERE id = 1",
     )?;
     let result = stmt.query_row([], |row| {
         Ok(Preferences {
@@ -370,17 +394,19 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             passive_correction_capture: row.get::<_, Option<i64>>(18)?.map(|v| v != 0),
             auto_enter_delay_ms: row.get::<_, Option<i64>>(19)?.map(|v| v as u32),
             idle_pause_secs: row.get::<_, Option<i64>>(20)?.map(|v| v as u32),
-            idle_pause_action: row.get(21)?,
-            shortcut_correction_dialog: row.get(22)?,
-            per_app_settings_json: row.get(23)?,
-            transcriber_backend: row.get(24)?,
-            shortcut_master_pause: row.get(25)?,
-            transcript_stream: row.get::<_, Option<i64>>(26)?.map(|v| v != 0),
-            stt_adaptive_silence: row.get::<_, Option<i64>>(27)?.map(|v| v != 0),
-            speaker_gate_enabled: row.get::<_, Option<i64>>(28)?.map(|v| v != 0),
-            speaker_gate_threshold: row.get(29)?,
-            audible_status_sound: row.get(30)?,
-            stt_live_preview: row.get::<_, Option<i64>>(31)?.map(|v| v != 0),
+            shortcut_correction_dialog: row.get(21)?,
+            per_app_settings_json: row.get(22)?,
+            transcriber_backend: row.get(23)?,
+            shortcut_master_pause: row.get(24)?,
+            transcript_stream: row.get::<_, Option<i64>>(25)?.map(|v| v != 0),
+            stt_adaptive_silence: row.get::<_, Option<i64>>(26)?.map(|v| v != 0),
+            speaker_gate_enabled: row.get::<_, Option<i64>>(27)?.map(|v| v != 0),
+            speaker_gate_threshold: row.get(28)?,
+            audible_status_sound: row.get(29)?,
+            stt_live_preview: row.get::<_, Option<i64>>(30)?.map(|v| v != 0),
+            auto_learn_corrections: row.get::<_, Option<i64>>(31)?.map(|v| v != 0),
+            correction_model: row.get(32)?,
+            postprocess_provider: row.get(33)?,
         })
     });
     match result {
@@ -417,7 +443,6 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "passive_correction_capture",
         "auto_enter_delay_ms",
         "idle_pause_secs",
-        "idle_pause_action",
         "shortcut_correction_dialog",
         "per_app_settings_json",
         "transcriber_backend",
@@ -428,6 +453,9 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "speaker_gate_enabled",
         "speaker_gate_threshold",
         "audible_status_sound",
+        "auto_learn_corrections",
+        "correction_model",
+        "postprocess_provider",
     ];
     if !valid_keys.contains(&key) {
         anyhow::bail!(
@@ -541,11 +569,6 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
                 anyhow::bail!("idle_pause_secs must be <= 86400 (1 day)");
             }
         }
-        "idle_pause_action" => {
-            if !matches!(value, "pause" | "pause_and_mute") {
-                anyhow::bail!("idle_pause_action must be one of: pause, pause_and_mute");
-            }
-        }
         "audible_status_sound" => {
             let _: crate::always::status_sound::StatusSoundSetting = value.parse()?;
         }
@@ -561,6 +584,10 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
             let _: crate::stt_dispatch::TranscriberBackendChoice = value
                 .parse()
                 .context("transcriber_backend must be 'groq' or 'local:<model_id>'")?;
+        }
+        "postprocess_provider" => {
+            let parsed: Result<crate::always::config::PostprocessProvider, _> = value.parse();
+            parsed.map_err(|e| anyhow::anyhow!("postprocess_provider must be 'groq' or 'apple': {e}"))?;
         }
         _ => {}
     }

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use always::always::config::{
-    AlwaysConfig, IdlePauseAction, PostprocessConfig, VadMode, VocabConfig,
+    AlwaysConfig, PostprocessConfig, VadMode, VocabConfig,
 };
 use always::always::localization::Localization;
 use always::always::speech_action::{
@@ -45,7 +45,6 @@ fn bench_config() -> AlwaysConfig {
         postprocess_config: PostprocessConfig::default(),
         auto_enter_delay_ms: 0,
         idle_pause_secs: 0,
-        idle_pause_action: IdlePauseAction::default(),
         transcript_stream_enabled: false,
         speaker_gate_enabled: false,
         speaker_gate_threshold: 0.5,

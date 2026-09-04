@@ -29,7 +29,7 @@ const FULL_VERSION: &str = concat!(
 #[command(
     name = "always",
     version = FULL_VERSION,
-    about = "Always-on voice activation daemon — Groq STT with intelligent transcription"
+    about = "Always — the first speech-to-text software designed to be always on and free your hands from the affordance"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -259,7 +259,7 @@ fn main() -> Result<()> {
             OverlayAction::Run => overlay_integration::run(),
         },
         None => {
-            eprintln!("always: always-on voice activation daemon");
+            eprintln!("always: the first speech-to-text software designed to be always on and free your hands from the affordance");
             eprintln!("Usage: always <COMMAND>");
             eprintln!();
             eprintln!("Commands:");
@@ -446,6 +446,14 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .unwrap_or_else(|| "true".to_string())
             );
             println!(
+                "postprocess_provider: {}",
+                prefs.postprocess_provider.as_deref().unwrap_or("groq")
+            );
+            println!(
+                "apple_intelligence_available: {}",
+                always::always::apple_intelligence::check_availability()
+            );
+            println!(
                 "per_app_settings_json: {}",
                 prefs.per_app_settings_json.as_deref().unwrap_or("{}")
             );
@@ -455,10 +463,6 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .idle_pause_secs
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "120".to_string())
-            );
-            println!(
-                "idle_pause_action: {}",
-                prefs.idle_pause_action.as_deref().unwrap_or("pause")
             );
             println!(
                 "transcript_stream: {}",
@@ -634,7 +638,7 @@ fn handle_corrections(action: CorrectionsAction) -> Result<()> {
             // 60s window matches the default hotkey behaviour: a paste
             // older than that is almost certainly unrelated to whatever
             // the user has selected now.
-            match correction::capture_via_hotkey(Duration::from_secs(60))? {
+            match correction::capture_via_hotkey(Duration::from_secs(60), true)? {
                 CaptureOutcome::NoRecentPaste => {
                     eprintln!("No recent paste to diff against.");
                     std::process::exit(1);
@@ -645,11 +649,17 @@ fn handle_corrections(action: CorrectionsAction) -> Result<()> {
                 CaptureOutcome::NoCorrectionPairs => {
                     println!("Selection differs but no word pairs cleared the similarity gate.");
                 }
-                CaptureOutcome::Applied { pairs, applied } => {
+                CaptureOutcome::Applied { pairs, applied, .. } => {
                     for pair in &pairs {
                         println!("Recorded: {} → {}", pair.wrong, pair.right);
                     }
                     println!("Wrote {applied} new mistranscription(s) to ~/.always/glossary.json");
+                }
+                CaptureOutcome::Extracted { pairs, .. } => {
+                    for pair in &pairs {
+                        println!("Extracted: {} → {}", pair.wrong, pair.right);
+                    }
+                    println!("Auto-learn is disabled — pairs not written to glossary.");
                 }
             }
         }

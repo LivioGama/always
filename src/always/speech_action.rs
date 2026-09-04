@@ -339,7 +339,7 @@ mod tests {
     use crate::stt::TranscriptionResult;
 
     fn test_config() -> AlwaysConfig {
-        use crate::always::config::{IdlePauseAction, PostprocessConfig, VocabConfig};
+        use crate::always::config::{PostprocessConfig, VocabConfig};
 
         AlwaysConfig {
             lang: "en".to_string(),
@@ -358,6 +358,7 @@ mod tests {
             post_processor: None,
             project_root: None,
             learning_enabled: false,
+            auto_learn_corrections: true,
             groq_stt_api_key: Some("test-key".to_string()),
             transcriber_backend: crate::stt_dispatch::TranscriberBackendChoice::Groq,
             vad_mode: crate::always::config::VadMode::Local,
@@ -366,7 +367,6 @@ mod tests {
             postprocess_config: PostprocessConfig::default(),
             auto_enter_delay_ms: 0,
             idle_pause_secs: 0,
-            idle_pause_action: IdlePauseAction::default(),
             localization: Localization::ENGLISH,
             transcript_stream_enabled: false,
             audible_status_sound: crate::always::status_sound::StatusSoundSetting::default(),

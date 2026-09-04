@@ -10,15 +10,19 @@ import SwiftUI
 struct NumericSettingRow<T: Numeric & LosslessStringConvertible>: View where T: Comparable {
     let title: String
     let help: String
+    let explanation: String
     let unit: String
     let formatter: NumberFormatter
     @Binding var value: T
     let defaultValue: T
     let range: ClosedRange<T>?
 
+    @State private var showExplanation = false
+
     init(
         title: String,
         help: String = "",
+        explanation: String = "",
         unit: String = "",
         formatter: NumberFormatter,
         value: Binding<T>,
@@ -27,6 +31,7 @@ struct NumericSettingRow<T: Numeric & LosslessStringConvertible>: View where T: 
     ) {
         self.title = title
         self.help = help
+        self.explanation = explanation
         self.unit = unit
         self.formatter = formatter
         self._value = value
@@ -37,8 +42,32 @@ struct NumericSettingRow<T: Numeric & LosslessStringConvertible>: View where T: 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                    .font(.body)
+                HStack(spacing: 4) {
+                    Text(title)
+                        .font(.body)
+                    if !explanation.isEmpty {
+                        Button {
+                            showExplanation.toggle()
+                        } label: {
+                            Image(systemName: "info.circle")
+                                .font(.caption2)
+                                .foregroundColor(.accentColor)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("What does this mean?")
+                        .popover(isPresented: $showExplanation, arrowEdge: .leading) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(title).font(.body.weight(.medium))
+                                Text(explanation)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(12)
+                            .frame(width: 280)
+                        }
+                    }
+                }
                 if !help.isEmpty {
                     Text(help)
                         .font(.caption2)

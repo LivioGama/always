@@ -588,6 +588,11 @@ pub enum DaemonCommand {
     /// and respawns the `rec` child so it opens the new default device
     /// without requiring an app relaunch.
     RespawnRecorder,
+    /// Settings → Shortcuts saved a new key combo. Daemon re-reads the
+    /// prefs DB and swaps the live keyboard listener's shortcut set —
+    /// no restart needed. Sent after each `always config set shortcut_*`
+    /// call from the Swift app.
+    ReloadShortcuts,
 }
 
 impl DaemonCommand {

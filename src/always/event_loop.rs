@@ -203,7 +203,7 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
 
     // Idle-pause watchdog. Spawns at most one task; no-op when
     // `idle_pause_secs == 0`. Lives for the daemon lifetime.
-    idle_watcher::spawn(rt.handle(), cfg.idle_pause_secs, cfg.idle_pause_action);
+    idle_watcher::spawn(rt.handle(), cfg.idle_pause_secs);
 
     // Mic-conflict watchdog: dedicated task so a call starting while
     // `record_utterance` blocks (up to 30s waiting for voice) is caught

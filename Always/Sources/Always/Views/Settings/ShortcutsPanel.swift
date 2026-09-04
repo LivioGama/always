@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ShortcutsPanel: View {
     @ObservedObject var cliService: CLIService
+    @ObservedObject var stateMonitor: StateMonitor
     @Binding var config: Config
 
     var body: some View {
@@ -17,6 +18,7 @@ struct ShortcutsPanel: View {
                     shortcut: $config.shortcutMasterPause,
                     onSave: { value in
                         _ = try? await cliService.setConfig(key: "shortcut_master_pause", value: value)
+                        stateMonitor.sendCommand("ReloadShortcuts")
                     }
                 )
                 KeyCaptureButton(
@@ -25,6 +27,7 @@ struct ShortcutsPanel: View {
                     shortcut: $config.shortcutPause,
                     onSave: { value in
                         _ = try? await cliService.setConfig(key: "shortcut_pause", value: value)
+                        stateMonitor.sendCommand("ReloadShortcuts")
                     }
                 )
                 KeyCaptureButton(
@@ -33,6 +36,7 @@ struct ShortcutsPanel: View {
                     shortcut: $config.shortcutAutoEnter,
                     onSave: { value in
                         _ = try? await cliService.setConfig(key: "shortcut_auto_enter", value: value)
+                        stateMonitor.sendCommand("ReloadShortcuts")
                     }
                 )
                 KeyCaptureButton(
@@ -41,6 +45,7 @@ struct ShortcutsPanel: View {
                     shortcut: $config.shortcutForcePaste,
                     onSave: { value in
                         _ = try? await cliService.setConfig(key: "shortcut_force_paste", value: value)
+                        stateMonitor.sendCommand("ReloadShortcuts")
                     }
                 )
                 KeyCaptureButton(
@@ -49,10 +54,11 @@ struct ShortcutsPanel: View {
                     shortcut: $config.shortcutCorrectionDialog,
                     onSave: { value in
                         _ = try? await cliService.setConfig(key: "shortcut_correction_dialog", value: value)
+                        stateMonitor.sendCommand("ReloadShortcuts")
                     }
                 )
 
-                Text("Shortcut changes take effect on next launch.")
+                Text("Changes take effect immediately.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                     .padding(.top, 8)
