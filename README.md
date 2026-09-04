@@ -14,9 +14,11 @@ The always-on dictation app for macOS. No push-to-talk, no window to open — ju
 
 ---
 
-## ✨ What It Does
+## ✨ What It Is
 
 You speak. Your words appear at your cursor — in any app, any text field, anywhere on macOS. There's nothing to press, nothing to click, nothing to remember. Always lives in your menu bar, listens to your voice, and types what you say.
+
+But Always is more than a speech-to-text tool — it's a philosophy. The idea is that your hands should be free. That speaking should be as natural as thinking, and that the technology should disappear so completely you forget it's there. It's hard to explain in words. You have to try it to understand — and once you do, you get used to it faster than you'd expect.
 
 Other dictation tools want to be the center of attention. Always wants to disappear.
 
@@ -62,20 +64,6 @@ All shortcuts are customizable in Settings → Shortcuts.
 Optional, but it makes a big difference. Record three short samples and Always builds a voiceprint that lets it ignore everything except you — other people in the room, the TV, a podcast, a Zoom call. Your voiceprint never leaves your machine.
 
 You can re-record anytime from Settings → My Voice.
-
----
-
-## 🚀 Onboarding
-
-A 5-step walkthrough shown once to new users:
-
-1. **Welcome** — app logo and guided narration
-2. **Permissions** — microphone and accessibility access
-3. **My Voice** — optional voice enrollment (skippable, with a gentle "are you sure?")
-4. **Tips** — the shortcuts you'll use every day
-5. **Ready** — animated typing demo showing exactly what Always does
-
-Narration uses your system's Siri voice if one is configured. If not, it stays silent — no low-quality fallback.
 
 ---
 
