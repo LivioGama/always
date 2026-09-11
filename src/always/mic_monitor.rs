@@ -6,16 +6,20 @@ pub struct MicrophoneMonitor {
     last_check: Instant,
     check_interval: Duration,
     last_usage_state: bool,
+    /// User-configurable bundle IDs excluded from mic-conflict
+    /// detection (e.g. screen recorders). Checked in addition to
+    /// the hardcoded system/metering exclusions.
+    coexisting_bundles: Vec<String>,
 }
 
 impl Default for MicrophoneMonitor {
     fn default() -> Self {
-        Self::new()
+        Self::new(Vec::new())
     }
 }
 
 impl MicrophoneMonitor {
-    pub fn new() -> Self {
+    pub fn new(coexisting_bundles: Vec<String>) -> Self {
         Self {
             last_check: Instant::now(),
             // The CoreAudio process-object probe is an in-process query
@@ -24,6 +28,7 @@ impl MicrophoneMonitor {
             // macOS < 14.4 where the probe is unavailable.
             check_interval: Duration::from_millis(1000),
             last_usage_state: false,
+            coexisting_bundles,
         }
     }
 
@@ -200,15 +205,6 @@ mod coreaudio_probe {
     /// the stream open, which would permanently pause Always if treated as
     /// a real conflict.
     const METERING_ONLY_BUNDLES: &[&str] = &["com.apple.Sound-Settings.extension"];
-
-    /// Apps the user may run alongside Always even though they hold an
-    /// input stream — e.g. ScreenFlow or CleanShotX recording a
-    /// screencast while the user voice-types. Excluded from mic-conflict
-    /// detection so both apps can read the mic simultaneously.
-    const COEXISTING_INPUT_BUNDLES: &[&str] = &[
-        "net.telestream.screenflow10",
-        "pl.maketheweb.cleanshotx",
-    ];
 
     /// Our own capture chain: the daemon (`always` / `always-daemon`)
     /// records through a spawned `rec`/`sox` child, and coreaudiod is
@@ -425,7 +421,7 @@ mod coreaudio_probe {
     /// Human-facing labels of processes other than Always (and always-on
     /// system listeners) that are running audio input right now. Empty =
     /// no call / no foreign capture in progress.
-    pub fn other_input_captors() -> Result<Vec<String>> {
+    pub fn other_input_captors(coexisting_bundles: &[String]) -> Result<Vec<String>> {
         let address = addr(PROP_PROCESS_OBJECT_LIST);
         let mut size: u32 = 0;
         let status = unsafe {
@@ -475,7 +471,7 @@ mod coreaudio_probe {
                     || METERING_ONLY_BUNDLES
                         .iter()
                         .any(|s| s.eq_ignore_ascii_case(b))
-                    || COEXISTING_INPUT_BUNDLES
+                    || coexisting_bundles
                         .iter()
                         .any(|s| s.eq_ignore_ascii_case(b)))
             {
@@ -511,7 +507,13 @@ mod coreaudio_probe {
             // Live query against coreaudiod. Must not error on any
             // macOS >= 14.4, and always-on Siri listeners must never
             // surface as captors regardless of machine state.
-            let captors = other_input_captors().expect("process-object probe failed");
+            let default_exclusions: Vec<String> =
+                crate::always::config::DEFAULT_MIC_CONFLICT_EXCLUSION_BUNDLES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+            let captors = other_input_captors(&default_exclusions)
+                .expect("process-object probe failed");
             for label in &captors {
                 assert!(
                     !SYSTEM_LISTENER_BUNDLES
@@ -525,12 +527,6 @@ mod coreaudio_probe {
                         .any(|s| s.eq_ignore_ascii_case(label)),
                     "metering-only bundle leaked into captors: {label}"
                 );
-                assert!(
-                    !COEXISTING_INPUT_BUNDLES
-                        .iter()
-                        .any(|s| s.eq_ignore_ascii_case(label)),
-                    "coexisting input bundle leaked into captors: {label}"
-                );
             }
         }
     }
@@ -542,7 +538,7 @@ impl MicrophoneMonitor {
     /// CoreAudio process-object probe, with the legacy lsof scan as a
     /// fallback for macOS versions without process objects (< 14.4).
     fn check_microphone_usage_macos(&self) -> Result<bool> {
-        match coreaudio_probe::other_input_captors() {
+        match coreaudio_probe::other_input_captors(&self.coexisting_bundles) {
             Ok(captors) => Ok(!captors.is_empty()),
             Err(e) => {
                 tracing::debug!(error = %e, "coreaudio process probe unavailable — falling back to lsof");
@@ -553,7 +549,7 @@ impl MicrophoneMonitor {
     }
 
     fn get_microphone_users_macos(&self) -> Result<Vec<String>> {
-        if let Ok(captors) = coreaudio_probe::other_input_captors()
+        if let Ok(captors) = coreaudio_probe::other_input_captors(&self.coexisting_bundles)
             && !captors.is_empty()
         {
             return Ok(captors);
@@ -835,12 +831,12 @@ mod tests {
 
     #[test]
     fn can_create_monitor() {
-        let _monitor = MicrophoneMonitor::new();
+        let _monitor = MicrophoneMonitor::new(Vec::new());
     }
 
     #[test]
     fn can_check_usage() {
-        let mut monitor = MicrophoneMonitor::new();
+        let mut monitor = MicrophoneMonitor::new(Vec::new());
         // This might return true or false depending on system state
         let _result = monitor.is_microphone_in_use();
     }

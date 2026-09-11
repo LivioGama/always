@@ -371,6 +371,7 @@ mod tests {
             transcript_stream_enabled: false,
             audible_status_sound: crate::always::status_sound::StatusSoundSetting::default(),
             stt_live_preview: true,
+            mic_conflict_exclusion_bundles: Vec::new(),
         }
     }
 

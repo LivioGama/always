@@ -339,12 +339,15 @@ Another application taking the microphone is detected within about a second.
 The following are **not** treated as conflicts even though they open an input
 stream: always-on system listeners (Siri/CoreSpeech/assistantd), macOS
 Settings extensions that use the mic only for level-metering
-(`com.apple.Sound-Settings.extension`), and screen-recording apps the user
-runs alongside Always (`net.telestream.screenflow10`, `pl.maketheweb.cleanshotx`).
+(`com.apple.Sound-Settings.extension`), and user-configured coexisting apps
+(`mic_conflict_exclusion_bundles` preference, JSON array of bundle IDs).
 The Sound extension can outlive the visible System Settings window and keep
 the stream open; without the exclusion it would permanently pause Always.
-Screen-recording apps hold the mic for the duration of a screencast; excluding
-them lets the user voice-type while recording.
+Coexisting apps (default: ScreenFlow `net.telestream.screenflow10`, CleanShotX
+`pl.maketheweb.cleanshotx`) hold the mic for the duration of a recording;
+excluding them lets the user voice-type while recording. The list is
+user-configurable via `always config set mic_conflict_exclusion_bundles
+'["bundle.id"]'`.
 
 ### 7.2 Recorder health and respawn
 

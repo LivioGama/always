@@ -36,9 +36,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RESUME_FREE_POLLS: u32 = 3;
 
 /// Spawn the watchdog task. Lives for the daemon lifetime.
-pub fn spawn(rt: &Handle) {
+pub fn spawn(rt: &Handle, coexisting_bundles: Vec<String>) {
     rt.spawn(async move {
-        let mut monitor = MicrophoneMonitor::new();
+        let mut monitor = MicrophoneMonitor::new(coexisting_bundles);
         let mut paused_for_mic = false;
         // Consecutive polls seeing a free mic while paused. Reset by any
         // poll that finds the mic taken again, so a dictation app

@@ -482,6 +482,12 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "true".to_string())
             );
+            println!(
+                "mic_conflict_exclusion_bundles: {}",
+                prefs.mic_conflict_exclusion_bundles.as_deref().unwrap_or(
+                    r#"["net.telestream.screenflow10","pl.maketheweb.cleanshotx"]"#
+                )
+            );
         }
         ConfigAction::Set { key, value } => {
             // Store API keys in the preferences DB. Keychain access prompts

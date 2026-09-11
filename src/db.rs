@@ -77,6 +77,10 @@ pub struct Preferences {
     pub correction_model: Option<String>,
     /// Post-processing LLM provider: "groq" or "apple". Default "groq".
     pub postprocess_provider: Option<String>,
+    /// JSON-encoded array of bundle IDs excluded from mic-conflict
+    /// detection (apps that hold the mic but shouldn't pause Always,
+    /// e.g. screen recorders). Default: ScreenFlow + CleanShotX.
+    pub mic_conflict_exclusion_bundles: Option<String>,
 }
 
 pub fn open() -> Result<Connection> {
@@ -338,6 +342,15 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN postprocess_provider TEXT;")?;
     }
 
+    let has_mic_conflict_exclusion_bundles = conn
+        .prepare("SELECT mic_conflict_exclusion_bundles FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_mic_conflict_exclusion_bundles {
+        conn.execute_batch(
+            "ALTER TABLE preferences ADD COLUMN mic_conflict_exclusion_bundles TEXT;",
+        )?;
+    }
+
     encode_plaintext_groq_key(conn)?;
 
     Ok(())
@@ -369,7 +382,7 @@ fn encode_plaintext_groq_key(conn: &Connection) -> Result<()> {
 
 pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
     let mut stmt = conn.prepare(
-        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream, stt_adaptive_silence, speaker_gate_enabled, speaker_gate_threshold, audible_status_sound, stt_live_preview, auto_learn_corrections, correction_model, postprocess_provider FROM preferences WHERE id = 1",
+        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream, stt_adaptive_silence, speaker_gate_enabled, speaker_gate_threshold, audible_status_sound, stt_live_preview, auto_learn_corrections, correction_model, postprocess_provider, mic_conflict_exclusion_bundles FROM preferences WHERE id = 1",
     )?;
     let result = stmt.query_row([], |row| {
         Ok(Preferences {
@@ -407,6 +420,7 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             auto_learn_corrections: row.get::<_, Option<i64>>(31)?.map(|v| v != 0),
             correction_model: row.get(32)?,
             postprocess_provider: row.get(33)?,
+            mic_conflict_exclusion_bundles: row.get(34)?,
         })
     });
     match result {
@@ -456,6 +470,7 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "auto_learn_corrections",
         "correction_model",
         "postprocess_provider",
+        "mic_conflict_exclusion_bundles",
     ];
     if !valid_keys.contains(&key) {
         anyhow::bail!(
@@ -588,6 +603,20 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "postprocess_provider" => {
             let parsed: Result<crate::always::config::PostprocessProvider, _> = value.parse();
             parsed.map_err(|e| anyhow::anyhow!("postprocess_provider must be 'groq' or 'apple': {e}"))?;
+        }
+        "mic_conflict_exclusion_bundles" => {
+            if !value.is_empty() {
+                let parsed: serde_json::Value = serde_json::from_str(value)
+                    .context("mic_conflict_exclusion_bundles must be a JSON array of strings")?;
+                if !parsed.is_array() {
+                    anyhow::bail!("mic_conflict_exclusion_bundles must be a JSON array");
+                }
+                for item in parsed.as_array().unwrap() {
+                    if !item.is_string() {
+                        anyhow::bail!("mic_conflict_exclusion_bundles array items must be strings");
+                    }
+                }
+            }
         }
         _ => {}
     }

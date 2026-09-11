@@ -91,6 +91,10 @@ struct Config: Codable {
     var audibleStatusSound: String
     /// Language code for transcription ("auto", "en", "fr", etc.) or nil if not set.
     var lang: String?
+    /// JSON-encoded array of bundle IDs excluded from mic-conflict
+    /// detection (apps that hold the mic but shouldn't pause Always,
+    /// e.g. screen recorders). Default: ScreenFlow + CleanShotX.
+    var micConflictExclusionBundles: String
 
     // Defaults match `SensitivityPreset::Normal` and the Rust
     // `AlwaysConfig::default()` values.
@@ -117,7 +121,8 @@ struct Config: Codable {
         perAppSettingsJson: nil,
         idlePauseSecs: 600,
         audibleStatusSound: "off",
-        lang: nil
+        lang: nil,
+        micConflictExclusionBundles: #"["net.telestream.screenflow10","pl.maketheweb.cleanshotx"]"#
     )
 
     static func fromCLI(output: String) -> Config? {
@@ -211,6 +216,8 @@ struct Config: Codable {
                     }
                 case "lang":
                     config.lang = value.isEmpty || value.contains("(not set)") ? nil : value
+                case "mic_conflict_exclusion_bundles":
+                    config.micConflictExclusionBundles = value
                 default:
                     // Surface drift: if the CLI emits a new key the GUI
                     // doesn't bind, log it once per parse so a daemon

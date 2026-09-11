@@ -225,6 +225,7 @@ struct SettingsWindow: View {
                 _ = try await cliService.setConfig(key: "postprocess_provider", value: config.postprocessProvider)
                 _ = try await cliService.setConfig(key: "idle_pause_secs", value: String(config.idlePauseSecs))
                 _ = try await cliService.setConfig(key: "audible_status_sound", value: config.audibleStatusSound)
+                _ = try await cliService.setConfig(key: "mic_conflict_exclusion_bundles", value: config.micConflictExclusionBundles)
                 await MainActor.run {
                     stateMonitor.applyRuntimePreferences(from: config)
                 }

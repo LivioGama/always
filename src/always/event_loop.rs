@@ -209,7 +209,7 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     // `record_utterance` blocks (up to 30s waiting for voice) is caught
     // within the poll interval instead of after the wait. Replaces the
     // inline check that used to live at the top of this loop.
-    mic_watcher::spawn(rt.handle());
+    mic_watcher::spawn(rt.handle(), cfg.mic_conflict_exclusion_bundles.clone());
 
     let mut last_process = Instant::now() - Duration::from_secs(10);
     let mut last_dup_check = Instant::now();

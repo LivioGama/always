@@ -27,6 +27,14 @@ pub const DEFAULT_SILENCE_SECS: f64 = 0.9;
 /// felt like the daemon "randomly" paused during normal desk work.
 const DEFAULT_IDLE_PAUSE_SECS: u32 = 600;
 
+/// Default bundle IDs excluded from mic-conflict detection — screen
+/// recording apps that hold the mic for the duration of a recording
+/// but aren't competing dictation tools.
+pub const DEFAULT_MIC_CONFLICT_EXCLUSION_BUNDLES: &[&str] = &[
+    "net.telestream.screenflow10",
+    "pl.maketheweb.cleanshotx",
+];
+
 #[derive(Debug, Clone, Default)]
 pub enum VadMode {
     #[default]
@@ -247,6 +255,12 @@ pub struct AlwaysConfig {
     /// cadence is much slower than the streaming-engine preview loop
     /// (see `LIVE_PREVIEW_INTERVAL_MS` in vad.rs). Default on.
     pub stt_live_preview: bool,
+    /// Bundle IDs excluded from mic-conflict detection (apps that hold
+    /// the mic but shouldn't pause Always, e.g. screen recorders).
+    /// User-configurable via `always config set
+    /// mic_conflict_exclusion_bundles '["bundle.id"]'`. DB pref
+    /// `mic_conflict_exclusion_bundles`.
+    pub mic_conflict_exclusion_bundles: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -487,6 +501,7 @@ impl AlwaysConfig {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or_default(),
             stt_live_preview: resolve_stt_live_preview(&prefs),
+            mic_conflict_exclusion_bundles: resolve_mic_conflict_exclusion_bundles(&prefs),
         };
 
         Ok(config)
@@ -567,6 +582,10 @@ impl Default for AlwaysConfig {
             transcript_stream_enabled: false,
             audible_status_sound: StatusSoundSetting::default(),
             stt_live_preview: true,
+            mic_conflict_exclusion_bundles: DEFAULT_MIC_CONFLICT_EXCLUSION_BUNDLES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         }
     }
 }
@@ -585,6 +604,22 @@ fn resolve_stt_live_preview(prefs: &Preferences) -> bool {
             _ => None,
         })
         .unwrap_or(true)
+}
+
+/// Resolve the mic-conflict exclusion bundle IDs. Order: DB pref →
+/// built-in defaults (ScreenFlow, CleanShotX).
+fn resolve_mic_conflict_exclusion_bundles(prefs: &Preferences) -> Vec<String> {
+    if let Some(saved) = &prefs.mic_conflict_exclusion_bundles
+        && !saved.is_empty()
+    {
+        if let Ok(arr) = serde_json::from_str::<Vec<String>>(saved) {
+            return arr;
+        }
+    }
+    DEFAULT_MIC_CONFLICT_EXCLUSION_BUNDLES
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 #[cfg(test)]
