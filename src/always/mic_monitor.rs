@@ -201,6 +201,15 @@ mod coreaudio_probe {
     /// a real conflict.
     const METERING_ONLY_BUNDLES: &[&str] = &["com.apple.Sound-Settings.extension"];
 
+    /// Apps the user may run alongside Always even though they hold an
+    /// input stream — e.g. ScreenFlow or CleanShotX recording a
+    /// screencast while the user voice-types. Excluded from mic-conflict
+    /// detection so both apps can read the mic simultaneously.
+    const COEXISTING_INPUT_BUNDLES: &[&str] = &[
+        "net.telestream.screenflow10",
+        "pl.maketheweb.cleanshotx",
+    ];
+
     /// Our own capture chain: the daemon (`always` / `always-daemon`)
     /// records through a spawned `rec`/`sox` child, and coreaudiod is
     /// the audio server itself.
@@ -465,6 +474,9 @@ mod coreaudio_probe {
                     .any(|s| s.eq_ignore_ascii_case(b))
                     || METERING_ONLY_BUNDLES
                         .iter()
+                        .any(|s| s.eq_ignore_ascii_case(b))
+                    || COEXISTING_INPUT_BUNDLES
+                        .iter()
                         .any(|s| s.eq_ignore_ascii_case(b)))
             {
                 continue;
@@ -512,6 +524,12 @@ mod coreaudio_probe {
                         .iter()
                         .any(|s| s.eq_ignore_ascii_case(label)),
                     "metering-only bundle leaked into captors: {label}"
+                );
+                assert!(
+                    !COEXISTING_INPUT_BUNDLES
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case(label)),
+                    "coexisting input bundle leaked into captors: {label}"
                 );
             }
         }
