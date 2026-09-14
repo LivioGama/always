@@ -271,7 +271,7 @@ jobs:
     needs: [build-mac, publish]
     steps:
       - name: Open auto-PR against LivioGama/homebrew-tap
-        uses: dawidd6/action-homebrew-bump-formula@v7
+        uses: dawidd6/action-homebrew-bump-formula@v10
         with:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           tap: LivioGama/homebrew-tap
