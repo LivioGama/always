@@ -104,9 +104,7 @@ fn default_filter_config() -> FilterConfig {
 pub fn load_filter_config() -> Option<FilterConfig> {
     let paths = vec![
         PathBuf::from("filter_config.json"),
-        dirs::config_dir()
-            .map(|d| d.join("always/filter_config.json"))
-            .unwrap_or_default(),
+        crate::config::config_dir().join("filter_config.json"),
     ];
 
     for path in paths {

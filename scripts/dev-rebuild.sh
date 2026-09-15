@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# Local dev helper: kill → build → bundle → launch the Always app.
-# Plays a short macOS system sound at each lifecycle marker so you can hear
-# the state of the rebuild while looking at logs / another app.
+# Local dev loop: kill → build → bundle → launch the DEV app only.
+#
+# Builds "Always Dev.app" (bundle id com.always.v3.dev) and deploys it to
+# /Applications/Always Dev.app — a separate identity with its own config
+# dir, socket, pid file, and prefs. The production /Applications/Always.app
+# and its running GUI/daemon are NEVER touched by this script.
+#
+# To ship a build as the production app, run scripts/promote.sh manually.
 #
 # Usage:
 #   scripts/dev-rebuild.sh                # debug build (default — transcripts visible)
@@ -49,6 +54,11 @@ trap 'play "$SOUND_FAIL"; echo "✗ rebuild failed"' ERR
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
+DEV_APP_NAME="Always Dev"
+DEV_APP="/Applications/${DEV_APP_NAME}.app"
+DEV_SUPPORT_DIR="$HOME/Library/Application Support/always-dev"
+PROD_SUPPORT_DIR="$HOME/Library/Application Support/always"
+
 # Check if Rust source files changed (to avoid unnecessary daemon restarts)
 RUST_CHANGED=false
 if [ "$FORCE_DAEMON" = false ] && [ "$SKIP_DAEMON" = false ]; then
@@ -75,39 +85,31 @@ if [ "$FORCE_DAEMON" = false ] && [ "$SKIP_DAEMON" = false ]; then
     fi
 fi
 
-# ALWAYS kill, even for a Swift-only change.
+# ALWAYS kill the dev app, even for a Swift-only change (a stale running
+# dev GUI makes `open` re-focus the old process and the new build never
+# executes — same failure this script exists to prevent).
 #
-# This used to be gated on `RUST_CHANGED || FORCE_DAEMON`. A Swift-only
-# rebuild therefore killed nothing, and the `open` at the end merely
-# re-focused the instance that was still running — so the freshly built
-# GUI sat in /Applications, never executed, while the script printed
-# "✓ done". Measured in a real session: binaries written at 22:46:56, GUI
-# still running from 21:07:02. Every Swift fix "shipped" in that window
-# was untestable, and the user reasonably concluded nothing had changed.
-#
-# Restarting the daemon when only Swift moved costs about two seconds.
-# Handing someone a build that is not running costs an hour.
+# These patterns are scoped to "Always Dev.app" on purpose: the string
+# "Always Dev.app" cannot match the production path "Always.app", and
+# broad patterns like `pkill -f "always-daemon run"` would kill the
+# PRODUCTION daemon — the exact failure this split exists to prevent.
 if true; then
-    echo "▶ killing Always..."
+    echo "▶ killing Always Dev (production Always is untouched)..."
     play "$SOUND_KILL"
-    pkill -9 -f "Always.app" 2>/dev/null || true
-    pkill -9 -f "/Applications/Always.app" 2>/dev/null || true
-    # Stale project-dir bundle can steal LaunchServices resolution.
-    pkill -9 -f "Documents/always/Always/Always.app" 2>/dev/null || true
+    pkill -9 -f "Always Dev.app" 2>/dev/null || true
 
-    # Kill the Rust daemon too (unless --no-daemon flag is set)
-    # The GUI's applicationWillTerminate handler usually does this, but a hard
-    # pkill on Always.app skips it, so the daemon outlives the rebuild and the
-    # next launch hits a stale UDS socket / pid file. Send SIGTERM first
-    # (lets PidGuard::Drop fire), then SIGKILL if still alive.
     if [ "$SKIP_DAEMON" = false ]; then
-        for _pat in "always-daemon run" "always run"; do
-          pkill -TERM -f "$_pat" 2>/dev/null || true
-        done
-        sleep 0.5   # PidGuard::Drop + socket cleanup
-        for _pat in "always-daemon run" "always run"; do
-          pkill -KILL -f "$_pat" 2>/dev/null || true
-        done
+        # Dev daemon via its own pid file (covers bundled daemon AND any
+        # manual `ALWAYS_INSTANCE=dev always run` from target/).
+        if [ -f "$DEV_SUPPORT_DIR/always.pid" ]; then
+            _dev_pid="$(cat "$DEV_SUPPORT_DIR/always.pid" 2>/dev/null || true)"
+            if [ -n "${_dev_pid:-}" ]; then
+                kill -TERM "$_dev_pid" 2>/dev/null || true
+                sleep 0.5
+                kill -KILL "$_dev_pid" 2>/dev/null || true
+            fi
+            rm -f "$DEV_SUPPORT_DIR/always.pid"
+        fi
         sleep 0.2   # let processes actually die before rebuild
     fi
 else
@@ -134,25 +136,38 @@ else
 fi
 play "$SOUND_COMPILED"
 
-echo "▶ Swift bundle + deploy..."
+echo "▶ Swift bundle + deploy (Always Dev)..."
 (
     cd Always
-    ALWAYS_BUILD_PROFILE="$PROFILE" ./build.sh
+    ALWAYS_BUILD_PROFILE="$PROFILE" \
+    ALWAYS_APP_NAME="$DEV_APP_NAME" \
+    ALWAYS_BUNDLE_ID="com.always.v3.dev" \
+    ALWAYS_DEPLOY_PATH="$DEV_APP" \
+    ALWAYS_URL_SCHEME="always-dev" \
+    ALWAYS_SPARKLE=0 \
+    ./build.sh
 )
 
 # CRITICAL: remove the intermediate project-dir bundle. If it lives on,
-# LaunchServices re-discovers it on every seed-rescan and `open -a
-# Always` may resolve to it instead of /Applications. Three duplicate
-# "Always" entries in System Settings → Control Center →
-# "Allow in the Menu Bar" came from this — the resulting status-item
-# registration conflict made the menu-bar icon invisible.
+# LaunchServices re-discovers it on every seed-rescan and `open` may
+# resolve to it instead of /Applications.
 echo "▶ removing intermediate bundle..."
-rm -rf "$REPO_ROOT/Always/Always.app"
+rm -rf "$REPO_ROOT/Always/${DEV_APP_NAME}.app"
 
-echo "▶ launching Always..."
-# Use explicit path, not `open -a Always` (name lookup can resolve
-# to a stale LaunchServices entry).
-open /Applications/Always.app
+# First-run seed: copy production state into the dev instance so the dev
+# app boots with the user's real prefs, Groq key, voiceprint, and
+# vocabulary instead of a cold onboarding flow. Runs once — afterwards the
+# dev dir is independent and prod edits never propagate.
+if [ ! -d "$DEV_SUPPORT_DIR" ]; then
+    echo "▶ seeding dev instance from production state..."
+    mkdir -p "$DEV_SUPPORT_DIR"
+    for f in always.db always.db-wal always.db-shm voiceprint.json vocabulary.json; do
+        [ -f "$PROD_SUPPORT_DIR/$f" ] && cp "$PROD_SUPPORT_DIR/$f" "$DEV_SUPPORT_DIR/$f" || true
+    done
+fi
+
+echo "▶ launching Always Dev..."
+open "$DEV_APP"
 sleep 3
 
 # Prove the new build is the one running.
@@ -192,10 +207,12 @@ verify_running() {
 
 echo "▶ verifying the running processes match the build..."
 VERIFY_OK=true
-verify_running "GUI" "Always.app/Contents/MacOS/Always$" \
-    "/Applications/Always.app/Contents/MacOS/Always" || VERIFY_OK=false
-verify_running "daemon" "always-daemon run" \
-    "/Applications/Always.app/Contents/MacOS/always-daemon" || VERIFY_OK=false
+verify_running "dev GUI" "Always Dev.app/Contents/MacOS/Always$" \
+    "$DEV_APP/Contents/MacOS/Always" || VERIFY_OK=false
+if [ "$SKIP_DAEMON" = false ]; then
+    verify_running "dev daemon" "Always Dev.app/Contents/MacOS/always-daemon run" \
+        "$DEV_APP/Contents/MacOS/always-daemon" || VERIFY_OK=false
+fi
 
 if [ "$VERIFY_OK" != true ]; then
     play "$SOUND_FAIL"
@@ -203,5 +220,12 @@ if [ "$VERIFY_OK" != true ]; then
     exit 1
 fi
 
+# Belt-and-suspenders audit: prove production is still alive. Cheap check,
+# catches any future regression where a dev path accidentally kills prod.
+if ! pgrep -f "Always.app/Contents/MacOS/Always$" >/dev/null; then
+    echo "⚠️  production Always GUI is not running — nothing was killed by"
+    echo "    this script, but prod won't come back on its own."
+fi
+
 play "$SOUND_UP"
-echo "✓ done — new build verified running"
+echo "✓ done — Always Dev verified running (production untouched)"

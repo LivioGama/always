@@ -15,7 +15,7 @@ fn state_path() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("Always")
-        .join("focus-state.json")
+        .join(format!("focus-state{}.json", crate::config::instance_suffix()))
 }
 
 /// Write the latest focused bundle (or clear when `None`).

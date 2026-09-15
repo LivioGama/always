@@ -53,6 +53,27 @@ static NO_GUI_PAUSED: AtomicBool = AtomicBool::new(false);
 /// until the user resumes either globally or for a specific app.
 static EFFECTIVE_PAUSED: AtomicBool = AtomicBool::new(true);
 
+/// Provenance flag: this daemon was paused by the PEER instance's startup
+/// handshake (`SetPaused{reason:"peer-instance"}`), not by the user. The
+/// peer-resume watchdog in `daemon.rs` reads it: while set, it polls the
+/// peer's socket and self-resumes when the peer dies. Any non-peer pause
+/// command clears it, so a manual pause/unpause always wins over the
+/// handoff and the watchdog stands down.
+static PAUSED_BY_PEER: AtomicBool = AtomicBool::new(false);
+
+pub fn set_paused_by_peer(v: bool) {
+    PAUSED_BY_PEER.store(v, Ordering::Relaxed);
+}
+
+pub fn is_paused_by_peer() -> bool {
+    PAUSED_BY_PEER.load(Ordering::Relaxed)
+}
+
+/// Clear-and-get: only the caller that observes the peer's death may resume.
+pub fn take_paused_by_peer() -> bool {
+    PAUSED_BY_PEER.swap(false, Ordering::Relaxed)
+}
+
 /// Consumer source: an external controller asked the daemon (via
 /// `DaemonCommand::SetConsumeMode`) to route transcription to its stream
 /// consumers instead of the paste path. While set, the capture loop ignores

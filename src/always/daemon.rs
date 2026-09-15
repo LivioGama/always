@@ -28,7 +28,7 @@ pub fn socket_path() -> Option<PathBuf> {
                 .join("Library")
                 .join("Caches")
                 .join("Always")
-                .join("always.sock")
+                .join(format!("always{}.sock", config::instance_suffix()))
         })
     }
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -69,7 +69,15 @@ fn is_daemon_run_command(command: &str) -> bool {
     else {
         return false;
     };
-    matches!(name, "always" | "always-daemon") && subcommand == "run"
+    matches!(name, "always" | "always-daemon") && subcommand == "run" && same_instance(command)
+}
+
+/// True when `command` belongs to this process's runtime instance. The dev
+/// daemon lives inside `Always Dev.app`; every other `always run` command
+/// is prod. Without this gate a dev daemon startup would "reconcile" the
+/// production daemon as a duplicate and kill it.
+fn same_instance(command: &str) -> bool {
+    command.contains("Always Dev.app") == (config::instance() == "dev")
 }
 
 fn process_table() -> Vec<(u32, String)> {
@@ -173,6 +181,157 @@ pub fn socket_is_live(sock: &std::path::Path) -> bool {
     {
         false
     }
+}
+
+// ── Dev/prod peer handoff ────────────────────────────────────────────────
+//
+// Two instances can coexist (`Always.app` prod, `Always Dev.app` dev) but
+// the machine has ONE microphone: two live daemons both transcribe and
+// both paste — the "double transcript" failure. So whichever daemon
+// starts last pauses its peer over the peer's UDS socket
+// (`SetPaused{reason:"peer-instance"}`), and a paused-by-peer daemon runs
+// a watchdog that self-resumes the moment the peer's socket dies — which
+// covers SIGKILL, where no exit cleanup runs. Graceful exits resume the
+// peer directly via `resume_peer_on_exit`.
+
+/// The OTHER instance's UDS socket: prod↔dev.
+pub fn peer_socket_path() -> Option<PathBuf> {
+    let file = match config::instance() {
+        "prod" => "always-dev.sock",
+        _ => "always.sock",
+    };
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var("HOME").ok().map(|home| {
+            PathBuf::from(home)
+                .join("Library")
+                .join("Caches")
+                .join("Always")
+                .join(file)
+        })
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+            Some(PathBuf::from(runtime_dir).join(file))
+        } else {
+            Some(PathBuf::from("/tmp").join(file))
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = file;
+        None
+    }
+}
+
+/// True when the peer instance's daemon socket accepts a connection.
+pub fn peer_is_live() -> bool {
+    peer_socket_path().is_some_and(|p| p.exists() && socket_is_live(&p))
+}
+
+static WE_PAUSED_PEER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Send `SetPaused{paused, reason:"peer-instance"}` to the peer daemon.
+/// Returns true when the command reached a live peer. Tracks
+/// `WE_PAUSED_PEER` so `resume_peer_on_exit` only fires when WE paused.
+pub fn set_peer_paused(paused: bool) -> bool {
+    let Some(sock) = peer_socket_path() else {
+        return false;
+    };
+    if !sock.exists() || !socket_is_live(&sock) {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::io::{Read as _, Write as _};
+        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&sock) {
+            let cmd = format!(
+                "{{\"type\":\"SetPaused\",\"data\":{{\"paused\":{paused},\"reason\":\"peer-instance\"}}}}\n"
+            );
+            if stream.write_all(cmd.as_bytes()).is_err() {
+                return false;
+            }
+            // Drain the initial-state burst briefly — a client that hangs
+            // up right after writing makes the daemon's burst write fail,
+            // and it may drop the connection before reading our command.
+            stream
+                .set_read_timeout(Some(Duration::from_millis(300)))
+                .ok();
+            let mut sink = [0u8; 4096];
+            let _ = stream.read(&mut sink);
+            if paused {
+                WE_PAUSED_PEER.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            return true;
+        }
+    }
+    false
+}
+
+/// Startup handshake: pause the peer instance so it stops transcribing the
+/// same mic input. Must run AFTER our own socket is live — the peer's
+/// resume watchdog polls it, so pausing before we're live would let the
+/// peer self-resume immediately.
+pub fn pause_peer_when_ready() {
+    std::thread::spawn(|| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if socket_path().is_some_and(|s| s.exists() && socket_is_live(&s)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if peer_is_live() && set_peer_paused(true) {
+            tracing::info!("peer_instance_paused_on_startup");
+        }
+    });
+}
+
+/// Graceful-exit counterpart: if we paused the peer, release it. No-op
+/// unless `set_peer_paused(true)` previously succeeded, so a daemon that
+/// never touched the peer can't wrongly resume a user-paused peer.
+pub fn resume_peer_on_exit() {
+    if WE_PAUSED_PEER.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        let _ = set_peer_paused(false);
+        tracing::info!("peer_instance_resumed_on_exit");
+    }
+}
+
+static PEER_WATCHDOG_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// While paused-by-peer, poll the peer's socket once a second; when the
+/// peer daemon dies, resume ourselves. Covers the kill -9 path where the
+/// peer's `resume_peer_on_exit` never runs. Single-flight.
+pub fn spawn_peer_resume_watchdog() {
+    use std::sync::atomic::Ordering;
+    if PEER_WATCHDOG_RUNNING.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    std::thread::spawn(|| {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            // A user/any other pause source cleared the flag — we no
+            // longer own this pause, stop watching.
+            if !crate::always::pause::is_paused_by_peer() {
+                break;
+            }
+            if !peer_is_live() {
+                if crate::always::pause::take_paused_by_peer() {
+                    let (_effective, changed) = crate::always::pause::set_paused(false);
+                    crate::always::event::global_broadcaster().master_pause_changed(false);
+                    if changed {
+                        crate::always::event::global_broadcaster().resumed();
+                    }
+                    tracing::info!("peer_daemon_gone_auto_resumed");
+                }
+                break;
+            }
+        }
+        PEER_WATCHDOG_RUNNING.store(false, Ordering::Relaxed);
+    });
 }
 
 pub fn start(cfg: &AlwaysConfig) -> Result<()> {
@@ -443,6 +602,7 @@ impl Drop for PidGuard {
         if let Some(sock) = socket_path() {
             let _ = std::fs::remove_file(sock);
         }
+        resume_peer_on_exit();
     }
 }
 
@@ -521,6 +681,7 @@ pub fn install_signal_handlers(handle: &tokio::runtime::Handle) {
             if let Some(sock) = socket_path() {
                 let _ = std::fs::remove_file(sock);
             }
+            resume_peer_on_exit();
             std::process::exit(0);
         });
     }
@@ -567,6 +728,11 @@ mod tests {
         ));
         assert!(!is_daemon_run_command(
             "/Applications/Always.app/Contents/MacOS/always-daemon status"
+        ));
+        // Test binaries run as the prod instance: dev-bundle commands must
+        // be foreign so prod never reconciles/kills the dev daemon.
+        assert!(!is_daemon_run_command(
+            "/Applications/Always Dev.app/Contents/MacOS/always-daemon run --lang en"
         ));
     }
 }

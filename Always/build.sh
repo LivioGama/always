@@ -4,7 +4,19 @@ set -e
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 CRATE_VERSION="$(grep '^version' "$APP_DIR/../Cargo.toml" | head -1 | cut -d'"' -f2)"
 
-echo "Building Always..."
+# Instance identity. Defaults produce the production app; the dev loop
+# overrides all four so `Always Dev.app` is a separate install that never
+# collides with /Applications/Always.app.
+APP_NAME="${ALWAYS_APP_NAME:-Always}"
+APP_BUNDLE="${APP_NAME}.app"
+BUNDLE_ID="${ALWAYS_BUNDLE_ID:-com.always.v3}"
+DEPLOY_PATH="${ALWAYS_DEPLOY_PATH:-/Applications/${APP_BUNDLE}}"
+URL_SCHEME="${ALWAYS_URL_SCHEME:-always}"
+# 0 strips Sparkle keys from the plist — dev builds must never self-update
+# into a production release.
+SPARKLE_ENABLED="${ALWAYS_SPARKLE:-1}"
+
+echo "Building ${APP_NAME}..."
 cd "$APP_DIR"
 SWIFT_CONFIGURATION="${ALWAYS_SWIFT_CONFIGURATION:-${ALWAYS_BUILD_PROFILE:-debug}}"
 case "$SWIFT_CONFIGURATION" in
@@ -17,9 +29,9 @@ case "$SWIFT_CONFIGURATION" in
 esac
 swift build -c "$SWIFT_CONFIGURATION"
 
-echo "Creating app bundle..."
-mkdir -p Always.app/Contents/MacOS
-mkdir -p Always.app/Contents/Resources
+echo "Creating app bundle (${APP_BUNDLE}, id ${BUNDLE_ID})..."
+mkdir -p "$APP_BUNDLE/Contents/MacOS"
+mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 SWIFT_BIN=".build/$SWIFT_CONFIGURATION/Always"
 ARCH_SWIFT_BIN=".build/$(uname -m)-apple-macosx/$SWIFT_CONFIGURATION/Always"
@@ -35,11 +47,20 @@ else
     exit 1
 fi
 
-cp Info.plist Always.app/Contents/
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $CRATE_VERSION" Always.app/Contents/Info.plist
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $CRATE_VERSION" Always.app/Contents/Info.plist
-cp "$SWIFT_BIN" Always.app/Contents/MacOS/
-cp Resources/AlwaysIcon.icns Always.app/Contents/Resources/
+cp Info.plist "$APP_BUNDLE/Contents/"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $CRATE_VERSION" "$APP_BUNDLE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $CRATE_VERSION" "$APP_BUNDLE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$APP_BUNDLE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleName $APP_NAME" "$APP_BUNDLE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $APP_NAME" "$APP_BUNDLE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 $URL_SCHEME" "$APP_BUNDLE/Contents/Info.plist"
+if [ "$SPARKLE_ENABLED" = "0" ]; then
+    for key in SUFeedURL SUPublicEDKey SUEnableAutomaticChecks SUScheduledCheckInterval; do
+        /usr/libexec/PlistBuddy -c "Delete :$key" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
+    done
+fi
+cp "$SWIFT_BIN" "$APP_BUNDLE/Contents/MacOS/"
+cp Resources/AlwaysIcon.icns "$APP_BUNDLE/Contents/Resources/"
 
 # Daemon binary: ALWAYS_BUILD_PROFILE=release|debug, else pick newest build.
 RELEASE_BIN="../target/release/always"
@@ -68,8 +89,8 @@ esac
 if [ -f "$DAEMON_PATH" ]; then
     # Ship as always-daemon: APFS is case-insensitive; MacOS/always overwrites MacOS/Always.
     echo "Copying daemon binary to app bundle ($DAEMON_PATH → MacOS/always-daemon)..."
-    mkdir -p Always.app/Contents/MacOS
-    cp "$DAEMON_PATH" Always.app/Contents/MacOS/always-daemon
+    mkdir -p "$APP_BUNDLE/Contents/MacOS"
+    cp "$DAEMON_PATH" "$APP_BUNDLE/Contents/MacOS/always-daemon"
     echo "✓ Daemon binary copied"
 else
     echo "✗ Daemon binary not found at $DAEMON_PATH"
@@ -78,16 +99,20 @@ else
 fi
 
 # Bundle Sparkle.framework and add @executable_path/../Frameworks rpath for dyld.
+# Sparkle.framework is always bundled when present — the binary links it
+# via @rpath, so omitting it crashes at dyld. For dev builds the updater
+# stays inert anyway: plist keys are stripped above and UpdateService
+# refuses to start under a .dev bundle id.
 SPARKLE_SRC=".build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 if [ -d "$SPARKLE_SRC" ]; then
     echo "Bundling Sparkle.framework..."
-    mkdir -p Always.app/Contents/Frameworks
-    rm -rf Always.app/Contents/Frameworks/Sparkle.framework
-    cp -R "$SPARKLE_SRC" Always.app/Contents/Frameworks/Sparkle.framework
-    if ! otool -l Always.app/Contents/MacOS/Always \
+    mkdir -p "$APP_BUNDLE/Contents/Frameworks"
+    rm -rf "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+    cp -R "$SPARKLE_SRC" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+    if ! otool -l "$APP_BUNDLE/Contents/MacOS/Always" \
             | grep -A2 LC_RPATH | grep -q "@executable_path/../Frameworks"; then
         install_name_tool -add_rpath "@executable_path/../Frameworks" \
-            Always.app/Contents/MacOS/Always
+            "$APP_BUNDLE/Contents/MacOS/Always"
         echo "✓ Added @executable_path/../Frameworks rpath"
     fi
     echo "✓ Sparkle.framework copied"
@@ -120,7 +145,7 @@ if [ -z "$SIGN_IDENTITY" ]; then
     SIGN_IDENTITY="-"
 fi
 echo "Using signing identity: ${SIGN_IDENTITY}"
-codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "com.always.v3" --entitlements Always.entitlements Always.app
+codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" --entitlements Always.entitlements "$APP_BUNDLE"
 
 # Notarize when ALWAYS_NOTARIZE_TEAM_ID, ALWAYS_NOTARIZE_APPLE_ID, and ALWAYS_NOTARIZE_APP_PWD are set.
 if [ "$SIGN_IDENTITY" != "-" ] \
@@ -130,15 +155,15 @@ if [ "$SIGN_IDENTITY" != "-" ] \
     echo "Notarizing app..."
 
     if /usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" \
-            Always.app/Contents/Info.plist 2>/dev/null \
+            "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null \
             | grep -q "REPLACE_WITH_BASE64_EDDSA_PUBLIC_KEY"; then
         echo "✗ Info.plist still contains the Sparkle SUPublicEDKey placeholder."
         echo "  Replace with the real EdDSA public key before publishing — see docs/RELEASE.md."
         exit 1
     fi
 
-    ZIP_PATH="Always.zip"
-    ditto -c -k --keepParent "Always.app" "$ZIP_PATH"
+    ZIP_PATH="${APP_NAME}.zip"
+    ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_PATH"
 
     NOTARIZATION_OUTPUT=$(xcrun notarytool submit "$ZIP_PATH" \
         --team-id "$ALWAYS_NOTARIZE_TEAM_ID" \
@@ -161,8 +186,8 @@ if [ "$SIGN_IDENTITY" != "-" ] \
     fi
 
     echo "✓ Notarization accepted (ID: $NOTARIZATION_ID)"
-    xcrun stapler staple "Always.app"
-    xcrun stapler validate "Always.app"
+    xcrun stapler staple "$APP_BUNDLE"
+    xcrun stapler validate "$APP_BUNDLE"
     echo "✓ Notarization ticket stapled + validated"
 
     rm -f "$ZIP_PATH"
@@ -171,8 +196,8 @@ else
 fi
 
 # Fail if GUI and always-daemon are missing or collapsed to the same file on APFS.
-GUI_BIN="Always.app/Contents/MacOS/Always"
-DAEMON_BIN_IN_BUNDLE="Always.app/Contents/MacOS/always-daemon"
+GUI_BIN="$APP_BUNDLE/Contents/MacOS/Always"
+DAEMON_BIN_IN_BUNDLE="$APP_BUNDLE/Contents/MacOS/always-daemon"
 if [ ! -f "$GUI_BIN" ] || [ ! -f "$DAEMON_BIN_IN_BUNDLE" ]; then
     echo "✗ Bundle integrity check failed:"
     [ ! -f "$GUI_BIN" ] && echo "   missing GUI binary: $GUI_BIN"
@@ -187,25 +212,26 @@ if [ "$gui_size" = "$daemon_size" ]; then
 fi
 echo "✓ Bundle integrity: GUI=${gui_size}B, daemon=${daemon_size}B"
 
-echo "Deploying to /Applications..."
-DEST_APP="/Applications/Always.app"
+echo "Deploying to ${DEPLOY_PATH}..."
+DEST_APP="$DEPLOY_PATH"
 if [ -d "$DEST_APP" ]; then
     if [ ! -w "$DEST_APP" ]; then
         echo "✗ $DEST_APP is not writable by $(id -un)."
         echo "  One-time repair: sudo chown -R $(id -un):admin $DEST_APP"
-        echo "  After that, dev rebuilds update the app in place without sudo prompts."
+        echo "  After that, rebuilds update the app in place without sudo prompts."
         exit 1
     fi
     # rsync in place (no rm -rf): preserves GUI inode + TCC grants across daemon-only rebuilds. Do not pass -X.
-    rsync -a --checksum --delete Always.app/Contents/ "$DEST_APP/Contents/"
+    rsync -a --checksum --delete "$APP_BUNDLE/Contents/" "$DEST_APP/Contents/"
 else
-    if [ ! -w /Applications ]; then
-        echo "✗ /Applications is not writable by $(id -un)."
-        echo "  Install Always.app once from Finder, or repair /Applications permissions."
+    dest_parent="$(dirname "$DEST_APP")"
+    if [ ! -w "$dest_parent" ]; then
+        echo "✗ $dest_parent is not writable by $(id -un)."
+        echo "  Install ${APP_BUNDLE} once from Finder, or repair permissions."
         exit 1
     fi
-    cp -R Always.app "$DEST_APP"
+    cp -R "$APP_BUNDLE" "$DEST_APP"
 fi
-echo "✓ Deployed to /Applications/Always.app"
+echo "✓ Deployed to ${DEPLOY_PATH}"
 
-echo "App bundle ready. Run with: open -a Always"
+echo "App bundle ready. Run with: open \"${DEPLOY_PATH}\""

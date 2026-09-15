@@ -28,6 +28,14 @@ final class UpdateService: ObservableObject {
 
     private init() {
         let host = Bundle.main
+        // Dev builds never self-update: Sparkle would replace the dev
+        // bundle with a production release mid-debugging.
+        guard !AppInstance.isDev else {
+            self.driver = nil
+            self.updater = nil
+            logger.info("Sparkle disabled for dev instance")
+            return
+        }
         guard Self.hasUsablePublicKey(in: host) else {
             self.driver = nil
             self.updater = nil

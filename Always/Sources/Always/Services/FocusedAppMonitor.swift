@@ -22,12 +22,10 @@ import os.log
 final class FocusedAppMonitor: ObservableObject {
     static let shared = FocusedAppMonitor()
 
-    /// Always's own bundle id (matches `CFBundleIdentifier` in
-    /// `Always/Info.plist`). Centralised so every UI surface — focus
-    /// filter, allowlist filter, menu bar control — uses the same
-    /// constant. If the bundle id ever changes both sides must update
-    /// in lockstep or Always would appear in its own allowlist.
-    static let ownBundleId = "com.always.v3"
+    /// Always's own bundle id — read from the bundle so the dev build
+    /// (`com.always.v3.dev`) also ignores its own focus events and never
+    /// appears in its own allowlist.
+    static let ownBundleId = Bundle.main.bundleIdentifier ?? "com.always.v3"
 
     @Published private(set) var currentBundleId: String?
     @Published private(set) var currentAppName: String?

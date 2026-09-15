@@ -138,7 +138,7 @@ pub fn socket_path() -> Result<PathBuf> {
             .join("Library")
             .join("Caches")
             .join("Always")
-            .join("always.sock")
+            .join(format!("always{}.sock", crate::config::instance_suffix()))
     } else {
         // Linux: Use XDG_RUNTIME_DIR or fallback to /tmp
         if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
@@ -707,6 +707,12 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                 pause::set_idle_auto_paused(false);
                 pause::mark_voice_seen();
             }
+            // Peer-instance handoff: a dev/prod daemon that just started
+            // pauses us with reason "peer-instance". Track the provenance
+            // so the watchdog knows whether this pause is ours to lift —
+            // any non-peer pause command clears it and wins.
+            let by_peer = reason.as_deref() == Some("peer-instance");
+            pause::set_paused_by_peer(paused && by_peer);
             let (effective, changed) = pause::set_paused(paused);
             global_broadcaster().master_pause_changed(paused);
             if changed {
@@ -724,6 +730,9 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                 reason = reason.as_deref().unwrap_or(""),
                 "uds_set_paused"
             );
+            if by_peer && paused {
+                crate::always::daemon::spawn_peer_resume_watchdog();
+            }
         }
         DaemonCommand::CancelAutoEnterCountdown => {
             if pause::countdown_active() {

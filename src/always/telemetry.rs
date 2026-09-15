@@ -96,7 +96,10 @@ pub fn get_log_directory() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         dirs::home_dir()
-            .map(|h| h.join("Library/Logs/Always"))
+            .map(|h| {
+                h.join("Library/Logs")
+                    .join(format!("Always{}", crate::config::instance_suffix()))
+            })
             .unwrap_or_else(fallback)
     }
 

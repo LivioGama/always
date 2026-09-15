@@ -581,13 +581,7 @@ class UDSClient: ObservableObject {
     /// Get the default socket path based on the platform
     static func defaultSocketPath() -> String {
         #if os(macOS)
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home
-            .appendingPathComponent("Library")
-            .appendingPathComponent("Caches")
-            .appendingPathComponent("Always")
-            .appendingPathComponent("always.sock")
-            .path
+        return AppInstance.socketPath
         #else
         // Linux: Use XDG_RUNTIME_DIR or fallback to /tmp
         if let runtimeDir = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"] {

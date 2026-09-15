@@ -412,12 +412,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Kill voice daemons via pid file + ps sweep (never `pkill -f`, which
-    /// can match its own argv and hang).
+    /// can match its own argv and hang). Instance-scoped: the dev app only
+    /// touches its own daemon, never the production one.
     static func killStaleDaemon() {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let pidPath = home
-            .appendingPathComponent("Library/Application Support/always/always.pid")
-            .path
+        let pidPath = AppInstance.pidPath
 
         if let pidString = try? String(contentsOfFile: pidPath, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -445,13 +443,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         usleep(100_000)
 
-        let sockPath = home
-            .appendingPathComponent("Library/Caches/Always/always.sock")
-            .path
-        try? FileManager.default.removeItem(atPath: sockPath)
+        try? FileManager.default.removeItem(atPath: AppInstance.socketPath)
     }
 
-    /// PIDs whose argv is `always-daemon run` (bundled or dev).
+    /// PIDs whose argv is `always-daemon run` for THIS instance — a dev
+    /// GUI never sees the production daemon and vice versa.
     static func listDaemonProcessIDs() -> [pid_t] {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/ps")
@@ -483,5 +479,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let executable = String(parts[0] as Substring)
         let name = URL(fileURLWithPath: executable).lastPathComponent
         return (name == "always" || name == "always-daemon") && parts[1] == "run"
+            && AppInstance.isSameInstance(command: command)
     }
 }

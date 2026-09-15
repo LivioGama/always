@@ -2,11 +2,13 @@ import AppKit
 import Foundation
 import os.log
 
-/// Ensures exactly one Always GUI process system-wide, regardless of bundle
-/// ID (com.always, com.always.v2, stale Desktop copies, dev builds).
+/// Ensures exactly one Always GUI process per instance, regardless of
+/// bundle ID (com.always, com.always.v2, stale Desktop copies, dev builds).
 ///
-/// Uses an advisory flock on `always.gui.lock` plus a process sweep so two
-/// copies cannot both own the menu bar or spawn duplicate daemons.
+/// Uses an advisory flock on `always[-dev].gui.lock` plus a process sweep
+/// so two copies of the SAME instance cannot both own the menu bar or
+/// spawn duplicate daemons. The dev instance (`Always Dev.app`) is a
+/// separate identity: prod never sweeps dev processes and vice versa.
 final class SingleInstanceGuard {
     static let shared = SingleInstanceGuard()
 
@@ -20,10 +22,9 @@ final class SingleInstanceGuard {
     private let lockPath: String
 
     private init() {
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/always", isDirectory: true)
+        let dir = AppInstance.supportDir
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        lockPath = dir.appendingPathComponent("always.gui.lock").path
+        lockPath = AppInstance.guiLockPath
     }
 
     deinit {
@@ -81,9 +82,10 @@ final class SingleInstanceGuard {
     }
 
     static func isAlwaysGUIProcess(command: String) -> Bool {
+        guard AppInstance.isSameInstance(command: command) else { return false }
         let executable = command.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? command
         if executable.contains("always-daemon") { return false }
-        if executable.hasSuffix("/Always.app/Contents/MacOS/Always") { return true }
+        if executable.hasSuffix(".app/Contents/MacOS/Always") { return true }
         // Local `swift run` / `.build/.../Always` dev launches.
         if executable.hasSuffix("/Always") && !executable.contains("Helper") { return true }
         return false
@@ -102,7 +104,9 @@ final class SingleInstanceGuard {
 
     private func activateExistingInstance() {
         let myPid = ProcessInfo.processInfo.processIdentifier
-        for bundleId in Self.knownBundleIDs {
+        // Activate only a same-instance peer — a prod launch must never
+        // drag the dev app's windows forward or vice versa.
+        if let bundleId = Bundle.main.bundleIdentifier {
             for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
                 where app.processIdentifier != myPid {
                 app.activate(options: [.activateAllWindows])
