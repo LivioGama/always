@@ -437,6 +437,77 @@ fn ends_with_words(words: &[String], suffix: &[&str]) -> bool {
             .all(|(word, expected)| word == expected)
 }
 
+/// Strip everything except alphanumeric characters and lowercase the result.
+/// Used to compare word cores so "Hello," and "hello" match.
+fn alnum_core(w: &str) -> String {
+    w.chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+/// Fast, deterministic cleanup for transcripts. Runs synchronously on every
+/// utterance: removes adjacent repeated words ("the the", "ok ok") and
+/// conservative filler words ("um", "uh", "ah") without inventing content.
+/// Used as the sole cleanup pass when LLM grammar is disabled, and as a
+/// pre-pass before the LLM when it is enabled.
+pub fn local_cleanup(text: &str) -> String {
+    const FILLERS: &[&str] = &["um", "uh", "ah", "eh"];
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return text.trim().to_string();
+    }
+
+    let mut out: Vec<&str> = Vec::with_capacity(words.len());
+    for w in words {
+        let core = alnum_core(w);
+        if !core.is_empty() && FILLERS.contains(&core.as_str()) {
+            continue;
+        }
+        if let Some(&prev) = out.last()
+            && alnum_core(prev) == core
+            && !core.is_empty()
+        {
+            continue;
+        }
+        out.push(w);
+    }
+
+    out.join(" ")
+}
+
+#[cfg(test)]
+mod local_cleanup_tests {
+    use super::local_cleanup;
+
+    #[test]
+    fn removes_adjacent_repeats() {
+        assert_eq!(local_cleanup("the the cat"), "the cat");
+        assert_eq!(local_cleanup("ok ok ok done"), "ok done");
+    }
+
+    #[test]
+    fn removes_fillers() {
+        assert_eq!(local_cleanup("um hello uh world"), "hello world");
+    }
+
+    #[test]
+    fn preserves_punctuation_and_case() {
+        assert_eq!(local_cleanup("Hello, hello world."), "Hello, world.");
+    }
+
+    #[test]
+    fn leaves_different_words_alone() {
+        assert_eq!(local_cleanup("hello world hello"), "hello world hello");
+    }
+
+    #[test]
+    fn handles_empty() {
+        assert_eq!(local_cleanup(""), "");
+        assert_eq!(local_cleanup("   "), "");
+    }
+}
+
 fn extract_tagged<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");

@@ -264,6 +264,9 @@ pub enum TranscriberBackendChoice {
     /// activated — [`build_transcriber`] falls back to Groq when the
     /// model file is missing on disk.
     Local { model_id: String },
+    /// On-device Apple SFSpeechRecognizer. Requires macOS and a
+    /// downloaded on-device language model.
+    Apple,
 }
 
 impl TranscriberBackendChoice {
@@ -274,7 +277,14 @@ impl TranscriberBackendChoice {
     /// such brake and must be throttled explicitly. See
     /// `vad::LOCAL_STREAM_INTERVAL_MS`.
     pub fn is_local(&self) -> bool {
-        matches!(self, TranscriberBackendChoice::Local { .. })
+        matches!(
+            self,
+            TranscriberBackendChoice::Local { .. } | TranscriberBackendChoice::Apple
+        )
+    }
+
+    pub fn is_apple(&self) -> bool {
+        matches!(self, TranscriberBackendChoice::Apple)
     }
 }
 
@@ -283,6 +293,7 @@ impl std::fmt::Display for TranscriberBackendChoice {
         match self {
             Self::Groq => f.write_str("groq"),
             Self::Local { model_id } => write!(f, "local:{model_id}"),
+            Self::Apple => f.write_str("apple"),
         }
     }
 }
@@ -294,6 +305,9 @@ impl FromStr for TranscriberBackendChoice {
         if s == "groq" {
             return Ok(Self::Groq);
         }
+        if s == "apple" {
+            return Ok(Self::Apple);
+        }
         if let Some(rest) = s.strip_prefix("local:") {
             if rest.is_empty() {
                 anyhow::bail!("local backend missing model id");
@@ -302,7 +316,7 @@ impl FromStr for TranscriberBackendChoice {
                 model_id: rest.to_string(),
             });
         }
-        anyhow::bail!("invalid transcriber backend: {s} (expected 'groq' or 'local:<id>')");
+        anyhow::bail!("invalid transcriber backend: {s} (expected 'groq', 'apple', or 'local:<id>')");
     }
 }
 
@@ -328,6 +342,7 @@ pub fn build_transcriber(
         TranscriberBackendChoice::Groq => {
             Ok(wrap_with_local_fallback(build_groq(cfg)?, cfg, registry))
         }
+        TranscriberBackendChoice::Apple => build_apple(cfg),
         TranscriberBackendChoice::Local { model_id } => {
             let info = registry
                 .get(model_id)
@@ -427,6 +442,25 @@ fn build_groq(cfg: &AlwaysConfig) -> Result<Arc<dyn Transcriber>> {
         "transcriber_ready"
     );
     Ok(t)
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn build_apple(cfg: &AlwaysConfig) -> Result<Arc<dyn Transcriber>> {
+    use crate::always::stt_apple::AppleTranscriber;
+
+    let lang = if cfg.lang == "auto" || cfg.lang.is_empty() {
+        None
+    } else {
+        Some(cfg.lang.clone())
+    };
+    let t = AppleTranscriber::new(lang).context("initializing Apple STT")?;
+    tracing::info!(backend = "apple", "transcriber_ready");
+    Ok(Arc::new(t))
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+fn build_apple(_cfg: &AlwaysConfig) -> Result<Arc<dyn Transcriber>> {
+    anyhow::bail!("Apple STT is only available on macOS")
 }
 
 #[cfg(feature = "local-stt")]

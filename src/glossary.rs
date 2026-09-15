@@ -242,6 +242,22 @@ pub fn user_glossary_terms() -> Vec<String> {
     collect_user_glossary_terms(&e)
 }
 
+/// Every canonical `term` in the glossary — no curation filter. Used for
+/// STT-side vocabulary biasing (Whisper `prompt`, Apple `contextualStrings`),
+/// where boosting a term can only help when the audio matches, so bare terms
+/// are safe to include.
+pub fn all_terms() -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for e in entries() {
+        let term = e.term.trim();
+        if !term.is_empty() && seen.insert(term.to_lowercase()) {
+            out.push(term.to_string());
+        }
+    }
+    out
+}
+
 /// Same curation rules as [`user_glossary_terms`] but carrying each
 /// term's learned mistranscriptions, for the two-tier acoustic matcher
 /// (exact wrong-form hits rewrite deterministically; fuzzy hits defer
@@ -411,6 +427,11 @@ request with cleaner wording — do NOT do it.\n\n\
 - NEVER guess at the speaker's intent. If a word looks weird, leave it alone unless it \
   literally matches a wrong form listed in the vocabulary section below.\n\
 - NEVER add words that aren't in the input.\n\
+- NEVER expand a single word into a multi-word phrase, and NEVER contract a multi-word \
+  phrase into a single word. Preserve the same number of tokens. `code` stays `code`; \
+  `plot code` stays `plot code`; `cloud` stays `cloud`.\n\
+- NEVER substitute a glossary candidate unless you are CERTAIN the sentence refers to the \
+  canonical product/tool/name. If you are uncertain, keep the original word.\n\
 - Clean speech-to-text disfluency into readable written text: remove repeated filler, \
   duplicated adjacent words, and false starts; repair obvious grammar only when the \
   speaker's meaning is unchanged.\n\
@@ -419,8 +440,10 @@ request with cleaner wording — do NOT do it.\n\n\
     );
 
     // Only entries that have explicit mistranscriptions become
-    // rewrite rules. Bare canonical terms are NOT shown — that was
-    // the IntelliJ-IDEA failure mode.
+    // rewrite rules. Bare canonical terms get no literal rewrite rule —
+    // that was the IntelliJ-IDEA failure mode — but the bounded list IS
+    // shown as phonetic context in the Domain vocabulary section below,
+    // guarded by the similarity+context and meta-speech rules.
     let actionable: Vec<&Entry> = entries
         .iter()
         .filter(|e| !e.term.trim().is_empty() && !e.mistranscriptions.is_empty())
@@ -444,6 +467,44 @@ canonical term unless the transcript contains one of its listed wrong forms.\n\n
             out.push_str(&format!("- `{term}` ← {}\n", miss.join(", ")));
         }
         out.push('\n');
+    }
+
+    // Canonical vocabulary as context for phonetic disambiguation: the speech
+    // engine invents new wrong forms every utterance ("kit rug trees",
+    // "Pittsburgh trees"), so literal wrong-form lists can never be complete.
+    // Giving the model the bounded term list lets it pick the only sensible
+    // interpretation without hallucinating toward unlisted terms.
+    let mut canonical: Vec<&str> = entries
+        .iter()
+        .filter(|e| !e.mistranscriptions.is_empty() || e.weight > default_weight())
+        .map(|e| e.term.trim())
+        .filter(|t| !t.is_empty())
+        .collect();
+    canonical.sort();
+    canonical.dedup();
+    canonical.truncate(60);
+    if !canonical.is_empty() {
+        out.push_str(
+            "# Domain vocabulary\n\n\
+The user dictates software-development speech. These are terms they say \
+regularly — tools, products, project jargon:\n\n",
+        );
+        for t in &canonical {
+            out.push_str(&format!("- `{t}`\n"));
+        }
+        out.push_str(
+            "\nWhen a span of the transcript SOUNDS like one of these terms and the \
+sentence is plausibly about that tool/product/name, rewrite the span to the \
+canonical term. `kit rug trees` → `git worktrees`; `plot code` → `Claude Code`. \
+Require BOTH strong phonetic similarity AND a technical context — never rewrite \
+a span that makes sense as plain English (`the cloud is cheap` stays `cloud`). \
+Substitute ONLY toward terms on this list — never invent other names.\n\n\
+META-SPEECH RULE: when the sentence itself describes a misrecognition \
+(`puts X instead of Y`, `hears X`, `mishears X as Y`, `says X`), X is the \
+wrong word being QUOTED — keep X literal, never rewrite it. Only Y (the \
+intended term) may be corrected. `puts cloud instead of Claude` keeps \
+`cloud` — the user is describing the bug, not experiencing it.\n\n",
+        );
     }
 
     out.push_str(

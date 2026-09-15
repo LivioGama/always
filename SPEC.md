@@ -184,12 +184,15 @@ Idle-paused · Low mic volume · correction confirmations.
 | Situation | Timing |
 |---|---|
 | My Voice off | On voice onset — immediately. |
-| My Voice on | After the speaker is verified — up to ~2 s measured live. Background media and other voices do NOT flash the badge; the indicator appears only for the enrolled user. |
+| My Voice on | After the speaker is verified — the first check fires at ~0.3 s of voiced audio (the embedder's minimum window, padded by the 200 ms pre-buffer), rechecked every 0.25 s of new voice; typically under ~1 s live, up to ~2 s for marginal audio. Background media and other voices do NOT flash the badge; the indicator appears only for the enrolled user. |
 
 The verify wait under My Voice is the price of the gate doing its job: the
 badge must not register audio the user did not produce. An earlier "optimistic
 badge on onset" experiment flashed the overlay on every non-user voice (videos,
 meetings, sleep-time media) and was reverted at the owner's request — see §6.
+The latency budget is attacked at the check schedule (earlier first attempt,
+tighter retry cadence), never by weakening the threshold — a noisy short window
+that cannot clear the full bar simply falls through to the next check.
 
 **Live transcript text** is shown whenever the daemon produces a provisional
 preview — the GUI renders any non-empty partial it receives, during the
@@ -459,6 +462,61 @@ The original implementation attempt failed because:
 The solution was to use `parakeet-rs` instead, which provides a dedicated Nemotron
 implementation compatible with the ONNX Runtime this project already depends on.
 
+### 8.2 Apple SpeechAnalyzer backend
+
+macOS 26+ uses `SpeechAnalyzer` + `SpeechTranscriber` — Apple's newer on-device
+speech engine, ~4x more accurate than the legacy `SFSpeechRecognizer` model.
+On macOS < 26 the backend falls back to `SFSpeechRecognizer` with cloud
+recognition. Requires no API key and never uploads audio on macOS 26+.
+
+**Rules:**
+- The `apple` backend is only available on macOS. On other platforms the daemon
+  rejects the `apple` backend choice when building the transcriber.
+- Audio is written to a temporary WAV file and analyzed with
+  `SpeechAnalyzer(inputAudioFile:modules:analysisContext:finishAfterFile:)`
+  running a `SpeechTranscriber` module. The daemon deletes the temp file
+  after the call regardless of the outcome.
+- Domain vocabulary (all canonical glossary terms plus a small default tech
+  list, capped at 100 phrases) is passed as `AnalysisContext.contextualStrings`
+  under the `.general` tag — the only tag the SDK defines. A compiled custom
+  language model (`SFCustomLanguageModelData` + `DictationTranscriber`) was
+  evaluated and rejected: it added 2-5 s of latency per utterance and was less
+  accurate on technical vocabulary than plain `SpeechTranscriber`.
+- Missing locale assets are installed via
+  `AssetInventory.assetInstallationRequest(supporting:)` on first use.
+- It is a non-streaming backend: `Transcriber::supports_streaming()` returns
+  `false` and `transcribe_streaming()` yields a single final result.
+- The configured `lang` hint is resolved against
+  `SpeechTranscriber.supportedLocales`. If `lang` is `auto` or empty, the
+  current system locale is used.
+- Recognition calls are serialized with a global mutex because concurrent
+  recognition sessions have produced empty results for one of the callers.
+- Before transcription, the WAV samples are normalized to ~90% of full scale
+  with a 4x ceiling. Apple STT is less tolerant of quiet speech than Whisper.
+- The async analyzer is bridged to the sync C FFI with a `Task` +
+  `DispatchSemaphore` pair, bounded to a 12 second timeout so a wedged
+  analyzer cannot stall the chunker finalize. The legacy recognizer path runs
+  its result handler on a dedicated `OperationQueue` because the daemon's Rust
+  main thread does not pump `NSRunLoop`.
+- The live preview cadence is disabled for the Apple backend. Previews are
+  non-streaming, compete for the serialized recognizer, and add latency without
+  improving the final paste.
+- Grammar correction on the Apple backend follows `postprocess_provider`:
+  `groq` calls the Groq LLM with the glossary-aware prompt (~600 ms);
+  `apple` calls Apple Intelligence through the same prompt (1.5-4 s, fully
+  on-device). Both are eligible on the Apple backend — the provider pref
+  decides, no forced disable. Independent of provider, the fast local
+  cleanup always runs first: tier-1 glossary rewrites plus removal of
+  adjacent repeated words and fillers.
+- In the Settings → Models tab, the Apple on-device option appears at the top of
+  the model list (above downloaded/available models and broken-model diagnostics).
+  Selecting it sends `SetActiveTranscriber { "backend": "apple" }`, the active
+  row is badged, and the same loading spinner is shown while the daemon confirms.
+- `Always.app/Contents/Info.plist` declares `NSSpeechRecognitionUsageDescription`
+  so the bundled `always-daemon` can request macOS speech-recognition permission.
+  The first transcription attempt triggers a TCC prompt; without this key the
+  process is killed by the system before the user can respond.
+
 ---
 
 ## 9. Text pipeline
@@ -474,7 +532,19 @@ Between transcription and the keyboard:
    audio, and the echo is indistinguishable from speech to everything downstream.
 3. **Glossary corrections** — known mistranscriptions mapped to canonical terms.
 4. **Snippets / text expansion.** ❓ Not verified in detail.
-5. **Grammar cleanup** — an LLM pass, on by default (`postprocess_enabled`).
+5. **Local cleanup** — a deterministic pass that runs on every utterance at
+   paste time and around the LLM call: removes adjacent repeated words and
+   conservative fillers ("um", "uh", "ah", "eh") without inventing content.
+   It is the sole cleanup when the LLM pass is disabled, timed out, or
+   failed, and a post-pass on the LLM's own output.
+6. **Grammar cleanup** — an LLM pass, on by default (`postprocess_enabled`).
+   Its prompt enforces token preservation (never expand one word into a
+   phrase or contract a phrase into one word) and a certainty bar for
+   glossary substitutions. A bounded domain-vocabulary section lists the
+   user's canonical terms so the model can resolve phonetic mishearings
+   (`kit rug trees` → `git worktrees`) only when strong phonetic similarity
+   AND technical context both hold; a meta-speech rule keeps quoted wrong
+   words literal (`puts cloud instead of Claude` keeps `cloud`).
    The blocking call at paste time is pre-warmed in the background so it
    usually lands as a cache hit (or joins the identical in-flight request):
    - **Un-chunked utterance:** the tentative-silence speculation warms the
@@ -486,7 +556,7 @@ Between transcription and the keyboard:
      speculation warms join + tail. Warm and paste build the request through
      the same builder (`correction_request::build`), which is what keeps the
      cache keys byte-identical.
-6. **Corrections** — the user can log a correction for a wrong transcription;
+7. **Corrections** — the user can log a correction for a wrong transcription;
    passive capture of clipboard edits is available but off by default.
 
 ---
@@ -698,13 +768,62 @@ auto-enter `ctrl+alt+a` · force paste `ctrl+alt+v` · log correction
 
 ## 12. Build, install, run
 
-`scripts/dev-rebuild.sh` is the only supported path. It kills the app and
-daemon, builds Rust and Swift, deploys to `/Applications/Always.app`, relaunches,
-and **verifies the running processes are newer than the binaries** — exiting
-non-zero if not.
+Two identities coexist on the development machine; each is one GUI + one
+daemon (I4/I5 hold *per instance*).
+
+| | Production | Development |
+|---|---|---|
+| App | `/Applications/Always.app` | `/Applications/Always Dev.app` |
+| Bundle id | `com.always.v3` | `com.always.v3.dev` |
+| State dir | `~/Library/Application Support/always` | `~/Library/Application Support/always-dev` |
+| Socket | `~/Library/Caches/Always/always.sock` | `~/Library/Caches/Always/always-dev.sock` |
+| URL scheme | `always://` | `always-dev://` |
+| Sparkle | on | off (keys stripped at build; updater disabled in code) |
+| Focus-state file | `~/Library/Caches/Always/focus-state.json` | `focus-state-dev.json` |
+| Daemon logs | `~/Library/Logs/Always` | `~/Library/Logs/Always-dev` |
+
+Shared deliberately: `~/Library/Application Support/always/models` and the
+`~/Library/Caches/always` model caches — immutable downloads, reused by both.
+
+**Instance detection.** The daemon resolves its instance once at startup:
+`ALWAYS_INSTANCE=dev` env var, else `Always Dev.app` in its own executable
+path, else prod. The GUI detects via its bundle id/path. No env plumbing is
+needed for the bundled daemon — it inherits the right identity from its
+location.
+
+**Isolation.** Each instance's single-instance lock, pid file, process
+sweep, and orphan-reconciliation only match processes from its own bundle
+path, so neither instance can signal or kill the other. Dev's first launch
+seeds its state dir from production's db/voiceprint/vocabulary (one-time
+copy; afterwards they diverge).
+
+**Peer handoff.** The microphone is still singular — two live daemons would
+both transcribe and both paste. So whichever daemon starts last pauses its
+peer over the peer's UDS socket (`SetPaused{reason:"peer-instance"}`): the
+paused instance stops listening, no audio is transcribed or pasted. A
+paused-by-peer daemon runs a watchdog that self-resumes the moment the
+peer's socket dies (~1 s), covering SIGKILL where no cleanup runs;
+graceful exits resume the peer directly. A user pause/unpause of either
+instance always overrides the handoff — the watchdog stands down and the
+user's choice wins.
+
+**Commands.**
+
+- `scripts/dev-rebuild.sh` — the dev loop. Kills/rebuilds/relaunches only
+  `Always Dev.app`; never touches the production install. Exits non-zero
+  unless the dev GUI + daemon are running the just-built binaries, and
+  warns if production went missing.
+- `scripts/promote.sh` — manual production promotion, user-invoked only.
+  Kills production, rebuilds, deploys over `/Applications/Always.app`,
+  relaunches, verifies. Agents must not run it.
 
 **Nothing is "done" until the new build is running** (I10). "Built" and
 "deployed" are different claims, and only "running" is testable.
+
+> ⚠️ Live-mic testing of the dev instance still contends for the single
+> hardware microphone — the mic-conflict monitor (§7) will pause one side.
+> Test the dev daemon with file/STT paths while production holds the mic,
+> or pause production manually first.
 
 ---
 

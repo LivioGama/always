@@ -115,6 +115,14 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         (ready_signal, registry_placeholder, active_placeholder)
     };
 
+    // Dev/prod handoff: whichever daemon starts last pauses its peer over
+    // the peer's UDS socket, so the two instances never transcribe the same
+    // mic input into double pastes. Runs on a thread that first waits for
+    // OUR socket to bind — the peer's resume watchdog polls it, and
+    // pausing before we're live would let the peer self-resume instantly.
+    #[cfg(unix)]
+    daemon::pause_peer_when_ready();
+
     // Send initial state events immediately - UDS server will broadcast them
     // to clients as they connect via the initial state in handle_client
     event::global_broadcaster().listening_started();
@@ -553,6 +561,10 @@ fn handle_speech(
             Ok(())
         }
         SpeechAction::Paste { text: transformed } => {
+            // Deterministic local cleanup first: removes adjacent repeats and
+            // fillers before snippet matching / grammar so they never reach the
+            // paste buffer or the LLM prompt.
+            let transformed = crate::always::postprocess::local_cleanup(&transformed);
             // Log the raw Whisper transcript for debugging STT quality issues
             // Privacy: gate transcript text behind `should_log_transcripts`
             if crate::always::telemetry::should_log_transcripts() {
@@ -1082,16 +1094,18 @@ fn apply_grammar_blocking_request(
         let process_result = match timed {
             Ok(inner) => inner,
             Err(_elapsed) => {
+                let local = crate::always::postprocess::local_cleanup(&fallback);
                 tracing::warn!(
                     timeout_secs = GRAMMAR_BLOCKING_TIMEOUT.as_secs(),
-                    fallback_text = %fallback,
-                    "grammar correction timed out, using acoustic match result"
+                    fallback_text = %local,
+                    "grammar correction timed out, using local cleanup"
                 );
-                return (fallback, false);
+                return (local, false);
             }
         };
         match process_result {
-            Ok((cleaned, cache_hit)) => {
+            Ok((mut cleaned, cache_hit)) => {
+                cleaned = crate::always::postprocess::local_cleanup(&cleaned);
                 let elapsed_ms = started.elapsed().as_millis() as u64;
                 if fallback != cleaned {
                     tracing::info!(
@@ -1114,21 +1128,23 @@ fn apply_grammar_blocking_request(
                 (cleaned, cache_hit)
             }
             Err(err) => {
+                let local = crate::always::postprocess::local_cleanup(&fallback);
                 tracing::warn!(
                     error = %err,
-                    fallback_text = %fallback,
-                    "grammar correction failed, using acoustic match result"
+                    fallback_text = %local,
+                    "grammar correction failed, using local cleanup"
                 );
-                (fallback, false)
+                (local, false)
             }
         }
     } else {
+        let local = crate::always::postprocess::local_cleanup(&fallback);
         tracing::debug!(
             stage = "grammar_correction",
-            text = %fallback,
+            text = %local,
             "grammar correction disabled"
         );
-        (fallback, false)
+        (local, false)
     }
 }
 

@@ -407,6 +407,10 @@ impl AlwaysConfig {
             }
         }
 
+        // Apple Intelligence postprocess adds ~2-4s and can over-correct,
+        // but it is fully on-device and private — the user's provider pref
+        // decides. No forced disable: Apple+Apple is a valid combination
+        // when the user wants zero cloud calls.
         // Construct the post-processor whenever grammar_correction is
         // enabled. The previous gate required BOTH a loaded
         // vocabulary.json AND a detected project root (`.git`
@@ -422,6 +426,7 @@ impl AlwaysConfig {
                 .or_else(|| std::env::var("GROQ_API_KEY").ok());
             tracing::info!(
                 grammar_correction_enabled = effective_postprocess.grammar_correction_enabled,
+                provider = %effective_postprocess.provider,
                 has_api_key = groq_api_key.is_some(),
                 project_root = project_root.is_some(),
                 "post_processor_init"
@@ -510,18 +515,17 @@ impl AlwaysConfig {
     /// True when the LLM grammar/glossary postprocess pass should run for
     /// the current utterance.
     ///
-    /// Requires grammar correction enabled + a usable API key (see
-    /// [`PostProcessor::can_correct`]) AND the Groq STT backend active.
-    /// Local models must stay fully offline and near-instant, so
-    /// postprocess never fires while `transcriber_backend` is `Local` —
-    /// regardless of the saved `postprocess_enabled` preference, which
-    /// keeps applying normally the moment the user switches back to Groq.
+    /// Requires grammar correction enabled + a usable provider (Groq API
+    /// key for Groq, Apple Intelligence available for Apple). Local STT
+    /// stays raw to stay fully offline and near-instant.
     pub fn postprocess_available(&self) -> bool {
-        matches!(self.transcriber_backend, TranscriberBackendChoice::Groq)
-            && self
-                .post_processor
-                .as_ref()
-                .is_some_and(|pp| pp.can_correct())
+        matches!(
+            self.transcriber_backend,
+            TranscriberBackendChoice::Groq | TranscriberBackendChoice::Apple
+        ) && self
+            .post_processor
+            .as_ref()
+            .is_some_and(|pp| pp.can_correct())
     }
 
     /// Whether deterministic CONTENT filtering (hard phrase filter +

@@ -112,6 +112,8 @@ struct ModelsSection: View {
         VStack(alignment: .leading, spacing: 12) {
             sectionHeader
 
+            appleBackendSection
+
             backendBar
 
             languagePickerSection
@@ -210,7 +212,69 @@ struct ModelsSection: View {
         if models.activeBackend == "groq" {
             return "Groq Whisper (Remote)"
         }
+        if models.activeBackend == "apple" {
+            return "Apple (On-Device)"
+        }
         return models.activeBackend
+    }
+
+    /// On-device Apple STT card — shown at the top of the model list.
+    /// Selecting it sends `SetActiveTranscriber { "backend": "apple" }`.
+    private var appleBackendSection: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text("Apple (On-Device)")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                    if models.activeBackend == "apple" {
+                        Text("Active")
+                            .font(.caption2)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(Color.accentColor.opacity(0.25))
+                            )
+                    }
+                }
+                Text("Siri on-device dictation for the current language. No download, no API key.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            if models.activeBackend == "apple" {
+                Text("Active")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                let loading = models.loadingBackend == "apple"
+                Button {
+                    models.setActive(backend: "apple")
+                } label: {
+                    HStack(spacing: 4) {
+                        if loading {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(loading ? "Loading…" : "Use")
+                            .font(.caption)
+                    }
+                }
+                .controlSize(.small)
+                .disabled(models.loadingBackend != nil)
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(
+                    models.activeBackend == "apple"
+                        ? Color.accentColor.opacity(0.6)
+                        : Color.secondary.opacity(0.2)
+                )
+        )
     }
 
     /// The catalog entry for the currently active local model, or `nil`

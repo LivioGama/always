@@ -38,7 +38,11 @@ const NUM_MEL_BINS: i32 = 80;
 /// scores get noisier below ~1s but remain far more reliable than not
 /// checking at all, and the runtime gate fails CLOSED for anything
 /// shorter (a snippet too short to verify is dropped, never pasted).
-pub const MIN_EMBED_SAMPLES: usize = 8_000; // 0.5 s @ 16 kHz
+/// 0.3 s is the shortest window worth embedding — noisier than longer
+/// voice, but the gate threshold is unchanged so a marginal early window
+/// simply fails through to the next check instead of being accepted.
+/// Lowered from 0.5 s so the first speaker check can fire ~200 ms sooner.
+pub const MIN_EMBED_SAMPLES: usize = 4_800; // 0.3 s @ 16 kHz
 
 /// Where the model lives on disk (`~/Library/Caches/always/` on macOS
 /// — same dir Silero materialises to).

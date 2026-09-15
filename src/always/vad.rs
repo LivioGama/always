@@ -286,6 +286,12 @@ const SPEAKER_GATE_EARLY_SAMPLES: usize = 32_000;
 /// at the last matching boundary and finalized — so the end of dictation
 /// is defined by THE USER going quiet, not by the room going quiet.
 const SPEAKER_TAIL_CHECK_EVERY_SAMPLES: usize = 8_000; // 0.5s of voice
+/// Re-check cadence while the speaker is still UNVERIFIED: 0.25 s of new
+/// voiced audio between attempts. Tighter than the tail cadence — each
+/// embed costs ~30-50 ms and the payoff is the listening overlay (and
+/// live preview, which is gated on verification) appearing up to ~1 s
+/// sooner. Reverts to `SPEAKER_TAIL_CHECK_EVERY_SAMPLES` once verified.
+const SPEAKER_GATE_UNVERIFIED_CHECK_EVERY_SAMPLES: usize = 4_000; // 0.25s of voice
 /// Trailing window scored by each tail check: 1.5s is enough voice for a
 /// stable embedding while keeping the cut ~1.5s behind the user's last
 /// word.
@@ -540,8 +546,15 @@ fn preview_cadence(
     consume_mode: bool,
     streaming_engine: bool,
     local_engine: bool,
+    apple_engine: bool,
     live_preview_pref: bool,
 ) -> Option<PreviewCadence> {
+    // Apple STT is non-streaming and file-based. Live preview competes with
+    // final chunk transcription for the same serialized recognizer, adding
+    // latency and empty-result races. Disable preview entirely for Apple.
+    if apple_engine {
+        return None;
+    }
     // A LOCAL streaming engine is compute-bound, not network-bound. It must
     // be throttled explicitly — see `LOCAL_STREAM_INTERVAL_MS`. Checked
     // BEFORE the consume/streaming branch so a local streaming engine never
@@ -787,11 +800,12 @@ fn record_with_local_vad(
     let mut committed_samples = 0usize;
     let mut voiced_since_flush = true;
 
-    // "My Voice" gate — resolved once per utterance, checked at most
-    // once per utterance (early at ~2s of voice, else at speculation
-    // kickoff, else at final). A failing check returns DroppedSpeaker
-    // immediately, so `speaker_checked == true` below always means
-    // "checked and passed (or unverifiable → fail-open)".
+    // "My Voice" gate — resolved once per utterance, retried on a short
+    // cadence until verified (first check at ~0.3s of voice, then every
+    // 0.25s; decisive whole-utterance check at ~2s). A failing decisive
+    // check returns DroppedSpeaker immediately, so
+    // `speaker_checked == true` below always means "checked and passed
+    // (or unverifiable → fail-open)".
     let speaker_gate_ctx = speaker_gate_ctx(cfg);
     let speaker_gate_requested = speaker_gate_ctx.requested;
     let speaker_gate = speaker_gate_ctx.gate;
@@ -800,13 +814,15 @@ fn record_with_local_vad(
     // trailing-silence frames that also land in `speech_samples`) —
     // the embedding needs real voice, not padded silence.
     let mut voiced_samples = 0usize;
-    // Speaker verification ladder + tail monitor (see SPEAKER_TAIL_*
-    // consts). A check runs every SPEAKER_TAIL_CHECK_EVERY_SAMPLES of
-    // NEW voiced audio: before verification it tries to confirm the
-    // user and only then raises the badge; after verification it
-    // watches the trailing window so the utterance ends when the USER
-    // stops talking, not when the room goes quiet.
-    let mut next_speaker_check = SPEAKER_TAIL_CHECK_EVERY_SAMPLES;
+    // Speaker verification ladder + tail monitor (see SPEAKER_TAIL_* /
+    // SPEAKER_GATE_UNVERIFIED_* consts). The first check fires as soon as
+    // the embedder has enough audio (MIN_EMBED_SAMPLES ≈ 0.3s voiced —
+    // the pre-buffer is already in `speech_samples`, so the scored window
+    // is really ~0.5s), then every 0.25s of new voice until verified.
+    // After verification the cadence relaxes to 0.5s and watches the
+    // trailing window so the utterance ends when the USER stops talking,
+    // not when the room goes quiet.
+    let mut next_speaker_check = crate::always::speaker_embed::MIN_EMBED_SAMPLES;
     let mut tail_fail_streak = 0usize;
     // Set when the mic-conflict watchdog fired mid-capture; turns the
     // finalized utterance into `PreemptedByMicConflict` so the caller
@@ -1157,15 +1173,16 @@ fn record_with_local_vad(
                     return Ok(RecordResult::DroppedSpeaker { score: -1.0 });
                 }
 
-                // "My Voice" ladder: one check per 0.5s of NEW voiced
-                // audio. The ~30-50ms of inference stalls the read loop
-                // briefly; rec's 131KB pipe buffer (~4s) absorbs it.
+                // "My Voice" ladder: one check per 0.25s of NEW voiced
+                // audio while unverified, 0.5s after verification. The
+                // ~30-50ms of inference stalls the read loop briefly;
+                // rec's 131KB pipe buffer (~4s) absorbs it.
                 //
                 // UNVERIFIED phase: a trailing-window match at the full
-                // threshold verifies the user (typically 0.5-1s in) —
-                // the listening overlay is already up optimistically, so
-                // verification only confirms it (and a mismatch retracts
-                // it). Still unverified at ~2s → decisive
+                // threshold verifies the user (as early as ~0.3s of voice
+                // now that MIN_EMBED_SAMPLES is the floor) and only then
+                // raises the listening badge — non-user voices never flash
+                // it. Still unverified at ~2s → decisive
                 // whole-utterance check, ABORT on mismatch — background
                 // media dialogue must not hold the recorder hostage for
                 // an entire scene.
@@ -1179,7 +1196,12 @@ fn record_with_local_vad(
                 if let Some(gate) = &speaker_gate
                     && voiced_samples >= next_speaker_check
                 {
-                    next_speaker_check = voiced_samples + SPEAKER_TAIL_CHECK_EVERY_SAMPLES;
+                    next_speaker_check = voiced_samples
+                        + if speaker_checked {
+                            SPEAKER_TAIL_CHECK_EVERY_SAMPLES
+                        } else {
+                            SPEAKER_GATE_UNVERIFIED_CHECK_EVERY_SAMPLES
+                        };
                     let tail_len = SPEAKER_TAIL_WINDOW_SAMPLES.min(speech_samples.len());
                     let window = &speech_samples[speech_samples.len() - tail_len..];
                     if !speaker_checked {
@@ -1283,6 +1305,7 @@ fn record_with_local_vad(
                     crate::always::pause::is_consume_mode(),
                     transcriber.supports_streaming(),
                     cfg.transcriber_backend.is_local(),
+                    cfg.transcriber_backend.is_apple(),
                     cfg.stt_live_preview,
                 ) && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
                     && speech_samples.len() >= CONSUME_STREAM_MIN_SAMPLES
@@ -2599,7 +2622,7 @@ mod tests {
         // Consume mode keeps the original fast cadence regardless of
         // engine or pref — external consumers (Iris) depend on it.
         for (streaming, pref) in [(false, false), (false, true), (true, false), (true, true)] {
-            let cadence = super::preview_cadence(true, streaming, false, pref)
+            let cadence = super::preview_cadence(true, streaming, false, false, pref)
                 .expect("consume mode always arms the preview");
             assert_eq!(cadence.interval_ms, super::CONSUME_STREAM_INTERVAL_MS);
             assert_eq!(cadence.min_new_samples, 0);
@@ -2611,7 +2634,7 @@ mod tests {
         // latency is what limits the rate. (This used to read "streaming
         // previews are local + free" — that assumption is what let a local
         // streaming engine run previews back-to-back and peg every core.)
-        let cadence = super::preview_cadence(false, true, false, false)
+        let cadence = super::preview_cadence(false, true, false, false, false)
             .expect("streaming engine always arms the preview");
         assert_eq!(cadence.interval_ms, super::CONSUME_STREAM_INTERVAL_MS);
     }
@@ -2619,7 +2642,7 @@ mod tests {
     #[test]
     fn preview_cadence_slow_cloud_path_gated_on_pref() {
         // Groq (non-streaming) + pref ON → slow, starvation-safe cadence.
-        let cadence = super::preview_cadence(false, false, false, true)
+        let cadence = super::preview_cadence(false, false, false, false, true)
             .expect("live-preview pref arms the slow cloud cadence");
         assert_eq!(cadence.interval_ms, super::LIVE_PREVIEW_INTERVAL_MS);
         assert_eq!(cadence.min_new_samples, super::LIVE_PREVIEW_MIN_NEW_SAMPLES);
@@ -2633,7 +2656,7 @@ mod tests {
         assert!(cadence.min_new_samples >= 8_000);
 
         // Pref OFF (and no consume/streaming) → no live preview at all.
-        assert_eq!(super::preview_cadence(false, false, false, false), None);
+        assert_eq!(super::preview_cadence(false, false, false, false, false), None);
     }
 
     /// A LOCAL streaming engine (Nemotron) must never get the 200ms cloud
@@ -2646,7 +2669,7 @@ mod tests {
     fn preview_cadence_throttles_local_streaming_engine() {
         for consume in [false, true] {
             for pref in [false, true] {
-                let cadence = super::preview_cadence(consume, true, true, pref)
+                let cadence = super::preview_cadence(consume, true, true, false, pref)
                     .expect("local streaming engine arms a throttled preview");
 
                 // The three throttles the cloud path gives up.
