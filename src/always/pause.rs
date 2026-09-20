@@ -243,7 +243,10 @@ pub fn is_audio_output_paused() -> bool {
 /// Record whether the Mac is playing audio. Pure fact — never
 /// recomputes the effective pause state, never gates capture.
 pub fn set_system_audio_playing(playing: bool) {
-    SYSTEM_AUDIO_PLAYING.store(playing, Ordering::Relaxed);
+    let prev = SYSTEM_AUDIO_PLAYING.swap(playing, Ordering::Relaxed);
+    if prev != playing {
+        tracing::info!(playing, "system_audio_playing_changed");
+    }
 }
 
 /// Is the Mac playing audio out of its speakers right now?

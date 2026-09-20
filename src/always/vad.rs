@@ -295,12 +295,22 @@ fn speaker_confirmation(scored: bool, score: Option<f32>, threshold: f32) -> Spe
 fn speaker_gate_confirm_utterance(
     gate: &SpeakerGate,
     samples: &[i16],
-    voiced_samples: usize,
+    _voiced_samples: usize,
 ) -> SpeakerConfirmation {
     let min = crate::always::speaker_embed::MIN_EMBED_SAMPLES;
-    let scored = voiced_samples >= min && samples.len() >= min;
-    let score = scored.then(|| speaker_gate_score(gate, samples)).flatten();
-    speaker_confirmation(scored, score, gate.threshold)
+    // Score whenever the embedder CAN embed (samples.len() >= min), not only
+    // when voiced_samples >= min. A short burst of video/TTS audio can have
+    // samples.len() >= min (the 1.5s trailing window that passed the ladder
+    // is 24000 samples) but voiced_samples < min (only 0.3s of actual voice).
+    // The old `voiced_samples >= min` gate returned `Insufficient` for these,
+    // deferring to the ladder — which accepted them on a 0.15 window bar that
+    // media audio clears easily. That was the leak: non-user audio passed the
+    // window, STT ran, and the whole-utterance check said "no opinion" instead
+    // of scoring and refuting. Now we score whenever the embedder can, so the
+    // whole-utterance bar (0.5) catches what the window bar (0.15) let through.
+    let can_embed = samples.len() >= min;
+    let score = can_embed.then(|| speaker_gate_score(gate, samples)).flatten();
+    speaker_confirmation(can_embed, score, gate.threshold)
 }
 
 /// Bar for the ladder's single trailing-window verification.

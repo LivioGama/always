@@ -366,7 +366,13 @@ before they are committed, since a committed chunk leaves the buffer for good.
 Rejecting requires positive evidence. A fragment too short to embed, or an
 embedder error, defers to whatever the in-capture checks already decided — the
 confirmation can turn an accept into a reject, never the reverse, and it never
-discards chunks that were already confirmed.
+discards chunks that were already confirmed. "Too short to embed" means
+`samples.len() < MIN_EMBED_SAMPLES` — the embedder's own floor on input length.
+A short burst of video/TTS audio that has enough total samples to embed (the
+1.5s trailing window is 24000 samples, well above the 8000 floor) but little
+voiced audio IS scored and CAN be refuted; the old check that gated on
+`voiced_samples >= MIN_EMBED_SAMPLES` let these through as "insufficient" and
+deferred to the ladder, which accepted them on the permissive 0.15 window bar.
 
 **The gate gets stricter while the Mac is playing audio**, but only for the
 single-window check: `AUDIO_PLAYING_GATE_BUMP` (0.15) is added to the window bar
