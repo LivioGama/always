@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -115,6 +116,13 @@ enum Commands {
     MenuBar {
         #[command(subcommand)]
         action: MenuBarAction,
+    },
+    /// Feed a 16 kHz mono WAV through the Apple streaming session (dev self-test).
+    /// Must run inside the signed daemon binary for TCC speech permission.
+    #[command(hide = true, name = "apple-stream-selftest")]
+    AppleStreamSelftest {
+        /// Path to a WAV file (any rate/depth — resampled to 16 kHz f32 mono)
+        wav: PathBuf,
     },
     /// Run overlay companion process (Linux)
     #[cfg(feature = "overlay")]
@@ -254,6 +262,7 @@ fn main() -> Result<()> {
         Some(Commands::MenuBar { action }) => match action {
             MenuBarAction::Reset => cli::menu_bar::reset(),
         },
+        Some(Commands::AppleStreamSelftest { wav }) => apple_stream_selftest(wav),
         #[cfg(feature = "overlay")]
         Some(Commands::Overlay { action }) => match action {
             OverlayAction::Run => overlay_integration::run(),
@@ -283,6 +292,66 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Dev self-test: feed a WAV through the Apple incremental streaming session
+/// in 500 ms chunks (same cadence as the live capture worker) and print each
+/// cumulative partial plus the final transcript. Run the bundled binary so
+/// TCC sees the signed `com.always.v3` identity:
+/// `/Applications/Always.app/Contents/MacOS/always-daemon apple-stream-selftest x.wav`
+#[cfg(target_os = "macos")]
+fn apple_stream_selftest(wav: PathBuf) -> Result<()> {
+    use always::always::apple_stt::{self, AppleStreamSession};
+
+    if !apple_stt::stream_supported() {
+        anyhow::bail!("apple streaming not supported on this device/build");
+    }
+
+    let data = std::fs::read(&wav)?;
+    // Locate the PCM payload (canonical 44-byte header or extended fmt).
+    let mut i = 12usize;
+    let offset = loop {
+        anyhow::ensure!(i + 8 <= data.len(), "no data chunk in wav");
+        let size = u32::from_le_bytes([data[i + 4], data[i + 5], data[i + 6], data[i + 7]]) as usize;
+        if &data[i..i + 4] == b"data" {
+            break i + 8;
+        }
+        i += 8 + size;
+    };
+    let samples: Vec<f32> = data[offset..]
+        .chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32_768.0)
+        .collect();
+    anyhow::ensure!(!samples.is_empty(), "empty wav");
+
+    let mut session = AppleStreamSession::start(Some("en"), &[])
+        .ok_or_else(|| anyhow::anyhow!("stream session failed to start"))?;
+    println!("session started, feeding {} samples", samples.len());
+
+    const CHUNK: usize = 8_000;
+    let mut fed = 0usize;
+    while samples.len() - fed >= CHUNK {
+        let text = session
+            .push(&samples[fed..fed + CHUNK])
+            .map_err(|e| anyhow::anyhow!("push failed: {e}"))?;
+        fed += CHUNK;
+        println!("  [{:>6} samples] {text:?}", fed);
+    }
+    if fed < samples.len() {
+        let mut tail = samples[fed..].to_vec();
+        tail.resize(CHUNK, 0.0);
+        let text = session.push(&tail).map_err(|e| anyhow::anyhow!("tail push failed: {e}"))?;
+        println!("  [{:>6} samples] {text:?}", samples.len());
+    }
+
+    let final_text = session.finish().map_err(|e| anyhow::anyhow!("finish failed: {e}"))?;
+    println!("final: {final_text:?}");
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apple_stream_selftest(_wav: PathBuf) -> Result<()> {
+    anyhow::bail!("apple streaming self-test is macOS only")
 }
 
 fn handle_config(action: ConfigAction) -> Result<()> {

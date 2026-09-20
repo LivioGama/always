@@ -127,7 +127,7 @@ daemon broadcasts events, the GUI sends commands.
    1296 ms once chunking engaged). Rolling chunks resume past 120 s of speech —
    the longest span over which streaming was measured flat — and immediately if
    the session dies or its audio is truncated.
-4a. **Live decode (cache-aware streaming engines only — Nemotron)** — a single
+4a. **Live decode (streaming engines — Nemotron, and Apple on macOS 26+)** — a single
    persistent decode session is fed the audio in 560 ms windows as it is
    captured, so the transcript is built *while the user speaks*. The overlay
    preview is read straight off that session; no extra decode runs.
@@ -624,8 +624,19 @@ recognition. Requires no API key and never uploads audio on macOS 26+.
   accurate on technical vocabulary than plain `SpeechTranscriber`.
 - Missing locale assets are installed via
   `AssetInventory.assetInstallationRequest(supporting:)` on first use.
-- It is a non-streaming backend: `Transcriber::supports_streaming()` returns
-  `false` and `transcribe_streaming()` yields a single final result.
+- On macOS 26+ the backend is **incrementally streaming**: `supports_streaming()`
+  reports true and `open_live_stream()` opens a `SpeechAnalyzer` session fed by
+  an `AsyncStream<AnalyzerInput>` of 16 kHz mono Int16 buffers (~500 ms
+  chunks; the recognizer worker only accepts Int16 — Float32 input traps it). `transcriber.results` is collected into an ordered segment table;
+  `.volatileResults` emissions supersede overlapping spans, so every
+  `push_chunk` returns the engine's latest cumulative transcript. `finish`
+  closes input, runs `finalizeAndFinishThroughEndOfInput()`, and returns the
+  joined segments — end-of-speech costs one flush, not a from-scratch decode.
+  A session refuses to open when the locale's model is not yet installed or
+  speech recognition is not authorized — the caller keeps its one-shot path,
+  which installs the model on demand, and the next utterance streams.
+  On macOS < 26 the backend stays one-shot (`supports_streaming()` false,
+  `transcribe_streaming()` yields a single final result).
 - The configured `lang` hint is resolved against
   `SpeechTranscriber.supportedLocales`. If `lang` is `auto` or empty, the
   current system locale is used.
@@ -638,9 +649,10 @@ recognition. Requires no API key and never uploads audio on macOS 26+.
   analyzer cannot stall the chunker finalize. The legacy recognizer path runs
   its result handler on a dedicated `OperationQueue` because the daemon's Rust
   main thread does not pump `NSRunLoop`.
-- The live preview cadence is disabled for the Apple backend. Previews are
-  non-streaming, compete for the serialized recognizer, and add latency without
-  improving the final paste.
+- The re-decode live preview cadence is disabled for the Apple backend. On
+  macOS 26+ interim text comes free from the incremental session's cumulative
+  transcript; on older systems previews were non-streaming, competed for the
+  serialized recognizer, and added latency without improving the final paste.
 - Grammar correction on the Apple backend follows `postprocess_provider`:
   `groq` calls the Groq LLM with the glossary-aware prompt (~600 ms);
   `apple` calls Apple Intelligence through the same prompt (1.5-4 s, fully
