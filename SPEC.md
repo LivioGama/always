@@ -56,6 +56,12 @@ un-authorise speech already given. This is what lets master pause keep the
 in-flight utterance (§7) without weakening the rule. It does not loosen I6:
 audio captured *during* suppression is still never transcribed or pasted.
 
+**I3a. Under My Voice, no audio reaches transcription unless the utterance
+matches the enrolled voiceprint *as a whole*.**
+A single matching window during capture is not sufficient authority — it is one
+trial in a series, and background media wins it eventually. Every path to STT is
+covered: the final transcript and each committed chunk. See §6.
+
 **I4. Only one recorder.** One `rec` process, driven from a single thread. Two
 readers of the microphone deadlock or starve each other.
 
@@ -113,14 +119,91 @@ daemon broadcasts events, the GUI sends commands.
 3. **Listening shown** — see §5.
 4. **Speaking** — audio accumulates. Long utterances are committed in chunks and
    transcribed as they go, so a two-minute dictation does not wait until the end.
-5. **Pause detected** — a tentative silence starts a *speculative* transcription
-   in the background, which also pre-warms the grammar LLM for the expected
-   final text (§9). If speech resumes, it is discarded.
+   **Chunking is suppressed while a live decode session is carrying the
+   utterance** (§4a): every flush resets that session, so chunking a streaming
+   utterance replaced one flat ~130 ms finalization with a from-scratch
+   one-shot decode of every 6 s of speech, and the end-of-utterance wait grew
+   with how long the user talked (measured 487 ms streaming → 880 → 1086 →
+   1296 ms once chunking engaged). Rolling chunks resume past 120 s of speech —
+   the longest span over which streaming was measured flat — and immediately if
+   the session dies or its audio is truncated.
+4a. **Live decode (streaming engines — Nemotron, and Apple on macOS 26+)** — a single
+   persistent decode session is fed the audio in 560 ms windows as it is
+   captured, so the transcript is built *while the user speaks*. The overlay
+   preview is read straight off that session; no extra decode runs.
+5. **Pause detected** — at a tentative silence the grammar LLM is pre-warmed
+   for the expected final text (§9), and the adaptive-silence verdict is taken.
+   On a live session both use the transcript that already exists. Without one,
+   a *speculative* background transcription starts instead and both wait on it;
+   if speech resumes, it is discarded.
 6. **End of utterance** — silence exceeds the configured window
    (`stt_silence_secs`, default 1.4 s). With adaptive silence on, the window
-   extends when the text looks mid-sentence.
-7. **Transcribe** — the speculative result is used if still valid, otherwise a
-   fresh transcription runs.
+   moves in *both* directions:
+   - **Extends** (×2, capped at +1.5 s) when the transcript looks mid-sentence.
+     On the **live** path that means an explicitly unfinished trailing mark
+     (`,` `;` `:` `—` `-`) or a trailing connector / hesitation filler. On the
+     **speculative** path (cloud engines, which punctuate reliably) a missing
+     sentence terminator also counts.
+   - **Shortens to 300 ms** when the transcript reads as a finished sentence:
+     its last word is not a connector or filler, it does not end on an
+     unfinished mark, and it is at least three words long. A sentence
+     terminator counts when present but is **not required** — local streaming
+     engines do not punctuate dictation. The short window is clamped to the
+     configured one, so it can only ever shorten the wait.
+
+   The two verdicts are a ladder: extend wins, then shorten, then the window is
+   left alone. They must never both hold for the same text. The live path
+   deliberately does **not** treat missing punctuation as "unfinished": doing so
+   made the extend branch true on every unpunctuated utterance, which is every
+   utterance on a local streaming engine, so the shorten branch was unreachable
+   (measured: it fired 0 times, ever) and ordinary dictation silently paid the
+   *doubled* 1.8 s window instead of the configured 0.9 s.
+
+   The ladder is evaluated from the tentative mark onward, every second frame,
+   plus one guaranteed last look before the base cut. It requires only that the
+   session was not invalidated, that voice was logged, and that the speaker gate
+   has verified the user. It deliberately does **not** require "speech has landed
+   since the last chunk flush": that flag exists to avoid *spending* a
+   speculative decode on trailing silence, and the live verdict spends nothing.
+   Requiring it cost every chunked utterance its verdict for the whole remaining
+   silence run, because the flush clears the flag and only a voiced frame sets it
+   again — and the flushing pause is usually the end of the utterance.
+
+   Every evaluation is logged: `midsentence_decision`, `early_finalize_decision`,
+   or `early_finalize_skipped` with the exact precondition that was false
+   (`no_live_session`, `worker_behind`, `no_transcript`, `adaptive_disabled`,
+   `short_utterance`, `tail_not_decoded`, `already_extended`,
+   `silence_below_early_window`, `not_complete_utterance`). Because that log
+   lived *inside* the gate, a false gate produced no reason at all; the gate is
+   therefore reported from outside itself by `silence_verdict_state` — one
+   unconditional line per silence run, at the tentative mark, naming every input
+   including the live-session state. A gate that can be false must say so from
+   outside itself, and a verdict that only logs when it succeeds cannot be shown
+   to be dead.
+
+   Both verdicts require that *every voiced sample has actually been decoded
+   into the transcript*. The live session withholds a partial trailing window
+   of up to 560 ms from the decoder, so "caught up" alone does not mean the
+   user's last words are in the text; judging a truncated transcript reads as
+   "unfinished" almost by construction and extended the window on utterances
+   that were in fact complete. The verdict is deferred frame by frame until the
+   trailing audio is covered — the silence itself flows into the decoder, so
+   this resolves within one 560 ms window. If it never resolves before the
+   configured window expires, no verdict is taken and the window applies
+   unchanged. Shortening additionally requires a live decode session; the
+   speculative path can still only extend.
+
+   In practice the shortened cut lands 300-660 ms after the last voiced frame
+   (never at exactly 300 ms unless speech happened to end on a 560 ms decoder
+   boundary), plus ~130 ms of flat live finalization.
+7. **Transcribe** — with a live session the transcript is already complete:
+   finalization feeds the last partial window plus one silent flush window and
+   takes the accumulated text (measured 124-139 ms, and **flat** — a 40 s
+   utterance finalizes as fast as a 5 s one). Otherwise the speculative result
+   is used if still valid, else a fresh whole-utterance transcription runs
+   (~0.10x realtime: 0.5 s for 5 s of audio, 3.8 s for 40 s, 11.5 s for 2 min).
+   A live session that failed, timed out, decoded nothing, or whose audio was
+   truncated by the speaker gate falls back to that same fresh transcription.
 8. **Post-process** — filters, glossary corrections, grammar cleanup (§9).
    A rule-filtered utterance (not a hallucination) is still copied to the
    clipboard — no paste, no auto-Enter — so a wrong filter verdict costs a
@@ -202,9 +285,21 @@ the active model claimed streaming; that gate is gone.) A model that returns
 one finished transcript per utterance must still not claim streaming —
 `Transcriber::supports_streaming()` stays `false` for the cloud backend.
 
-The daemon's live-preview loop (`vad.rs`, `preview_cadence`) re-transcribes the
-growing buffer on an interval while the user is still talking. Three ways it
-arms, in priority order:
+**A live decode session supersedes the preview loop entirely.** When the active
+engine offers one (`Transcriber::open_live_stream`, today Nemotron only), the
+overlay preview is the session's own cumulative transcript, broadcast whenever
+it changes and at most every `LIVE_STREAM_PREVIEW_MIN_GAP_MS` (250 ms). It
+costs no extra decode, and the text is the *cumulative* transcript rather than
+concatenated per-chunk returns — those split words at window boundaries
+("whe ther", "finali zes") because the tokenizer emits sub-word pieces.
+`preview_cadence` is not consulted at all in that case; the re-decode loop
+below would otherwise contend with the session for the one shared ONNX model
+mutex (measured: seven previews in a single 30 s utterance at 318-1966 ms each,
+with the final decode queued behind all of them).
+
+The re-decode preview loop (`vad.rs`, `preview_cadence`) re-transcribes the
+growing buffer on an interval while the user is still talking, for engines with
+no live session. Three ways it arms, in priority order:
 
 1. **Consume mode** (`SetConsumeMode`, regardless of engine) — fast cadence:
    every `CONSUME_STREAM_INTERVAL_MS` (200ms), self-limited to one round trip
@@ -256,6 +351,43 @@ above the threshold, it is the user.
   not when the room goes quiet.
 - Audio that fails is discarded before any transcription is paid for.
 
+**A single matching moment never authorises an utterance.** Verification during
+capture is scored on a 1.5 s trailing window, retried every 0.5 s, against the
+best of four enrolled embeddings. That is a repeated trial, and against
+continuous media it eventually succeeds by chance: measured on 2026-08-31 with a
+Hindi video playing, three windows crossed a 0.35 threshold (0.362, 0.365,
+0.375) and each one released a whole utterance to the clipboard. So the audio is
+re-scored **as a whole** before it can be transcribed, at the same threshold, and
+is discarded if the utterance does not match — no matter what an individual
+window said. Over the same recording, 42 whole-utterance scores peaked at 0.341;
+none reached the bar. Chunks of a long dictation are confirmed the same way
+before they are committed, since a committed chunk leaves the buffer for good.
+
+Rejecting requires positive evidence. A fragment too short to embed, or an
+embedder error, defers to whatever the in-capture checks already decided — the
+confirmation can turn an accept into a reject, never the reverse, and it never
+discards chunks that were already confirmed. "Too short to embed" means
+`samples.len() < MIN_EMBED_SAMPLES` — the embedder's own floor on input length.
+A short burst of video/TTS audio that has enough total samples to embed (the
+1.5s trailing window is 24000 samples, well above the 8000 floor) but little
+voiced audio IS scored and CAN be refuted; the old check that gated on
+`voiced_samples >= MIN_EMBED_SAMPLES` let these through as "insufficient" and
+deferred to the ladder, which accepted them on the permissive 0.15 window bar.
+
+**The gate gets stricter while the Mac is playing audio**, but only for the
+single-window check: `AUDIO_PLAYING_GATE_BUMP` (0.15) is added to the window bar
+and never to the whole-utterance bar. Dictating over music must keep working, and
+the owner's Nepali scores 0.45–0.52 — a raised whole-utterance bar of 0.50 would
+reject half of it. Missing the raised window bar costs the user latency, not
+their words: the whole-utterance check at ~2 s still admits them at the
+unraised threshold.
+
+"Is audio playing" is tracked as a **fact**, separately from the audio-output
+*pause source* below. The two were the same flag, and because the pause source is
+deliberately suppressed whenever My Voice is on (§7), the fact was suppressed
+with it — the strictness bump was unreachable in the only configuration that
+needed it, for as long as it existed.
+
 **No trust window.** An earlier build remembered a confirmed match for a period
 (10 s, later 5 min) and let the badge appear on voice onset without re-verifying
 inside that window. That made the overlay flash on every non-user voice —
@@ -292,7 +424,7 @@ the `ReloadShortcuts` UDS command — the daemon re-reads the prefs DB
 and swaps the live keyboard listener's combo set without a restart.
 | Per-app | Focused app is on the paused list | Focus moves to an allowed app |
 | Mic conflict | Another app holds the microphone | Mic free for ~3 s (§7.1) |
-| Audio output | System audio is playing | Playback stops |
+| Audio output | System audio is playing (suppressed entirely when My Voice is on — the gate already ignores non-user voices, so music must not stop dictation) | Playback stops |
 | Idle | No voice for `idle_pause_secs` | Voice detected again |
 | No GUI | Daemon lost its last client | A client connects |
 
@@ -445,10 +577,18 @@ directory, and a declared `size_mb` that agrees with the sum of the parts.
 **Implementation details:**
 - `LoadedEngine::Nemotron` holds a **shared, read-only `parakeet_rs::NemotronHandle`** (loaded via `NemotronHandle::load(path, None)`), never a bare `Nemotron` instance. Every call — the one-shot final path and each streaming session — spawns its own independent `Nemotron::from_shared(&handle)` with fresh decoder state, transcribes, and drops it. This is required, not cosmetic: `Nemotron::transcribe_audio` (the one-shot path) starts by resetting the same cache-aware decode state (`encoder_cache`, LSTM `state_1`/`state_2`, `last_token`) that a concurrent `transcribe_chunk` streaming sequence depends on, and the streaming path releases `self.engine`'s mutex between chunks (so a slow decode doesn't block unrelated daemon work) — sharing one `Nemotron` between the two paths let the daemon's independent "speculative transcription" (fires ~240ms after any pause, unrelated to streaming preview state) silently corrupt an in-progress streaming decode. Per-call isolation removes the shared mutable state entirely; no additional locking is needed.
 - Non-streaming transcription uses `Nemotron::from_shared(&handle)` then `transcribe_audio(&samples)`
-- `LocalTranscriber::transcribe_streaming` clones the handle out of `self.engine` once, then uses stateful `transcribe_chunk(&audio_chunk)` calls on its own `Nemotron` instance with 560ms chunks (8960 samples @ 16kHz)
+- `LocalTranscriber::open_live_stream` returns the **persistent** session used for both the live preview and the final transcript. It takes the handle from a `nemotron` field held *outside* `self.engine`'s mutex — `transcribe_from_bytes` holds that mutex for a whole decode, and the session is opened from the capture thread, which must never block behind an unrelated one-shot. The session lives on its own worker thread (`always::live_stream`), is fed exactly 8960-sample windows in capture order, and exposes only the **cumulative** transcript (`Nemotron::get_transcript()`), never per-call returns.
+- Measured on the shipped int8 model (`examples/nemotron_stream_bench.rs`): per-window decode cost is **flat at ~54 ms** from a 0.5 s buffer to a 120 s buffer (0.10x realtime, ~10x headroom), and the flush costs 51-54 ms. The same clips cost 514 ms / 4200 ms / 11512 ms to decode one-shot at 4.7 s / 39.6 s / 119.7 s. Transcript equivalence versus one-shot: WER 0.000 at 4.7 s, 0.008 at 39.6 s.
+- The session is opened at voice onset. On a cold daemon the engine may still be loading, and the open is a deliberately non-blocking `try_lock` that answers "no session" rather than stalling the capture thread; that answer is **retried every 300 ms** for as long as the active engine reports it can stream. Without the retry a single unlucky first frame disabled streaming for the whole utterance — no live transcript (so no early finalization) and the 6 s chunk target back in force, which is how `chunk_flush` still appeared on a streaming engine. Re-opening mid-utterance is complete, not partial: `feed` starts from sample 0 of the current buffer, and after a chunk flush that buffer is exactly the tail `finalize_chunked` appends.
+- A **degraded** session is treated as an absent one and is replaced, up to three times per utterance. `degraded()` latches on a single worker decode error or a queue 16 windows behind, and a degraded session is present-but-dead: `feed` returns immediately, `transcript()` and `finish()` are `None`, and `live_session_carrying` goes false — which puts the 6 s chunk target back for the rest of the utterance. The replacement starts at `fed = 0` on a fresh generation and re-decodes the current buffer from its first sample. Past three attempts the utterance falls back to rolling chunking, which has its own retries and spill. `live_final_state` is logged once per utterance with the carrying reason, the re-open count and the chunk count, because `stt_wait_ms` scaling with utterance length (one-shot, ~0.10x realtime) and flat ~130 ms (live) are otherwise indistinguishable in the log.
+- `supports_streaming() == true` does **not** imply `open_live_stream().is_some()` — the flag is a per-model registry constant while the session additionally requires the loaded engine to be Nemotron. That combination is warned once per utterance (`live_stream_unavailable_despite_supports_streaming`) rather than retried silently.
+- Every chunk flush logs which of the three non-carrying states caused it (`no_session`, `invalidated`, `degraded`, or `carrying` for the 120 s safety valve), because `live_session_carrying` collapses three very different failures into one `false`.
+- The session is re-based (`LiveStream::reset`) on every chunker flush, because the committed audio leaves the live buffer and `finalize_chunked` appends the tail to the separately-decoded chunks — a session still holding the committed words would duplicate them. It is invalidated outright on a speaker-gate truncation, because its decoded state then covers audio the rest of the pipeline has discarded.
+- Because a flush destroys the session's accumulated state, the two are mutually exclusive by design: while a healthy session is carrying the utterance the chunk target rises from `CHUNK_TARGET_SECS` (6 s) / `CHUNK_HARD_MAX_SECS` (15 s) to `STREAM_CHUNK_TARGET_SECS` (120 s), so a normal dictation never chunks at all. 120 s rather than "never" because that is the longest span the flat per-window cost was actually measured over, and because past it the chunker still provides things the live path does not: per-chunk empty-result retries, per-chunk grammar for text beyond `GRAMMAR_MAX_CHARS`, the failed-chunk WAV spill, and a bound on the raw sample buffer (120 s ≈ 3.8 MB). parakeet-rs trims its own retained audio to ~1.8 s per session regardless of length, so a long session is memory-bounded on the engine side. The `ALWAYS_CHUNK_TARGET_SECS` test override still wins over the streaming ceiling.
+- `LocalTranscriber::transcribe_streaming` (the older, non-persistent API) clones the handle out of `self.engine` once, then uses stateful `transcribe_chunk(&audio_chunk)` calls on its own `Nemotron` instance with 560ms chunks (8960 samples @ 16kHz). It decodes a COMPLETE clip from scratch each call, so it is a presentation helper only — it is no longer on the dictation path for Nemotron.
 - Each preview snapshot spawns a fresh (already-reset) instance, pads its final chunk to 8960 samples, and sends three silent flush chunks
 - VAD consume-mode previews call `transcribe_streaming`; preview events contain cumulative text because the Swift monitor replaces its stored partial transcript on each event
-- The final paste path remains non-streaming and uses `transcribe_audio(&samples)`
+- The final paste path uses the live session when one is available, and falls back to non-streaming `transcribe_audio(&samples)` otherwise
 - Rust test coverage covers the chunk-splitting/padding math (560ms sizing, ragged-tail zero-padding, flush-tail count) without a loaded model; real Nemotron model inference and long-running memory behavior remain unverified by automated tests since that needs ~2.5GB of real weights this repo doesn't ship
 - The loader auto-detects English-only vs multilingual variants from the encoder ONNX graph
 - Multilingual variant accepts a target language code via `apply_nemotron_language()` → `set_target_lang()`, driven by the Settings language picker (Swift) and the daemon's existing `cfg.lang` plumbing (`uds_server.rs::set_language`). **Known format mismatch**: `cfg.lang` and this model's own catalogue entry use bare ISO 639-1 codes ("es", "ja", "zh", ...), but parakeet-rs's `PROMPT_DICTIONARY` only has bare-code entries for most languages — "ja"/"zh" require locale-tagged form ("ja-JP", "zh-CN"). A bare "ja"/"zh" selection is rejected by `set_target_lang` and falls back to auto-detect with a logged warning rather than failing the transcription. Mapping "ja"→"ja-JP"/"zh"→"zh-CN" before the call is a known follow-up, not yet done.
@@ -484,8 +624,19 @@ recognition. Requires no API key and never uploads audio on macOS 26+.
   accurate on technical vocabulary than plain `SpeechTranscriber`.
 - Missing locale assets are installed via
   `AssetInventory.assetInstallationRequest(supporting:)` on first use.
-- It is a non-streaming backend: `Transcriber::supports_streaming()` returns
-  `false` and `transcribe_streaming()` yields a single final result.
+- On macOS 26+ the backend is **incrementally streaming**: `supports_streaming()`
+  reports true and `open_live_stream()` opens a `SpeechAnalyzer` session fed by
+  an `AsyncStream<AnalyzerInput>` of 16 kHz mono Int16 buffers (~500 ms
+  chunks; the recognizer worker only accepts Int16 — Float32 input traps it). `transcriber.results` is collected into an ordered segment table;
+  `.volatileResults` emissions supersede overlapping spans, so every
+  `push_chunk` returns the engine's latest cumulative transcript. `finish`
+  closes input, runs `finalizeAndFinishThroughEndOfInput()`, and returns the
+  joined segments — end-of-speech costs one flush, not a from-scratch decode.
+  A session refuses to open when the locale's model is not yet installed or
+  speech recognition is not authorized — the caller keeps its one-shot path,
+  which installs the model on demand, and the next utterance streams.
+  On macOS < 26 the backend stays one-shot (`supports_streaming()` false,
+  `transcribe_streaming()` yields a single final result).
 - The configured `lang` hint is resolved against
   `SpeechTranscriber.supportedLocales`. If `lang` is `auto` or empty, the
   current system locale is used.
@@ -498,9 +649,10 @@ recognition. Requires no API key and never uploads audio on macOS 26+.
   analyzer cannot stall the chunker finalize. The legacy recognizer path runs
   its result handler on a dedicated `OperationQueue` because the daemon's Rust
   main thread does not pump `NSRunLoop`.
-- The live preview cadence is disabled for the Apple backend. Previews are
-  non-streaming, compete for the serialized recognizer, and add latency without
-  improving the final paste.
+- The re-decode live preview cadence is disabled for the Apple backend. On
+  macOS 26+ interim text comes free from the incremental session's cumulative
+  transcript; on older systems previews were non-streaming, competed for the
+  serialized recognizer, and added latency without improving the final paste.
 - Grammar correction on the Apple backend follows `postprocess_provider`:
   `groq` calls the Groq LLM with the glossary-aware prompt (~600 ms);
   `apple` calls Apple Intelligence through the same prompt (1.5-4 s, fully
@@ -522,6 +674,150 @@ recognition. Requires no API key and never uploads audio on macOS 26+.
 ## 9. Text pipeline
 
 Between transcription and the keyboard:
+
+0. **Script normalisation (Devanagari → Roman Nepali).** The first thing that
+   happens to a transcript, ahead of every filter and every judgment below.
+
+   Nemotron supports 40 language-locales and **Nepali is not one of them**:
+   `ne-NP` is prompt slot 46 and its embedding is untrained, returning empty
+   for every input. So Nepali speech — and English/Nepali code-switching — is
+   resolved onto the nearest locale the model does know, Hindi (`hi-IN`), and
+   comes back as **Devanagari even when `lang = "en"`**. The language prompt
+   biases decoding; it does not constrain the output alphabet, so configuring
+   the language correctly is necessary but not sufficient.
+
+   The user writes Nepali in Latin script and never wants Devanagari pasted.
+   Every Devanagari run is therefore rewritten into **his own romanisation**
+   (`छ → x`, `भ → v` — he writes `hunxa`, `xaina`, `vayo`, `maa`, not
+   `hunchha`/`bhayo`). Everything else — English words, punctuation, spacing,
+   emoji, code — passes through **byte-identical**, so a code-switched
+   sentence comes out uniformly Latin rather than half-transliterated.
+
+   **Every tier is the same learned model.** There are no hand-written
+   transliteration rules; the tiers differ only in what the answer costs.
+
+   0. Devanagari digits `०-९` are a 1:1 map and never reach the model — the
+      same carve-out the training pipeline made, because a seq2seq guessing
+      them turned `००७` into `dah`.
+   1. An exact table of 49,064 entries, built offline by running the trained
+      transliteration model (99.0% exact on held-out pairs of his own
+      spellings) over the SLR54 Nepali corpus and word-aligning the result,
+      with his 1,844 hand-mined pairs overriding it. `include_str!`-ed and
+      binary-searched in place: no init cost, no allocation for Latin-only
+      text.
+   2. **The model itself**, as ONNX (`translit_encoder.onnx` +
+      `translit_decoder.onnx`, 18.4 MB, lazily loaded on the first cache
+      miss), for words the table lacks. Every miss in one utterance is
+      submitted as a single batch.
+   3. A per-process memo of everything tier 2 has already answered, so a
+      novel word costs the model once per process and a hash lookup after.
+   4. `char_roman.tsv` — the model's own answer for each Devanagari codepoint
+      taken alone — reachable only when ORT cannot build a session at all.
+
+   Tier 2 replaced a hand-written syllable transliterator that scored **39.0%
+   exact** (19,148/49,064) against tier 1 used as gold, at 607 ns/word. The
+   model reproduces tier 1 on **97.7%** of a 2,000-word sample and is
+   bit-identical to the PyTorch checkpoint it was exported from.
+
+   Measured cost, release build, against a ~870 ms decode:
+
+   | case | time |
+   |---|---|
+   | English utterance (no Devanagari) | **28.9 ns** |
+   | Devanagari, every word in the table | **4.1 µs** |
+   | Devanagari, one novel word, memoized | **4.2 µs** |
+   | Devanagari, one novel word, cold | **8.2 ms** |
+   | the reported code-switched utterance, cold | **19.6 ms** |
+   | four novel words in one utterance, cold | **42.3 ms** |
+
+   The cold numbers are ORT per-kernel dispatch over a 317-node decoder graph
+   run once per output character, not arithmetic: ORT thread count, graph
+   fusion and prepacking all fail to move them. This is **over the
+   single-digit-millisecond budget** for utterances containing words the table
+   has never seen, which is ~31% of Devanagari utterances on a held-out split
+   (mean 0.37 novel words per utterance). Peak RSS for a session that reaches
+   tier 2 is **+71 MB**; a session that never leaves tier 1 pays **+0.5 MB**
+   and an English-only session pays **0**.
+
+   **Invariant: no codepoint in U+0900..U+097F ever reaches the clipboard.**
+   This is now structural: the model's entire target vocabulary is the 26
+   lowercase ASCII letters, so no decode can emit one. Unmapped Devanagari is
+   dropped rather than passed through. The pass is idempotent, and it runs
+   *before* snippet expansion, so user-authored snippet text is never
+   transliterated.
+
+   Ordering note: this deliberately precedes the hallucination filter, which
+   rejects mixed Latin/Devanagari as "mixed-script gibberish" — precisely what
+   a genuine code-switched sentence looks like. Filtering first would discard
+   the utterances this step exists to rescue. One gap remains: the
+   hallucination detector reads the raw transcription object rather than the
+   romanised string, so on the **remote Groq backend** (the only backend where
+   content filtering runs at all) a code-switched utterance is still dropped.
+   Local backends are unaffected. Escape hatch: `ALWAYS_NO_ROMANIZE=1`.
+
+   **English recovery.** Romanisation is faithful, and that is the problem for
+   the English *inside* a Nepali utterance. Nemotron picks one language per
+   utterance; when the utterance is mostly Nepali it picks Hindi, and the
+   English words in it come back spelled phonetically in Devanagari. The
+   romaniser then transliterates them rather than recognising them:
+
+   | raw | romanised | said |
+   |---|---|---|
+   | `स्पीकिंग` | `spiking` | speaking |
+   | `इंग्लिस` | `inglis` | English |
+   | `बिटवीन` | `bitwin` | between |
+   | `अगेन` | `agena` | again |
+   | `एम` | `em` | am |
+
+   Nothing is lost — `स्पीकिंग` *is* "speaking" — so a recovery pass runs on
+   each romanised word, and only on words that came out of a Devanagari run.
+   English dictation never reaches it and keeps its borrowed, zero-allocation
+   path.
+
+   Devanagari destroys English vowels (it cannot write the lax/tense contrast,
+   so *and*/*end* and *speaking*/*spiking* collapse) but preserves consonants
+   including voicing, so the match key is a **consonant skeleton**:
+   `spiking → SPKNG ← speaking`. A skeleton alone is far too permissive, so a
+   rewrite must also survive, in order:
+
+   1. **The vocabulary veto** — anything he has ever typed himself (9,730
+      tokens mined from 18,452 of his WhatsApp messages) is left alone. This
+      covers all of his Nepali *and* his English that transcribed correctly.
+   2. **Nepali orthographic shape** — `x` (his `छ`), the aspirate digraphs
+      `dh`/`bh`/`jh`/`chh`, an `h` after `k g l r n m d b j v y`, and
+      consonant+`y` clusters. Devanagari renderings of English words do not
+      contain these.
+   3. **Vowel correspondence** — each vowel must be a collapse Devanagari
+      actually forces (`i`←`ea`, `i`←`ee`, `e`←`a`) and not one it does not
+      (`o`←`e`, or a long `aa` standing for English /ʌ/). This alone is what
+      separates `owar → over` from `owar → every`, and what stops his `बात`
+      (`baata`) becoming `but`.
+   4. **Evidence proportional to ambiguity** — a one-consonant skeleton may
+      only rewrite a two-letter token one edit away; two consonants need four
+      letters and two edits; longer skeletons carry themselves.
+
+   Targets come only from his own vocabulary (`en_recover.tsv`, 2,121
+   skeletons / 2,684 words, built by
+   `training/nepali-nemotron/build_en_recover.py`), so a recovery can never
+   produce a word he does not use. Ties break on fewest edits, then on how
+   often he writes the word. **A wrong rewrite is worse than none** — he can
+   read `spiking`; `spike` would mislead — so every filter exists to make "do
+   nothing" the default answer.
+
+   Measured, release build:
+
+   | case | result |
+   |---|---|
+   | the reported utterance, English recovered | **5/5** (`speaking`, `english`, `between`, `again`, `am`) |
+   | the reported utterance, Nepali damaged | **0** (`dekhi`, `nepali`, `boli`, `ki`, `khabar`, `rat`, `ita`, `aai` all survive) |
+   | his own 9,730-token vocabulary rewritten | **0 (0.00%)**, asserted as a test |
+   | unseen SLR54 romanisations rewritten | 662/45,923 (**1.44%**), mostly correct loanword recoveries |
+   | English utterance (no Devanagari) | **30.5 ns**, unchanged — the pass is not reached |
+   | added to a 6-word Devanagari sentence | **+4.7 µs** (8.8 → 13.5 µs) |
+   | added to a 20-word code-switched sentence | **+9.3 µs** (15.0 → 24.3 µs) |
+
+   The pass is idempotent and emits lowercase, matching how he writes. Escape
+   hatch: `ALWAYS_NO_ENGLISH_RECOVERY=1`.
 
 1. **Hallucination filter** — rejects the known failure modes of speech models:
    empty output, "thank you"/"bye" family, subtitle credits, repeated tokens,

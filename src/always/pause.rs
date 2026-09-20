@@ -34,6 +34,23 @@ static MASTER_PAUSED: AtomicBool = AtomicBool::new(false);
 /// `NotifySystemAudioState`). Auto-clears when playback stops.
 static AUDIO_OUTPUT_PAUSED: AtomicBool = AtomicBool::new(false);
 
+/// FACT, not policy: the Mac is currently playing audio out of its
+/// speakers, as last reported by Swift's `NotifySystemAudioState`.
+///
+/// Deliberately separate from `AUDIO_OUTPUT_PAUSED` above. That flag is
+/// a *pause source*, and the UDS handler intentionally refuses to set it
+/// while the "My Voice" gate is ready — the whole point of the gate is
+/// that dictation keeps working over music. But the handler also
+/// `return`ed at that point, which threw the underlying fact away, and
+/// the speaker gate's `AUDIO_PLAYING_GATE_BUMP` keyed off the pause
+/// flag. Net effect: "get stricter while audio plays" was unreachable in
+/// exactly the configuration it was written for, and media audio was
+/// transcribed and pasted as if the user had spoken it.
+///
+/// This is NOT a pause source: `compute_effective()` never reads it and
+/// it can never stop capture. It only informs the speaker gate.
+static SYSTEM_AUDIO_PLAYING: AtomicBool = AtomicBool::new(false);
+
 /// Watchdog source: another app (Zoom, FaceTime, …) holds the
 /// microphone. Auto-clears when the app releases it.
 static MIC_CONFLICT_PAUSED: AtomicBool = AtomicBool::new(false);
@@ -93,8 +110,14 @@ pub fn acquire_consume_mode(lease: &AtomicBool) {
 /// Release this connection's consume-mode lease. Safe to call repeatedly
 /// from the reader shutdown path and its connection guard.
 pub fn release_consume_mode(lease: &AtomicBool) {
-    if lease.swap(false, Ordering::AcqRel) {
-        CONSUME_MODE_LEASES.fetch_sub(1, Ordering::AcqRel);
+    if lease.swap(false, Ordering::AcqRel)
+        && CONSUME_MODE_LEASES.fetch_sub(1, Ordering::AcqRel) == 1
+    {
+        // Last controller gone. Anything `consume_merge` was holding open
+        // for a continuation will never get one, and a controller that
+        // armed itself on a partial is waiting on that final to release
+        // it — so commit now rather than strand a half-assembled request.
+        crate::always::consume_merge::flush_now();
     }
 }
 
@@ -215,6 +238,24 @@ pub fn set_audio_output_paused(paused: bool) -> (bool, bool) {
 
 pub fn is_audio_output_paused() -> bool {
     AUDIO_OUTPUT_PAUSED.load(Ordering::Relaxed)
+}
+
+/// Record whether the Mac is playing audio. Pure fact — never
+/// recomputes the effective pause state, never gates capture.
+pub fn set_system_audio_playing(playing: bool) {
+    let prev = SYSTEM_AUDIO_PLAYING.swap(playing, Ordering::Relaxed);
+    if prev != playing {
+        tracing::info!(playing, "system_audio_playing_changed");
+    }
+}
+
+/// Is the Mac playing audio out of its speakers right now?
+///
+/// The speaker gate uses this to raise the bar for the single-window
+/// verification while competing audio is in the room. Read it for that
+/// kind of judgement only — it is not a pause source.
+pub fn is_system_audio_playing() -> bool {
+    SYSTEM_AUDIO_PLAYING.load(Ordering::Relaxed)
 }
 
 /// Set/clear the mic-conflict watchdog pause source. Never touches
@@ -398,6 +439,44 @@ pub fn take_last_pasted_within(
 #[cfg(test)]
 pub fn clear_last_pasted_for_test() {
     *LAST_PASTED.lock() = None;
+}
+
+/// Deadline until which keystrokes observed by our own event tap are
+/// assumed to be ours, not the user's.
+///
+/// The daemon posts synthetic Cmd+Z / Cmd+V to `CGEventTapLocation::HID`,
+/// and its own `rdev` listener sees them come back. The auto-enter
+/// countdown cancels on ANY key press, so without this window an
+/// in-place grammar patch cancels the very Return it was trying to
+/// preserve — and clears the dictation buffer the patch needs as its
+/// "message not yet submitted" proof.
+static SYNTHETIC_INPUT_UNTIL: std::sync::LazyLock<Mutex<Option<Instant>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+/// Open a window during which our own synthetic keystrokes are ignored by
+/// the countdown-cancel path. Deliberately time-bounded rather than a
+/// begin/end pair: a panic between the two would otherwise wedge the
+/// daemon into ignoring every real keypress.
+pub fn begin_synthetic_input(window: std::time::Duration) {
+    *SYNTHETIC_INPUT_UNTIL.lock() = Some(Instant::now() + window);
+}
+
+/// Close the window early (the patch finished sooner than its budget).
+pub fn end_synthetic_input() {
+    *SYNTHETIC_INPUT_UNTIL.lock() = None;
+}
+
+/// True while the daemon is posting its own key events.
+pub fn synthetic_input_active() -> bool {
+    let mut guard = SYNTHETIC_INPUT_UNTIL.lock();
+    match *guard {
+        Some(deadline) if Instant::now() < deadline => true,
+        Some(_) => {
+            *guard = None;
+            false
+        }
+        None => false,
+    }
 }
 
 /// True while a paste pipeline (copy → Cmd+V → optional grammar patch) is
@@ -929,5 +1008,29 @@ mod tests {
         set_current_app(Some("com.example.editor".into()));
         assert!(recompute_effective().0, "fresh app, no allowlist — paused");
         assert!(should_gate_capture());
+    }
+    /// The daemon's own Cmd+Z / Cmd+V come back through its own event tap.
+    /// Without this window the in-place grammar patch cancels the very
+    /// auto-enter countdown it is trying to preserve, and clears the
+    /// dictation buffer the patch uses as its "not yet submitted" proof.
+    #[test]
+    fn synthetic_input_window_opens_and_closes() {
+        end_synthetic_input();
+        assert!(!synthetic_input_active());
+
+        begin_synthetic_input(std::time::Duration::from_secs(30));
+        assert!(synthetic_input_active());
+
+        end_synthetic_input();
+        assert!(!synthetic_input_active());
+    }
+
+    /// Time-bounded rather than a begin/end pair on purpose: a panic
+    /// between the two would otherwise wedge the daemon into ignoring
+    /// every real keypress forever.
+    #[test]
+    fn synthetic_input_window_expires_on_its_own() {
+        begin_synthetic_input(std::time::Duration::ZERO);
+        assert!(!synthetic_input_active());
     }
 }

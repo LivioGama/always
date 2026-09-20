@@ -185,6 +185,50 @@ impl ChunkAccumulator {
                 Err(anyhow::anyhow!("chunk transcription panicked: {msg}"))
             });
 
+            // An empty result is NOT a success, and it must never be
+            // treated as one: the audio is dropped a few lines below and
+            // there is no other copy, so an engine that returns "" silently
+            // DESTROYS the user's utterance. Measured on real dictation:
+            // ~13% of chunks (Parakeet) and ~17% (Nemotron) came back empty,
+            // including chunks whose speech the speaker gate had positively
+            // verified — i.e. the user demonstrably spoke and the words were
+            // thrown away with no error, no overlay, and nothing pasted.
+            //
+            // Retry once before believing it. A genuinely silent chunk costs
+            // one extra decode (sub-second locally) and still resolves to
+            // empty; a transient engine failure gets its words back.
+            let outcome = match outcome {
+                Ok(ref result) if result.text.trim().is_empty() => {
+                    tracing::warn!(chunk = index, "chunk_empty_retrying");
+                    let retry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                        || -> Result<TranscriptionResult> {
+                            let wav = audio::create_wav_bytes_i16_mono_16k(&audio_chunk)?;
+                            transcriber
+                                .transcribe_from_bytes(wav)
+                                .map_err(anyhow::Error::from)
+                        },
+                    ));
+                    match retry {
+                        Ok(Ok(r)) if !r.text.trim().is_empty() => {
+                            tracing::info!(
+                                chunk = index,
+                                chars = r.text.trim().chars().count(),
+                                "chunk_empty_retry_recovered"
+                            );
+                            Ok(r)
+                        }
+                        // Still empty, or the retry itself failed: keep the
+                        // ORIGINAL outcome so behaviour is unchanged from
+                        // before this retry existed.
+                        _ => {
+                            tracing::warn!(chunk = index, "chunk_empty_after_retry");
+                            outcome
+                        }
+                    }
+                }
+                other => other,
+            };
+
             match outcome {
                 Ok(result) => {
                     let raw = result.text.trim().to_string();

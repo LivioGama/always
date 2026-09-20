@@ -20,7 +20,8 @@ use parking_lot::{Condvar, Mutex};
 use crate::always::AlwaysConfig;
 use crate::managers::model_registry::ModelRegistry;
 use crate::stt::{
-    GroqTranscriber, StreamingTranscriptionResult, SttError, Transcriber, TranscriptionResult,
+    GroqTranscriber, LiveTranscriptionStream, StreamingTranscriptionResult, SttError, Transcriber,
+    TranscriptionResult,
 };
 
 /// Placeholder installed at daemon boot so the UDS server can bind before
@@ -92,6 +93,16 @@ impl Transcriber for PendingTranscriber {
         lock.try_lock()
             .and_then(|guard| guard.as_ref().map(|t| t.supports_streaming()))
             .unwrap_or(false)
+    }
+
+    fn open_live_stream(&self) -> Option<Box<dyn LiveTranscriptionStream>> {
+        // Non-blocking, exactly like `supports_streaming`: this runs on the
+        // capture thread at voice onset and must never wait on the model-load
+        // thread. Not ready yet reads as "no live stream this utterance" and
+        // the caller falls back to the one-shot path.
+        let (lock, _cv) = &*self.slot;
+        lock.try_lock()
+            .and_then(|guard| guard.as_ref().and_then(|t| t.open_live_stream()))
     }
 
     fn transcribe_from_bytes(&self, audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
@@ -238,6 +249,13 @@ impl Transcriber for FallbackTranscriber {
         }
     }
 
+    fn open_live_stream(&self) -> Option<Box<dyn LiveTranscriptionStream>> {
+        // Same policy as `transcribe_streaming`: the live session belongs to
+        // the primary engine. If the primary can't stream there is no session
+        // and the caller keeps its one-shot path (which still falls back).
+        self.primary.open_live_stream()
+    }
+
     fn transcribe_streaming(
         &self,
         audio: Vec<u8>,
@@ -250,14 +268,25 @@ impl Transcriber for FallbackTranscriber {
     }
 }
 
+/// Registry id of the local model the daemon prefers when the user has
+/// expressed no explicit choice.
+///
+/// On-device is the default because the remote path carries a hard
+/// external dependency (a live, funded Groq key) whose failure mode is
+/// silent and user-hostile: the circuit breaker opens and the chunker
+/// pastes `[audio saved: chunk N]` where the words should be. A local
+/// model has no such cliff. This is a *preference*, not a requirement —
+/// [`build_transcriber`] still degrades to Groq when the model is not
+/// downloaded.
+pub const DEFAULT_LOCAL_MODEL_ID: &str = "nemotron-3.5-asr-streaming-0.6b";
+
 /// User's transcription backend pick. Serialises to a single TEXT
 /// column in the prefs DB (`groq` or `local:<model_id>`). The
 /// FromStr/Display impls own that wire format so the DB layer and the
 /// UDS server stay in sync.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriberBackendChoice {
     /// Remote Groq Whisper API. Requires `GROQ_API_KEY`.
-    #[default]
     Groq,
     /// Local model identified by the registry id (e.g.
     /// `parakeet-tdt-0.6b-v3`). Must be downloaded before it can be
@@ -267,6 +296,16 @@ pub enum TranscriberBackendChoice {
     /// On-device Apple SFSpeechRecognizer. Requires macOS and a
     /// downloaded on-device language model.
     Apple,
+}
+
+/// Prefer the local model over Groq. Hand-written rather than
+/// `#[derive(Default)]` because the default variant carries a payload.
+impl Default for TranscriberBackendChoice {
+    fn default() -> Self {
+        Self::Local {
+            model_id: DEFAULT_LOCAL_MODEL_ID.to_string(),
+        }
+    }
 }
 
 impl TranscriberBackendChoice {

@@ -150,6 +150,29 @@ pub fn classify_transcription(
         return SpeechAction::InCooldown;
     }
 
+    // Script normalisation, ahead of every judgment made below.
+    //
+    // Nemotron has no Nepali locale — `ne-NP` is prompt slot 46 and its
+    // embedding is untrained — so Nepali speech, and English/Nepali
+    // code-switching, comes back as Devanagari borrowed from the Hindi slot
+    // even with `lang = "en"`. The language prompt biases decoding; it does
+    // not constrain the output alphabet. The user writes Nepali in Latin
+    // script and never wants Devanagari in his editor, so it is rewritten
+    // into his own romanisation here — see `crate::always::translit`.
+    //
+    // This runs BEFORE the content filter on purpose. The hallucination
+    // heuristics reject mixed Latin/Devanagari as "mixed-script gibberish",
+    // which is exactly what a real code-switched sentence looks like — so
+    // filtering first would silently discard the very utterances this is
+    // here to rescue. Romanising first means every check below judges the
+    // single-script text that is actually going to be pasted.
+    //
+    // Latin-only input — nearly every utterance — is returned borrowed after
+    // one scan (28 ns measured), so English dictation pays nothing. Shadowing
+    // `text` keeps the rest of this function reading exactly as before.
+    let romanized = crate::always::translit::romanize(text);
+    let text: &str = &romanized;
+
     // Deterministic CONTENT filtering (hard phrase filter + hallucination
     // heuristics) is REMOTE-model cleanup only — see
     // `AlwaysConfig::content_filtering_enabled`. On local models the system
@@ -179,6 +202,10 @@ pub fn classify_transcription(
         };
     }
 
+    // `text` is already romanised (top of this function), so everything
+    // downstream — snippet matching, the grammar LLM, dictation merges, the
+    // paste itself — sees single-script Latin. Snippet expansions are spliced
+    // in after this point and are never touched: they are user-authored text.
     SpeechAction::Paste {
         text: text.to_string(),
     }
@@ -407,6 +434,119 @@ mod tests {
             now,
         );
         assert_eq!(action, SpeechAction::InCooldown);
+    }
+
+    #[test]
+    fn classify_romanizes_devanagari_before_pasting() {
+        // The reported failure: Nemotron has no Nepali locale, so Nepali
+        // speech comes back in Devanagari borrowed from the Hindi slot even
+        // with lang="en". `local_config` is the backend this actually happens
+        // on. The classifier is the single funnel every transcript passes
+        // through, so it is where the script gets normalised — nothing
+        // downstream (snippets, grammar, merge, paste) ever sees Devanagari.
+        let cfg = local_config();
+        let now = Instant::now();
+        let spoken = "म अफिस जान्छु, then I'll call you";
+        let action = classify_transcription(
+            &cfg,
+            spoken,
+            &empty_transcription(spoken),
+            now,
+            now - Duration::from_secs(10),
+        );
+        match action {
+            SpeechAction::Paste { text } => {
+                assert_eq!(text, "ma aphis janxu, then I'll call you");
+            }
+            other => panic!("expected Paste, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_romanizes_the_utterance_from_the_bug_report() {
+        // Verbatim from the report — this was pasted into his editor as-is.
+        let cfg = local_config();
+        let now = Instant::now();
+        let spoken = "अच्छी बात है, एक स्पीकिंग ना चाह इट गोस";
+        let action = classify_transcription(
+            &cfg,
+            spoken,
+            &empty_transcription(spoken),
+            now,
+            now - Duration::from_secs(10),
+        );
+        match action {
+            SpeechAction::Paste { text } => {
+                assert!(text.is_ascii(), "not plain Latin: {text}");
+                assert!(
+                    !crate::always::translit::contains_devanagari(&text),
+                    "Devanagari reached the paste: {text}"
+                );
+                // `spiking` is `स्पीकिंग`, which is English "speaking" spelled
+                // phonetically in Devanagari because Nemotron picked one
+                // language for the utterance and picked Hindi. The romaniser
+                // transliterates it faithfully; the recovery pass afterwards
+                // recognises it — see `crate::always::english_recovery`.
+                // Everything else here is real Nepali and is left exactly as
+                // the romaniser wrote it, `baata` included.
+                assert_eq!(text, "axi baata hai, ek speaking naa caaha ita gosa");
+            }
+            other => panic!("expected Paste, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_leaves_english_transcripts_byte_identical() {
+        // The romanisation pass must be invisible to English dictation, which
+        // is almost every utterance.
+        let cfg = test_config();
+        let now = Instant::now();
+        for spoken in [
+            "open file",
+            "Ship it. Now! really?",
+            "cargo build --release --lib",
+        ] {
+            let action = classify_transcription(
+                &cfg,
+                spoken,
+                &empty_transcription(spoken),
+                now,
+                now - Duration::from_secs(10),
+            );
+            match action {
+                SpeechAction::Paste { text } => assert_eq!(text, spoken),
+                other => panic!("expected Paste for {spoken:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn remote_backend_still_discards_devanagari_as_gibberish() {
+        // Documented limitation, not an oversight. `is_hallucination` reads
+        // the raw `TranscriptionResult`, not the romanised string, so on the
+        // Groq backend a code-switched utterance is still rejected as
+        // "mixed-script gibberish" before it can be pasted.
+        //
+        // Left alone deliberately: the reported bug is on the local backend
+        // (`content_filtering_enabled` is Groq-only), and rewriting what the
+        // hallucination detector sees would change remote-path filtering that
+        // nobody asked to change. If Nepali dictation over Groq is ever
+        // wanted, this is the line to revisit.
+        let cfg = test_config(); // Groq
+        assert!(cfg.content_filtering_enabled());
+        let now = Instant::now();
+        let spoken = "म अफिस जान्छु, then I'll call you";
+        let action = classify_transcription(
+            &cfg,
+            spoken,
+            &empty_transcription(spoken),
+            now,
+            now - Duration::from_secs(10),
+        );
+        assert!(
+            matches!(action, SpeechAction::Hallucinated { .. }),
+            "expected the remote path to keep rejecting this, got {action:?}"
+        );
     }
 
     #[test]

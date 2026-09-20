@@ -27,6 +27,8 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
+#[cfg(feature = "macos")]
+use parking_lot::Mutex;
 
 #[cfg(feature = "macos")]
 use super::{clipboard_watcher, config as always_config, correction, event, log, paste, pause};
@@ -468,26 +470,106 @@ fn handle_per_app_pause_hotkey(bundle: &str) {
     );
 }
 
-/// ctrl+option+shift+P: global pause/resume. When ANY global source is
-/// pausing (user master pause, audio-output watchdog, mic conflict) OR
-/// the idle watchdog has auto-paused, the chord clears them ALL — an
-/// explicit user resume overrides the watchdogs until their next
-/// transition, so dictating over music or into notes during a call is
-/// one chord away. Otherwise it sets the user master pause.
+/// Collapse duplicate observations of one Fn press.
 ///
-/// Idle is cleared BEFORE `clear_global_pauses` so the recompute inside
-/// sees idle=false and produces the correct effective state. The old
-/// order (clear_global_pauses → set_idle_auto_paused) left
-/// EFFECTIVE_PAUSED stale at true because `set_idle_auto_paused` is a
-/// plain setter that does not recompute.
+/// The Fn/Globe key used to reach this module through TWO listeners:
+/// rdev's keyDown tap (`EventType::KeyPress(Key::Function)`, delivered on
+/// some macOS versions and not others) and the dedicated `flagsChanged`
+/// tap in `start_fn_listener`. The rdev arm is gone — the flagsChanged
+/// tap is the single path — but this guard stays: it also collapses any
+/// repeat `flagsChanged` edges of the same press, and historically one
+/// physical press produced two `fn_key_pressed` records ~5µs apart, which
+/// toggled master pause on and straight back off so the mute key looked
+/// dead.
+///
+/// Returns `true` when this observation duplicates one already accepted
+/// inside `FN_DEDUPE_WINDOW_MS` and must be dropped. The compare-exchange
+/// is load-bearing: the two taps run on different threads and can both read
+/// the same `prev`, so the window comparison alone would let both through.
+/// The window is far wider than the microseconds separating the duplicates
+/// and far narrower than the ~100ms floor on human repeat tapping, so a
+/// genuine fast double-tap still registers as two presses.
+#[cfg(feature = "macos")]
+fn fn_press_is_duplicate() -> bool {
+    use std::sync::atomic::AtomicU64;
+
+    static LAST_FN_PRESS_MS: AtomicU64 = AtomicU64::new(0);
+    const FN_DEDUPE_WINDOW_MS: u64 = 50;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let prev = LAST_FN_PRESS_MS.load(Ordering::SeqCst);
+    if now.saturating_sub(prev) < FN_DEDUPE_WINDOW_MS {
+        return true;
+    }
+    LAST_FN_PRESS_MS
+        .compare_exchange(prev, now, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+}
+
+/// What one press of the master pause chord should do.
+#[cfg(feature = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MasterChord {
+    /// Set the user's master pause.
+    Mute,
+    /// Clear the user's master pause *and* the watchdog sources.
+    Unmute,
+}
+
+/// Decide the chord's direction from the user's own pause sources.
+///
+/// This used to test `pause::is_any_global_pause()` — master OR
+/// audio-output OR mic-conflict. Because the audio watchdog auto-pauses
+/// whenever the Mac is playing sound, a user who pressed mute while music
+/// was playing took the clear-everything branch and got UNMUTED by the
+/// mute key. Mute must mean mute, so only the user's master flag decides —
+/// plus an idle-only auto-pause, which the chord still resumes from since
+/// the user never asked to be muted at all.
+#[cfg(feature = "macos")]
+fn master_chord_direction() -> MasterChord {
+    if pause::is_master_paused() || pause::is_idle_auto_paused() {
+        MasterChord::Unmute
+    } else {
+        MasterChord::Mute
+    }
+}
+
+/// The master pause chord (default ⌃⌥⇧P, configurable — this user binds
+/// it to the Fn/Globe key): mute if not muted, otherwise unmute.
+///
+/// Unmuting clears the watchdog sources (audio-output, mic conflict) as
+/// well as the user's master flag, so an explicit resume still overrides
+/// the watchdogs until their next transition and dictating over music or
+/// into notes during a call stays one chord away.
 #[cfg(feature = "macos")]
 fn handle_master_pause_hotkey() {
-    let (effective, changed) = if pause::is_any_global_pause() || pause::is_idle_auto_paused() {
-        pause::set_idle_auto_paused(false);
-        pause::mark_voice_seen();
-        pause::clear_global_pauses()
-    } else {
-        pause::set_paused(true)
+    // Serialise the whole read-modify-write. Reading the pause state and
+    // then mutating it is a TOCTOU: two listener threads (or a watchdog
+    // recompute landing in between) could both observe the pre-state and
+    // then both mutate, which is how this handler used to log the torn
+    // `master:true, effective:false` pair — a state the model says cannot
+    // exist, since master forces effective.
+    static CHORD_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = CHORD_LOCK.lock();
+
+    // Branch on the user's own sources — see `master_chord_direction`. The
+    // chord keeps its power to lift a watchdog pause; that now costs the
+    // press that turns master off rather than the press that turns it on.
+    //
+    // Idle is cleared BEFORE `clear_global_pauses` so the recompute inside
+    // sees idle=false and produces the correct effective state — the old
+    // order left EFFECTIVE_PAUSED stale at true because
+    // `set_idle_auto_paused` is a plain setter that does not recompute.
+    let (effective, changed) = match master_chord_direction() {
+        MasterChord::Unmute => {
+            pause::set_idle_auto_paused(false);
+            pause::mark_voice_seen();
+            pause::clear_global_pauses()
+        }
+        MasterChord::Mute => pause::set_paused(true),
     };
     let master = pause::is_master_paused();
     event::global_broadcaster().master_pause_changed(master);
@@ -1013,7 +1095,10 @@ fn start_fn_listener() {
         if keycode == FN_KEYCODE {
             let fn_held = (flags & FN_FLAG) != 0;
             let was_held = FN_PREVIOUSLY_HELD.swap(fn_held, Ordering::Relaxed);
-            if fn_held && !was_held {
+            // `was_held` is this tap's own edge detector; `fn_press_is_duplicate`
+            // additionally coalesces against rdev's tap, which may have already
+            // handled this same physical press microseconds ago.
+            if fn_held && !was_held && !fn_press_is_duplicate() {
                 tracing::info!("fn_key_pressed");
                 handle_master_pause_hotkey();
             }
@@ -1160,7 +1245,9 @@ pub mod mock {
 
 #[cfg(test)]
 mod tests {
+    use super::pause;
     use super::{Combo, default_shortcuts};
+    use std::time::Duration;
 
     #[test]
     fn parses_shortcut_with_modifiers_and_key() {
@@ -1276,5 +1363,130 @@ mod tests {
         for own in crate::always::per_app::ALWAYS_OWN_BUNDLE_IDS {
             assert_eq!(pause_chord_action(Some(own)), ChordAction::NoFocusedApp);
         }
+    }
+
+    /// The pause statics are process-global; these tests mutate them.
+    static MASTER_CHORD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Regression: mute must mean mute.
+    ///
+    /// The chord used to branch on `is_any_global_pause()`, so with the
+    /// audio-output watchdog engaged (the Mac is playing sound — the most
+    /// ordinary state there is) a press took the clear-everything branch.
+    /// The user pressed mute and the daemon UNMUTED.
+    #[test]
+    fn mute_press_mutes_even_while_a_watchdog_is_pausing() {
+        use super::{MasterChord, master_chord_direction};
+        let _guard = MASTER_CHORD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        pause::clear_global_pauses();
+        assert!(!pause::is_master_paused());
+
+        // Music starts: the watchdog pauses without touching MASTER.
+        pause::set_audio_output_paused(true);
+        assert!(pause::is_any_global_pause());
+        assert!(!pause::is_master_paused());
+
+        assert_eq!(
+            master_chord_direction(),
+            MasterChord::Mute,
+            "a press while only a watchdog is pausing must MUTE, not unmute"
+        );
+
+        pause::clear_global_pauses();
+    }
+
+    /// The other half of the contract: once the user's own flag is set, the
+    /// chord unmutes — and clearing it lifts the watchdog sources too, so
+    /// "force dictation over music" still costs exactly one more press.
+    #[test]
+    fn unmute_press_clears_master_and_watchdogs() {
+        use super::{MasterChord, master_chord_direction};
+        let _guard = MASTER_CHORD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        pause::clear_global_pauses();
+        pause::set_paused(true);
+        pause::set_audio_output_paused(true);
+        pause::set_mic_conflict_paused(true);
+
+        assert_eq!(master_chord_direction(), MasterChord::Unmute);
+
+        pause::clear_global_pauses();
+        assert!(!pause::is_master_paused());
+        assert!(!pause::is_audio_output_paused());
+        assert!(!pause::is_mic_conflict_paused());
+    }
+
+    /// Regression: one physical Fn press must produce exactly one toggle.
+    ///
+    /// rdev's keyDown tap and the dedicated flagsChanged tap both observe
+    /// the key on this machine, ~5µs apart, so the handler ran twice and
+    /// the mute cancelled itself out.
+    #[test]
+    fn second_fn_observation_of_the_same_press_is_dropped() {
+        use super::fn_press_is_duplicate;
+        let _guard = MASTER_CHORD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // Drain any residue from a neighbouring test, then settle past the
+        // dedupe window so this test starts from a known-cold state.
+        let _ = fn_press_is_duplicate();
+        std::thread::sleep(Duration::from_millis(60));
+
+        assert!(
+            !fn_press_is_duplicate(),
+            "the first observation of a press must be accepted"
+        );
+        assert!(
+            fn_press_is_duplicate(),
+            "the second tap seeing the SAME press must be dropped"
+        );
+
+        // A genuinely separate press, after the window, still registers —
+        // the guard must not swallow deliberate repeat tapping.
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(
+            !fn_press_is_duplicate(),
+            "a real second press after the window must be accepted"
+        );
+    }
+
+    /// Only ONE of two threads racing on the same press may win. This is
+    /// why the guard uses compare-exchange and not a plain store: both
+    /// taps can read the same `prev` before either writes.
+    #[test]
+    fn concurrent_taps_on_one_press_yield_exactly_one_toggle() {
+        use super::fn_press_is_duplicate;
+        use std::sync::atomic::{AtomicUsize, Ordering as O};
+        let _guard = MASTER_CHORD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let _ = fn_press_is_duplicate();
+        std::thread::sleep(Duration::from_millis(60));
+
+        static ACCEPTED: AtomicUsize = AtomicUsize::new(0);
+        ACCEPTED.store(0, O::SeqCst);
+
+        std::thread::scope(|s| {
+            for _ in 0..2 {
+                s.spawn(|| {
+                    if !fn_press_is_duplicate() {
+                        ACCEPTED.fetch_add(1, O::SeqCst);
+                    }
+                });
+            }
+        });
+
+        assert_eq!(
+            ACCEPTED.load(O::SeqCst),
+            1,
+            "two taps observing one press must produce exactly one toggle"
+        );
     }
 }

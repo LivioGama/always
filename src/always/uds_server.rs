@@ -781,6 +781,16 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             tracing::info!(bundle = ?bundle_id, effective, "uds_focused_app_changed");
         }
         DaemonCommand::NotifySystemAudioState { playing } => {
+            // Record the FACT first, unconditionally, before any policy
+            // decision below can `return`. The speaker gate reads this
+            // to raise the bar for single-window verification while
+            // competing audio is in the room; keying that off the pause
+            // SOURCE instead meant it was permanently false whenever the
+            // gate was on (the branch below force-clears it and
+            // returns), so the protection never once applied and media
+            // audio reached the paste path.
+            pause::set_system_audio_playing(playing);
+
             // "My Voice" gate active → the daemon already ignores every
             // voice but the enrolled user's, so media playback is no
             // reason to stop listening. Skip the auto-pause entirely

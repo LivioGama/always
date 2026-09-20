@@ -1,10 +1,12 @@
-//! Apple on-device SFSpeechRecognizer [`Transcriber`] implementation.
+//! Apple on-device speech [`Transcriber`] implementation.
 //!
-//! The audio path: callers pass WAV bytes (16 kHz mono i16, produced by
-//! the daemon's audio pipeline). We write them to a temporary file and
-//! ask the Swift SFSpeechRecognizer bridge to transcribe it. No streaming
-//! support — the Speech framework returns a single final result for a
-//! complete utterance.
+//! Two decode paths share the Swift bridge (`swift/apple_stt.swift`):
+//!
+//! - One-shot: callers pass WAV bytes (16 kHz mono i16); we write them to a
+//!   temporary file and transcribe the whole utterance at once.
+//! - Incremental (macOS 26+): [`AppleTranscriber::open_live_stream`] opens a
+//!   SpeechAnalyzer session fed by pushed audio, so the transcript is built
+//!   WHILE the user talks — end-of-speech costs one flush, not a re-decode.
 
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -13,7 +15,8 @@ use std::sync::Mutex;
 use futures::stream::Stream;
 
 use crate::stt::{
-    StreamingTranscriptionResult, SttError, Transcriber, TranscriptionResult,
+    LiveTranscriptionStream, StreamingTranscriptionResult, SttError, Transcriber,
+    TranscriptionResult,
 };
 
 /// Serializes access to SFSpeechRecognizer. Concurrent recognition tasks
@@ -35,7 +38,18 @@ impl AppleTranscriber {
 
 impl Transcriber for AppleTranscriber {
     fn supports_streaming(&self) -> bool {
-        false
+        crate::always::apple_stt::stream_supported()
+    }
+
+    fn open_live_stream(&self) -> Option<Box<dyn LiveTranscriptionStream>> {
+        let session = crate::always::apple_stt::AppleStreamSession::start(
+            self.language.as_deref(),
+            &context_phrases(),
+        )?;
+        tracing::info!("apple_live_stream_started");
+        Some(Box::new(AppleLiveStream {
+            session: Some(session),
+        }))
     }
 
     fn transcribe_from_bytes(&self, mut audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
@@ -93,6 +107,43 @@ impl Transcriber for AppleTranscriber {
             Err(e) => Err(e),
         };
         Box::pin(futures::stream::once(async move { result }))
+    }
+}
+
+/// Samples per `push_chunk` — 500 ms at 16 kHz. SpeechAnalyzer accepts
+/// arbitrary buffer sizes; 500 ms matches the capture cadence granularity the
+/// speaker gate and truncation history were tuned around.
+const APPLE_LIVE_CHUNK_SAMPLES: usize = 8_000;
+
+/// Incremental Apple decode session implementing the live-stream contract:
+/// `push_chunk` feeds the analyzer and returns the transcript so far;
+/// `finish` flushes and returns the final text. Abandoned sessions (reset,
+/// dropped utterance) cancel on drop.
+struct AppleLiveStream {
+    session: Option<crate::always::apple_stt::AppleStreamSession>,
+}
+
+impl LiveTranscriptionStream for AppleLiveStream {
+    fn chunk_samples(&self) -> usize {
+        APPLE_LIVE_CHUNK_SAMPLES
+    }
+
+    fn push_chunk(&mut self, samples: &[f32]) -> Result<String, SttError> {
+        let Some(session) = self.session.as_mut() else {
+            return Err(SttError::Other(anyhow::anyhow!("apple live stream closed")));
+        };
+        session
+            .push(samples)
+            .map_err(|e| SttError::Other(anyhow::anyhow!("apple live push failed: {e}")))
+    }
+
+    fn finish(&mut self) -> Result<String, SttError> {
+        let Some(session) = self.session.take() else {
+            return Err(SttError::Other(anyhow::anyhow!("apple live stream closed")));
+        };
+        session
+            .finish()
+            .map_err(|e| SttError::Other(anyhow::anyhow!("apple live finish failed: {e}")))
     }
 }
 

@@ -39,3 +39,39 @@ public func freeAppleSttResult(_ response: UnsafeMutablePointer<AppleSttResponse
 
     response.deallocate()
 }
+
+// Streaming session stubs — never available in stub builds.
+
+@_cdecl("apple_stt_stream_supported")
+public func appleSttStreamSupported() -> Int32 { 0 }
+
+@_cdecl("apple_stt_stream_start")
+public func appleSttStreamStart(
+    _ lang: UnsafePointer<CChar>?,
+    _ phrases: UnsafePointer<CChar>?
+) -> UnsafeMutableRawPointer? { nil }
+
+@_cdecl("apple_stt_stream_push")
+public func appleSttStreamPush(
+    _ session: UnsafeMutableRawPointer?,
+    _ samples: UnsafePointer<Float>?,
+    _ count: Int
+) -> UnsafeMutablePointer<CChar>? { nil }
+
+@_cdecl("apple_stt_stream_finish")
+public func appleSttStreamFinish(
+    _ session: UnsafeMutableRawPointer?
+) -> UnsafeMutablePointer<AppleSttResponse> {
+    let responsePtr = UnsafeMutablePointer<AppleSttResponse>.allocate(capacity: 1)
+    responsePtr.initialize(to: AppleSttResponse(text: nil, success: 0, error_message: nil))
+    responsePtr.pointee.error_message = strdup("Apple STT streaming not available in this build.")
+    return responsePtr
+}
+
+@_cdecl("apple_stt_stream_cancel")
+public func appleSttStreamCancel(_ session: UnsafeMutableRawPointer?) {}
+
+@_cdecl("free_apple_stt_string")
+public func freeAppleSttString(_ s: UnsafeMutablePointer<CChar>?) {
+    if let s { free(s) }
+}
