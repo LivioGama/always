@@ -815,14 +815,22 @@ class StatusOverlayWindow: NSPanel {
                 self.alphaValue = 0.0
             }
             self.orderFrontRegardless()
+            // The minimum-visible clock (I2) starts when the HUD APPEARS:
+            // not visible before, or a fade-out was taking it away. Live
+            // state changes on a HUD already on screen (listening → text →
+            // transcribing, every preview update) must not restart it —
+            // that held the HUD up to 0.6 s after the paste on every
+            // utterance.
+            let appearing = !wasVisible || self.isFadingOut
             // A show interrupts any in-flight fade, so the guard must be
             // released or the next genuine hide would be swallowed.
             self.isFadingOut = false
-            // A show cancels any hide that was waiting out the minimum,
-            // and restarts the clock.
+            // A show cancels any hide that was waiting out the minimum.
             self.pendingHide?.cancel()
             self.pendingHide = nil
-            self.shownAt = Date()
+            if appearing || self.shownAt == nil {
+                self.shownAt = Date()
+            }
             if case .voiceActivity = state {
                 let f = self.frame
                 let host = NSScreen.screens.firstIndex { $0.frame.intersects(f) }
@@ -849,8 +857,9 @@ class StatusOverlayWindow: NSPanel {
     }
 
     func hide() {
-        // Smooth fade-out so flashes don't pop off-screen abruptly.
-        fadeOut(duration: 0.4)
+        // Short fade: long enough not to pop, short enough that the HUD is
+        // gone the moment the text lands (was 0.4 s).
+        fadeOut(duration: 0.15)
     }
 
     /// Shortest time the overlay stays on screen once shown.
@@ -1270,18 +1279,24 @@ class StatusOverlayController {
         let work = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             self.flashEndsAt = nil
-            // A flash owns the window outright, so whatever StateMonitor
-            // believed was applied is no longer true. Tell it to forget,
-            // or its change-detection will treat the next real state as
-            // "already showing" and never re-apply it.
-            StateMonitor.shared.invalidateAppliedOverlay()
             // If a persistent show was deferred during the flash, honor it now
             // instead of hiding (avoids a flicker between flash hide and show).
             if let deferred = self.pendingShowState {
                 self.pendingShowState = nil
+                // A flash owns the window outright, so whatever StateMonitor
+                // believed was applied is no longer true. Tell it to forget,
+                // or its change-detection will treat the next real state as
+                // "already showing" and never re-apply it.
+                StateMonitor.shared.invalidateAppliedOverlay()
                 self.window?.show(state: deferred, instant: deferred.isInstantShow)
             } else {
-                self.window?.hide()
+                // Hand the window back to the live state: the listening /
+                // transcribing badge if the user is mid-utterance, hidden
+                // otherwise. An unconditional hide here blanked a live
+                // badge until the next daemon heartbeat (up to 2 s).
+                if !StateMonitor.shared.reapplyLiveOverlay() {
+                    self.window?.hide()
+                }
             }
         }
         hideWorkItem = work

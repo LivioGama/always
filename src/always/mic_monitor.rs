@@ -92,7 +92,10 @@ impl MicrophoneMonitor {
 #[cfg(target_os = "macos")]
 mod coreaudio_probe {
     use anyhow::{Result, bail};
+    use parking_lot::Mutex;
+    use std::collections::HashMap;
     use std::ffi::c_void;
+    use std::sync::LazyLock;
 
     #[repr(C)]
     struct AudioObjectPropertyAddress {
@@ -298,12 +301,33 @@ mod coreaudio_probe {
         path.rsplit('/').next().map(str::to_string)
     }
 
+    /// Process-lifetime cache of bundle id → display name.
+    ///
+    /// The mic-conflict watchdog probes once per second for the daemon's
+    /// lifetime, and while an always-on captor is running input (another
+    /// dictation app, a call), every probe re-ran the LaunchServices +
+    /// CFBundle resolution for the SAME bundle id. Besides the waste, each
+    /// resolution retained memory: the Info.plist value CFType from
+    /// `CFBundleGetValueForInfoDictionaryKey` was never released, and
+    /// LaunchServices per-query state accumulated. Measured 2026-09-29:
+    /// ~1 MB/s in the live daemon (0.7 GB at launch → tens of GB over a
+    /// working day), 80 MiB over 300 probes in the isolation test.
+    /// Resolving each bundle id once ever is correct — an app's display
+    /// name does not change while the daemon runs — and bounds the leak
+    /// to one resolution per distinct captor.
+    static DISPLAY_NAME_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
     /// Resolve a bundle id to a human-readable display name via
     /// LaunchServices + the app's Info.plist. Falls back to the last
-    /// path component of the bundle id if resolution fails.
+    /// path component of the bundle id if resolution fails. Results are
+    /// cached for the process lifetime (see [`DISPLAY_NAME_CACHE`]).
     fn bundle_display_name(bundle_id: &str) -> String {
-        let display = resolve_bundle_display_name(bundle_id);
-        display.unwrap_or_else(|| {
+        let mut cache = DISPLAY_NAME_CACHE.lock();
+        if let Some(name) = cache.get(bundle_id) {
+            return name.clone();
+        }
+        let display = resolve_bundle_display_name(bundle_id).unwrap_or_else(|| {
             // "com.superduper.superwhisper" → "superwhisper"
             bundle_id
                 .rsplit('.')
@@ -311,7 +335,9 @@ mod coreaudio_probe {
                 .filter(|s| !s.is_empty())
                 .unwrap_or(bundle_id)
                 .to_string()
-        })
+        });
+        cache.insert(bundle_id.to_string(), display.clone());
+        display
     }
 
     fn resolve_bundle_display_name(bundle_id: &str) -> Option<String> {
@@ -377,8 +403,14 @@ mod coreaudio_probe {
                 value = CFBundleGetValueForInfoDictionaryKey(bundle, cf_key2);
                 CFRelease(cf_key2);
             }
+            // `CFBundleGetValueForInfoDictionaryKey` returns a +1 retained
+            // CFType (usually the display-name CFString) — release it after
+            // reading. Retaining it here leaked per resolution; the 1 Hz
+            // watchdog turned that into ~1 MB/s whenever a captor was live.
             let result = if !value.is_null() {
-                cf_string_to_string(value)
+                let s = cf_string_to_string(value);
+                CFRelease(value);
+                s
             } else {
                 None
             };
@@ -829,6 +861,9 @@ impl MicrophoneMonitor {
 mod tests {
     use super::MicrophoneMonitor;
 
+    #[cfg(target_os = "macos")]
+    use super::coreaudio_probe;
+
     #[test]
     fn can_create_monitor() {
         let _monitor = MicrophoneMonitor::new(Vec::new());
@@ -839,5 +874,51 @@ mod tests {
         let mut monitor = MicrophoneMonitor::new(Vec::new());
         // This might return true or false depending on system state
         let _result = monitor.is_microphone_in_use();
+    }
+
+    /// Regression test for the 2026-09-29 memory leak (always-daemon
+    /// 0.7 GB → 30 GB over a working day). The mic-conflict watchdog
+    /// calls [`MicrophoneMonitor::is_microphone_in_use`] once per second
+    /// for the daemon's lifetime; while any non-excluded app runs audio
+    /// input, every probe re-ran the LaunchServices/CFBundle
+    /// display-name resolution for the same bundle id, and each
+    /// resolution retained the Info.plist value CFType plus per-query
+    /// LaunchServices state — measured ~1 MB per second.
+    ///
+    /// The budget only fires when something is actually capturing input
+    /// during the run (an always-on dictation app, a call); with no
+    /// captor the probe exits before display-name resolution and the
+    /// test passes vacuously. 300 probes ≈ 5 minutes of daemon life.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn repeated_probe_does_not_leak_resident_memory() {
+        let default_exclusions: Vec<String> =
+            crate::always::config::DEFAULT_MIC_CONFLICT_EXCLUSION_BUNDLES
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+
+        // One warm probe so one-time CoreAudio/LaunchServices framework
+        // init doesn't count against the growth budget.
+        coreaudio_probe::other_input_captors(&default_exclusions)
+            .expect("coreaudio probe failed");
+
+        let peak_rss_bytes = || -> i64 {
+            let mut ru = std::mem::MaybeUninit::<libc::rusage>::uninit();
+            // SAFETY: rusage is plain-old-data, filled in by the kernel.
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, ru.as_mut_ptr()) };
+            // macOS reports ru_maxrss in BYTES.
+            unsafe { ru.assume_init() }.ru_maxrss as i64
+        };
+        let before = peak_rss_bytes();
+        for _ in 0..300 {
+            coreaudio_probe::other_input_captors(&default_exclusions)
+                .expect("coreaudio probe failed");
+        }
+        let grew_mib = (peak_rss_bytes() - before) / (1024 * 1024);
+        assert!(
+            grew_mib < 5,
+            "300 mic probes grew peak RSS by {grew_mib} MiB — per-poll CoreAudio/LaunchServices retention is back"
+        );
     }
 }

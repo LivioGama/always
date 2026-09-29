@@ -368,13 +368,18 @@ class StateMonitor: ObservableObject {
         ]
         Publishers.MergeMany(inputs)
             .sink { [weak self] _ in
-                guard let self else { return }
-                if Thread.isMainThread {
-                    self.updateOverlay()
-                } else {
-                    DispatchQueue.main.async { [weak self] in
-                        self?.updateOverlay()
-                    }
+                // `@Published` emits in `willSet`: when this closure runs,
+                // the property being assigned still holds its OLD value.
+                // Rendering synchronously here read stale state — preview
+                // text showed one update late, and a hide could be skipped
+                // until some later write happened to re-render. Render on
+                // the next main-queue turn instead, once every write the
+                // current handler makes has landed; a burst of writes (the
+                // three clears on TranscriptFinal) collapses into one
+                // render. Handlers on the latency-critical path also call
+                // `updateOverlay()` directly after their writes.
+                DispatchQueue.main.async { [weak self] in
+                    self?.updateOverlay()
                 }
             }
             .store(in: &cancellables)
@@ -449,6 +454,19 @@ class StateMonitor: ObservableObject {
     /// state change is not swallowed as "already applied".
     func invalidateAppliedOverlay() {
         appliedOverlay = nil
+    }
+
+    /// A flash is handing the window back. If the user is still speaking or
+    /// a transcription is running, re-show that live state at once and
+    /// return true; otherwise forget what was applied (the flash replaced
+    /// it) and return false so the caller hides the window. Never hides
+    /// anything itself — the idle resume widget must survive a flash end.
+    func reapplyLiveOverlay() -> Bool {
+        appliedOverlay = nil
+        guard let desired = desiredOverlayState() else { return false }
+        appliedOverlay = .some(desired)
+        StatusOverlayController.shared.show(state: desired)
+        return true
     }
 
     /// Render the desired state, but only when it actually changed.
@@ -620,6 +638,7 @@ class StateMonitor: ObservableObject {
             if let text = event.data?["text"], !text.isEmpty {
                 partialTranscript = text
                 armTranscribingLease()
+                updateOverlay()
             }
         case .transcriptFinal:
             // The phrase is fully done. Force-clear the ongoing state
@@ -632,6 +651,12 @@ class StateMonitor: ObservableObject {
             cancelVoiceLease()
             cancelTranscribingLease()
             stopTranscribingTicker()
+            // Hide now, from the fully-cleared state. Rendering from inside
+            // the individual writes above re-showed "Listening" for one
+            // step (transcribing cleared, voice not yet), which restarted
+            // the minimum-visible clock and kept the HUD up ~1 s after the
+            // paste.
+            updateOverlay()
 
             // Optionally show the final reshaped text in the overlay briefly
             if let text = event.data?["text"], !text.isEmpty,

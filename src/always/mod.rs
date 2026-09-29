@@ -59,3 +59,13 @@ pub mod stt_apple;
 
 pub use config::AlwaysConfig;
 pub use event_loop::run;
+
+/// Serialises the RSS-growth regression tests (Silero / speaker-embed /
+/// mic-probe). They measure `getrusage` peak RSS inside one shared test
+/// process; running concurrently would count each other's allocations
+/// and produce nonsense verdicts.
+#[cfg(test)]
+pub(crate) mod leak_probe_lock {
+    use parking_lot::Mutex;
+    pub(crate) static LOCK: Mutex<()> = Mutex::new(());
+}

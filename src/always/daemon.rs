@@ -334,6 +334,106 @@ pub fn spawn_peer_resume_watchdog() {
     });
 }
 
+/// Current physical footprint of THIS process, in bytes — the same
+/// number `vmmap --summary` prints as "Physical footprint" and the
+/// closest thing to Activity Monitor's per-process "Memory" figure.
+///
+/// `getrusage(RUSAGE_SELF).ru_maxrss` is a monotonic high-water mark, so
+/// it cannot drive a "have we grown past the ceiling" decision;
+/// `proc_pid_rusage(RUSAGE_INFO_V0)` reads the live footprint. The V0
+/// flavor is used deliberately: its layout has been stable for a
+/// decade and puts `ri_phys_footprint` at a fixed offset.
+///
+/// Returns None if the syscall fails — the caller then skips its check,
+/// because a missing reading must never restart the daemon.
+pub fn resident_footprint_bytes() -> Option<u64> {
+    use std::ffi::{c_int, c_void};
+
+    #[repr(C, align(8))]
+    struct RusageInfoV0 {
+        _uuid: [u8; 16],
+        _user_time: u64,
+        _system_time: u64,
+        _pkg_idle_wkups: u64,
+        _interrupt_wkups: u64,
+        _pgins: u64,
+        _wired_count: u64,
+        _resident_count: u64,
+        phys_footprint: u64,
+        _proc_start: u64,
+        _proc_exit: u64,
+    }
+
+    const RUSAGE_INFO_V0: c_int = 0;
+
+    unsafe extern "C" {
+        // libproc is part of libSystem — no extra link directive needed
+        // (same link posture as `proc_pidpath` in mic_monitor.rs).
+        fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *mut c_void) -> c_int;
+    }
+
+    let mut info = RusageInfoV0 {
+        _uuid: [0; 16],
+        _user_time: 0,
+        _system_time: 0,
+        _pkg_idle_wkups: 0,
+        _interrupt_wkups: 0,
+        _pgins: 0,
+        _wired_count: 0,
+        _resident_count: 0,
+        phys_footprint: 0,
+        _proc_start: 0,
+        _proc_exit: 0,
+    };
+    let status = unsafe {
+        proc_pid_rusage(
+            std::process::id() as c_int,
+            RUSAGE_INFO_V0,
+            (&raw mut info).cast(),
+        )
+    };
+    (status == 0).then_some(info.phys_footprint)
+}
+
+/// True when the daemon should exit and let the GUI respawn it: the
+/// physical footprint crossed [`RSS_CEILING_BYTES`] while the daemon is
+/// not actively listening (effective-paused, or no voice for at least
+/// [`SELF_RESTART_IDLE_GRACE_SECS`]). Never restarts mid-utterance.
+///
+/// Why this exists (2026-09-29): ONNX Runtime 2.0.0-rc.12 on this macOS
+/// build retains a slice of every inference's working buffers at the
+/// process level for the daemon's lifetime — measured live: 0.7 GB at
+/// launch → 4.2 GB within the hour while the user dictated (tens of GB
+/// per working day, matching the "18 GB → 30 GB" report; the leaked
+/// blocks are `std::shared_ptr_pointer<void const**>` nodes visible in
+/// `heap`). Session recycling and the arena/pattern knobs do NOT bound
+/// it (fresh sessions still retain, and drops don't reclaim — see the
+/// leak-probe history in vad_silero.rs). A ceiling restart converts the
+/// unbounded growth into a bounded sawtooth: the daemon exits while
+/// idle, the GUI respawns it within seconds, and the mic handoff
+/// already covers the transition.
+pub fn should_self_restart(
+    footprint: Option<u64>,
+    idle_secs: u64,
+    effective_paused: bool,
+) -> bool {
+    const IDLE_GRACE_SECS: u64 = 60;
+    match footprint {
+        Some(bytes) if bytes > RSS_CEILING_BYTES => {
+            effective_paused || idle_secs >= IDLE_GRACE_SECS
+        }
+        _ => false,
+    }
+}
+
+/// Physical-footprint ceiling that triggers the self-restart. Well above
+/// any legitimate steady state (the heaviest documented profile — local
+/// STT model loaded — is ~0.9 GB; the leak-free Groq backend sits under
+/// 0.5 GB), and low enough that a dictation-heavy day restarts the
+/// daemon a handful of times instead of ever approaching the
+/// tens-of-GB regime the user reported.
+pub const RSS_CEILING_BYTES: u64 = 3 * 1024 * 1024 * 1024;
+
 pub fn start(cfg: &AlwaysConfig) -> Result<()> {
     if is_running() {
         println!("Always-on daemon already running.");
@@ -702,6 +802,62 @@ fn process_is_running(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The 2026-09-29 leak safety net: the restart fires only when the
+    /// footprint is past the ceiling AND the daemon is not actively
+    /// listening (effective-paused, or no voice for the grace period).
+    #[test]
+    fn self_restart_needs_ceiling_and_quiet() {
+        let ceiling = RSS_CEILING_BYTES;
+        // Under the ceiling: never restart, whatever the pause state.
+        assert!(!should_self_restart(
+            Some(ceiling),
+            0,
+            true
+        ));
+        assert!(!should_self_restart(
+            Some(ceiling - 1),
+            10_000,
+            true
+        ));
+        // Over the ceiling but actively listening (not paused, voice
+        // seconds ago): never restart mid-utterance.
+        assert!(!should_self_restart(
+            Some(ceiling + 1),
+            0,
+            false
+        ));
+        assert!(!should_self_restart(
+            Some(ceiling * 10),
+            59,
+            false
+        ));
+        // Over the ceiling and quiet: restart.
+        assert!(should_self_restart(
+            Some(ceiling + 1),
+            60,
+            false
+        ));
+        assert!(should_self_restart(
+            Some(ceiling * 10),
+            5,
+            true
+        ));
+        // A missing reading must never restart.
+        assert!(!should_self_restart(None, 10_000, true));
+    }
+
+    /// The live-footprint reader works on this platform and returns a
+    /// plausible magnitude (tens of MB to tens of GB, never 0 or wild).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resident_footprint_is_plausible() {
+        let fp = resident_footprint_bytes().expect("proc_pid_rusage works");
+        assert!(
+            fp > 1_000_000 && fp < 64 * 1024 * 1024 * 1024,
+            "implausible footprint: {fp} bytes"
+        );
+    }
 
     #[test]
     fn list_daemon_pids_dedupes() {

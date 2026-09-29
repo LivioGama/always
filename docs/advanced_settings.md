@@ -69,21 +69,21 @@ always config set hear_energy_threshold 0.0008
 
 | | |
 |---|---|
-| Default | `1.5` (seconds) |
-| Range   | `0.1 – 10.0` |
-| What    | How many seconds of silence end an utterance. Whisper is invoked once silence persists this long. |
+| Default | `0.9` (seconds) |
+| Range   | `0.3 – 15.0` (values outside are clamped) |
+| What    | How many seconds of silence end an utterance. It applies to the whole utterance, including long dictations committed in chunks. |
 | Lower → | Snappier; transcription fires sooner; may cut off natural pauses. |
 | Higher → | Tolerates long mid-sentence pauses; user feels the "lag" before paste. |
 
-`1.5 s` balances snappiness against natural mid-sentence pauses.
-Speculative transcription kicks off at 75 % of this (≈ 1.1 s) so the
-Whisper round-trip happens in parallel with the silence wait —
-end-to-end paste latency rarely exceeds ~1.5 s from when the user
-stops talking. Going below ~`0.7` chops trains of thought into
+Speculative transcription (and the grammar pre-warm) starts after
+240 ms of silence, so the speech-to-text round trip runs in parallel
+with the rest of the silence wait. With adaptive silence on, the
+window stretches (up to 2× / +1.5 s) when the text so far looks
+mid-sentence. Going below ~`0.7` chops trains of thought into
 fragments.
 
 ```bash
-always config set stt_silence 1.5
+always config set stt_silence 0.9
 ```
 
 ### `stt_cooldown_ms`

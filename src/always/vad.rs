@@ -209,7 +209,10 @@ fn speaker_gate_score(gate: &SpeakerGate, samples: &[i16]) -> Option<f32> {
     match gate.embedder.embed(samples) {
         Ok(e) => {
             let (score, matched) = best_voiceprint_match(&e, &gate.voiceprint);
-            tracing::debug!(
+            // Info, not debug: the embedding runs inline on the VAD thread
+            // and sits on the badge's critical path under "My Voice", so
+            // its cost must be visible in production logs.
+            tracing::info!(
                 score,
                 matched,
                 elapsed_ms = started.elapsed().as_millis() as u64,
@@ -326,17 +329,22 @@ pub fn record_utterance(
 pub fn poll_speech_energy(cfg: &AlwaysConfig) -> Result<bool> {
     let recorder_arc = audio::RecChild::get_or_spawn()?;
     let mut frame_buf = [0u8; FRAME_BYTES];
-    // INVARIANT (concurrency): `read_frame` blocks under GLOBAL_RECORDER (see
+    // INVARIANT (concurrency): the read waits under GLOBAL_RECORDER (see
     // the matching note in `record_with_local_vad`). This idle wake-on-voice
     // poll must run on the same single thread as `record_utterance`; running
     // them concurrently risks serializing on — or, if `rec` wedges, deadlocking
     // behind — the global recorder lock.
+    //
+    // Newest frame, not the next queued one: this probe runs while capture
+    // is gated and nobody consumes the recorder's queue, so the oldest
+    // queued frame can be many seconds old. The question is whether the
+    // user is speaking now.
     let read = {
         let mut recorder = recorder_arc.lock();
         let rec = recorder
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Audio recorder not available"))?;
-        rec.read_frame(&mut frame_buf)?
+        rec.read_newest_frame(&mut frame_buf)?
     };
     if read < FRAME_BYTES {
         return Ok(false);
@@ -364,6 +372,20 @@ pub fn poll_speech_energy(_cfg: &AlwaysConfig) -> Result<bool> {
 /// like "So, ..." or "And, ..." into the short bucket and got cut off
 /// mid-thought.
 const SHORT_SPEECH_MS: u32 = 400;
+/// Whether the utterance so far is shorter than [`SHORT_SPEECH_MS`] and
+/// so gets the aggressive [`SHORT_SILENCE_MS`] cut. Measured over the
+/// WHOLE utterance: audio already committed to chunks plus the live
+/// buffer (16 samples per ms at 16 kHz).
+///
+/// Measuring the live buffer alone was a bug: right after a chunk flush
+/// the live buffer holds one frame, so the next silent frame looked like
+/// a brand-new 30 ms utterance, switched to the 7-frame short window
+/// with ~9 silent frames already counted, and cut. Every utterance
+/// longer than the chunk target (6 s) ended at its first ~270 ms pause
+/// instead of the configured silence window, and was pasted in pieces.
+fn is_short_utterance_so_far(committed_samples: usize, live_samples: usize) -> bool {
+    ((committed_samples + live_samples) as u64 / 16) < SHORT_SPEECH_MS as u64
+}
 /// Silence-after-speech window for short utterances. Standard window
 /// is `cfg.silence_secs`; for a short utterance we cut at 200ms so
 /// single words ("yes", "ok") paste extremely fast.
@@ -683,11 +705,16 @@ fn record_with_local_vad(
     let mut voice_activity_announced = false;
     let mut voice_activity_announced_at: Option<std::time::Instant> = None;
     let mut last_voice_heartbeat: Option<std::time::Instant> = None;
-    // First frame of this utterance that looked like speech — the
-    // reference point for the measured onset→badge latency. Declared
-    // before `announce_voice_activity!` because macro_rules hygiene
-    // binds the locals a macro reads at its DEFINITION site.
+    // Capture time of the first frame of this utterance that looked like
+    // speech — the reference point for the measured onset→badge latency
+    // (speech time, not processing time: a frame can be processed well
+    // after it was spoken if the loop fell behind). Declared before
+    // `announce_voice_activity!` because macro_rules hygiene binds the
+    // locals a macro reads at its DEFINITION site.
     let mut first_voice_at: Option<std::time::Instant> = None;
+    // Capture time of the frame being processed; its value when the loop
+    // exits is the moment the final-silence cut was reached in speech time.
+    let mut frame_captured_at = std::time::Instant::now();
     let mut early_voice_streak = 0usize;
     let mut long_recording_warned = false;
     let mut total_frames = 0usize;
@@ -873,21 +900,24 @@ fn record_with_local_vad(
             mic_conflict_preempted = true;
             break;
         }
-        // INVARIANT (concurrency): `read_frame` blocks on rec's stdout for up
-        // to one full frame while holding GLOBAL_RECORDER. `record_utterance`
-        // and `poll_speech_energy` therefore MUST NOT run concurrently on
-        // different threads — they would serialize on this lock a full frame
-        // each, and a wedged `rec` (neither bytes nor EOF) would hold the lock
-        // indefinitely and deadlock every other audio caller. The live
-        // pipeline upholds this by driving both from the single event-loop
-        // thread; a future multi-reader design needs a single owning reader or
-        // a read timeout before this invariant can be relaxed.
+        // INVARIANT (concurrency): `read_frame` waits for the recorder's
+        // reader thread to queue the next frame (up to one 30 ms frame
+        // normally, READ_FRAME_TIMEOUT_MS at most) while holding
+        // GLOBAL_RECORDER. `record_utterance` and `poll_speech_energy`
+        // therefore MUST NOT run concurrently on different threads — they
+        // would serialize on this lock and consume each other's frames.
+        // The live pipeline upholds this by driving both from the single
+        // event-loop thread; the reader thread only fills the queue.
         let read = {
             let mut recorder = recorder_arc.lock();
             let Some(rec) = recorder.as_mut() else {
                 return Err(anyhow::anyhow!("Audio recorder not available"));
             };
-            match rec.read_frame(&mut frame_buf) {
+            let read = rec.read_frame(&mut frame_buf);
+            if let Some(at) = rec.last_captured_at() {
+                frame_captured_at = at;
+            }
+            match read {
                 Ok(n) => n,
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                     // Wedged recorder (alive but producing neither bytes
@@ -1005,7 +1035,7 @@ fn record_with_local_vad(
         // `speaker_gate_verified` / whole-utterance pass below instead —
         // slightly later, but only ever for the enrolled user.
         if is_speech && first_voice_at.is_none() {
-            first_voice_at = Some(std::time::Instant::now());
+            first_voice_at = Some(frame_captured_at);
         }
         if !in_speech && !voice_activity_announced && !speaker_gate_requested {
             if early_voice_frame_ok(
@@ -1084,7 +1114,12 @@ fn record_with_local_vad(
                     };
 
                     if passes_energy_check {
-                        log.write(Event::VoiceDetected);
+                        // How far behind real time this frame was processed.
+                        // Near zero when capture flows; a regression to
+                        // burst delivery shows up here first.
+                        log.write(Event::VoiceDetected {
+                            audio_delivery_lag_ms: frame_captured_at.elapsed().as_millis() as u64,
+                        });
                         voice_logged = true;
 
                         // Warn if energy is barely above threshold (within 20% margin)
@@ -1175,8 +1210,9 @@ fn record_with_local_vad(
 
                 // "My Voice" ladder: one check per 0.25s of NEW voiced
                 // audio while unverified, 0.5s after verification. The
-                // ~30-50ms of inference stalls the read loop briefly;
-                // rec's 131KB pipe buffer (~4s) absorbs it.
+                // inference stalls the read loop briefly; the recorder's
+                // reader thread keeps queueing meanwhile, so no audio is
+                // lost and the loop catches up within a few frames.
                 //
                 // UNVERIFIED phase: a trailing-window match at the full
                 // threshold verifies the user (as early as ~0.3s of voice
@@ -1329,12 +1365,12 @@ fn record_with_local_vad(
                     let preview_len = CONSUME_STREAM_PREVIEW_MAX_SAMPLES.min(speech_samples.len());
                     let audio_snapshot =
                         speech_samples[speech_samples.len() - preview_len..].to_vec();
-                    // Slow overlay path only: prefix the already-settled
-                    // chunk texts so a long chunked utterance previews as
-                    // the whole sentence, not just the open chunk. Cheap
+                    // Slow overlay path only: prefix the committed chunk
+                    // texts so a long chunked utterance previews as the
+                    // whole sentence, not just the open chunk. Cheap
                     // (non-blocking; `None` while any chunk is in flight).
                     let settled_prefix = if cadence.prefix_settled_chunks && !chunker.is_empty() {
-                        chunker.join_handle().settled_join()
+                        chunker.join_handle().current_join()
                     } else {
                         None
                     };
@@ -1429,14 +1465,12 @@ fn record_with_local_vad(
             consecutive_speech = 0;
             speech_samples.extend_from_slice(samples);
 
-            // Short-utterance fast path. Speech duration is just
-            // samples / 16 (16kHz mono). While we're still under
-            // SHORT_SPEECH_MS, use the aggressive cutoff. If speech
+            // Short-utterance fast path. While the utterance is still
+            // under SHORT_SPEECH_MS, use the aggressive cutoff. If speech
             // resumes and the total grows past the threshold, we
             // automatically fall back to the standard window on the
             // next iteration. No state, no commitment.
-            let speech_ms = (speech_samples.len() as u32) / 16;
-            let is_short = speech_ms < SHORT_SPEECH_MS;
+            let is_short = is_short_utterance_so_far(committed_samples, speech_samples.len());
             let eff_silence_frames = if is_short {
                 short_silence_frames
             } else {
@@ -1604,18 +1638,17 @@ fn record_with_local_vad(
                     // the user resumed speaking, the final text differs and
                     // this warm is a wasted-but-cached call.
                     //
-                    // Chunked utterance: the paste key is over
-                    // join(corrected chunks) + tail (see
-                    // `finalize_chunked`), so warm THAT — but only once
-                    // the join is deterministic (every chunk's grammar
-                    // settled); an unsettled join would warm a key
-                    // finalize never asks for.
+                    // Chunked utterance: the paste key is over the chunk
+                    // join + tail (see `finalize_chunked`), so warm THAT,
+                    // with each chunk as finalize would take it right now
+                    // (corrected if its correction landed, raw otherwise).
+                    // `None` while a chunk is still in flight.
                     if let Some(text) = warm_text
                         && captured_gen == slot.current_generation()
                         && let Some(pp) = grammar_warm
                     {
                         let warm_target = if chunk_join.chunk_count() > 0 {
-                            chunk_join.settled_join().map(|joined| {
+                            chunk_join.current_join().map(|joined| {
                                 // Byte-identical to finalize_chunked's
                                 // assembly: trimmed tail, single-space
                                 // separator, joined-only when the tail is
@@ -1767,9 +1800,10 @@ fn record_with_local_vad(
         }
     }
 
-    // "Speech end" for latency accounting: the loop exit is within one
-    // 30ms frame of the final-silence cut firing.
-    let speech_end_at = std::time::Instant::now();
+    // "Speech end" for latency accounting: the capture time of the frame
+    // on which the final-silence cut fired — i.e. when the user's silence
+    // window actually elapsed, not when the loop got around to it.
+    let speech_end_at = frame_captured_at;
 
     let has_chunks = !chunker.is_empty();
 
@@ -1909,11 +1943,13 @@ fn record_with_local_vad(
         None
     };
 
+    // Speech-to-text finishing is NOT the end of "Transcribing" for the
+    // HUD: grammar and paste still follow, and ending the state here
+    // flipped the badge back to "Listening" for that stretch. The state
+    // is closed by the utterance's terminal events in `event_loop`
+    // (TranscriptFinal, a filter/drop, or `emit_utterance_terminal`).
     let (result, speculation_used) = match speculation {
-        Some(Ok(r)) => {
-            event::global_broadcaster().transcribing_stopped();
-            (r, true)
-        }
+        Some(Ok(r)) => (r, true),
         _ => {
             // No speculation, speculation errored, or timeout — do a fresh
             // transcription with the full audio (including any trailing silence).
@@ -1962,10 +1998,7 @@ fn record_with_local_vad(
             heartbeat_stop.store(true, Ordering::Relaxed);
             let _ = heartbeat_handle.join();
             match transcribed {
-                Ok(result) => {
-                    event::global_broadcaster().transcribing_stopped();
-                    (result, false)
-                }
+                Ok(result) => (result, false),
                 Err(err) => {
                     event::global_broadcaster().transcribing_stopped();
                     return Err(err).context("failed to transcribe utterance");
@@ -2082,8 +2115,9 @@ fn finalize_chunked(
     speech_end_at: std::time::Instant,
     speculation_used: bool,
 ) -> Result<RecordResult> {
+    // "Transcribing" stays up through grammar and paste — see the note
+    // where `record_with_local_vad` takes its transcription result.
     let assembled = chunker.finalize(transcriber);
-    event::global_broadcaster().transcribing_stopped();
     let tail = tail_text.trim();
     let mut full_text = assembled.text;
     if !tail.is_empty() {
@@ -2242,9 +2276,10 @@ fn looks_mid_sentence(loc: &crate::always::localization::Localization, text: &st
 #[cfg(test)]
 mod tests {
     use super::{
-        chunk_target_secs, early_voice_frame_ok, extended_silence_frames, fast_energy_check,
-        fast_normalized_energy, looks_mid_sentence, normal_silence_frames, normalized_energy,
-        speaker_gate_allows_score, speaker_gate_allows_stt, speaker_gate_allows_transcription,
+        SHORT_SPEECH_MS, chunk_target_secs, early_voice_frame_ok, extended_silence_frames,
+        fast_energy_check, fast_normalized_energy, is_short_utterance_so_far, looks_mid_sentence,
+        normal_silence_frames, normalized_energy, speaker_gate_allows_score,
+        speaker_gate_allows_stt, speaker_gate_allows_transcription,
         speaker_gate_dependencies_ready, speaker_gate_should_reject_unavailable,
         voice_activity_energy_threshold,
     };
@@ -2341,6 +2376,17 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(normal_silence_frames(&cfg), 10);
+    }
+
+    #[test]
+    fn short_window_is_judged_on_the_whole_utterance() {
+        // 7 s already committed to a chunk, one 30 ms frame live: this is
+        // a long utterance mid-pause, not a new short one.
+        assert!(!is_short_utterance_so_far(7 * 16_000, 480));
+        // A genuinely short utterance: 300 ms, nothing committed.
+        assert!(is_short_utterance_so_far(0, 300 * 16));
+        // Boundary: exactly SHORT_SPEECH_MS is no longer short.
+        assert!(!is_short_utterance_so_far(0, SHORT_SPEECH_MS as usize * 16));
     }
 
     #[test]

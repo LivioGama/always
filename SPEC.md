@@ -87,7 +87,7 @@ Two processes, plus a recorder:
 |---|---|
 | `Always` (Swift, menu bar) | UI: menu bar item, overlay HUD, settings, onboarding. Owns nothing about audio. |
 | `always-daemon` (Rust) | Audio capture, VAD, speaker verification, transcription, pasting. |
-| `rec` (SoX) | Raw microphone capture, 16 kHz mono 16-bit, one instance, spawned by the daemon. |
+| `rec` (SoX) | Raw microphone capture, 16 kHz mono 16-bit, one instance, spawned by the daemon. Its output is drained continuously by one daemon reader thread (see §4, "Audio delivery"). |
 
 The GUI spawns the daemon and talks to it over a Unix domain socket at
 `~/Library/Caches/always/always.sock`. Messages are newline-delimited JSON; the
@@ -117,8 +117,11 @@ daemon broadcasts events, the GUI sends commands.
    in the background, which also pre-warms the grammar LLM for the expected
    final text (§9). If speech resumes, it is discarded.
 6. **End of utterance** — silence exceeds the configured window
-   (`stt_silence_secs`, default 1.4 s). With adaptive silence on, the window
-   extends when the text looks mid-sentence.
+   (`stt_silence_secs`; the code default is 0.9 s). With adaptive silence
+   on, the window extends when the text looks mid-sentence. The window
+   applies to the **whole utterance**: committing a chunk of a long
+   dictation (step 4) must never shorten it. Only an utterance that is
+   itself under 400 ms in total gets the short 200 ms cut.
 7. **Transcribe** — the speculative result is used if still valid, otherwise a
    fresh transcription runs.
 8. **Post-process** — filters, glossary corrections, grammar cleanup (§9).
@@ -128,16 +131,27 @@ daemon broadcasts events, the GUI sends commands.
 9. **Paste** — text is typed into the focused application. If auto-Enter is on,
    Return follows after `auto_enter_delay_ms`.
 
+**Audio delivery must be real time.** Every timing above is counted in
+30 ms frames, so it is only as prompt as the frames' arrival. SoX's
+`--buffer` is also the full-buffering size of its stdout, so it sets how
+much audio SoX holds before the daemon sees any of it: it is 4096 bytes
+(128 ms). It was 131 072 bytes (4.096 s) until 2026-09-25, which delivered
+audio in 4.1 s bursts: the badge, the end-of-utterance cut and the paste
+were each up to 4 s late, and none of it showed in the logs because they
+stamped processing time. A dedicated reader thread drains `rec` into a
+bounded queue (30 s, oldest dropped first), so SoX never blocks while the
+event loop is busy transcribing, pasting or gated. Each frame carries its
+estimated capture time; latency metrics are measured from it (§11).
+
 **Pause tolerance is the difference between dictating and being interrupted.**
 Two settings govern it, and the shipped defaults were both too aggressive for
 real speech: a 1.4 s silence window ended utterances during ordinary thinking
 pauses, and auto-Enter with no grace period then sent the half-finished message.
-This instance now runs 1.1 s (lowered from 2.2 s on 2026-08-26 after log
-analysis showed real pauses p95 ≈ 1.25 s and the adaptive mid-sentence
-extension covering the tail) and 0 ms auto-Enter delay.
-
-❓ The code defaults are still 1.4 s / 0 ms. Product decision needed on whether
-to move them for everyone.
+This instance runs 0.9 s and a 0 ms auto-Enter delay (read from
+`always-daemon config show` on 2026-09-25; it was lowered from 2.2 s to
+1.1 s on 2026-08-26 after log analysis showed real pauses p95 ≈ 1.25 s and
+the adaptive mid-sentence extension covering the tail). The code defaults
+are 0.9 s (`DEFAULT_SILENCE_SECS`) and 4000 ms (`DEFAULT_AUTO_ENTER_DELAY_MS`).
 
 ---
 
@@ -157,7 +171,15 @@ Idle-paused · Low mic volume · correction confirmations.
 - **Visible above everything** (I1). Window level must be above normal and
   full-screen application content. It is a status indicator, and it belongs at
   the same tier as the menu bar, below system alerts.
-- **Minimum 600 ms on screen** (I2).
+- **Minimum 600 ms on screen** (I2), counted from when the HUD appears.
+  State changes on a HUD that is already visible (listening → text →
+  transcribing, each preview update) do not restart the count.
+- **Leaves as soon as the text is final.** On the final transcript the HUD
+  fades out over 0.15 s (once the 600 ms minimum is met). "Transcribing"
+  stays up from the speculative kickoff until the final text is ready to
+  paste or the utterance is dropped — speech-to-text finishing is not the
+  end, grammar follows — and it returns to "Listening" only if the user
+  resumes speaking.
 - Follows the active screen and the cursor; must be fully on a screen the user
   is looking at.
 - Fixed width, growing height: transcript text wraps within the fixed content
@@ -178,13 +200,20 @@ Idle-paused · Low mic volume · correction confirmations.
   showing, the flash ends immediately and the live state shows at once.
   Lower-priority states still wait for the flash to finish, so a
   confirmation is never cut short by e.g. a stale state re-emission.
+  When a flash ends on its own while the user is still speaking or a
+  transcription is running, the live badge returns immediately.
 
 **When "Listening" appears:**
 
 | Situation | Timing |
 |---|---|
-| My Voice off | On voice onset — immediately. |
-| My Voice on | After the speaker is verified — the first check fires at ~0.3 s of voiced audio (the embedder's minimum window, padded by the 200 ms pre-buffer), rechecked every 0.25 s of new voice; typically under ~1 s live, up to ~2 s for marginal audio. Background media and other voices do NOT flash the badge; the indicator appears only for the enrolled user. |
+| My Voice off | On voice onset — 60 ms of speech, plus at most the 128 ms audio-delivery granularity. |
+| My Voice on | After the speaker is verified — the first check fires at ~0.3 s of voiced audio (the embedder's minimum window, padded by the 200 ms pre-buffer), rechecked every 0.25 s of new voice. Measured 2026-09-25 on the owner's voice (built-in mic, 10 utterances): median ≈ 1.0 s after onset, 0.4–2.4 s — the spread is how many 0.25 s re-checks it takes to clear the threshold. Background media and other voices do NOT flash the badge; the indicator appears only for the enrolled user. |
+
+Both rows are speech time: `listening_overlay_shown.latency_ms` is measured
+from the capture time of the first speech frame. (Before 2026-09-25 it was
+measured from when that frame was *processed*, which hid up to 4 s of
+audio-delivery delay — see §4.)
 
 The verify wait under My Voice is the price of the gate doing its job: the
 badge must not register audio the user did not produce. An earlier "optimistic
@@ -357,12 +386,17 @@ user-configurable via `always config set mic_conflict_exclusion_bundles
 The `rec` (SoX) process runs for the daemon's lifetime and is only replaced
 when genuinely unhealthy. CoreAudio "buffer overrun" messages trigger a respawn
 only as a **rate**: at least 64 overruns within one 60 s window. Overruns are
-**not counted while capture is deliberately gated** (pause, mic conflict) —
-during a gate nobody drains the pipe, SoX blocks, and CoreAudio discarding
-callbacks is expected backpressure, not a device fault. (The previous
-lifetime-cumulative counter condemned a healthy recorder after any single
-benign backpressure episode — 291 respawns in 2 days, each paying a ~4.5 s
-device cold start.)
+**not counted while capture is deliberately gated** (pause, mic conflict).
+(The previous lifetime-cumulative counter condemned a healthy recorder after
+any single benign backpressure episode — 291 respawns in 2 days, each
+costing ~4.5 s before the first audio arrived. Most of those 4.5 s was the
+4.096 s SoX output buffer, not the device; the daemon logs
+`rec_first_audio` with the real figure since 2026-09-25.)
+
+The recorder's reader thread drains `rec` whether or not capture is gated,
+so gates no longer create backpressure; audio queued during a gate is
+discarded on resume (I6), including frames still inside SoX when the gate
+lifted, by capture time.
 
 When a respawn does happen, the old recorder is killed and reaped **before**
 the replacement is spawned, so two `rec` processes never hold the input device
@@ -377,6 +411,25 @@ so it opens the newly selected mic. Without this, `rec` keeps capturing
 from the device it opened at spawn time and the user would have to
 relaunch Always to switch microphones. The respawn follows the same
 I4 "drop old before spawn new" discipline as a health-driven respawn.
+
+### 7.3 Daemon memory ceiling and self-restart
+
+The daemon checks its own **physical footprint** every 30 s (same metric
+`vmmap --summary` reports). If it is past **3 GiB** AND the daemon is not
+actively listening — effective-paused, or no voice for at least 60 s — it
+logs `rss_ceiling_self_restart`, cleans up its pid/socket like the orphan
+watchdog does, and exits; the GUI respawns it within seconds and the
+dev/prod mic handoff covers the transition. It **never** restarts
+mid-utterance, and a failed footprint reading never triggers a restart.
+
+Why: ONNX Runtime 2.0.0-rc.12 on current macOS builds retains a slice of
+every inference's working buffers at the process level for the lifetime
+of the process (measured 2026-09-29: 0.7 GB at launch → 4.2 GB within an
+hour of dictation; session recycling and the arena/pattern options do
+not bound it). A heavy dictation day otherwise grows the daemon into the
+tens-of-GB regime the user reported. The ceiling converts that into a
+bounded sawtooth — a quiet-moment blip of a few seconds at most a few
+times a day instead of unbounded growth.
 
 ---
 
@@ -550,12 +603,18 @@ Between transcription and the keyboard:
    - **Un-chunked utterance:** the tentative-silence speculation warms the
      grammar key for its transcript as soon as speculative STT returns.
    - **Chunked utterance:** the paste-time call is keyed on the *join* of the
-     corrected chunks (+ tail), a key the per-chunk corrections never touch.
-     Each chunk that finishes its per-chunk correction warms the joined
-     transcript once every committed chunk is settled; a voiced tail's
+     chunks (+ tail), a key the per-chunk corrections never touch. Each
+     chunk takes part in the join as `finalize` would take it at that
+     moment — corrected once its per-chunk correction landed, raw before —
+     so the join is warmed at each point it can change: when a chunk's raw
+     text arrives, and again when its correction lands. A voiced tail's
      speculation warms join + tail. Warm and paste build the request through
-     the same builder (`correction_request::build`), which is what keeps the
-     cache keys byte-identical.
+     the same builder (`correction_request::build`), which also applies the
+     local cleanup (step 5) itself, so raw warm text and cleaned paste text
+     produce byte-identical cache keys.
+   - The Groq request for gpt-oss models asks for `reasoning_effort: low`
+     and no reasoning text in the response: the call is on the paste path,
+     and hidden reasoning tokens are generated before the answer.
 7. **Corrections** — the user can log a correction for a wrong transcription;
    passive capture of clipboard edits is available but off by default.
 
@@ -763,6 +822,16 @@ auto-enter `ctrl+alt+a` · force paste `ctrl+alt+v` · log correction
   default.
 - Any user-visible latency claim must be measured from **first speech**, not
   from an internal marker that fires later.
+- Audio frames carry their estimated capture time (§4). Measured from it:
+  `listening_overlay_shown.latency_ms` (first speech frame → badge) and
+  `latency_breakdown` (`speech_end_at` = capture time of the frame on which
+  the silence window elapsed). `voice_detected.audio_delivery_lag_ms` is how
+  far behind real time the onset frame was processed — near zero when
+  capture flows; a regression to burst delivery shows there first.
+  `rec_first_audio.ms_since_spawn` is the recorder's real cold start.
+  `speaker_gate_scored` (info) records each voice check's cost.
+  `grammar_cache_hit` counts a paste that joined a warm call still in flight
+  as a hit.
 
 ---
 
@@ -837,11 +906,14 @@ user's choice wins.
    gate.
 2. ~~Auto-Enter with no delay~~ / ~~silence window at 1.4 s~~ — **resolved for this
    instance 2026-08-05**: 2.2 s and 800 ms, after both cut the user off
-   mid-thought. Open question is whether the code defaults should follow.
+   mid-thought. As of 2026-09-25 this instance runs 0.9 s and 0 ms (§4).
+   Open question is whether the code defaults should follow.
 4. ~~Should a streaming local model become the default so live text works?~~
    **Resolved 2026-08-04:** `moonshine-small-streaming-en` downloaded and made
    active, so the overlay's live-text path has something to render. English
    only — revisit if multilingual dictation matters more than live text.
+   As of 2026-09-25 the active backend is Groq again (daemon logs), and live
+   text comes from the `stt_live_preview` cloud cadence (§5).
 5. Mic conflict discards the interrupted sentence rather than pasting it — right
    call?
 6. ~~Nemotron — fix and restore, or leave out?~~ **Resolved 2026-08-15:**

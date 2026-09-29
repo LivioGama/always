@@ -51,14 +51,11 @@ struct ChunkSlot {
 /// warm succeeded. `finalize` prefers `corrected` — for long transcripts
 /// the event loop skips its own blocking grammar pass (see
 /// `GRAMMAR_MAX_CHARS`), so per-chunk correction is the only one applied.
+/// `corrected` stays `None` until that correction lands, so the text a
+/// chunk contributes can change once: raw first, corrected later.
 struct ChunkText {
     raw: String,
     corrected: Option<String>,
-    /// The per-chunk grammar attempt finished (success or failure), so
-    /// this chunk's contribution to the final join can no longer change.
-    /// Drives `settled_join` — the joined-text grammar warm must only
-    /// fire on a join that `finalize` is guaranteed to reproduce.
-    grammar_done: bool,
 }
 
 pub struct ChunkedTranscript {
@@ -73,7 +70,7 @@ pub struct ChunkedTranscript {
 pub struct ChunkAccumulator {
     /// Shared with the per-chunk transcription threads so a finished
     /// chunk can inspect ALL committed chunks and warm the joined-text
-    /// grammar key (see `settled_join`).
+    /// grammar key (see `current_join`).
     slots: Arc<Mutex<Vec<Arc<ChunkSlot>>>>,
 }
 
@@ -90,26 +87,30 @@ impl ChunkJoinHandle {
         self.slots.lock().len()
     }
 
-    /// See [`settled_join`].
-    pub fn settled_join(&self) -> Option<String> {
+    /// See [`current_join`].
+    pub fn current_join(&self) -> Option<String> {
         let slots = self.slots.lock().clone();
-        settled_join(&slots)
+        current_join(&slots)
     }
 }
 
-/// The exact chunk join `finalize` will assemble, or `None` while it is
-/// still undetermined. `Some` only when every committed chunk has a
-/// stored successful result AND its grammar attempt has finished —
-/// `finalize` then picks `corrected.unwrap_or(raw)` per chunk, which is
-/// reproduced byte-for-byte here (same choice, same skip-empty, same
-/// single-space join). A failed or in-flight chunk returns `None`: its
-/// final text depends on the retry at finalize. Non-consuming.
-fn settled_join(slots: &[Arc<ChunkSlot>]) -> Option<String> {
+/// The exact chunk join `finalize` would assemble if it ran now, or
+/// `None` while that is undetermined. Per chunk, `finalize` takes
+/// `corrected.unwrap_or(raw)` — raw while the per-chunk correction is
+/// still in flight, corrected once it lands — and that choice is
+/// reproduced byte-for-byte here (same skip-empty, same single-space
+/// join). An in-flight or failed chunk returns `None`: its final text
+/// depends on the retry at finalize. Non-consuming.
+///
+/// The grammar warms target this join at each point it can change (raw
+/// published, correction landed), so whichever state the utterance ends
+/// in, the paste-path grammar key has already been warmed.
+fn current_join(slots: &[Arc<ChunkSlot>]) -> Option<String> {
     let mut parts: Vec<String> = Vec::with_capacity(slots.len());
     for slot in slots {
         let guard = slot.result.lock();
         match guard.as_ref() {
-            Some(Ok(text)) if text.grammar_done => {
+            Some(Ok(text)) => {
                 let chosen = text.corrected.clone().unwrap_or_else(|| text.raw.clone());
                 if !chosen.is_empty() {
                     parts.push(chosen);
@@ -119,6 +120,28 @@ fn settled_join(slots: &[Arc<ChunkSlot>]) -> Option<String> {
         }
     }
     Some(parts.join(" "))
+}
+
+/// Start the joined-transcript grammar call in the background so the
+/// paste-path request for the same text lands as a cache hit or joins
+/// the in-flight single-flight cell. Skipped when the join is not yet
+/// determined or the paste path would skip grammar for it anyway.
+fn warm_current_join(
+    pp: &Arc<crate::always::postprocess::PostProcessor>,
+    slots: &Arc<Mutex<Vec<Arc<ChunkSlot>>>>,
+    rt: &tokio::runtime::Handle,
+) {
+    let snapshot = slots.lock().clone();
+    if let Some(join) = current_join(&snapshot)
+        && !crate::always::event_loop::is_short_utterance(&join)
+        && join.chars().count() <= crate::always::event_loop::GRAMMAR_MAX_CHARS
+    {
+        let req = crate::always::correction_request::build(&join, pp.can_correct());
+        let pp = Arc::clone(pp);
+        rt.spawn(async move {
+            let _ = pp.process_request(&req).await;
+        });
+    }
 }
 
 impl ChunkAccumulator {
@@ -198,15 +221,22 @@ impl ChunkAccumulator {
                     // it before setting `result` made finalize time out and
                     // paste `[audio saved: chunk N]` even though Whisper had
                     // already returned usable text.
-                    let will_correct = grammar.is_some() && !raw.is_empty();
                     *slot.result.lock() = Some(Ok(ChunkText {
                         raw: raw.clone(),
                         corrected: None,
-                        grammar_done: !will_correct,
                     }));
                     // Success: the audio has served its purpose. Drop it only
                     // after a usable raw result is visible to finalize.
                     *slot.audio.lock() = None;
+                    // Warm the join as it stands NOW, with this chunk raw.
+                    // If the user stops here, the final cut (silence
+                    // window) usually comes before this chunk's own
+                    // correction below returns, so finalize pastes exactly
+                    // this join — and the grammar call for it is already
+                    // running.
+                    if let Some(pp) = &grammar {
+                        warm_current_join(pp, &all_slots, &rt);
+                    }
                     #[cfg(test)]
                     if let Some(rx) = TEST_PAUSE_AFTER_RAW_PUBLISH.lock().unwrap().take() {
                         let _ = rx.recv_timeout(Duration::from_secs(2));
@@ -230,37 +260,25 @@ impl ChunkAccumulator {
                         corrected = corrected.is_some(),
                         "chunk_transcribed"
                     );
+                    let corrected_landed = corrected.is_some();
                     {
                         let mut result = slot.result.lock();
                         if let Some(Ok(text)) = result.as_mut() {
                             text.corrected = corrected;
-                            text.grammar_done = true;
                         }
                     }
-                    // Joined-transcript grammar warm. The paste path's
-                    // blocking grammar call is keyed on the JOIN of the
-                    // corrected chunks (+ tail), not on any chunk's raw
-                    // text — a key no per-chunk correction ever touched,
-                    // which is why chunked dictations (the vast majority,
-                    // measured 469/518 pastes) always paid a cold
-                    // ~600-1400ms LLM call at paste. As soon as this
-                    // chunk settles the join, start that call in the
-                    // background so the paste-path request lands as a
-                    // cache hit / joins the in-flight single-flight cell.
-                    // If more chunks follow, the superseded warm is a
-                    // wasted-but-cached call, bounded per chunk and by
+                    // Joined-transcript grammar warm, second point: this
+                    // chunk's correction changed the join (raw → corrected),
+                    // so warm the new join too — the paste path asks for
+                    // whichever state the utterance ends in. The paste
+                    // path's blocking call is keyed on the JOIN (+ tail),
+                    // a key no per-chunk correction ever touches. If more
+                    // chunks follow, a superseded warm is a wasted-but-
+                    // cached call, bounded per chunk and by
                     // GRAMMAR_MAX_CHARS (above it the paste path skips
                     // blocking grammar entirely).
-                    let slots_snapshot = all_slots.lock().clone();
-                    if let Some(pp) = grammar_for_warm
-                        && let Some(join) = settled_join(&slots_snapshot)
-                        && !crate::always::event_loop::is_short_utterance(&join)
-                        && join.chars().count() <= crate::always::event_loop::GRAMMAR_MAX_CHARS
-                    {
-                        let req = crate::always::correction_request::build(&join, pp.can_correct());
-                        rt.spawn(async move {
-                            let _ = pp.process_request(&req).await;
-                        });
+                    if corrected_landed && let Some(pp) = &grammar_for_warm {
+                        warm_current_join(pp, &all_slots, &rt);
                     }
                 }
                 Err(err) => {
@@ -591,39 +609,50 @@ mod tests {
     }
 
     #[test]
-    fn settled_join_prefers_corrected_and_matches_finalize_choice() {
+    fn current_join_prefers_corrected_and_matches_finalize_choice() {
         let slots = vec![
             slot_with(Some(Ok(ChunkText {
                 raw: "furst part".into(),
                 corrected: Some("first part".into()),
-                grammar_done: true,
             }))),
+            // Correction still in flight (or failed): raw, as finalize
+            // would paste it right now.
             slot_with(Some(Ok(ChunkText {
                 raw: "second part".into(),
                 corrected: None,
-                grammar_done: true,
             }))),
         ];
         assert_eq!(
-            settled_join(&slots).as_deref(),
+            current_join(&slots).as_deref(),
             Some("first part second part")
         );
     }
 
     #[test]
-    fn settled_join_is_none_while_grammar_pending_or_chunk_failed() {
-        let pending = vec![slot_with(Some(Ok(ChunkText {
-            raw: "text".into(),
-            corrected: None,
-            grammar_done: false,
-        })))];
-        assert!(settled_join(&pending).is_none());
-
+    fn current_join_is_none_while_a_chunk_is_in_flight_or_failed() {
         let in_flight = vec![slot_with(None)];
-        assert!(settled_join(&in_flight).is_none());
+        assert!(current_join(&in_flight).is_none());
 
         let failed = vec![slot_with(Some(Err("boom".into())))];
-        assert!(settled_join(&failed).is_none());
+        assert!(current_join(&failed).is_none());
+    }
+
+    #[test]
+    fn finalize_pastes_the_raw_join_when_correction_has_not_landed() {
+        // The warm at raw-publish time targets this exact string; finalize
+        // must assemble the same one when the cut beats the correction.
+        let acc = ChunkAccumulator::new();
+        acc.slots.lock().push(slot_with(Some(Ok(ChunkText {
+            raw: "first part".into(),
+            corrected: Some("First part.".into()),
+        }))));
+        acc.slots.lock().push(slot_with(Some(Ok(ChunkText {
+            raw: "second part".into(),
+            corrected: None,
+        }))));
+        let warmed = acc.join_handle().current_join().expect("determined");
+        let t = mock(vec![], vec![]);
+        assert_eq!(acc.finalize(&t).text, warmed);
     }
 
     #[test]
@@ -633,11 +662,11 @@ mod tests {
         let mut acc = ChunkAccumulator::new();
         acc.flush(vec![0i16; 16_000], &t, None, rt.handle());
         let handle = acc.join_handle();
-        // The background thread stores the raw result with grammar_done
-        // (no post-processor was supplied); poll briefly for it.
+        // The background thread stores the raw result (no post-processor
+        // was supplied, so it never changes); poll briefly for it.
         let started = Instant::now();
         let join = loop {
-            if let Some(j) = handle.settled_join() {
+            if let Some(j) = handle.current_join() {
                 break j;
             }
             assert!(

@@ -6,7 +6,10 @@ pub enum Event<'a> {
         cfg: &'a AlwaysConfig,
     },
     Stop,
-    VoiceDetected,
+    VoiceDetected {
+        /// How long after capture the onset frame was processed.
+        audio_delivery_lag_ms: u64,
+    },
     Transcribed {
         text: &'a str,
         energy: f64,
@@ -84,8 +87,10 @@ impl Logger {
             Event::Stop => {
                 tracing::info!("daemon_stopped");
             }
-            Event::VoiceDetected => {
-                tracing::info!("voice_detected");
+            Event::VoiceDetected {
+                audio_delivery_lag_ms,
+            } => {
+                tracing::info!(audio_delivery_lag_ms, "voice_detected");
             }
             Event::Transcribed { text, energy } => {
                 let log_transcripts = should_log_transcripts();

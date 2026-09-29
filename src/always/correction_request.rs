@@ -36,6 +36,14 @@ pub struct CorrectionRequest {
 /// disabled, the legacy rewrite-in-place behavior applies (deterministic
 /// but context-blind — there is nobody downstream to decide).
 pub fn build(text: &str, llm_available: bool) -> CorrectionRequest {
+    // The paste path runs this deterministic cleanup before it calls
+    // `build`; the warm paths (speculation, chunk joins) hand in raw STT
+    // text. Applying it here too keeps every key byte-identical — without
+    // it, one dropped "um", a repeated word or a stray leading space made
+    // the warm and paste keys differ and turned the paste into a cold
+    // LLM call. Idempotent, so the paste path's own call is harmless.
+    let cleaned = crate::always::postprocess::local_cleanup(text);
+    let text = cleaned.as_str();
     let entries = crate::glossary::glossary_match_entries();
     let (acoustic_text, substitutions) =
         apply_glossary_tiered(text, &entries, DEFAULT_THRESHOLD, if llm_available { FuzzyMode::LlmAvailable } else { FuzzyMode::NoLlm });
@@ -180,6 +188,22 @@ mod tests {
         crate::always::pause::dictation_buffer_clear();
         let warm = build("testing one two three", true);
         let paste = build("testing one two three", true);
+        assert_eq!(warm.user_message, paste.user_message);
+        assert_eq!(warm.acoustic_text, paste.acoustic_text);
+    }
+
+    /// The warm paths build from raw STT text; the paste path builds from
+    /// text that already went through `local_cleanup`. Both must land on
+    /// the same key.
+    #[test]
+    fn raw_warm_text_and_cleaned_paste_text_share_a_key() {
+        let _guard = crate::always::dictation::SESSION_TEST_LOCK.lock();
+        crate::always::dictation::clear();
+        crate::always::pause::dictation_buffer_clear();
+        let raw = " um testing testing one two three";
+        let pasted = crate::always::postprocess::local_cleanup(raw);
+        let warm = build(raw, true);
+        let paste = build(&pasted, true);
         assert_eq!(warm.user_message, paste.user_message);
         assert_eq!(warm.acoustic_text, paste.acoustic_text);
     }

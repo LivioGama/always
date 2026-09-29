@@ -229,6 +229,31 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         if last_dup_check.elapsed() >= Duration::from_secs(30) {
             last_dup_check = Instant::now();
             daemon::reconcile_duplicate_processes();
+
+            // Memory-leak safety net: if ONNX retention has piled up past
+            // the ceiling, exit gracefully while nothing is being
+            // transcribed and let the GUI respawn a fresh daemon. See
+            // `daemon::should_self_restart` for the measured backstory.
+            let footprint = daemon::resident_footprint_bytes();
+            if daemon::should_self_restart(footprint, pause::since_last_voice().as_secs(), pause::is_paused()) {
+                tracing::warn!(
+                    footprint_bytes = footprint.unwrap_or(0),
+                    ceiling_bytes = daemon::RSS_CEILING_BYTES,
+                    "rss_ceiling_self_restart"
+                );
+                log.write(Event::Error {
+                    message: "Daemon self-restarting: memory ceiling reached while idle",
+                });
+                // Same cleanup the orphan watchdog performs so the next
+                // launch sees a clean slate, then exit(0): the GUI's
+                // respawn watchdog brings a fresh daemon up within
+                // seconds.
+                let _ = std::fs::remove_file(crate::always::daemon::pid_path());
+                if let Some(sock) = crate::always::daemon::socket_path() {
+                    let _ = std::fs::remove_file(sock);
+                }
+                std::process::exit(0);
+            }
         }
 
         // "My Voice" enrollment recording, queued by the UDS server.

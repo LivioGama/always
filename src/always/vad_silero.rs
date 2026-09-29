@@ -122,4 +122,38 @@ mod tests {
         let bad = vec![0i16; 256];
         assert!(vad.predict(&bad).is_err());
     }
+
+    /// The 2026-09-29 leak (always-daemon → tens of GB) surfaced as ONNX
+    /// Runtime `std::shared_ptr<void const**>` blobs accumulating per
+    /// inference. This exercises the Silero session at the daemon's real
+    /// cadence (33 predictions/s while listening; 6 000 ≈ 3 min) and
+    /// fails if peak RSS grows materially. Budget only counts what the
+    /// loop itself retains — a one-time arena warm-up plateau passes.
+    /// Serialised against the other RSS-growth tests via
+    /// `leak_probe_lock` (they share one test process; concurrent
+    /// getrusage verdicts would count each other's allocations).
+    #[test]
+    fn repeated_predict_does_not_leak_resident_memory() {
+        let _serial = crate::always::leak_probe_lock::LOCK.lock();
+        let vad = SileroVad::new().expect("model loads");
+        let frame = [120i16; 480];
+        vad.predict(&frame).expect("warm inference");
+
+        let peak_rss_bytes = || -> i64 {
+            let mut ru = std::mem::MaybeUninit::<libc::rusage>::uninit();
+            // SAFETY: rusage is plain-old-data, filled in by the kernel.
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, ru.as_mut_ptr()) };
+            // macOS reports ru_maxrss in BYTES.
+            unsafe { ru.assume_init() }.ru_maxrss as i64
+        };
+        let before = peak_rss_bytes();
+        for _ in 0..6000 {
+            vad.predict(&frame).expect("inference");
+        }
+        let grew_mib = (peak_rss_bytes() - before) / (1024 * 1024);
+        assert!(
+            grew_mib < 100,
+            "6000 VAD predictions grew peak RSS by {grew_mib} MiB — per-inference ONNX retention is back"
+        );
+    }
 }

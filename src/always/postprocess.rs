@@ -126,7 +126,11 @@ impl PostProcessor {
         if !self.config.grammar_correction_enabled {
             return Ok((transcript.to_string(), false));
         }
-        let cache_hit = self.cache.lock().contains_key(user_message);
+        // A warm already finished (cached) OR is still in flight (the call
+        // below joins its single-flight cell) — both mean the paste reused
+        // the warm instead of paying a cold LLM call.
+        let cache_hit = self.cache.lock().contains_key(user_message)
+            || self.inflight.lock().contains_key(user_message);
         let corrected = match self.config.provider {
             PostprocessProvider::Groq => {
                 let Some(ref api_key) = self.groq_api_key else {
@@ -278,21 +282,11 @@ impl PostProcessor {
             .post("https://api.groq.com/openai/v1/chat/completions")
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
-            .json(&serde_json::json!({
-                "model": self.config.groq_model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": crate::glossary::postprocess_system_prompt()
-                    },
-                    {
-                        "role": "user",
-                        "content": user_message
-                    }
-                ],
-                "temperature": 0.1,
-                "max_tokens": 500
-            }))
+            .json(&grammar_request_body(
+                &self.config.groq_model,
+                &crate::glossary::postprocess_system_prompt(),
+                user_message,
+            ))
             .send()
             .await
             .context("Failed to call Groq API")?;
@@ -437,6 +431,31 @@ fn ends_with_words(words: &[String], suffix: &[&str]) -> bool {
             .all(|(word, expected)| word == expected)
 }
 
+/// Chat-completions body for the Groq grammar call.
+///
+/// gpt-oss models generate hidden reasoning tokens before the first
+/// answer token, and this call sits on the paste path, so its length is
+/// paste latency. Grammar cleanup of one dictated utterance needs little
+/// deliberation: ask for the low reasoning effort and do not send the
+/// reasoning text back. Both parameters are gpt-oss-only on Groq, so they
+/// are omitted for any other configured model.
+fn grammar_request_body(model: &str, system_prompt: &str, user_message: &str) -> Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": user_message }
+        ],
+        "temperature": 0.1,
+        "max_tokens": 500
+    });
+    if model.contains("gpt-oss") {
+        body["reasoning_effort"] = Value::from("low");
+        body["include_reasoning"] = Value::from(false);
+    }
+    body
+}
+
 /// Strip everything except alphanumeric characters and lowercase the result.
 /// Used to compare word cores so "Hello," and "hello" match.
 fn alnum_core(w: &str) -> String {
@@ -474,6 +493,30 @@ pub fn local_cleanup(text: &str) -> String {
     }
 
     out.join(" ")
+}
+
+#[cfg(test)]
+mod grammar_request_body_tests {
+    use super::grammar_request_body;
+
+    #[test]
+    fn gpt_oss_asks_for_low_reasoning_without_reasoning_text() {
+        let body =
+            grammar_request_body("openai/gpt-oss-120b", "sys", "<transcript>hi</transcript>");
+        assert_eq!(body["reasoning_effort"], "low");
+        assert_eq!(body["include_reasoning"], false);
+        assert_eq!(
+            body["messages"][1]["content"],
+            "<transcript>hi</transcript>"
+        );
+    }
+
+    #[test]
+    fn other_models_do_not_get_gpt_oss_parameters() {
+        let body = grammar_request_body("llama-3.1-8b-instant", "sys", "x");
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("include_reasoning").is_none());
+    }
 }
 
 #[cfg(test)]

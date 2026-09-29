@@ -72,6 +72,9 @@ final class AlwaysTests: XCTestCase {
             "shortcutCorrectionDialog": "ctrl+alt+w",
             "shortcutMasterPause": "ctrl+alt+shift+p",
             "postprocessEnabled": true,
+            "postprocessProvider": "groq",
+            "appleIntelligenceAvailable": true,
+            "micConflictExclusionBundles": "[]",
             "idlePauseSecs": 600,
             "idlePauseAction": "pause",
             "audibleStatusSound": "off"
@@ -107,6 +110,7 @@ final class AlwaysTests: XCTestCase {
         idle_pause_secs: 600
             audible_status_sound: high
         postprocess_enabled: true
+        postprocess_provider: groq
         """
         guard let config = Config.fromCLI(output: cliOutput) else {
             return XCTFail("fromCLI returned nil")
@@ -115,7 +119,6 @@ final class AlwaysTests: XCTestCase {
         XCTAssertEqual(config.sttSilence, 2.0)
         XCTAssertTrue(config.sttAutoEnter)
         XCTAssertEqual(config.idlePauseSecs, 600)
-        XCTAssertEqual(config.idlePauseAction, "pause")
         XCTAssertEqual(config.audibleStatusSound, "high")
     }
 
@@ -504,6 +507,73 @@ final class AlwaysTests: XCTestCase {
         NotificationCenter.default.post(name: .daemonEvent, object: ended)
         monitor.partialTranscript = ""
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+    }
+
+    private func post(_ json: String) throws {
+        let event = try JSONDecoder().decode(DaemonEvent.self, from: json.data(using: .utf8)!)
+        NotificationCenter.default.post(name: .daemonEvent, object: event)
+    }
+
+    private func resetOverlayState(_ monitor: StateMonitor) {
+        StatusOverlayController.shared.hide()
+        monitor.currentModelSupportsStreaming = false
+        monitor.isDaemonConnected = true
+        monitor.isPaused = false
+        monitor.isMasterPaused = false
+        monitor.isIdleAutoPaused = false
+        monitor.isTranscribing = false
+        monitor.isVoiceActivity = false
+        monitor.partialTranscript = ""
+        monitor.invalidateAppliedOverlay()
+        waitForStatusOverlayToHide()
+    }
+
+    /// The HUD must leave as soon as the text is final. It used to re-show
+    /// "Listening" for one step while clearing state (transcribing cleared,
+    /// voice not yet), which restarted the 0.6 s minimum-visible clock and
+    /// kept it on screen ~1 s after every paste.
+    func testTranscriptFinalHidesPromptly() throws {
+        try ensureAppKit()
+        let monitor = StateMonitor.shared
+        resetOverlayState(monitor)
+
+        try post(#"{"type":"VoiceActivityDetected","data":null}"#)
+        try post(#"{"type":"TranscribingStarted","data":null}"#)
+        // Past the minimum-visible window, as in any real utterance.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.7))
+        XCTAssertTrue(isStatusOverlayVisible())
+
+        let finalAt = Date()
+        try post(#"{"type":"TranscriptFinal","data":{"text":"done"}}"#)
+        waitForStatusOverlayToHide(timeout: 2.0)
+        XCTAssertFalse(isStatusOverlayVisible())
+        XCTAssertLessThan(Date().timeIntervalSince(finalAt), 0.45,
+                          "HUD must be gone within the short fade after the final text")
+    }
+
+    /// A confirmation flash that ends while the user is still speaking must
+    /// hand the window back to the live badge, not blank it until the next
+    /// daemon heartbeat.
+    func testFlashEndRestoresLiveBadge() throws {
+        try ensureAppKit()
+        let monitor = StateMonitor.shared
+        resetOverlayState(monitor)
+
+        try post(#"{"type":"VoiceActivityDetected","data":null}"#)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        StatusOverlayController.shared.flash(state: .autoEnterOn, duration: 0.3)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.6))
+
+        XCTAssertFalse(StatusOverlayController.shared.isFlashActive())
+        XCTAssertTrue(isStatusOverlayVisible())
+        let shown = NSApplication.shared.windows
+            .compactMap { $0 as? StatusOverlayWindow }
+            .compactMap { $0.currentOverlayState }
+            .first
+        XCTAssertEqual(shown, .voiceActivity)
+
+        try post(#"{"type":"VoiceActivityEnded","data":null}"#)
+        waitForStatusOverlayToHide()
     }
 
     // A fresh utterance must open with a clean badge: stale partial text

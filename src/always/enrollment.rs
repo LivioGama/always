@@ -124,6 +124,13 @@ fn record_and_store(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
     broadcaster.voice_enrollment_started(step.as_str());
 
     let recorder_arc = audio::RecChild::get_or_spawn()?;
+    // Start from the moment the user clicked record: the recorder keeps
+    // queueing while dictation is paused (which is when people enroll),
+    // and a voiceprint built from that backlog would include whatever the
+    // mic heard before — other voices, media, silence.
+    if let Some(rec) = recorder_arc.lock().as_mut() {
+        rec.drain_pending();
+    }
     let mut frame_buf = [0u8; FRAME_BYTES];
     let mut sample_buf = [0i16; FRAME_SAMPLES];
     // Collect everything once voice starts (natural pauses included —
