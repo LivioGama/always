@@ -304,7 +304,7 @@ pub fn paste_text(auto_enter: bool) -> Result<()> {
 // ─── Linux paste_text ───────────────────────────────────────────────────
 
 /// Paste on Linux: detect Wayland (ydotool first, xdotool fallback) or X11.
-#[cfg(all(target_os = "linux", not(target_os = "macos")))]
+#[cfg(target_os = "linux")]
 pub fn paste_text(auto_enter: bool) -> Result<()> {
     // Detect Wayland: try ydotool first, fall back to xdotool.
     if is_wayland_session() {
@@ -313,12 +313,6 @@ pub fn paste_text(auto_enter: bool) -> Result<()> {
         paste_x11(auto_enter)?;
     }
     Ok(())
-}
-
-/// Stub for platforms that don't have a default paste_text implementation.
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-pub fn paste_text(_auto_enter: bool) -> Result<()> {
-    anyhow::bail!("paste_text not implemented without the macos feature")
 }
 
 /// Detect whether the current session is Wayland by inspecting
