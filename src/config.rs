@@ -3,6 +3,12 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+/// Return the bundle identifier of the Always daemon process.
+/// Used by platform permission checks (e.g. macOS TCC database lookups).
+pub fn bundle_id() -> &'static str {
+    "com.always"
+}
+
 pub const SUPPORTED_LANGS: &[&str] = &[
     "en", "fr", "es", "de", "it", "pt", "zh", "ja", "ko", "ru", "ar", "nl", "auto",
 ];
@@ -26,10 +32,10 @@ pub fn instance() -> &'static str {
                     v
                 };
             }
-            if let Ok(exe) = std::env::current_exe() {
-                if exe.to_string_lossy().contains("Always Dev.app") {
-                    return "dev".to_string();
-                }
+            if let Ok(exe) = std::env::current_exe()
+                && exe.to_string_lossy().contains("Always Dev.app")
+            {
+                return "dev".to_string();
             }
             "prod".to_string()
         })

@@ -63,8 +63,6 @@ pub fn mic_available() -> MicStatus {
 /// Probe microphone availability on macOS via Core Audio.
 #[cfg(target_os = "macos")]
 fn probe_mic_macos() -> MicStatus {
-    use std::ffi::c_void;
-
     // Core Audio uses a simple property query: enumerate device property
     // kAudioHardwarePropertyDevices.  If we get at least one device,
     // the subsystem is alive; we don't need a real capture handle.
@@ -231,8 +229,6 @@ pub fn input_monitoring_granted() -> bool {
 /// to create a `CGEventTap`.
 #[cfg(target_os = "macos")]
 fn input_monitoring_granted_macos() -> bool {
-    use std::ffi::c_void;
-
     // Check via CGPreflightListenEventAccess (cheap, never prompts).
     unsafe extern "C" {
         fn CGPreflightListenEventAccess() -> bool;

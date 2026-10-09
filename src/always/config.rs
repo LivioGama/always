@@ -261,12 +261,6 @@ pub struct AlwaysConfig {
     pub mic_conflict_exclusion_bundles: Vec<String>,
 }
 
-/// Return the bundle identifier of the Always daemon process.
-/// Used by platform permission checks (e.g. macOS TCC database lookups).
-pub fn bundle_id() -> &'static str {
-    "com.always"
-}
-
 #[derive(Debug, Clone)]
 pub struct VocabConfig {
     pub file_patterns: Vec<String>,
