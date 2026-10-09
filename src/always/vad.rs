@@ -938,10 +938,10 @@ fn record_with_local_vad(
             break;
         }
 
-    let chunks = frame_buf.as_chunks::<2>();
-    for (i, chunk) in chunks.0.iter().enumerate() {
-        sample_buf[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
-    }
+        let chunks = frame_buf.as_chunks::<2>();
+        for (i, chunk) in chunks.0.iter().enumerate() {
+            sample_buf[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
+        }
         let samples = &sample_buf[..];
 
         // One inference per 30ms frame. vad-rs requires exactly 480 samples
