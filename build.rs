@@ -210,9 +210,39 @@ fn build_apple_stt_bridge() {
     });
 
     let speech_framework = Path::new(&sdk_path).join("System/Library/Frameworks/Speech.framework");
-    let source_file = if speech_framework.exists() {
+
+    // SpeechTranscriber, SpeechAnalyzer, etc. require macOS 15+.
+    // CI runners (macOS 14) have Speech.framework but not these types.
+    let sdk_version_output = Command::new("xcrun")
+        .args(["--show-sdk-version"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|v| v.trim().to_string());
+
+    let has_newer_speech_types = sdk_version_output
+        .as_deref()
+        .map(|v| {
+            let major: u32 = v
+                .split('.')
+                .next()
+                .and_then(|m| m.parse().ok())
+                .unwrap_or(0);
+            major >= 15
+        })
+        .unwrap_or(false);
+
+    let force_stub = std::env::var("ALWAYS_FORCE_STT_STUB").as_deref() == Ok("1");
+
+    let source_file = if has_newer_speech_types && speech_framework.exists() && !force_stub {
         real_swift_path.to_str().unwrap()
     } else {
+        if let Some(ref v) = sdk_version_output {
+            println!(
+                "cargo:warning=SDK version {} detected; SpeechTranscriber requires macOS 15+.",
+                v
+            );
+        }
         stub_swift_path.to_str().unwrap()
     };
 
