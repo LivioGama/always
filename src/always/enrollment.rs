@@ -174,7 +174,8 @@ fn record_and_store(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
         if read < FRAME_BYTES {
             continue;
         }
-        for (i, chunk) in frame_buf.chunks_exact(2).enumerate() {
+        let chunks = frame_buf.as_chunks::<2>();
+        for (i, chunk) in chunks.0.iter().enumerate() {
             sample_buf[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
         }
 

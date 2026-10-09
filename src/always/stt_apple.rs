@@ -154,12 +154,14 @@ fn normalize_wav_samples(data: &mut [u8]) {
     let Some(samples_start) = wav_sample_offset(data) else {
         return;
     };
-    if samples_start >= data.len() || (data.len() - samples_start) % 2 != 0 {
+    let remaining = data.len().saturating_sub(samples_start);
+    if remaining % 2 != 0 {
         return;
     }
-    let sample_bytes = &data[samples_start..];
+    let sample_bytes = &data[samples_start..samples_start + remaining];
     let mut max_abs = 0i32;
-    for chunk in sample_bytes.chunks_exact(2) {
+    let chunks = sample_bytes.chunks_exact(2);
+    for chunk in chunks {
         let sample = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
         let abs = sample.unsigned_abs() as i32;
         if abs > max_abs {
@@ -176,8 +178,9 @@ fn normalize_wav_samples(data: &mut [u8]) {
     // Cap gain at 4x — if the audio needs more, it's probably noise.
     let gain = gain.min(4.0);
 
-    let sample_bytes = &mut data[samples_start..];
-    for chunk in sample_bytes.chunks_exact_mut(2) {
+    let sample_bytes = &mut data[samples_start..samples_start + remaining];
+    let chunks = sample_bytes.chunks_exact_mut(2);
+    for chunk in chunks {
         let sample = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
         let scaled = (sample as f32 * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         let bytes = scaled.to_le_bytes();

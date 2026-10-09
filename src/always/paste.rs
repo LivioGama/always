@@ -374,6 +374,7 @@ fn paste_x11(auto_enter: bool) -> Result<()> {
 }
 
 /// Check whether an executable is available on PATH.
+#[allow(dead_code)]
 fn which_present(name: &str) -> bool {
     std::process::Command::new("which")
         .arg(name)

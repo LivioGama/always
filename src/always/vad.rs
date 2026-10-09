@@ -342,7 +342,8 @@ pub fn poll_speech_energy(cfg: &AlwaysConfig) -> Result<bool> {
         .peek_newest_frame()
         .ok_or_else(|| anyhow::anyhow!("No audio frame available"))?;
     let mut sample_buf = [0i16; FRAME_SAMPLES];
-    for (i, chunk) in frame_buf.chunks_exact(2).enumerate() {
+    let chunks = frame_buf.as_chunks::<2>();
+    for (i, chunk) in chunks.0.iter().enumerate() {
         sample_buf[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
     }
     let energy = normalized_energy(&sample_buf[..]);
@@ -937,9 +938,10 @@ fn record_with_local_vad(
             break;
         }
 
-        for (i, chunk) in frame_buf.chunks_exact(2).enumerate() {
-            sample_buf[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
-        }
+    let chunks = frame_buf.as_chunks::<2>();
+    for (i, chunk) in chunks.0.iter().enumerate() {
+        sample_buf[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
+    }
         let samples = &sample_buf[..];
 
         // One inference per 30ms frame. vad-rs requires exactly 480 samples

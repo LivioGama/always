@@ -9,6 +9,7 @@ pub struct MicrophoneMonitor {
     /// User-configurable bundle IDs excluded from mic-conflict
     /// detection (e.g. screen recorders). Checked in addition to
     /// the hardcoded system/metering exclusions.
+    #[allow(dead_code)]
     coexisting_bundles: Vec<String>,
 }
 
@@ -393,7 +394,7 @@ mod coreaudio_probe {
             }
             let cf_key = CFStringCreateWithCString(
                 std::ptr::null(),
-                b"CFBundleDisplayName\0".as_ptr(),
+                std::ffi::CStr::from_bytes_with_nul_unchecked(b"CFBundleDisplayName\0").as_ptr(),
                 CF_STRING_ENCODING_UTF8,
             );
             let mut value = CFBundleGetValueForInfoDictionaryKey(bundle, cf_key);
@@ -402,7 +403,7 @@ mod coreaudio_probe {
             if value.is_null() {
                 let cf_key2 = CFStringCreateWithCString(
                     std::ptr::null(),
-                    b"CFBundleName\0".as_ptr(),
+                    std::ffi::CStr::from_bytes_with_nul_unchecked(b"CFBundleName\0").as_ptr(),
                     CF_STRING_ENCODING_UTF8,
                 );
                 value = CFBundleGetValueForInfoDictionaryKey(bundle, cf_key2);
@@ -714,7 +715,7 @@ impl MicrophoneMonitor {
 
         // Try pactl first (PulseAudio)
         let output = Command::new("pactl")
-            .args(&["list", "source-outputs"])
+            .args(["list", "source-outputs"])
             .output();
 
         match output {
@@ -743,7 +744,7 @@ impl MicrophoneMonitor {
         use std::process::Command;
 
         let output = Command::new("ps")
-            .args(&["-axo", "comm"])
+            .args(["-axo", "comm"])
             .output()
             .context("Failed to run ps command")?;
 
@@ -784,7 +785,7 @@ impl MicrophoneMonitor {
 
         // Try to get detailed info from PulseAudio
         let output = Command::new("pactl")
-            .args(&["list", "source-outputs"])
+            .args(["list", "source-outputs"])
             .output();
 
         match output {
@@ -792,12 +793,11 @@ impl MicrophoneMonitor {
                 let output_str = String::from_utf8_lossy(&result.stdout);
                 // Parse application names from PulseAudio output
                 for line in output_str.lines() {
-                    if line.trim().starts_with("application.name = ") {
-                        if let Some(app_name) = line.split('"').nth(1) {
-                            if !Self::is_own_recorder_app(app_name) {
-                                users.push(app_name.to_string());
-                            }
-                        }
+                    if line.trim().starts_with("application.name = ")
+                        && let Some(app_name) = line.split('"').nth(1)
+                        && !Self::is_own_recorder_app(app_name)
+                    {
+                        users.push(app_name.to_string());
                     }
                 }
             }
@@ -829,7 +829,7 @@ impl MicrophoneMonitor {
         let mut users = Vec::new();
 
         let output = Command::new("ps")
-            .args(&["-axo", "comm"])
+            .args(["-axo", "comm"])
             .output()
             .context("Failed to run ps command")?;
 
