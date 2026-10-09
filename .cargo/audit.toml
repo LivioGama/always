@@ -1,0 +1,7 @@
+# cargo-audit config — mirrors deny.toml advisories section.
+[advisories]
+ignore = [
+    # Transitive through keyring 2.3's Linux secret-service stack.
+    "RUSTSEC-2024-0384", # instant unmaintained
+    "RUSTSEC-2024-0388", # derivative unmaintained
+]
