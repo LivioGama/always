@@ -49,8 +49,8 @@ pub fn is_common_word(word: &str) -> bool {
             "chain", "link", "ring", "stack", "queue", "stream", "flow", "source", "sink", "state",
             "event", "signal", "pipe", "hook", "flag", "guard", "lock", "key", "token", "seed",
             "salt", "hash", "digest", "cipher", "core", "cell", // Communication
-            "mail", "post", "chat", "call", "text", "voice", "video", "meeting", "channel", "topic",
-            "thread", "reply", "share", "link", "feed", "story", "post", "blog",
+            "mail", "post", "chat", "call", "text", "voice", "video", "meeting", "channel",
+            "topic", "thread", "reply", "share", "link", "feed", "story", "post", "blog",
             // Products that are also common words
             "slack", "zoom", "teams", "page", "notion", "form", "base", "camp", "note", "suite",
             "office", "word", "excel", "number", "point", "access", "power", "contact", "calendar",
@@ -58,8 +58,8 @@ pub fn is_common_word(word: &str) -> bool {
             "good", "bad", "big", "small", "fast", "slow", "high", "low", "new", "old", "hot",
             "cold", "warm", "cool", "bright", "dark", "light", "heavy", "full", "empty", "open",
             "close", "sharp", "flat", "round", "square", "long", "short", // Colors
-            "red", "blue", "green", "yellow", "orange", "purple", "black", "white", "gray", "brown",
-            "pink", "gold", "silver", // Numbers (spelled out)
+            "red", "blue", "green", "yellow", "orange", "purple", "black", "white", "gray",
+            "brown", "pink", "gold", "silver", // Numbers (spelled out)
             "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "first",
             "second", "third", "last", "next", "zero",
             // Common short words that overlap with tech
