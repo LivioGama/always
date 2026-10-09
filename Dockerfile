@@ -15,10 +15,11 @@
 
 FROM rust:1.88.0-slim AS builder
 
-# ort (ONNX Runtime) vendors C++ code that defaults to C++14; older glibc
-# on Debian bullseye/slim doesn't support C++14 `>>` as template delimiter,
-# so specify explicitly.
+# The ort (ONNX Runtime) crate vendors C++ code. Force explicit C++14 standard
+# so the vendored code does not resolve C23 glibc symbols (__isoc23_*) that
+# are not available on Debian bookworm's glibc 2.36.
 ENV CXXFLAGS=-std=c++14
+ENV CXX=g++
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
