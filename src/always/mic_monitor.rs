@@ -394,8 +394,7 @@ mod coreaudio_probe {
             }
             let cf_key = CFStringCreateWithCString(
                 std::ptr::null(),
-                std::ffi::CStr::from_bytes_with_nul_unchecked(b"CFBundleDisplayName\0").as_ptr()
-                    as *const u8,
+                c"CFBundleDisplayName".as_ptr() as *const u8,
                 CF_STRING_ENCODING_UTF8,
             );
             let mut value = CFBundleGetValueForInfoDictionaryKey(bundle, cf_key);
@@ -404,8 +403,7 @@ mod coreaudio_probe {
             if value.is_null() {
                 let cf_key2 = CFStringCreateWithCString(
                     std::ptr::null(),
-                    std::ffi::CStr::from_bytes_with_nul_unchecked(b"CFBundleName\0").as_ptr()
-                        as *const u8,
+                    c"CFBundleName".as_ptr() as *const u8,
                     CF_STRING_ENCODING_UTF8,
                 );
                 value = CFBundleGetValueForInfoDictionaryKey(bundle, cf_key2);
