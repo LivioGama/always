@@ -325,44 +325,28 @@ pub fn record_utterance(
 
 /// Single-frame energy probe used while idle-paused so the user can wake
 /// listening by speaking without manually lifting pause.
-#[cfg(feature = "macos")]
+///
+/// Uses the cpal audio path on all platforms (via `audio::get_or_spawn()`).
+/// Peeks at the newest frame from the ring buffer without consuming it,
+/// so subsequent `record_utterance` calls are not affected.
 pub fn poll_speech_energy(cfg: &AlwaysConfig) -> Result<bool> {
-    let recorder_arc = audio::RecChild::get_or_spawn()?;
-    let mut frame_buf = [0u8; FRAME_BYTES];
-    // INVARIANT (concurrency): the read waits under GLOBAL_RECORDER (see
-    // the matching note in `record_with_local_vad`). This idle wake-on-voice
-    // poll must run on the same single thread as `record_utterance`; running
-    // them concurrently risks serializing on — or, if `rec` wedges, deadlocking
-    // behind — the global recorder lock.
-    //
-    // Newest frame, not the next queued one: this probe runs while capture
-    // is gated and nobody consumes the recorder's queue, so the oldest
-    // queued frame can be many seconds old. The question is whether the
-    // user is speaking now.
-    let read = {
-        let mut recorder = recorder_arc.lock();
-        let rec = recorder
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Audio recorder not available"))?;
-        rec.read_newest_frame(&mut frame_buf)?
-    };
-    if read < FRAME_BYTES {
-        return Ok(false);
-    }
+    let source_arc = audio::get_or_spawn()?;
+    // Peeking at the newest frame: this probe runs while capture is gated
+    // and nobody consumes the recorder's queue, so the oldest queued frame
+    // can be many seconds old. The question is whether the user is speaking now.
+    let guard = source_arc.lock();
+    let rec = guard
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Audio recorder not available"))?;
+    let frame_buf = rec
+        .peek_newest_frame()
+        .ok_or_else(|| anyhow::anyhow!("No audio frame available"))?;
     let mut sample_buf = [0i16; FRAME_SAMPLES];
     for (i, chunk) in frame_buf.chunks_exact(2).enumerate() {
         sample_buf[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
     }
     let energy = normalized_energy(&sample_buf[..]);
     Ok(energy >= voice_activity_energy_threshold(cfg))
-}
-
-/// Non-macOS stub.
-#[cfg(not(feature = "macos"))]
-pub fn poll_speech_energy(_cfg: &AlwaysConfig) -> Result<bool> {
-    Err(anyhow::anyhow!(
-        "Audio capture not supported on this platform"
-    ))
 }
 
 /// Speech shorter than this is treated as a "short utterance" and gets
@@ -693,7 +677,7 @@ fn record_with_local_vad(
     let mut prob_history: VecDeque<f32> = VecDeque::with_capacity(smoothing_window);
 
     // Use persistent recorder to avoid process spawning overhead
-    let recorder_arc = audio::RecChild::get_or_spawn()?;
+    let recorder_arc = audio::get_or_spawn()?;
     let mut frame_buf = [0u8; FRAME_BYTES];
     // Pre-allocate ~4 seconds of audio (16000 Hz * 4s = 64000 samples) to avoid Vec growth
     let mut speech_samples: Vec<i16> = Vec::with_capacity(64_000);
@@ -910,7 +894,7 @@ fn record_with_local_vad(
         // event-loop thread; the reader thread only fills the queue.
         let read = {
             let mut recorder = recorder_arc.lock();
-            let Some(rec) = recorder.as_mut() else {
+            let Some(ref mut rec) = *recorder else {
                 return Err(anyhow::anyhow!("Audio recorder not available"));
             };
             let read = rec.read_frame(&mut frame_buf);
@@ -920,11 +904,8 @@ fn record_with_local_vad(
             match read {
                 Ok(n) => n,
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    // Wedged recorder (alive but producing neither bytes
-                    // nor EOF): evict it like the EOF case below — Drop
-                    // kills and reaps the child — so the next capture
-                    // cycle respawns fresh instead of wedging forever.
-                    // Any partial audio flows through the post-loop path.
+                    // Closed the ring so the capture thread stops.
+                    // Respawn a fresh source on the next cycle.
                     if recorder.take().is_some() {
                         tracing::warn!("rec_timeout_recorder_reset");
                     }
@@ -935,20 +916,10 @@ fn record_with_local_vad(
         };
 
         if read == 0 {
-            // True EOF on rec's stdout: the recorder died (USB
-            // re-enumeration, mic unplug, TCC revoke, or `rec` exit).
-            // `read_frame` already logged `rec_eof_on_read_frame`. The
-            // danger is the *dead* RecChild lingering in the global slot:
-            // until the next `get_or_spawn` notices it via `try_wait`, every
-            // caller keeps reading immediate EOF from the corpse, so a
-            // transient re-enumeration looks like permanent death. Evict it
-            // now — `take()` drops the RecChild, whose Drop impl `kill()`s and
-            // `wait()`s the child — so the NEXT capture cycle's `get_or_spawn`
-            // respawns a fresh recorder and capture recovers. We deliberately
-            // do NOT attempt an in-loop respawn/retry of the current utterance:
-            // the safe, well-contained fix is to guarantee the dead child can't
-            // wedge subsequent cycles. Any partial audio captured so far flows
-            // through the post-loop path below exactly as on any other break.
+            // True EOF: the audio device disconnected, permissions revoked,
+            // or the recorder exited. The danger is the dead source lingering
+            // in the global slot — until the next `get_or_spawn` it returns
+            // immediate EOF. Evict it now so the next cycle respawns fresh.
             {
                 let mut recorder = recorder_arc.lock();
                 if recorder.take().is_some() {
@@ -2702,7 +2673,10 @@ mod tests {
         assert!(cadence.min_new_samples >= 8_000);
 
         // Pref OFF (and no consume/streaming) → no live preview at all.
-        assert_eq!(super::preview_cadence(false, false, false, false, false), None);
+        assert_eq!(
+            super::preview_cadence(false, false, false, false, false),
+            None
+        );
     }
 
     /// A LOCAL streaming engine (Nemotron) must never get the 200ms cloud

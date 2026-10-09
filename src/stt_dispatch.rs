@@ -316,7 +316,9 @@ impl FromStr for TranscriberBackendChoice {
                 model_id: rest.to_string(),
             });
         }
-        anyhow::bail!("invalid transcriber backend: {s} (expected 'groq', 'apple', or 'local:<id>')");
+        anyhow::bail!(
+            "invalid transcriber backend: {s} (expected 'groq', 'apple', or 'local:<id>')"
+        );
     }
 }
 

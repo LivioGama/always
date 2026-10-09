@@ -152,7 +152,7 @@ mod coreaudio_probe {
         // LaunchServices: resolve a bundle id to the installed .app URL.
         fn LSCopyApplicationURLsForBundleIdentifier(
             bundle_id: *const c_void, // CFString
-            error: *mut *mut c_void,   // CFErrorRef *
+            error: *mut *mut c_void,  // CFErrorRef *
         ) -> *const c_void; // CFArrayRef
     }
 
@@ -171,10 +171,7 @@ mod coreaudio_probe {
             c_str: *const u8,
             encoding: u32,
         ) -> *const c_void;
-        fn CFBundleCreate(
-            alloc: *const c_void,
-            bundle_url: *const c_void,
-        ) -> *const c_void;
+        fn CFBundleCreate(alloc: *const c_void, bundle_url: *const c_void) -> *const c_void;
         fn CFBundleGetValueForInfoDictionaryKey(
             bundle: *const c_void,
             key: *const c_void, // CFString
@@ -370,12 +367,20 @@ mod coreaudio_probe {
                 return None;
             }
             let mut path_buf = [0u8; 4096];
-            let ok = CFURLGetFileSystemRepresentation(url, 1, path_buf.as_mut_ptr(), path_buf.len() as isize);
+            let ok = CFURLGetFileSystemRepresentation(
+                url,
+                1,
+                path_buf.as_mut_ptr(),
+                path_buf.len() as isize,
+            );
             CFRelease(urls);
             if ok == 0 {
                 return None;
             }
-            let path_end = path_buf.iter().position(|&b| b == 0).unwrap_or(path_buf.len());
+            let path_end = path_buf
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(path_buf.len());
             let app_url = String::from_utf8_lossy(&path_buf[..path_end]).into_owned();
 
             // Create a CFBundle from the .app URL and read the display
@@ -430,17 +435,18 @@ mod coreaudio_probe {
                 1, // .app is a directory
             )
         };
-        if url.is_null() {
-            None
-        } else {
-            Some(url)
-        }
+        if url.is_null() { None } else { Some(url) }
     }
 
     unsafe fn cf_string_to_string(cf: *const c_void) -> Option<String> {
         let mut buf = [0u8; 512];
         let ok = unsafe {
-            CFStringGetCString(cf, buf.as_mut_ptr(), buf.len() as isize, CF_STRING_ENCODING_UTF8)
+            CFStringGetCString(
+                cf,
+                buf.as_mut_ptr(),
+                buf.len() as isize,
+                CF_STRING_ENCODING_UTF8,
+            )
         };
         if ok == 0 {
             return None;
@@ -503,9 +509,7 @@ mod coreaudio_probe {
                     || METERING_ONLY_BUNDLES
                         .iter()
                         .any(|s| s.eq_ignore_ascii_case(b))
-                    || coexisting_bundles
-                        .iter()
-                        .any(|s| s.eq_ignore_ascii_case(b)))
+                    || coexisting_bundles.iter().any(|s| s.eq_ignore_ascii_case(b)))
             {
                 continue;
             }
@@ -544,8 +548,8 @@ mod coreaudio_probe {
                     .iter()
                     .map(|s| s.to_string())
                     .collect();
-            let captors = other_input_captors(&default_exclusions)
-                .expect("process-object probe failed");
+            let captors =
+                other_input_captors(&default_exclusions).expect("process-object probe failed");
             for label in &captors {
                 assert!(
                     !SYSTEM_LISTENER_BUNDLES
@@ -900,8 +904,7 @@ mod tests {
 
         // One warm probe so one-time CoreAudio/LaunchServices framework
         // init doesn't count against the growth budget.
-        coreaudio_probe::other_input_captors(&default_exclusions)
-            .expect("coreaudio probe failed");
+        coreaudio_probe::other_input_captors(&default_exclusions).expect("coreaudio probe failed");
 
         let peak_rss_bytes = || -> i64 {
             let mut ru = std::mem::MaybeUninit::<libc::rusage>::uninit();

@@ -259,7 +259,9 @@ fn main() -> Result<()> {
             OverlayAction::Run => overlay_integration::run(),
         },
         None => {
-            eprintln!("always: the first speech-to-text software designed to be always on and free your hands from the affordance");
+            eprintln!(
+                "always: the first speech-to-text software designed to be always on and free your hands from the affordance"
+            );
             eprintln!("Usage: always <COMMAND>");
             eprintln!();
             eprintln!("Commands:");
@@ -449,10 +451,13 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                 "postprocess_provider: {}",
                 prefs.postprocess_provider.as_deref().unwrap_or("groq")
             );
+            #[cfg(target_os = "macos")]
             println!(
                 "apple_intelligence_available: {}",
                 always::always::apple_intelligence::check_availability()
             );
+            #[cfg(not(target_os = "macos"))]
+            println!("apple_intelligence_available: false (only supported on macOS)");
             println!(
                 "per_app_settings_json: {}",
                 prefs.per_app_settings_json.as_deref().unwrap_or("{}")
@@ -484,9 +489,10 @@ fn handle_config(action: ConfigAction) -> Result<()> {
             );
             println!(
                 "mic_conflict_exclusion_bundles: {}",
-                prefs.mic_conflict_exclusion_bundles.as_deref().unwrap_or(
-                    r#"["net.telestream.screenflow10","pl.maketheweb.cleanshotx"]"#
-                )
+                prefs
+                    .mic_conflict_exclusion_bundles
+                    .as_deref()
+                    .unwrap_or(r#"["net.telestream.screenflow10","pl.maketheweb.cleanshotx"]"#)
             );
         }
         ConfigAction::Set { key, value } => {

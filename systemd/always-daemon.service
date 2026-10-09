@@ -1,23 +1,62 @@
+# always-daemon.service
+#
+# Systemd user service for the Always dictation daemon.
+#
+# Installation:
+#   1. Build the release binary:
+#        cd /path/to/always && cargo build --release
+#   2. Copy the binary to your preferred location:
+#        sudo cp target/release/always /usr/local/bin/always
+#   3. Install the service file:
+#        cp systemd/always-daemon.service ~/.config/systemd/user/
+#   4. Enable and start:
+#        systemctl --user daemon-reload
+#        systemctl --user enable --now always-daemon.service
+#
+# To run as a system-wide service (root), install to /etc/systemd/system/
+# and use `systemctl enable --now always-daemon.service` (no --user).
+
 [Unit]
-Description=Always Voice-to-Text Daemon
-After=network.target sound.target
+Description=Always — always-on voice dictation daemon
+Documentation=https://github.com/LivioGama/always
+After=graphical-session.target pipewire.service pulseaudio.service bluetooth.target
+Wants=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/always run
+ExecStart=/usr/local/bin/always daemon
 Restart=on-failure
 RestartSec=5
+
+# Environment
 Environment=RUST_LOG=info
+Environment=ALWAYS_HOME=%h/.local/share/always
+Environment=XDG_CONFIG_HOME=%h/.config
 
 # Security hardening
-NoNewPrivileges=true
-PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/always
+PrivateTmp=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
 
-# Audio access
-DeviceAllow=/dev/snd rw
+# Allow access to input devices (keyboard listen) and audio
+# DeviceAllow=keyboard=rwm
+# DeviceAllow=audio=rwm
+
+# Resource limits
+LimitNPROC=1
+LimitNOFILE=1024
+MemoryMax=256M
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=always
 
 [Install]
 WantedBy=default.target

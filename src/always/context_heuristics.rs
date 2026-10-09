@@ -32,40 +32,110 @@ pub enum HeuristicDecision {
 /// Verbs that strongly suggest a product/person name when followed
 /// by the ambiguous word. "ask cloud" → "ask Claude".
 const PRODUCT_CONTEXT_VERBS: &[&str] = &[
-    "ask", "asks", "asked", "asking",
-    "tell", "tells", "told", "telling",
-    "prompt", "prompts", "prompted", "prompting",
-    "query", "queries", "queried",
-    "call", "calls", "called", "calling",
-    "message", "messages", "messaged",
-    "email", "emailed", "emails",
-    "ping", "pings", "pinged",
-    "mention", "mentions", "mentioned",
-    "thank", "thanks", "thanked",
-    "greet", "greets", "greeted",
-    "hear", "hears", "heard",
-    "love", "loves", "loved",
-    "hate", "hates",
-    "like", "likes", "liked",
+    "ask",
+    "asks",
+    "asked",
+    "asking",
+    "tell",
+    "tells",
+    "told",
+    "telling",
+    "prompt",
+    "prompts",
+    "prompted",
+    "prompting",
+    "query",
+    "queries",
+    "queried",
+    "call",
+    "calls",
+    "called",
+    "calling",
+    "message",
+    "messages",
+    "messaged",
+    "email",
+    "emailed",
+    "emails",
+    "ping",
+    "pings",
+    "pinged",
+    "mention",
+    "mentions",
+    "mentioned",
+    "thank",
+    "thanks",
+    "thanked",
+    "greet",
+    "greets",
+    "greeted",
+    "hear",
+    "hears",
+    "heard",
+    "love",
+    "loves",
+    "loved",
+    "hate",
+    "hates",
+    "like",
+    "likes",
+    "liked",
 ];
 
 /// Prepositions/articles that strongly suggest the ordinary meaning.
 /// "deploy to the cloud" → keep "cloud".
 const ORDINARY_CONTEXT_PRECEDING: &[&str] = &[
-    "to", "to the", "in the", "on the", "into the", "onto the",
-    "via the", "through the", "from the", "over the",
-    "a", "an", "the", "my", "your", "our", "their",
-    "this", "that", "some", "any", "every",
+    "to",
+    "to the",
+    "in the",
+    "on the",
+    "into the",
+    "onto the",
+    "via the",
+    "through the",
+    "from the",
+    "over the",
+    "a",
+    "an",
+    "the",
+    "my",
+    "your",
+    "our",
+    "their",
+    "this",
+    "that",
+    "some",
+    "any",
+    "every",
 ];
 
 /// Words that follow the ambiguous word and suggest ordinary meaning.
 /// "cloud storage", "cloud computing", "cloud infrastructure".
 const ORDINARY_CONTEXT_FOLLOWING: &[&str] = &[
-    "storage", "computing", "infrastructure", "services", "service",
-    "provider", "platform", "server", "servers", "deployment",
-    "hosting", "account", "instance", "cluster", "database",
-    "function", "functions", "lambda", "bucket", "cdn",
-    "sync", "backup", "backups", "archive",
+    "storage",
+    "computing",
+    "infrastructure",
+    "services",
+    "service",
+    "provider",
+    "platform",
+    "server",
+    "servers",
+    "deployment",
+    "hosting",
+    "account",
+    "instance",
+    "cluster",
+    "database",
+    "function",
+    "functions",
+    "lambda",
+    "bucket",
+    "cdn",
+    "sync",
+    "backup",
+    "backups",
+    "archive",
 ];
 
 /// Check whether the context around `word` in `sentence` suggests
@@ -82,9 +152,11 @@ pub fn decide(word: &str, sentence: &str) -> HeuristicDecision {
     }
 
     let word_lower = word.to_lowercase();
-    let word_idx = tokens
-        .iter()
-        .position(|t| t.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase() == word_lower);
+    let word_idx = tokens.iter().position(|t| {
+        t.trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase()
+            == word_lower
+    });
 
     let Some(idx) = word_idx else {
         return HeuristicDecision::Skip;
@@ -126,7 +198,8 @@ pub fn decide(word: &str, sentence: &str) -> HeuristicDecision {
 }
 
 fn strip_punct(s: &str) -> String {
-    s.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()
+    s.trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase()
 }
 
 #[cfg(test)]
@@ -135,7 +208,10 @@ mod tests {
 
     #[test]
     fn ask_cloud_suggests_product() {
-        assert_eq!(decide("cloud", "ask cloud to fix it"), HeuristicDecision::Apply);
+        assert_eq!(
+            decide("cloud", "ask cloud to fix it"),
+            HeuristicDecision::Apply
+        );
     }
 
     #[test]

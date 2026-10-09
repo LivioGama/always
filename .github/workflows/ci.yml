@@ -10,13 +10,18 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+
+# ─── PR checks ────────────────────────────────────────────────────────────────
+
 jobs:
-  rust:
-    name: Rust
+  rust-checks:
+    name: Rust checks
     runs-on: macos-14
     env:
-      # kaldi-fbank-rust-kautism bundles C++14 code; newer runners otherwise
-      # invoke Clang with its legacy default and reject `>>`, `{}`, and make_unique.
+      # kaldi-fbank-rust-kautism bundles C++14 code; newer runners invoke
+      # Clang with its legacy default and reject `>>`, `{}`, and make_unique.
       CXXFLAGS: -std=c++14
     steps:
       - uses: actions/checkout@v4
@@ -26,44 +31,46 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          shared-keys: |
+            rust-checks
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-
+      # ── Formatting ──────────────────────────────────────────────────────────
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all -- --check
 
-      - name: Run clippy
-        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      # ── Clippy ──────────────────────────────────────────────────────────────
+      - name: Clippy (default features)
+        run: cargo clippy --all-targets --locked -- -D warnings
 
-      - name: Run tests
-        run: cargo test --locked --all-targets
+      - name: Clippy (no-default-features + linux)
+        run: cargo clippy --no-default-features --features linux --all-targets --locked -- -D warnings
 
-      # `local-stt` (Whisper/Parakeet/Moonshine/.../Nemotron engines) isn't in
-      # default features, so the step above never compiles or runs it — a
-      # broken local-model code path would ship silently. This doesn't
-      # download the multi-GB model weights any real transcription needs;
-      # it only compiles the engine code and runs the plumbing/pure-logic
-      # tests that don't need a loaded model.
-      - name: Run tests (local-stt feature)
-        run: cargo test --locked --all-targets --features local-stt
+      - name: Clippy (overlay feature)
+        run: cargo clippy --all-targets --features overlay --locked -- -D warnings
 
+      # ── Tests ───────────────────────────────────────────────────────────────
+      - name: Tests (default features)
+        run: cargo test --locked --all-targets -- --skip macos_overlay
+
+      - name: Tests (no-default-features + linux)
+        run: cargo test --no-default-features --features linux --locked --lib --bins -- --skip macos
+
+      - name: Tests (overlay feature)
+        run: cargo test --locked --features overlay --lib --bins -- --skip macos
+
+      # `local-stt` isn't in default features; compiling the engine code (no
+      # model weights download) catches broken plumbing / pure-logic tests.
+      - name: Tests (local-stt)
+        run: cargo test --locked --features local-stt --lib --bins -- --skip macos
+
+      # ── Coverage ────────────────────────────────────────────────────────────
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Generate coverage (lcov)
         run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
@@ -77,50 +84,85 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-      - name: Install cargo-audit / deny / machete
+      # ── Security ────────────────────────────────────────────────────────────
+      - name: Install cargo-audit, cargo-deny, cargo-machete
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit,cargo-deny,cargo-machete
 
-      - name: Security audit
-        run: >
-          cargo audit --deny warnings
-          --ignore RUSTSEC-2024-0384
+      - name: cargo audit
+        # RUSTSEC-2024-0384 / 0388 suppressed — see deny.toml comments.
+        run: cargo audit --deny warnings \
+          --ignore RUSTSEC-2024-0384 \
           --ignore RUSTSEC-2024-0388
 
-      - name: Supply-chain (cargo-deny)
-        run: cargo deny --all-features check
+      - name: cargo deny (supply-chain gate)
+        run: cargo deny check --all-features
 
-      - name: Unused deps (cargo-machete)
+      - name: cargo machete (unused deps)
         run: cargo machete
 
-  linux-build:
-    name: Linux build (CLI-only)
-    runs-on: ubuntu-latest
+  # ─── Tauri / GUI check ────────────────────────────────────────────────────
+
+  tauri-check:
+    name: Tauri GUI (check)
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install ALSA + SQLite headers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libasound2-dev libsqlite3-dev pkg-config
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-      - name: Cache cargo build
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-keys: |
+            tauri-check
+
+      - name: Cache npm dependencies
         uses: actions/cache@v4
         with:
-          path: target
-          key: ${{ runner.os }}-linux-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          path: always-gui/node_modules
+          key: ${{ runner.os }}-npm-${{ hashFiles('always-gui/package-lock.json', 'always-gui/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
 
-      - name: Build with --features linux
-        run: cargo build --no-default-features --features linux --locked
+      - name: Install frontend deps
+        working-directory: always-gui
+        run: npm ci --ignore-scripts || npm install --ignore-scripts
 
-      - name: Run audio-free unit tests
-        # Skip tests that touch macOS-only paths.
-        run: cargo test --no-default-features --features linux --locked --lib --bins -- --skip macos
+      # Tauri v2 CLI — check-only (no binary bundling).  Builds the Vite
+      # frontend so we catch TS/TSX errors, missing imports, etc.
+      - name: TypeScript check (always-gui)
+        working-directory: always-gui
+        run: npx tsc --noEmit
+
+  # ─── Docker (Linux CLI build + test) ─────────────────────────────────────
+
+  docker-linux:
+    name: Docker (Linux build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build the Dockerfile that lives in the repo root.
+      - name: Build Docker image
+        run: docker build -f Dockerfile -t always-ci .
+
+      # Smoke-test: run the compiled binary.
+      - name: Run binary smoke test
+        run: docker run --rm always-ci always --help
+
+      # Run the same test suite that the macOS rust-checks job does (but
+      # against the linux-compiled binary / no-default-features).
+      - name: Run tests (Docker)
+        run: docker run --rm always-ci cargo test --no-default-features --features linux --locked --lib --bins -- --skip macos
+
+  # ─── Swift (existing) ────────────────────────────────────────────────────
 
   swift:
     name: Swift

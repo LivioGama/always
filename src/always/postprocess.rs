@@ -244,13 +244,16 @@ impl PostProcessor {
         .await
         .context("Apple Intelligence task panicked")?;
 
-        let raw_corrected = result
-            .map_err(|e| anyhow::anyhow!("Apple Intelligence call failed: {e}"))?;
+        let raw_corrected =
+            result.map_err(|e| anyhow::anyhow!("Apple Intelligence call failed: {e}"))?;
         let corrected = sanitize_corrected_text(transcript, &raw_corrected)
             .filter(|cleaned| {
                 let echoed = context.is_some_and(|ctx| echoes_context(ctx, cleaned));
                 if echoed {
-                    tracing::warn!(stage = "grammar_correction", "rejected context echo (apple)");
+                    tracing::warn!(
+                        stage = "grammar_correction",
+                        "rejected context echo (apple)"
+                    );
                 }
                 !echoed
             })

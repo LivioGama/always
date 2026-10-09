@@ -1,0 +1,29 @@
+[package]
+name = "always-tauri"
+version = "0.1.0"
+edition = "2024"
+description = "Always Tauri v2 backend — UDS client bridging the daemon to the web frontend"
+
+[[bin]]
+name = "always"
+path = "src/main.rs"
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-updater = "2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+dirs = "6"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

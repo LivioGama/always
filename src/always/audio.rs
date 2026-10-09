@@ -846,6 +846,12 @@ pub mod mock {
     }
 }
 
+#[cfg(feature = "cpal")]
+pub mod cpal_audio;
+
+#[cfg(feature = "cpal")]
+pub use cpal_audio::{CpalsAudioSource, force_respawn, get_or_spawn};
+
 pub fn temp_wav_path() -> PathBuf {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

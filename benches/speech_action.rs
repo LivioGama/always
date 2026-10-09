@@ -11,9 +11,7 @@ use std::time::{Duration, Instant};
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
-use always::always::config::{
-    AlwaysConfig, PostprocessConfig, VadMode, VocabConfig,
-};
+use always::always::config::{AlwaysConfig, PostprocessConfig, VadMode, VocabConfig};
 use always::always::localization::Localization;
 use always::always::speech_action::{
     classify_transcription, in_cooldown, merge_dictation, merge_dictation_with,

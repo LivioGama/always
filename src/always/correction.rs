@@ -345,10 +345,8 @@ pub fn apply_pairs_to_glossary_with_provenance(
         // mistranscription=pair.right, the user is correcting BACK —
         // the previous mapping was wrong and should be removed.
         let back_corr_idx = entries.iter().position(|e| {
-            e.get("term").and_then(|v| v.as_str())
-                == Some(pair.wrong.as_str())
-                && e
-                    .get("mistranscriptions")
+            e.get("term").and_then(|v| v.as_str()) == Some(pair.wrong.as_str())
+                && e.get("mistranscriptions")
                     .and_then(|v| v.as_array())
                     .is_some_and(|arr| {
                         arr.iter().any(|v| {
@@ -361,7 +359,10 @@ pub fn apply_pairs_to_glossary_with_provenance(
         if let Some(bi) = back_corr_idx {
             // Remove the bad mistranscription from the existing entry.
             let entry = &mut entries[bi];
-            if let Some(arr) = entry.get_mut("mistranscriptions").and_then(|v| v.as_array_mut()) {
+            if let Some(arr) = entry
+                .get_mut("mistranscriptions")
+                .and_then(|v| v.as_array_mut())
+            {
                 let before = arr.len();
                 arr.retain(|v| {
                     v.as_str()
@@ -958,7 +959,8 @@ mod tests {
         );
         // The reverse mapping (cloud → Claude) should NOT have been learned.
         assert!(
-            !arr.iter().any(|e| e.get("term").and_then(|v| v.as_str()) == Some("cloud")),
+            !arr.iter()
+                .any(|e| e.get("term").and_then(|v| v.as_str()) == Some("cloud")),
             "should not have learned the reverse mapping"
         );
     }

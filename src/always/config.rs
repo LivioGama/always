@@ -30,10 +30,8 @@ const DEFAULT_IDLE_PAUSE_SECS: u32 = 600;
 /// Default bundle IDs excluded from mic-conflict detection — screen
 /// recording apps that hold the mic for the duration of a recording
 /// but aren't competing dictation tools.
-pub const DEFAULT_MIC_CONFLICT_EXCLUSION_BUNDLES: &[&str] = &[
-    "net.telestream.screenflow10",
-    "pl.maketheweb.cleanshotx",
-];
+pub const DEFAULT_MIC_CONFLICT_EXCLUSION_BUNDLES: &[&str] =
+    &["net.telestream.screenflow10", "pl.maketheweb.cleanshotx"];
 
 #[derive(Debug, Clone, Default)]
 pub enum VadMode {
@@ -469,9 +467,7 @@ impl AlwaysConfig {
             post_processor,
             project_root,
             learning_enabled: postprocess_config.learning_history_limit > 0,
-            auto_learn_corrections: prefs
-                .auto_learn_corrections
-                .unwrap_or(true),
+            auto_learn_corrections: prefs.auto_learn_corrections.unwrap_or(true),
             groq_stt_api_key,
             transcriber_backend,
             vad_mode,

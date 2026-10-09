@@ -1290,10 +1290,12 @@ fn spawn_llm_extraction(
                     for p in &new_pairs {
                         global_broadcaster().correction_logged(&p.wrong, &p.right);
                     }
-                    if let Err(e) = crate::always::correction::apply_pairs_to_glossary_with_provenance(
-                        &new_pairs,
-                        crate::always::correction::Provenance::Llm,
-                    ) {
+                    if let Err(e) =
+                        crate::always::correction::apply_pairs_to_glossary_with_provenance(
+                            &new_pairs,
+                            crate::always::correction::Provenance::Llm,
+                        )
+                    {
                         tracing::error!(error = %e, "llm_extraction_apply_failed");
                     }
                 }

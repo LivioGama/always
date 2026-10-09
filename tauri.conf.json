@@ -1,0 +1,47 @@
+{
+  "productName": "Always",
+  "version": "0.1.0",
+  "identifier": "com.always.stt",
+  "build": {
+    "frontendDist": "../always-gui/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Always",
+        "width": 400,
+        "height": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "visible": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "app", "deb", "appimage", "msi", "nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ]
+  },
+  "updater": {
+    "active": true,
+    "endpoints": [
+      "https://github.com/LivioGama/always/releases/latest/download/latest.json"
+    ],
+    "dialog": false,
+    "pubkey": "dwpoxD3M96Bc3s2jv+ONvReriD9S6lq/rHTfI8qgLez9CvKgEmjyoZ5ve4+Y8qT7JW5sO4Yv3J+9Vx3J8h1K7k="
+  }
+}

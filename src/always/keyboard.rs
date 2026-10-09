@@ -18,9 +18,9 @@
 //!   must toggle pause/auto-enter via the CLI for now.
 
 #[cfg(feature = "macos")]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "macos")]
 use std::sync::Arc;
+#[cfg(feature = "macos")]
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "macos")]
 use std::thread;
 #[cfg(feature = "macos")]
@@ -640,10 +640,12 @@ fn spawn_llm_extraction(
                         event::global_broadcaster()
                             .correction_logged(p.wrong.clone(), p.right.clone());
                     }
-                    if let Err(e) = crate::always::correction::apply_pairs_to_glossary_with_provenance(
-                        &new_pairs,
-                        crate::always::correction::Provenance::Llm,
-                    ) {
+                    if let Err(e) =
+                        crate::always::correction::apply_pairs_to_glossary_with_provenance(
+                            &new_pairs,
+                            crate::always::correction::Provenance::Llm,
+                        )
+                    {
                         tracing::error!(error = %e, "llm_extraction_apply_failed");
                     }
                 } else {
@@ -760,20 +762,15 @@ pub fn start_keyboard_listener() -> Result<()> {
                     // microseconds (copy 6 Combo values), safe inside
                     // the CGEventTap callback's time budget.
                     let s = shortcuts.read();
-                    if s.master_pause.matches_name(
-                        ctrl_pressed,
-                        shift_pressed,
-                        alt_pressed,
-                        name,
-                    ) {
+                    if s.master_pause
+                        .matches_name(ctrl_pressed, shift_pressed, alt_pressed, name)
+                    {
                         drop(s);
                         handle_master_pause_hotkey();
-                    } else if s.pause.matches_name(
-                        ctrl_pressed,
-                        shift_pressed,
-                        alt_pressed,
-                        name,
-                    ) {
+                    } else if s
+                        .pause
+                        .matches_name(ctrl_pressed, shift_pressed, alt_pressed, name)
+                    {
                         drop(s);
                         match pause_chord_action(pause::current_app().as_deref()) {
                             ChordAction::TogglePerApp(bundle) => {
