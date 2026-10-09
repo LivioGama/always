@@ -16,18 +16,6 @@ use crate::always::pause;
 use crate::always::vad_silero::SileroVad;
 use crate::stt::Transcriber;
 
-/// How long (ms) to wait for a silent frame before concluding the user
-/// has finished speaking. Tuned for conversational pacing: short enough
-/// to start typing promptly after a sentence, but generous enough to
-/// skip over mid-sentence pauses (commas, thinking breaths).
-const END_OF_UTTERANCE_SILENCE_MS: u64 = 900;
-
-/// How long (ms) the system waits after a non-silent audio frame before
-/// triggering the next VAD inference pass. This effectively controls the
-/// transcription rate — at 30 ms inference the user hears a result every
-/// ~600 ms which matches the cadence of natural speech.
-const VAD_INFERENCE_INTERVAL_MS: u64 = 30;
-
 /// Speculative transcription slot with a generation counter so late
 /// writes from discarded speculation threads cannot poison the slot.
 struct SpeculationSlot {
