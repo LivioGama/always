@@ -16,13 +16,8 @@ ignore = [
     # These are advisory-level issues with minimal attack surface for our usage.
     "RUSTSEC-2024-0436", # paste unmaintained
     "RUSTSEC-2024-0366", # der yanked (derivative re-export)
-]
-
-# Vulnerabilities we accept with justification (transitive, low risk).
-# Revisit when transitive deps update or we bump direct deps.
-[[vulnerabilities]]
-allow = [
-    "RUSTSEC-2026-0258", # h2 — unbounded empty DATA frames (HTTP/2, not server-facing)
+    # Advisory/vulnerability advisories that are low-risk for our usage.
+    "RUSTSEC-2026-0258", # h2 — unbounded empty DATA frames
     "RUSTSEC-2026-0259", # h2 — same
     "RUSTSEC-2026-0285", # rustls — TLS 1.3 edge case
     "RUSTSEC-2026-0221", # event-listener — !Send edge case

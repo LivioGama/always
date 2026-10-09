@@ -13,12 +13,12 @@
 #
 # Multi-stage; final image is debian-slim + runtime deps only.
 
-FROM rust:1.88.0-bookworm-slim AS builder
+FROM rust:1.88.0-slim AS builder
 
-# The ort crate vendors ONNX runtime C++ code that defaults to C23.
-# Debian 12 (Bookworm) glibc 2.36 does not provide C23 strto{ull,l}
-# (__isoc23_*). Force C++20 to avoid C23 ABI mismatches at link time.
-ENV CXXFLAGS=-std=c++20
+# ort (ONNX Runtime) vendors C++ code that defaults to C++14; older glibc
+# on Debian bullseye/slim doesn't support C++14 `>>` as template delimiter,
+# so specify explicitly.
+ENV CXXFLAGS=-std=c++14
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
