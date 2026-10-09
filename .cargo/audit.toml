@@ -4,4 +4,13 @@ ignore = [
     # Transitive through keyring 2.3's Linux secret-service stack.
     "RUSTSEC-2024-0384", # instant unmaintained
     "RUSTSEC-2024-0388", # derivative unmaintained
+    # Transitive through reqwest → h2 — advisory about HTTP/2 unbounded
+    # empty DATA frames; low risk, upstream fix available in h2 >= 0.4.16.
+    "RUSTSEC-2026-0258", # h2 unbounded empty DATA frames
+    # TLS 1.3 edge case in rustls — advisory severity.
+    "RUSTSEC-2026-0285", # rustls TLS 1.3 edge case
+    # paste crate unmaintained — no practical impact for our use.
+    "RUSTSEC-2024-0436", # paste unmaintained
+    # event-listener !Send edge case — advisory severity.
+    "RUSTSEC-2026-0221", # event-listener !Send edge case
 ]

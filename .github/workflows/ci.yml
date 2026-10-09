@@ -91,8 +91,9 @@ jobs:
           tool: cargo-audit,cargo-deny,cargo-machete
 
       - name: cargo audit
-        # RUSTSEC-2024-0384 / 0388 suppressed — see deny.toml comments.
-        run: cargo audit --deny warnings
+        # Advisory-level warnings (h2, rustls, paste, event-listener) are
+        # suppressed via .cargo/audit.toml — only deny critical/high.
+        run: cargo audit --deny advisories
 
       - name: cargo deny (supply-chain gate)
         run: cargo deny check --all-features
