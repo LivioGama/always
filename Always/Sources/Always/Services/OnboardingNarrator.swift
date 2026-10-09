@@ -41,10 +41,8 @@ final class OnboardingNarrator: ObservableObject {
         process.standardOutput = devnull
         process.standardError = devnull
 
-        process.terminationHandler = { [weak self] _ in
-            Task { @MainActor in
-                self?.didFinishSpeaking()
-            }
+        process.terminationHandler = { [unowned self] _ in
+            self.didFinishSpeaking()
         }
 
         do {
