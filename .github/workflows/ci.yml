@@ -91,9 +91,9 @@ jobs:
           tool: cargo-audit,cargo-deny,cargo-machete
 
       - name: cargo audit
-        # Advisory-level warnings (h2, rustls, paste, event-listener) are
-        # suppressed via .cargo/audit.toml — only deny critical/high.
-        run: cargo audit --deny advisories
+        # Only deny actual vulnerabilities; advisory-level warnings are
+        # suppressed via .cargo/audit.toml.
+        run: cargo audit --deny vulnerabilities
 
       - name: cargo deny (supply-chain gate)
         run: cargo deny check --all-features
