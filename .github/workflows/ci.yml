@@ -91,9 +91,9 @@ jobs:
           tool: cargo-audit,cargo-deny,cargo-machete
 
       - name: cargo audit
-        # Only deny actual vulnerabilities; advisory-level warnings are
-        # suppressed via .cargo/audit.toml.
-        run: cargo audit --deny vulnerabilities
+        # Default behaviour: denies high/critical vulnerabilities and yanked
+        # crates. Advisory-level warnings are suppressed via .cargo/audit.toml.
+        run: cargo audit
 
       - name: cargo deny (supply-chain gate)
         run: cargo deny check --all-features
