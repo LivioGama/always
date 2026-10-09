@@ -335,6 +335,7 @@ pub fn is_wayland_session() -> bool {
 /// `ydotool` works on both Wayland and X11, but when xdotool is also
 /// present (e.g. in a Wayland session with XWayland compatibility),
 /// preferring `ydotool` avoids the X11 round-trip that xdotool forces.
+#[cfg(target_os = "linux")]
 fn paste_wayland(auto_enter: bool) -> Result<()> {
     // Try ydotool first — it types raw text directly into the focused window.
     if which_present("ydotool") {
