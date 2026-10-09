@@ -19,16 +19,21 @@ required-features = ["overlay"]
 
 [features]
 # `macos` is the default — full GUI overlay + clipboard paste + global
-# keyboard shortcuts. `linux` and `windows` build the daemon CLI only;
+# keyboard shortcuts. It is target-gated via the dependency section below
+# so it is effectively always-on on macOS but never activates on Linux /
+# Windows, avoiding the `default = ["macos"]` cross-compilation pitfall.
+# `linux` and `windows` build the daemon CLI only;
 # audio capture, paste, and key listener implementations are stubs that
-# return `NotImplemented`. The split lets CI build for Linux/Windows
-# without dragging in `core-graphics` or `oslog`.
+# return `NotImplemented`.
 #
 # `cpal` replaces the SoX-based audio capture on ALL platforms. It uses
 # the host API (CoreAudio, ALSA, WASAPI) in shared mode so the microphone
 # is never acquired exclusively — fixing the volume-drop issue.
-default = ["macos", "cpal"]
-macos = ["dep:core-graphics", "dep:oslog", "dep:rdev"]
+default = ["cpal"]
+# Platform-native feature — effectively a no-op because the three deps
+# below are target-gated, making `core-graphics`, `oslog` and `rdev`
+# always-available on macOS and completely absent on other targets.
+macos = []
 linux = []
 windows = []
 # Cross-platform audio via cpal (CoreAudio/ALSA/WASAPI). Replaces SoX `rec`
@@ -103,8 +108,6 @@ futures = "0.3"
 # for ort 2.0.0-rc.12 compatibility (0.3.7 requires rc.13, which conflicts
 # with transcribe-rs and vad-rs pins).
 parakeet-rs = { version = "=0.3.6", optional = true }
-# Optional, gated by the `macos` feature.
-rdev = { version = "0.5", optional = true }
 # Cross-platform audio capture — replaces SoX on all platforms.
 # Shared mode by default: never acquires exclusive device access.
 cpal = { version = "0.15", optional = true }
@@ -115,6 +118,9 @@ core-graphics = { version = "0.24", optional = true }
 # `oslog` is target-gated AND feature-gated so a future macOS user can
 # still build with `--no-default-features` for a pure-CLI daemon.
 oslog = { version = "0.2", optional = true }
+# macOS input event capture (global keyboard/mouse shortcuts).
+# Target-gated so it's not compiled on Linux/Windows.
+rdev = { version = "0.5", optional = true }
 # macOS: same build flags as Handy 0.8.3 — Metal-accelerated whisper +
 # ONNX Runtime for the non-whisper engines. Pinned to 0.3.3 for parity.
 transcribe-rs = { version = "=0.3.8", features = ["whisper-metal", "onnx"], optional = true }

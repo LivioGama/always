@@ -1006,13 +1006,13 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             // without an app relaunch. On non-macOS builds there is no
             // recorder to respawn (the CLI path uses a different source),
             // so the command is a no-op there.
-            #[cfg(feature = "macos")]
+            #[cfg(target_os = "macos")]
             {
                 if let Err(e) = crate::always::audio::RecChild::force_respawn() {
                     tracing::error!(error = %e, "uds_respawn_recorder_failed");
                 }
             }
-            #[cfg(not(feature = "macos"))]
+            #[cfg(not(target_os = "macos"))]
             {
                 tracing::debug!("RespawnRecorder ignored — no recorder on this build");
             }

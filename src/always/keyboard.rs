@@ -10,25 +10,25 @@
 //! key character string. The actual global hotkey listener that converts
 //! OS key events into `Combo::matches_name` calls is platform-specific:
 //!
-//! * **macOS** (`feature = "macos"`): uses `rdev` to subscribe to system
+//! * **macOS** (`target_os = "macos"`): uses `rdev` to subscribe to system
 //!   keyboard events. (P2 will replace `rdev` with a thin `CGEventTap`
 //!   wrapper to drop the unmaintained dep.)
 //! * **Linux / Windows**: stub — `start_keyboard_listener` returns `Ok(())`
 //!   without registering anything. Voice activation still works; users
 //!   must toggle pause/auto-enter via the CLI for now.
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 use std::sync::Arc;
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 use std::thread;
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 use anyhow::Result;
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 use super::{clipboard_watcher, config as always_config, correction, event, log, paste, pause};
 
 // ─── Live-reloadable shortcut state ───────────────────────────────────
@@ -39,7 +39,7 @@ use super::{clipboard_watcher, config as always_config, correction, event, log, 
 // restart needed. The read lock is held for microseconds (copy 6 Combo
 // values), which is safe inside the time-budgeted CGEventTap callback.
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 struct Shortcuts {
     pause: Combo,
     auto_enter: Combo,
@@ -49,11 +49,11 @@ struct Shortcuts {
     master_pause: Combo,
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 static SHARED_SHORTCUTS: std::sync::OnceLock<Arc<parking_lot::RwLock<Shortcuts>>> =
     std::sync::OnceLock::new();
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 fn shared_shortcuts() -> &'static Arc<parking_lot::RwLock<Shortcuts>> {
     SHARED_SHORTCUTS.get_or_init(|| {
         let (pause, auto_enter, force_paste, log_correction, correction_dialog, master_pause) =
@@ -72,7 +72,7 @@ fn shared_shortcuts() -> &'static Arc<parking_lot::RwLock<Shortcuts>> {
 /// Re-read shortcuts from the prefs DB and swap them into the live
 /// listener. Called by the `ReloadShortcuts` UDS command — safe to
 /// call any time after `start_keyboard_listener` has run.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 pub fn reload_shortcuts() {
     let (pause, auto_enter, force_paste, log_correction, correction_dialog, master_pause) =
         load_shortcuts();
@@ -100,20 +100,20 @@ pub fn reload_shortcuts() {
     tracing::info!("shortcuts_reloaded");
 }
 
-#[cfg(not(feature = "macos"))]
+#[cfg(not(target_os = "macos"))]
 pub fn reload_shortcuts() {
     // No-op: keyboard shortcuts are not wired on non-macOS yet.
 }
 
 /// Event-based tracking of Command key state as a fallback when
 /// CGEventSourceFlagsState is unreliable. Updated by the keyboard listener.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 static CMD_HELD_EVENT: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 static OPTION_HELD_EVENT: AtomicBool = AtomicBool::new(false);
 
 /// Raw check of CGEventSourceFlagsState - can be unreliable on some systems.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 fn is_cmd_held_cg() -> bool {
     unsafe extern "C" {
         fn CGEventSourceFlagsState(state_id: i32) -> u64;
@@ -134,7 +134,7 @@ fn is_cmd_held_cg() -> bool {
 /// This addresses the issue where CGEventSourceFlagsState can report false
 /// positives on some systems. We now require both methods to agree AND
 /// maintain that state across multiple checks to avoid transient false positives.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 pub fn is_cmd_held() -> bool {
     // Quick single check first - if either method definitely says not held, return fast
     let cg_result = is_cmd_held_cg();
@@ -173,12 +173,12 @@ pub fn is_cmd_held() -> bool {
     held_count == checks
 }
 
-#[cfg(not(feature = "macos"))]
+#[cfg(not(target_os = "macos"))]
 pub fn is_cmd_held() -> bool {
     false
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 fn is_option_held_cg() -> bool {
     unsafe extern "C" {
         fn CGEventSourceFlagsState(state_id: i32) -> u64;
@@ -189,12 +189,12 @@ fn is_option_held_cg() -> bool {
     flags & CG_EVENT_FLAG_ALTERNATE != 0
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 pub fn is_option_held() -> bool {
     is_option_held_cg() || OPTION_HELD_EVENT.load(Ordering::Relaxed)
 }
 
-#[cfg(not(feature = "macos"))]
+#[cfg(not(target_os = "macos"))]
 pub fn is_option_held() -> bool {
     false
 }
@@ -289,7 +289,7 @@ fn default_shortcuts() -> (Combo, Combo, Combo, Combo, Combo, Combo) {
     )
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 fn resolve_shortcuts(
     pause: Option<&str>,
@@ -334,7 +334,7 @@ fn resolve_shortcuts(
     )
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 fn load_shortcuts() -> (Combo, Combo, Combo, Combo, Combo, Combo) {
     let defaults = default_shortcuts();
 
@@ -358,7 +358,7 @@ fn load_shortcuts() -> (Combo, Combo, Combo, Combo, Combo, Combo) {
 // ----------------------------------------------------------------------
 // macOS implementation (rdev-backed; will become CGEventTap in P2.2)
 // ----------------------------------------------------------------------
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 fn key_to_shortcut_name(key: &rdev::Key) -> Option<&'static str> {
     use rdev::Key;
     match key {
@@ -425,7 +425,7 @@ fn pause_chord_action(current_app: Option<&str>) -> ChordAction {
 /// removes the override otherwise. Recomputes the effective state and
 /// broadcasts the appropriate UDS events so every connected GUI
 /// surface updates immediately.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 fn handle_per_app_pause_hotkey(bundle: &str) {
     use crate::always::per_app;
     let was_resumed = per_app::is_app_resumed(bundle);
@@ -480,7 +480,7 @@ fn handle_per_app_pause_hotkey(bundle: &str) {
 /// order (clear_global_pauses → set_idle_auto_paused) left
 /// EFFECTIVE_PAUSED stale at true because `set_idle_auto_paused` is a
 /// plain setter that does not recompute.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 fn handle_master_pause_hotkey() {
     let (effective, changed) = if pause::is_any_global_pause() || pause::is_idle_auto_paused() {
         pause::set_idle_auto_paused(false);
@@ -540,7 +540,7 @@ pub fn input_monitoring_status() -> Option<bool> {
     }
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 fn set_input_monitoring_status(granted: bool) {
     INPUT_MONITORING_STATUS.store(
         if granted { 1 } else { 2 },
@@ -549,7 +549,7 @@ fn set_input_monitoring_status(granted: bool) {
     event::global_broadcaster().shortcut_listener_status(granted);
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 fn request_input_monitoring_access() {
     // Preflight ONLY (cheap status read, never prompts). The GUI is the
     // sole requester: it calls IOHIDRequestAccess, which reliably surfaces
@@ -576,7 +576,7 @@ fn request_input_monitoring_access() {
 /// Read the `auto_learn_corrections` preference from the DB.
 /// Defaults to `true` when the DB or column is unavailable — the
 /// safe default is to learn, matching pre-toggle behavior.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 fn auto_learn_corrections_enabled() -> bool {
     let Ok(conn) = crate::db::open() else {
         return true;
@@ -591,7 +591,7 @@ fn auto_learn_corrections_enabled() -> bool {
 /// detached thread with its own tokio runtime so it doesn't block
 /// the keyboard listener. New pairs are written to the glossary
 /// (when `auto_apply` is true) or just logged for review.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 fn spawn_llm_extraction(
     original: String,
     corrected: String,
@@ -668,7 +668,7 @@ fn spawn_llm_extraction(
     });
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 pub fn start_keyboard_listener() -> Result<()> {
     use rdev::{EventType, Key, listen};
 
@@ -940,7 +940,7 @@ pub fn start_keyboard_listener() -> Result<()> {
 /// the Fn/Globe key (keycode 63). The Fn key on macOS keyboards fires as
 /// a modifier-flag change, not a keyDown — `rdev` never sees it. This
 /// mirrors the approach from iris-sama's `shortcut-events.swift`.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 fn start_fn_listener() {
     use std::os::raw::{c_int, c_void};
     use std::sync::atomic::AtomicPtr;
@@ -1084,7 +1084,7 @@ fn start_fn_listener() {
 // ----------------------------------------------------------------------
 // Linux / Windows: stub
 // ----------------------------------------------------------------------
-#[cfg(not(feature = "macos"))]
+#[cfg(not(target_os = "macos"))]
 pub fn start_keyboard_listener() -> Result<()> {
     tracing::warn!(
         "global keyboard shortcuts are not yet wired up on this platform; \
@@ -1193,7 +1193,7 @@ mod tests {
         let _ = default_shortcuts();
     }
 
-    #[cfg(feature = "macos")]
+    #[cfg(target_os = "macos")]
     #[test]
     fn falls_back_to_defaults_for_invalid_configured_shortcuts() {
         let (pause, auto_enter, force_paste, log_correction, correction_dialog, master_pause) =
@@ -1213,7 +1213,7 @@ mod tests {
         assert!(master_pause.matches_name(true, true, true, "p"));
     }
 
-    #[cfg(feature = "macos")]
+    #[cfg(target_os = "macos")]
     #[test]
     fn uses_configured_shortcuts_when_valid() {
         let (pause, auto_enter, force_paste, log_correction, correction_dialog, master_pause) =
@@ -1233,7 +1233,7 @@ mod tests {
         assert!(master_pause.matches_name(true, true, false, "g"));
     }
 
-    #[cfg(feature = "macos")]
+    #[cfg(target_os = "macos")]
     #[test]
     fn log_correction_default_is_ctrl_alt_x() {
         let (pause, auto_enter, force_paste, log_correction, correction_dialog, master_pause) =

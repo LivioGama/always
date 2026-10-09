@@ -239,12 +239,12 @@ pub fn replace_via_undo(text: &str) -> Result<()> {
 
 #[cfg(not(target_os = "macos"))]
 pub fn undo_last_paste() -> Result<()> {
-    anyhow::bail!("undo_last_paste not implemented for this platform")
+    anyhow::bail!("undo_last_paste not implemented without the macos feature")
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn replace_via_undo(_text: &str) -> Result<()> {
-    anyhow::bail!("replace_via_undo not implemented for this platform")
+    anyhow::bail!("replace_via_undo not implemented without the macos feature")
 }
 
 // ─── macOS paste_text ───────────────────────────────────────────────────
@@ -304,7 +304,7 @@ pub fn paste_text(auto_enter: bool) -> Result<()> {
 // ─── Linux paste_text ───────────────────────────────────────────────────
 
 /// Paste on Linux: detect Wayland (ydotool first, xdotool fallback) or X11.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(target_os = "macos")))]
 pub fn paste_text(auto_enter: bool) -> Result<()> {
     // Detect Wayland: try ydotool first, fall back to xdotool.
     if is_wayland_session() {
@@ -313,6 +313,12 @@ pub fn paste_text(auto_enter: bool) -> Result<()> {
         paste_x11(auto_enter)?;
     }
     Ok(())
+}
+
+/// Stub for platforms that don't have a default paste_text implementation.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub fn paste_text(_auto_enter: bool) -> Result<()> {
+    anyhow::bail!("paste_text not implemented without the macos feature")
 }
 
 /// Detect whether the current session is Wayland by inspecting
@@ -999,7 +1005,7 @@ mod tests {
         let _: Box<dyn ClipboardProvider> = Box::new(MockClipboardProvider::new());
     }
 
-    #[cfg(all(not(feature = "macos"), target_os = "linux"))]
+    #[cfg(all(not(target_os = "macos"), target_os = "linux"))]
     #[test]
     fn terminal_window_classes_use_terminal_paste_chord() {
         assert!(is_terminal_window_class("kitty"));
@@ -1065,7 +1071,7 @@ pub mod mock {
     }
 }
 
-#[cfg(all(test, feature = "macos"))]
+#[cfg(all(test, target_os = "macos"))]
 mod pasteboard_tests {
     use super::*;
 

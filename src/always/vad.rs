@@ -612,7 +612,7 @@ fn append_streaming_preview(accumulated: &mut String, chunk: &str) -> bool {
     true
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 fn record_with_local_vad(
     cfg: &AlwaysConfig,
     log: &mut Logger,
@@ -2052,7 +2052,7 @@ fn record_with_local_vad(
 ///
 /// Non-speech outcomes (silence, noise, a speaker-gate drop) pass
 /// through unchanged — there is nothing to keep and nothing to suppress.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 fn apply_mic_conflict_preemption(result: RecordResult, preempted: bool) -> RecordResult {
     if !preempted {
         return result;
@@ -2064,7 +2064,7 @@ fn apply_mic_conflict_preemption(result: RecordResult, preempted: bool) -> Recor
 }
 
 /// Non-macOS stub.
-#[cfg(not(feature = "macos"))]
+#[cfg(not(target_os = "macos"))]
 fn record_with_local_vad(
     _cfg: &AlwaysConfig,
     _log: &mut Logger,
@@ -2078,7 +2078,7 @@ fn record_with_local_vad(
 
 /// Assemble a chunked utterance: wait for committed chunks, join them in
 /// flush order, and append the (already transcribed) tail text.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 fn finalize_chunked(
     chunker: &crate::always::chunker::ChunkAccumulator,
@@ -2444,7 +2444,7 @@ mod tests {
         assert!(early_voice_frame_ok(0.02, 0.40, 0.0072, 0.5));
     }
 
-    #[cfg(feature = "macos")]
+    #[cfg(target_os = "macos")]
     #[test]
     fn scoring_uses_the_closest_enrolled_style_not_just_the_blend() {
         use super::best_voiceprint_match;
@@ -2502,7 +2502,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "macos")]
+    #[cfg(target_os = "macos")]
     #[test]
     fn mic_conflict_keeps_the_words_but_suppresses_the_paste() {
         use super::{RecordResult, UtteranceTiming, apply_mic_conflict_preemption};

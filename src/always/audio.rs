@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::io::Read;
 use std::path::PathBuf;
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 use std::process::Child;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -69,7 +69,7 @@ const _: () = assert!(READ_FRAME_TIMEOUT_MS >= 10_000);
 /// The stall budget now lives in the reader thread's ring
 /// ([`RING_CAPACITY_FRAMES`]), so SoX's buffer only has to cover
 /// CoreAudio's callback cadence.
-#[cfg_attr(not(feature = "macos"), allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const SOX_BUFFER_BYTES: usize = 4096;
 
 /// Frames buffered between the reader thread and the consumer (VAD loop,
@@ -116,13 +116,13 @@ struct RingState {
 /// Bounded single-producer / single-consumer queue of captured frames.
 /// Platform-agnostic so its behaviour is unit-tested on every target;
 /// only [`RecChild`] (macOS) feeds it from a real recorder today.
-#[cfg_attr(not(feature = "macos"), allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct FrameRing {
     state: Mutex<RingState>,
     ready: Condvar,
 }
 
-#[cfg_attr(not(feature = "macos"), allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl FrameRing {
     fn new() -> Self {
         Self {
@@ -235,7 +235,7 @@ impl FrameRing {
 /// newest at 32 bytes/ms. So a frame's stamp is back-dated by the audio
 /// that follows it in the same read — exact for a burst, and it still
 /// holds when the reader itself was late.
-#[cfg_attr(not(feature = "macos"), allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn pump_frames<R: Read>(mut reader: R, ring: &FrameRing) {
     let mut chunk = vec![0u8; READER_CHUNK_BYTES];
     let mut pending: Vec<u8> = Vec::with_capacity(READER_CHUNK_BYTES + FRAME_BYTES);
@@ -273,7 +273,7 @@ fn pump_frames<R: Read>(mut reader: R, ring: &FrameRing) {
 static TEMP_WAV_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // Global persistent audio recorder to avoid spawning processes repeatedly
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 static GLOBAL_RECORDER: LazyLock<Arc<Mutex<Option<RecChild>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(None)));
 
@@ -323,14 +323,14 @@ impl Drop for AudioBuffer {
 /// (writer) and `is_healthy` (reader). A window older than
 /// [`REC_OVERRUN_WINDOW_SECS`] restarts from 1 on the next overrun, so
 /// only a *sustained* storm crosses the respawn threshold.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 struct OverrunWindow {
     /// Epoch seconds of the current window's first overrun.
     window_start: AtomicU64,
     count: AtomicU32,
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 impl OverrunWindow {
     fn new() -> Self {
         Self {
@@ -370,7 +370,7 @@ impl OverrunWindow {
     }
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 pub struct RecChild {
     child: Child,
     /// Filled by the reader thread that owns `rec`'s stdout. That thread
@@ -385,7 +385,7 @@ pub struct RecChild {
     overruns: Arc<OverrunWindow>,
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 impl RecChild {
     pub fn spawn() -> Result<Self> {
         tracing::info!("rec_spawn_starting");
@@ -651,14 +651,14 @@ impl RecChild {
 
 /// `Read` adapter that logs, once, how long the recorder took to deliver
 /// its first bytes after spawn.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 struct FirstRead<R> {
     inner: R,
     spawned_at: Instant,
     logged: bool,
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 impl<R: Read> Read for FirstRead<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
@@ -673,7 +673,7 @@ impl<R: Read> Read for FirstRead<R> {
     }
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 impl Drop for RecChild {
     fn drop(&mut self) {
         // Killing the child closes its stdout; the reader thread then
@@ -745,12 +745,12 @@ pub trait AudioFrameSource: Send {
 ///
 /// Wraps the existing global `RecChild` pool via [`RecChild::get_or_spawn`].
 /// Acquires the recorder lazily on first frame read.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 pub struct SoxAudioSource {
     handle: std::sync::Arc<Mutex<Option<RecChild>>>,
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 impl SoxAudioSource {
     pub fn new() -> Result<Self> {
         let handle = RecChild::get_or_spawn()?;
@@ -758,7 +758,7 @@ impl SoxAudioSource {
     }
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 impl AudioFrameSource for SoxAudioSource {
     fn read_frame(&mut self, buf: &mut [u8; FRAME_BYTES]) -> io::Result<usize> {
         let mut guard = self.handle.lock();
@@ -783,17 +783,17 @@ impl AudioFrameSource for SoxAudioSource {
 
 /// Linux/Windows stub. Real implementations land with the
 /// `linux`/`windows` features in a follow-up.
-#[cfg(not(feature = "macos"))]
+#[cfg(not(target_os = "macos"))]
 pub struct StubAudioSource;
 
-#[cfg(not(feature = "macos"))]
+#[cfg(not(target_os = "macos"))]
 impl Default for StubAudioSource {
     fn default() -> Self {
         Self
     }
 }
 
-#[cfg(not(feature = "macos"))]
+#[cfg(not(target_os = "macos"))]
 impl AudioFrameSource for StubAudioSource {
     fn read_frame(&mut self, _buf: &mut [u8; FRAME_BYTES]) -> io::Result<usize> {
         Err(io::Error::new(
@@ -1035,7 +1035,7 @@ mod tests {
         assert!(wav_data.starts_with(b"RIFF"));
     }
 
-    #[cfg(feature = "macos")]
+    #[cfg(target_os = "macos")]
     #[test]
     fn overrun_window_counts_within_window_and_ages_out() {
         use super::{OverrunWindow, REC_OVERRUN_RESPAWN_THRESHOLD, REC_OVERRUN_WINDOW_SECS};
