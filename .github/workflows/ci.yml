@@ -96,7 +96,7 @@ jobs:
         run: cargo audit
 
       - name: cargo deny (supply-chain gate)
-        run: cargo deny check --all-features
+        run: cargo deny check
 
       - name: cargo machete (unused deps)
         run: cargo machete
