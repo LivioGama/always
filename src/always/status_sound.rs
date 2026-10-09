@@ -2,6 +2,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 static AUDIBLE_STATUS_SOUND: AtomicU8 = AtomicU8::new(StatusSoundSetting::Off as u8);
+#[allow(dead_code)]
 static PLAYBACK_IN_FLIGHT: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

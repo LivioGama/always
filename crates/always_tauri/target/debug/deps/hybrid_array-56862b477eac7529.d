@@ -1,0 +1,11 @@
+/home/livio/Abhi/always/crates/always_tauri/target/debug/deps/hybrid_array-56862b477eac7529.d: /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/lib.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/sizes.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/flatten.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/from_fn.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/iter.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/traits.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/../README.md
+
+/home/livio/Abhi/always/crates/always_tauri/target/debug/deps/libhybrid_array-56862b477eac7529.rmeta: /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/lib.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/sizes.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/flatten.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/from_fn.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/iter.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/traits.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/../README.md
+
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/lib.rs:
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/sizes.rs:
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/flatten.rs:
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/from_fn.rs:
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/iter.rs:
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/traits.rs:
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.15/src/../README.md:

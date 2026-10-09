@@ -23,7 +23,7 @@
 
 use std::time::Duration;
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -516,7 +516,7 @@ pub fn add_or_bump_term(term: &str) -> Result<()> {
 ///
 /// Returns `Ok(None)` if no selection is available (or the platform
 /// doesn't support this).
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 pub fn read_selection_via_cmd_c() -> Result<Option<String>> {
     use crate::always::paste;
 
@@ -565,12 +565,12 @@ pub fn read_selection_via_cmd_c() -> Result<Option<String>> {
     }
 }
 
-#[cfg(not(feature = "macos"))]
+#[cfg(not(target_os = "macos"))]
 pub fn read_selection_via_cmd_c() -> Result<Option<String>> {
     Ok(None)
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 fn simulate_cmd_c() -> Result<()> {
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
@@ -654,7 +654,7 @@ pub enum CaptureOutcome {
 /// is off), pairs are extracted and returned as `Extracted` but NOT
 /// written to the glossary — the caller may queue them for manual
 /// review instead.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 pub fn capture_via_hotkey(
     last_pasted_window: Duration,
     auto_apply: bool,
@@ -698,7 +698,7 @@ pub fn capture_via_hotkey(
     })
 }
 
-#[cfg(not(feature = "macos"))]
+#[cfg(not(target_os = "macos"))]
 pub fn capture_via_hotkey(_window: Duration, _auto_apply: bool) -> Result<CaptureOutcome> {
     Ok(CaptureOutcome::NoRecentPaste)
 }

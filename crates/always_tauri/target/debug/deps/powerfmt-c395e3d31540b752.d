@@ -1,0 +1,11 @@
+/home/livio/Abhi/always/crates/always_tauri/target/debug/deps/powerfmt-c395e3d31540b752.d: /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/lib.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/buf.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/ext.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/smart_display.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/smart_display_impls.rs
+
+/home/livio/Abhi/always/crates/always_tauri/target/debug/deps/libpowerfmt-c395e3d31540b752.rlib: /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/lib.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/buf.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/ext.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/smart_display.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/smart_display_impls.rs
+
+/home/livio/Abhi/always/crates/always_tauri/target/debug/deps/libpowerfmt-c395e3d31540b752.rmeta: /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/lib.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/buf.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/ext.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/smart_display.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/smart_display_impls.rs
+
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/lib.rs:
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/buf.rs:
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/ext.rs:
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/smart_display.rs:
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/powerfmt-0.2.1/src/smart_display_impls.rs:

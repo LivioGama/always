@@ -1,0 +1,12 @@
+/home/livio/Abhi/always/crates/always_tauri/target/debug/deps/async_lock-96e0839011258cd0.d: /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/lib.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/barrier.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/mutex.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/once_cell.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/rwlock.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/rwlock/futures.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/rwlock/raw.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/semaphore.rs
+
+/home/livio/Abhi/always/crates/always_tauri/target/debug/deps/libasync_lock-96e0839011258cd0.rmeta: /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/lib.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/barrier.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/mutex.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/once_cell.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/rwlock.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/rwlock/futures.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/rwlock/raw.rs /home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/semaphore.rs
+
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/lib.rs:
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/barrier.rs:
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/mutex.rs:
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/once_cell.rs:
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/rwlock.rs:
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/rwlock/futures.rs:
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/rwlock/raw.rs:
+/home/livio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-lock-3.4.2/src/semaphore.rs:
