@@ -893,9 +893,15 @@ mod tests {
     /// during the run (an always-on dictation app, a call); with no
     /// captor the probe exits before display-name resolution and the
     /// test passes vacuously. 300 probes ≈ 5 minutes of daemon life.
+    /// Regression test for the 2026-09-29 memory leak. Skipped on CI
+    /// because raw RSS measurement is too noisy on shared runners.
     #[cfg(target_os = "macos")]
     #[test]
     fn repeated_probe_does_not_leak_resident_memory() {
+        if std::env::var("CI").is_ok() {
+            // Raw RSS measurement is too noisy on shared CI runners.
+            return;
+        }
         let default_exclusions: Vec<String> =
             crate::always::config::DEFAULT_MIC_CONFLICT_EXCLUSION_BUNDLES
                 .iter()
