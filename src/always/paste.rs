@@ -999,7 +999,7 @@ mod tests {
         let _: Box<dyn ClipboardProvider> = Box::new(MockClipboardProvider::new());
     }
 
-    #[cfg(not(feature = "macos"))]
+    #[cfg(all(not(feature = "macos"), target_os = "linux"))]
     #[test]
     fn terminal_window_classes_use_terminal_paste_chord() {
         assert!(is_terminal_window_class("kitty"));
