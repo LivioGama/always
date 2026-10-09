@@ -1,6 +1,7 @@
 #![allow(unused_imports)]
 
 use anyhow::{Context, Result};
+use futures::StreamExt;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
