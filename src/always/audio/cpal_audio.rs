@@ -83,6 +83,7 @@ pub struct SharedAudioSource {
     stream_drop: Option<StreamDrop>,
 }
 
+#[allow(dead_code)]
 struct StreamDrop(thread::JoinHandle<()>);
 
 /// Helper: join the stream thread when dropped.
@@ -199,7 +200,6 @@ impl SharedAudioSource {
     ) -> thread::JoinHandle<()> {
         let tx = Arc::new(Mutex::new(Some(tx)));
         let tx_clone = Arc::clone(&tx);
-        let ring_clone = Arc::clone(&ring);
         let running_clone = Arc::clone(&running);
         let config = Arc::new(config);
 
@@ -256,11 +256,11 @@ impl SharedAudioSource {
             },
             None,
         );
-        if let Ok(s) = stream {
-            if s.play().is_ok() {
-                while running.load(Ordering::Relaxed) {
-                    thread::sleep(Duration::from_millis(100));
-                }
+        if let Ok(stream) = stream
+            && stream.play().is_ok()
+        {
+            while running.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(100));
             }
         }
     }
@@ -287,11 +287,11 @@ impl SharedAudioSource {
             },
             None,
         );
-        if let Ok(s) = stream {
-            if s.play().is_ok() {
-                while running.load(Ordering::Relaxed) {
-                    thread::sleep(Duration::from_millis(100));
-                }
+        if let Ok(stream) = stream
+            && stream.play().is_ok()
+        {
+            while running.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(100));
             }
         }
     }
@@ -318,11 +318,11 @@ impl SharedAudioSource {
             },
             None,
         );
-        if let Ok(s) = stream {
-            if s.play().is_ok() {
-                while running.load(Ordering::Relaxed) {
-                    thread::sleep(Duration::from_millis(100));
-                }
+        if let Ok(stream) = stream
+            && stream.play().is_ok()
+        {
+            while running.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(100));
             }
         }
     }
@@ -495,8 +495,7 @@ pub struct CpalsAudioSource;
 
 impl AudioFrameSource for CpalsAudioSource {
     fn read_frame(&mut self, buf: &mut [u8; FRAME_BYTES]) -> io::Result<usize> {
-        let source =
-            get_or_spawn().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let source = get_or_spawn().map_err(|e| io::Error::other(e.to_string()))?;
         let mut guard = source.lock();
         let rec = guard.as_mut().ok_or_else(|| {
             io::Error::new(

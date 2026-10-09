@@ -48,6 +48,9 @@ fn bench_config() -> AlwaysConfig {
         speaker_gate_threshold: 0.5,
         audible_status_sound: Default::default(),
         localization: Localization::ENGLISH,
+        auto_learn_corrections: true,
+        stt_live_preview: false,
+        mic_conflict_exclusion_bundles: vec![],
     }
 }
 

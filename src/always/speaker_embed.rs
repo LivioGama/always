@@ -311,7 +311,7 @@ mod tests {
         let feats = compute_fbank_cmn(&samples).unwrap();
         assert_eq!(feats.len(), 98 * 80);
         // CMN: per-bin means should now be ~0.
-        let mean0: f32 = feats.chunks_exact(80).map(|f| f[0]).sum::<f32>() / 98.0;
+        let mean0: f32 = feats.as_chunks::<80>().0.iter().map(|f| f[0]).sum::<f32>() / 98.0;
         assert!(mean0.abs() < 1e-3, "CMN should zero bin means, got {mean0}");
     }
 
@@ -402,7 +402,9 @@ mod tests {
             let _ = std::fs::remove_file(&aiff);
             let _ = std::fs::remove_file(&raw);
             bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| i16::from_le_bytes([c[0], c[1]]))
                 .collect()
         };
