@@ -41,13 +41,11 @@ final class OnboardingNarrator: ObservableObject {
         process.standardOutput = devnull
         process.standardError = devnull
 
-        process.terminationHandler = { [unowned self, devnull] _ in
-            withExtendedLifetime(devnull) {
-                // The handler may fire on a non-MainActor thread, so wrap
-                // the state update in a @MainActor detached task.
-                Task.detached { @MainActor [self] in
-                    self.didFinishSpeaking()
-                }
+        process.terminationHandler = { [unowned self] _ in
+            // The handler may fire on a non-MainActor thread, so dispatch
+            // the state update to the main actor.
+            Task { @MainActor [self] in
+                self.didFinishSpeaking()
             }
         }
 
