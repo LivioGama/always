@@ -196,7 +196,7 @@ pub fn copy_to_clipboard(text: String) -> Result<()> {
 /// Beyond this the user may have edited the field and undo is unsafe.
 pub const GRAMMAR_PATCH_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(4);
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 fn post_cmd_key(
     source: &core_graphics::event_source::CGEventSource,
     keycode: core_graphics::event::CGKeyCode,
@@ -216,7 +216,7 @@ fn post_cmd_key(
 }
 
 /// Undo the most recent paste in the focused app (Cmd+Z).
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 pub fn undo_last_paste() -> Result<()> {
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
@@ -230,26 +230,26 @@ pub fn undo_last_paste() -> Result<()> {
 }
 
 /// Replace the last paste with `text` via undo + clipboard paste (no Return).
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 pub fn replace_via_undo(text: &str) -> Result<()> {
     undo_last_paste()?;
     copy_to_clipboard(text.to_string())?;
     paste_text(false)
 }
 
-#[cfg(not(feature = "macos"))]
+#[cfg(not(target_os = "macos"))]
 pub fn undo_last_paste() -> Result<()> {
     anyhow::bail!("undo_last_paste not implemented for this platform")
 }
 
-#[cfg(not(feature = "macos"))]
+#[cfg(not(target_os = "macos"))]
 pub fn replace_via_undo(_text: &str) -> Result<()> {
     anyhow::bail!("replace_via_undo not implemented for this platform")
 }
 
 // ─── macOS paste_text ───────────────────────────────────────────────────
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 pub fn paste_text(auto_enter: bool) -> Result<()> {
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
@@ -346,7 +346,8 @@ fn paste_wayland(auto_enter: bool) -> Result<()> {
 }
 
 /// Paste via `ydotool type` — types plain text into the focused window.
-fn paste_wayland_ydotool(auto_enter: bool) -> Result<()> {
+#[cfg(target_os = "linux")]
+fn paste_wayland_ydotool(_auto_enter: bool) -> Result<()> {
     // ydotool type sends the text as a series of key events.
     // For clipboard paste on Wayland, we first write to clipboard via wl-copy/xdg-clipper,
     // then simulate Ctrl+V via ydotool key codes.
@@ -357,6 +358,7 @@ fn paste_wayland_ydotool(auto_enter: bool) -> Result<()> {
 ///
 /// In terminals we use Ctrl+Shift+V (many terminals bind Paste to that),
 /// while in regular apps Ctrl+V is the standard paste shortcut.
+#[cfg(target_os = "linux")]
 fn paste_x11(auto_enter: bool) -> Result<()> {
     if focused_window_is_terminal().unwrap_or(false) {
         post_xdotool_key(["key", "--clearmodifiers", "ctrl+shift+v"])?;
@@ -470,7 +472,7 @@ pub fn restore_clipboard_if_unchanged(
 /// preceding Cmd+V (or from a modifier the user happens to be holding)
 /// and apps like Ghostty interpret the result as Cmd+Return — a
 /// configured binding, not a newline.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 pub fn press_return() -> Result<()> {
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
@@ -522,18 +524,14 @@ pub fn press_return() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(feature = "macos"))]
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 pub fn press_return() -> Result<()> {
-    if !cfg!(target_os = "linux") {
-        anyhow::bail!("press_return not implemented for this platform");
-    }
     post_xdotool_key(["key", "--clearmodifiers", "Return"])
 }
 
 // ─── Window class detection (Linux / macOS stub) ────────────────────────
 
-#[cfg(not(feature = "macos"))]
+#[cfg(target_os = "linux")]
 fn focused_window_is_terminal() -> Result<bool> {
     let output = std::process::Command::new("xdotool")
         .args(["getactivewindow", "getwindowclassname"])
@@ -550,7 +548,7 @@ fn focused_window_is_terminal() -> Result<bool> {
     ))
 }
 
-#[cfg(not(feature = "macos"))]
+#[cfg(target_os = "linux")]
 fn is_terminal_window_class(class_name: &str) -> bool {
     matches!(
         class_name.to_ascii_lowercase().as_str(),
@@ -574,7 +572,7 @@ fn is_terminal_window_class(class_name: &str) -> bool {
     )
 }
 
-#[cfg(not(feature = "macos"))]
+#[cfg(target_os = "linux")]
 fn post_xdotool_key<const N: usize>(args: [&str; N]) -> Result<()> {
     let status = std::process::Command::new("xdotool")
         .args(args)
@@ -586,7 +584,7 @@ fn post_xdotool_key<const N: usize>(args: [&str; N]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(feature = "macos"))]
+#[cfg(target_os = "linux")]
 fn post_ydotool_key<const N: usize>(args: [&str; N]) -> Result<()> {
     let status = std::process::Command::new("ydotool")
         .args(args)
@@ -926,7 +924,7 @@ pub fn read_clipboard_text() -> Result<String> {
 /// message sends are not worth a new dep tree. Returns `None` off-macOS
 /// or if the runtime lookup fails, in which case callers fall back to
 /// the string-compare guard alone.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 pub fn pasteboard_change_count() -> Option<i64> {
     use std::ffi::c_void;
 
@@ -963,7 +961,7 @@ pub fn pasteboard_change_count() -> Option<i64> {
     }
 }
 
-#[cfg(not(feature = "macos"))]
+#[cfg(not(target_os = "macos"))]
 pub fn pasteboard_change_count() -> Option<i64> {
     None
 }
