@@ -13,7 +13,7 @@
 #
 # Multi-stage; final image is debian-slim + runtime deps only.
 
-FROM rust:1.85.1-slim AS builder
+FROM rust:1.88.0-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
