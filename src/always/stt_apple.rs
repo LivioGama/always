@@ -160,8 +160,8 @@ fn normalize_wav_samples(data: &mut [u8]) {
     }
     let sample_bytes = &data[samples_start..samples_start + remaining];
     let mut max_abs = 0i32;
-    let chunks = sample_bytes.chunks_exact(2);
-    for chunk in chunks {
+    let chunks = sample_bytes.as_chunks::<2>();
+    for chunk in chunks.0 {
         let sample = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
         let abs = sample.unsigned_abs() as i32;
         if abs > max_abs {
@@ -179,6 +179,7 @@ fn normalize_wav_samples(data: &mut [u8]) {
     let gain = gain.min(4.0);
 
     let sample_bytes = &mut data[samples_start..samples_start + remaining];
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     let chunks = sample_bytes.chunks_exact_mut(2);
     for chunk in chunks {
         let sample = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;

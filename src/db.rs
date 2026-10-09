@@ -701,7 +701,8 @@ fn decode_secret(value: Option<String>) -> Option<String> {
     }
 
     let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for pair in hex.as_bytes().chunks_exact(2) {
+    let byte_pairs = hex.as_bytes().as_chunks::<2>();
+    for pair in byte_pairs.0 {
         let Ok(pair) = std::str::from_utf8(pair) else {
             return Some(value);
         };

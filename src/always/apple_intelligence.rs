@@ -88,6 +88,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::print_stdout)]
     #[ignore]
     fn probe_live_inference() {
         let available = check_availability();
@@ -104,6 +105,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::print_stdout)]
     fn test_availability() {
         let available = check_availability();
         println!("Apple Intelligence available: {}", available);
