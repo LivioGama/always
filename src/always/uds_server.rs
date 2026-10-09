@@ -491,7 +491,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
             if write_end <= pos {
                 // Couldn't find a complete line, write what we have
                 if let Err(e) = tokio::time::timeout(WRITE_TIMEOUT, async {
-                    writer.write_all(initial_payload.as_bytes()[pos..]).await?;
+                    writer.write_all(&initial_payload.as_bytes()[pos..]).await?;
                     writer.flush().await
                 })
                 .await
