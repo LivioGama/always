@@ -356,6 +356,7 @@ impl OverlayStateReducer {
 
             // Events we don't handle in the overlay
             DaemonEvent::TranscriptChunk { text: _ }
+            | DaemonEvent::TranscriptionInterim { .. }
             | DaemonEvent::Heartbeat
             | DaemonEvent::FocusedAppChanged { bundle_id: _ }
             | DaemonEvent::MasterPauseChanged { master_paused: _ }

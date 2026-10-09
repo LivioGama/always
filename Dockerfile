@@ -31,7 +31,7 @@ COPY . .
 # `linux` feature replaces macOS-only deps (core-graphics, oslog, rdev) with
 # stubs. The daemon is operational; clipboard paste + global hotkeys
 # return NotImplemented and the user toggles state via the CLI instead.
-RUN cargo build --release --no-default-features --features linux --locked
+RUN cargo build --release --no-default-features --features linux,cpal --locked
 
 # ---------- runtime stage ----------
 FROM debian:bookworm-slim

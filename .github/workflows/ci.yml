@@ -45,8 +45,8 @@ jobs:
       - name: Clippy (default features)
         run: cargo clippy --all-targets --locked -- -D warnings
 
-      - name: Clippy (no-default-features + linux)
-        run: cargo clippy --no-default-features --features linux --all-targets --locked -- -D warnings
+      - name: Clippy (no-default-features + linux + cpal)
+        run: cargo clippy --no-default-features --features linux,cpal --all-targets --locked -- -D warnings
 
       - name: Clippy (overlay feature)
         run: cargo clippy --all-targets --features overlay --locked -- -D warnings
@@ -55,8 +55,8 @@ jobs:
       - name: Tests (default features)
         run: cargo test --locked --all-targets -- --skip macos_overlay
 
-      - name: Tests (no-default-features + linux)
-        run: cargo test --no-default-features --features linux --locked --lib --bins -- --skip macos
+      - name: Tests (no-default-features + linux + cpal)
+        run: cargo test --no-default-features --features linux,cpal --locked --lib --bins -- --skip macos
 
       - name: Tests (overlay feature)
         run: cargo test --locked --features overlay --lib --bins -- --skip macos
@@ -160,7 +160,7 @@ jobs:
       # Run the same test suite that the macOS rust-checks job does (but
       # against the linux-compiled binary / no-default-features).
       - name: Run tests (Docker)
-        run: docker run --rm always-ci cargo test --no-default-features --features linux --locked --lib --bins -- --skip macos
+        run: docker run --rm always-ci cargo test --no-default-features --features linux,cpal --locked --lib --bins -- --skip macos
 
   # ─── Swift (existing) ────────────────────────────────────────────────────
 
