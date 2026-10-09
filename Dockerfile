@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsqlite3-dev \
         libasound2-dev \
         sox \
+        g++ \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
