@@ -92,9 +92,7 @@ jobs:
 
       - name: cargo audit
         # RUSTSEC-2024-0384 / 0388 suppressed — see deny.toml comments.
-        run: cargo audit --deny warnings \
-          --ignore RUSTSEC-2024-0384 \
-          --ignore RUSTSEC-2024-0388
+        run: cargo audit --deny warnings
 
       - name: cargo deny (supply-chain gate)
         run: cargo deny check --all-features
