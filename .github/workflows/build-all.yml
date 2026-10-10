@@ -54,7 +54,7 @@ jobs:
           targets: aarch64-apple-darwin
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
 
@@ -179,7 +179,7 @@ jobs:
             libgdk-pixbuf-2.0-dev
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
 
@@ -248,7 +248,7 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
 
