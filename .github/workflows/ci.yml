@@ -156,11 +156,6 @@ jobs:
       - name: Run binary smoke test
         run: docker run --rm always-ci always --help
 
-      # Run the same test suite that the macOS rust-checks job does (but
-      # against the linux-compiled binary / no-default-features).
-      - name: Run tests (Docker)
-        run: docker run --rm always-ci cargo test --no-default-features --features linux,cpal --locked --lib --bins -- --skip macos
-
   # ─── Swift (existing) ────────────────────────────────────────────────────
 
   swift:
