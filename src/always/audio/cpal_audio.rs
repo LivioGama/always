@@ -155,9 +155,7 @@ impl SharedAudioSource {
 
         // Try exact match: 16kHz in range, mono.
         for cfg in &supported {
-            if cfg.channels() == 1
-                && cfg.min_sample_rate() <= RATE
-                && RATE <= cfg.max_sample_rate()
+            if cfg.channels() == 1 && cfg.min_sample_rate() <= RATE && RATE <= cfg.max_sample_rate()
             {
                 let sc = cfg.with_sample_rate(RATE);
                 return Ok((sc.config(), cfg.sample_format()));
