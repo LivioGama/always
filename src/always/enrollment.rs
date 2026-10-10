@@ -88,6 +88,7 @@ pub fn profile_status(cfg_enabled: bool) -> (bool, bool, Vec<String>) {
 /// Record one guided sample and fold it into the voiceprint. Runs on
 /// the event-loop thread. Broadcasts progress/terminal events itself;
 /// the returned Result is for the caller's log line only.
+#[cfg(target_os = "macos")]
 pub fn run_enrollment(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
     let broadcaster = event::global_broadcaster();
     let result = record_and_store(cfg, step);
