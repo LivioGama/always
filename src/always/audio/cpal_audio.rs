@@ -100,7 +100,8 @@ impl SharedAudioSource {
 
         let device = Self::find_input_device()?;
         let (stream_config, sample_format) = Self::find_config(&device)?;
-        let device_name = device.name().unwrap_or_else(|_| "unknown".to_string());
+        // cpal 0.18: Device no longer has .name(); use Display.
+        let device_name = format!("{}", device);
 
         let (tx, rx) = mpsc::channel::<[u8; FRAME_BYTES]>();
         let rx = Arc::new(Mutex::new(Some(rx)));
@@ -155,10 +156,10 @@ impl SharedAudioSource {
         // Try exact match: 16kHz in range, mono.
         for cfg in &supported {
             if cfg.channels() == 1
-                && cfg.min_sample_rate() <= cpal::SampleRate(RATE)
-                && cpal::SampleRate(RATE) <= cfg.max_sample_rate()
+                && cfg.min_sample_rate() <= RATE
+                && RATE <= cfg.max_sample_rate()
             {
-                let sc = cfg.with_sample_rate(cpal::SampleRate(RATE));
+                let sc = cfg.with_sample_rate(RATE);
                 return Ok((sc.config(), cfg.sample_format()));
             }
         }
@@ -168,8 +169,8 @@ impl SharedAudioSource {
             .iter()
             .filter(|c| c.channels() == 1)
             .min_by_key(|c| {
-                let lo = c.min_sample_rate().0;
-                let hi = c.max_sample_rate().0;
+                let lo = c.min_sample_rate();
+                let hi = c.max_sample_rate();
                 if RATE >= lo && RATE <= hi {
                     0u32 // exact range match, prefer exact
                 } else if RATE < lo {
@@ -181,7 +182,7 @@ impl SharedAudioSource {
             .context("No compatible mono input config")?;
 
         let sc = best
-            .try_with_sample_rate(cpal::SampleRate(RATE))
+            .try_with_sample_rate(RATE)
             .or_else(|| best.try_with_sample_rate(best.max_sample_rate()))
             .context("No compatible mono input config")?;
 
@@ -245,7 +246,7 @@ impl SharedAudioSource {
         let cfg_cb = Arc::clone(&config);
 
         let stream = device.build_input_stream(
-            &cfg_cb,
+            *cfg_cb,
             move |data: &[i16], _info| {
                 if running_cb.load(Ordering::Relaxed) {
                     Self::push_frames_i16(data, &tx_cb);
@@ -274,9 +275,8 @@ impl SharedAudioSource {
         let running_cb = Arc::clone(&running);
         let tx_cb = Arc::clone(&tx);
         let cfg_cb = Arc::clone(&config);
-
         let stream = device.build_input_stream(
-            &cfg_cb,
+            *cfg_cb,
             move |data: &[u16], _info| {
                 if running_cb.load(Ordering::Relaxed) {
                     Self::push_frames_u16(data, &tx_cb);
@@ -305,9 +305,8 @@ impl SharedAudioSource {
         let running_cb = Arc::clone(&running);
         let tx_cb = Arc::clone(&tx);
         let cfg_cb = Arc::clone(&config);
-
         let stream = device.build_input_stream(
-            &cfg_cb,
+            *cfg_cb,
             move |data: &[f32], _info| {
                 if running_cb.load(Ordering::Relaxed) {
                     Self::push_frames_f32(data, &tx_cb);
