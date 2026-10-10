@@ -235,7 +235,11 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
             // transcribed and let the GUI respawn a fresh daemon. See
             // `daemon::should_self_restart` for the measured backstory.
             let footprint = daemon::resident_footprint_bytes();
-            if daemon::should_self_restart(footprint, pause::since_last_voice().as_secs(), pause::is_paused()) {
+            if daemon::should_self_restart(
+                footprint,
+                pause::since_last_voice().as_secs(),
+                pause::is_paused(),
+            ) {
                 tracing::warn!(
                     footprint_bytes = footprint.unwrap_or(0),
                     ceiling_bytes = daemon::RSS_CEILING_BYTES,
@@ -346,9 +350,9 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         // user continuing to talk, and must be kept.
         if was_gated {
             was_gated = false;
-            if let Ok(recorder_arc) = audio::RecChild::get_or_spawn() {
-                let mut recorder = recorder_arc.lock();
-                if let Some(rec) = recorder.as_mut() {
+            if let Ok(source_arc) = audio::get_or_spawn() {
+                let mut source = source_arc.lock();
+                if let Some(rec) = source.as_mut() {
                     // Logged even at 0.0: a gate that queued nothing is
                     // itself worth seeing (it means `rec` got no samples
                     // while the other app held the device), and silence

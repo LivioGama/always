@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-utils/schema.json",
+  "identifier": "default",
+  "description": "Default capabilities for the Always Tauri app — core IPC, autolaunch, and updater.",
+  "windows": ["settings", "onboarding"],
+  "permissions": [
+    "core:default",
+    "autolaunch:default",
+    "updater:default"
+  ]
+}

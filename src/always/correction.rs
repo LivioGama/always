@@ -23,7 +23,7 @@
 
 use std::time::Duration;
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -345,10 +345,8 @@ pub fn apply_pairs_to_glossary_with_provenance(
         // mistranscription=pair.right, the user is correcting BACK —
         // the previous mapping was wrong and should be removed.
         let back_corr_idx = entries.iter().position(|e| {
-            e.get("term").and_then(|v| v.as_str())
-                == Some(pair.wrong.as_str())
-                && e
-                    .get("mistranscriptions")
+            e.get("term").and_then(|v| v.as_str()) == Some(pair.wrong.as_str())
+                && e.get("mistranscriptions")
                     .and_then(|v| v.as_array())
                     .is_some_and(|arr| {
                         arr.iter().any(|v| {
@@ -361,7 +359,10 @@ pub fn apply_pairs_to_glossary_with_provenance(
         if let Some(bi) = back_corr_idx {
             // Remove the bad mistranscription from the existing entry.
             let entry = &mut entries[bi];
-            if let Some(arr) = entry.get_mut("mistranscriptions").and_then(|v| v.as_array_mut()) {
+            if let Some(arr) = entry
+                .get_mut("mistranscriptions")
+                .and_then(|v| v.as_array_mut())
+            {
                 let before = arr.len();
                 arr.retain(|v| {
                     v.as_str()
@@ -515,7 +516,7 @@ pub fn add_or_bump_term(term: &str) -> Result<()> {
 ///
 /// Returns `Ok(None)` if no selection is available (or the platform
 /// doesn't support this).
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 pub fn read_selection_via_cmd_c() -> Result<Option<String>> {
     use crate::always::paste;
 
@@ -564,12 +565,12 @@ pub fn read_selection_via_cmd_c() -> Result<Option<String>> {
     }
 }
 
-#[cfg(not(feature = "macos"))]
+#[cfg(not(target_os = "macos"))]
 pub fn read_selection_via_cmd_c() -> Result<Option<String>> {
     Ok(None)
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 fn simulate_cmd_c() -> Result<()> {
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
@@ -653,7 +654,7 @@ pub enum CaptureOutcome {
 /// is off), pairs are extracted and returned as `Extracted` but NOT
 /// written to the glossary — the caller may queue them for manual
 /// review instead.
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 pub fn capture_via_hotkey(
     last_pasted_window: Duration,
     auto_apply: bool,
@@ -697,7 +698,7 @@ pub fn capture_via_hotkey(
     })
 }
 
-#[cfg(not(feature = "macos"))]
+#[cfg(not(target_os = "macos"))]
 pub fn capture_via_hotkey(_window: Duration, _auto_apply: bool) -> Result<CaptureOutcome> {
     Ok(CaptureOutcome::NoRecentPaste)
 }
@@ -958,7 +959,8 @@ mod tests {
         );
         // The reverse mapping (cloud → Claude) should NOT have been learned.
         assert!(
-            !arr.iter().any(|e| e.get("term").and_then(|v| v.as_str()) == Some("cloud")),
+            !arr.iter()
+                .any(|e| e.get("term").and_then(|v| v.as_str()) == Some("cloud")),
             "should not have learned the reverse mapping"
         );
     }

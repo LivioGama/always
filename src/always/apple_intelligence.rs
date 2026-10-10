@@ -50,11 +50,7 @@ pub fn process_text_with_system_prompt(
     let user_cstr = CString::new(user_content).map_err(|e| e.to_string())?;
 
     let response_ptr = unsafe {
-        process_text_with_system_prompt_apple(
-            system_cstr.as_ptr(),
-            user_cstr.as_ptr(),
-            max_tokens,
-        )
+        process_text_with_system_prompt_apple(system_cstr.as_ptr(), user_cstr.as_ptr(), max_tokens)
     };
 
     if response_ptr.is_null() {
@@ -72,7 +68,9 @@ pub fn process_text_with_system_prompt(
             }
         } else {
             let error_msg = if !response.error_message.is_null() {
-                CStr::from_ptr(response.error_message).to_string_lossy().into_owned()
+                CStr::from_ptr(response.error_message)
+                    .to_string_lossy()
+                    .into_owned()
             } else {
                 "Unknown error".to_string()
             };
@@ -90,6 +88,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::print_stdout)]
     #[ignore]
     fn probe_live_inference() {
         let available = check_availability();
@@ -106,6 +105,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::print_stdout)]
     fn test_availability() {
         let available = check_availability();
         println!("Apple Intelligence available: {}", available);

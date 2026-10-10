@@ -13,7 +13,10 @@
 #
 # Multi-stage; final image is debian-slim + runtime deps only.
 
-FROM rust:1.83-slim AS builder
+FROM rust:1.88.0-slim-trixie AS builder
+
+# Trixie's glibc 2.39 provides the C23 strto{ull,l} symbols that the
+# ort (ONNX Runtime) crate's vendored C++ code needs at link time.
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
@@ -21,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsqlite3-dev \
         libasound2-dev \
         sox \
+        g++ \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -30,10 +34,10 @@ COPY . .
 # `linux` feature replaces macOS-only deps (core-graphics, oslog, rdev) with
 # stubs. The daemon is operational; clipboard paste + global hotkeys
 # return NotImplemented and the user toggles state via the CLI instead.
-RUN cargo build --release --no-default-features --features linux --locked
+RUN cargo build --release --no-default-features --features linux,cpal --locked
 
 # ---------- runtime stage ----------
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         sox \

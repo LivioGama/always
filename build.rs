@@ -3,9 +3,8 @@
 //! revision a user is running. The Mac app reads `--version` at startup
 //! and compares against its bundled `Info.plist` to detect drift.
 //!
-//! On macOS ARM64 we also compile the Apple Intelligence Swift bridge
-//! (FoundationModels framework) into a static library and link it into
-//! the daemon binary, following the same pattern as Handy.
+//! On macOS ARM64 we also compile the Apple Intelligence / Apple STT
+//! Swift bridges into static libraries and link them into the daemon.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -61,7 +60,6 @@ fn build_apple_intelligence_bridge() {
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
     let object_path = out_dir.join("apple_intelligence.o");
-    let static_lib_path = out_dir.join("libapple_intelligence.a");
 
     // SDKROOT override for non-Xcode toolchains.
     let sdk_path = std::env::var("SDKROOT").unwrap_or_else(|_| {
@@ -151,11 +149,14 @@ fn build_apple_intelligence_bridge() {
         panic!("swiftc failed to compile {source_file}");
     }
 
+    let static_lib_path = out_dir.join("libapple_intelligence.a");
     let status = Command::new("libtool")
         .args([
             "-static",
             "-o",
-            static_lib_path.to_str().expect("Failed to convert static lib path"),
+            static_lib_path
+                .to_str()
+                .expect("Failed to convert static lib path"),
             object_path.to_str().expect("Failed to convert object path"),
         ])
         .status()
@@ -167,7 +168,10 @@ fn build_apple_intelligence_bridge() {
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=apple_intelligence");
-    println!("cargo:rustc-link-search=native={}", toolchain_swift_lib.display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        toolchain_swift_lib.display()
+    );
     println!("cargo:rustc-link-search=native={}", sdk_swift_lib.display());
     println!("cargo:rustc-link-lib=framework=Foundation");
 
@@ -191,7 +195,6 @@ fn build_apple_stt_bridge() {
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
     let object_path = out_dir.join("apple_stt.o");
-    let static_lib_path = out_dir.join("libapple_stt.a");
 
     let sdk_path = std::env::var("SDKROOT").unwrap_or_else(|_| {
         String::from_utf8(
@@ -206,11 +209,40 @@ fn build_apple_stt_bridge() {
         .to_string()
     });
 
-    let speech_framework =
-        Path::new(&sdk_path).join("System/Library/Frameworks/Speech.framework");
-    let source_file = if speech_framework.exists() {
+    let speech_framework = Path::new(&sdk_path).join("System/Library/Frameworks/Speech.framework");
+
+    // SpeechTranscriber, SpeechAnalyzer, etc. require macOS 15+.
+    // CI runners (macOS 14) have Speech.framework but not these types.
+    let sdk_version_output = Command::new("xcrun")
+        .args(["--show-sdk-version"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|v| v.trim().to_string());
+
+    let has_newer_speech_types = sdk_version_output
+        .as_deref()
+        .map(|v| {
+            let major: u32 = v
+                .split('.')
+                .next()
+                .and_then(|m| m.parse().ok())
+                .unwrap_or(0);
+            major >= 15
+        })
+        .unwrap_or(false);
+
+    let force_stub = std::env::var("ALWAYS_FORCE_STT_STUB").as_deref() == Ok("1");
+
+    let source_file = if has_newer_speech_types && speech_framework.exists() && !force_stub {
         real_swift_path.to_str().unwrap()
     } else {
+        if let Some(ref v) = sdk_version_output {
+            println!(
+                "cargo:warning=SDK version {} detected; SpeechTranscriber requires macOS 15+.",
+                v
+            );
+        }
         stub_swift_path.to_str().unwrap()
     };
 
@@ -253,11 +285,14 @@ fn build_apple_stt_bridge() {
         panic!("swiftc failed to compile {source_file}");
     }
 
+    let static_lib_path = out_dir.join("libapple_stt.a");
     let status = Command::new("libtool")
         .args([
             "-static",
             "-o",
-            static_lib_path.to_str().expect("Failed to convert static lib path"),
+            static_lib_path
+                .to_str()
+                .expect("Failed to convert static lib path"),
             object_path.to_str().expect("Failed to convert object path"),
         ])
         .status()

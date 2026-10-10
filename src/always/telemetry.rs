@@ -63,7 +63,7 @@ pub fn init_logging(foreground: bool) -> Result<tracing_appender::non_blocking::
     }
 
     // Add oslog layer on macOS
-    #[cfg(all(target_os = "macos", feature = "macos"))]
+    #[cfg(all(target_os = "macos", target_os = "macos"))]
     {
         init_oslog();
     }
@@ -72,7 +72,7 @@ pub fn init_logging(foreground: bool) -> Result<tracing_appender::non_blocking::
 }
 
 /// Initialize macOS oslog integration
-#[cfg(all(target_os = "macos", feature = "macos"))]
+#[cfg(all(target_os = "macos", target_os = "macos"))]
 fn init_oslog() {
     use oslog::OsLogger;
 

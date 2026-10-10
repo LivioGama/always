@@ -12,9 +12,7 @@ use std::sync::Mutex;
 
 use futures::stream::Stream;
 
-use crate::stt::{
-    StreamingTranscriptionResult, SttError, Transcriber, TranscriptionResult,
-};
+use crate::stt::{StreamingTranscriptionResult, SttError, Transcriber, TranscriptionResult};
 
 /// Serializes access to SFSpeechRecognizer. Concurrent recognition tasks
 /// have caused the framework to return empty results for one of the callers.
@@ -48,20 +46,14 @@ impl Transcriber for AppleTranscriber {
         })?;
 
         std::fs::write(&temp_path, &audio).map_err(|e| {
-            SttError::Other(anyhow::anyhow!(
-                "failed to write Apple STT temp file: {e}"
-            ))
+            SttError::Other(anyhow::anyhow!("failed to write Apple STT temp file: {e}"))
         })?;
 
         let phrases = context_phrases();
         let result = {
             let _guard = APPLE_STT_MUTEX.lock().unwrap();
-            crate::always::apple_stt::transcribe_wav(
-                &temp_path,
-                self.language.as_deref(),
-                &phrases,
-            )
-            .map_err(|e| SttError::Other(anyhow::anyhow!("Apple STT failed: {e}")))
+            crate::always::apple_stt::transcribe_wav(&temp_path, self.language.as_deref(), &phrases)
+                .map_err(|e| SttError::Other(anyhow::anyhow!("Apple STT failed: {e}")))
         };
 
         let _ = std::fs::remove_file(&temp_path);
@@ -145,7 +137,8 @@ fn wav_sample_offset(data: &[u8]) -> Option<usize> {
     let mut i = 12; // skip RIFF header
     while i + 8 <= data.len() {
         let chunk_id = std::str::from_utf8(&data[i..i + 4]).ok()?;
-        let chunk_size = u32::from_le_bytes([data[i + 4], data[i + 5], data[i + 6], data[i + 7]]) as usize;
+        let chunk_size =
+            u32::from_le_bytes([data[i + 4], data[i + 5], data[i + 6], data[i + 7]]) as usize;
         if chunk_id == "data" {
             return Some(i + 8);
         }
@@ -158,13 +151,17 @@ fn wav_sample_offset(data: &[u8]) -> Option<usize> {
 /// tolerant of quiet speech than Whisper, and the daemon's audio pipeline does
 /// not apply automatic gain control.
 fn normalize_wav_samples(data: &mut [u8]) {
-    let Some(samples_start) = wav_sample_offset(data) else { return };
-    if samples_start >= data.len() || (data.len() - samples_start) % 2 != 0 {
+    let Some(samples_start) = wav_sample_offset(data) else {
+        return;
+    };
+    let remaining = data.len().saturating_sub(samples_start);
+    if remaining % 2 != 0 {
         return;
     }
-    let sample_bytes = &data[samples_start..];
+    let sample_bytes = &data[samples_start..samples_start + remaining];
     let mut max_abs = 0i32;
-    for chunk in sample_bytes.chunks_exact(2) {
+    let chunks = sample_bytes.as_chunks::<2>();
+    for chunk in chunks.0 {
         let sample = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
         let abs = sample.unsigned_abs() as i32;
         if abs > max_abs {
@@ -181,8 +178,10 @@ fn normalize_wav_samples(data: &mut [u8]) {
     // Cap gain at 4x — if the audio needs more, it's probably noise.
     let gain = gain.min(4.0);
 
-    let sample_bytes = &mut data[samples_start..];
-    for chunk in sample_bytes.chunks_exact_mut(2) {
+    let sample_bytes = &mut data[samples_start..samples_start + remaining];
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    let chunks = sample_bytes.chunks_exact_mut(2);
+    for chunk in chunks {
         let sample = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
         let scaled = (sample as f32 * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         let bytes = scaled.to_le_bytes();

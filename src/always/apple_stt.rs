@@ -36,7 +36,11 @@ pub fn check_availability() -> bool {
 ///
 /// Returns the raw transcribed text on success, or a human-readable error
 /// string on failure.
-pub fn transcribe_wav(path: &Path, lang: Option<&str>, phrases: &[String]) -> Result<String, String> {
+pub fn transcribe_wav(
+    path: &Path,
+    lang: Option<&str>,
+    phrases: &[String],
+) -> Result<String, String> {
     let path_str = path
         .to_str()
         .ok_or_else(|| "Apple STT path is not valid UTF-8".to_string())?;
@@ -46,9 +50,7 @@ pub fn transcribe_wav(path: &Path, lang: Option<&str>, phrases: &[String]) -> Re
         .and_then(|l| CString::new(l).ok());
     let phrases_cstr = CString::new(phrases.join("\n")).ok();
 
-    let lang_ptr = lang_cstr
-        .as_ref()
-        .map_or(std::ptr::null(), |c| c.as_ptr());
+    let lang_ptr = lang_cstr.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
     let phrases_ptr = phrases_cstr
         .as_ref()
         .map_or(std::ptr::null(), |c| c.as_ptr());

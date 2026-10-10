@@ -230,8 +230,7 @@ pub fn peer_is_live() -> bool {
     peer_socket_path().is_some_and(|p| p.exists() && socket_is_live(&p))
 }
 
-static WE_PAUSED_PEER: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static WE_PAUSED_PEER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Send `SetPaused{paused, reason:"peer-instance"}` to the peer daemon.
 /// Returns true when the command reached a live peer. Tracks
@@ -335,17 +334,9 @@ pub fn spawn_peer_resume_watchdog() {
 }
 
 /// Current physical footprint of THIS process, in bytes — the same
-/// number `vmmap --summary` prints as "Physical footprint" and the
-/// closest thing to Activity Monitor's per-process "Memory" figure.
-///
-/// `getrusage(RUSAGE_SELF).ru_maxrss` is a monotonic high-water mark, so
-/// it cannot drive a "have we grown past the ceiling" decision;
-/// `proc_pid_rusage(RUSAGE_INFO_V0)` reads the live footprint. The V0
-/// flavor is used deliberately: its layout has been stable for a
-/// decade and puts `ri_phys_footprint` at a fixed offset.
-///
-/// Returns None if the syscall fails — the caller then skips its check,
-/// because a missing reading must never restart the daemon.
+/// number `vmmap --summary` prints as "Physical footprint".
+/// Only available on macOS (via `proc_pid_rusage`).
+#[cfg(target_os = "macos")]
 pub fn resident_footprint_bytes() -> Option<u64> {
     use std::ffi::{c_int, c_void};
 
@@ -395,6 +386,30 @@ pub fn resident_footprint_bytes() -> Option<u64> {
     (status == 0).then_some(info.phys_footprint)
 }
 
+/// Linux fallback: read `/proc/self/status` for `VmRSS`.
+#[cfg(not(target_os = "macos"))]
+pub fn resident_footprint_bytes() -> Option<u64> {
+    use std::io::Read;
+    let mut buf = String::new();
+    if std::fs::File::open("/proc/self/status")
+        .ok()?
+        .read_to_string(&mut buf)
+        .is_err()
+    {
+        return None;
+    }
+    buf.lines()
+        .find(|l| l.starts_with("VmRSS:"))
+        .and_then(|l| {
+            l.split_whitespace()
+                .nth(1)
+                .unwrap_or("0")
+                .parse::<u64>()
+                .ok()
+        })
+        .map(|kb| kb * 1024)
+}
+
 /// True when the daemon should exit and let the GUI respawn it: the
 /// physical footprint crossed [`RSS_CEILING_BYTES`] while the daemon is
 /// not actively listening (effective-paused, or no voice for at least
@@ -412,11 +427,7 @@ pub fn resident_footprint_bytes() -> Option<u64> {
 /// unbounded growth into a bounded sawtooth: the daemon exits while
 /// idle, the GUI respawns it within seconds, and the mic handoff
 /// already covers the transition.
-pub fn should_self_restart(
-    footprint: Option<u64>,
-    idle_secs: u64,
-    effective_paused: bool,
-) -> bool {
+pub fn should_self_restart(footprint: Option<u64>, idle_secs: u64, effective_paused: bool) -> bool {
     const IDLE_GRACE_SECS: u64 = 60;
     match footprint {
         Some(bytes) if bytes > RSS_CEILING_BYTES => {
@@ -810,39 +821,15 @@ mod tests {
     fn self_restart_needs_ceiling_and_quiet() {
         let ceiling = RSS_CEILING_BYTES;
         // Under the ceiling: never restart, whatever the pause state.
-        assert!(!should_self_restart(
-            Some(ceiling),
-            0,
-            true
-        ));
-        assert!(!should_self_restart(
-            Some(ceiling - 1),
-            10_000,
-            true
-        ));
+        assert!(!should_self_restart(Some(ceiling), 0, true));
+        assert!(!should_self_restart(Some(ceiling - 1), 10_000, true));
         // Over the ceiling but actively listening (not paused, voice
         // seconds ago): never restart mid-utterance.
-        assert!(!should_self_restart(
-            Some(ceiling + 1),
-            0,
-            false
-        ));
-        assert!(!should_self_restart(
-            Some(ceiling * 10),
-            59,
-            false
-        ));
+        assert!(!should_self_restart(Some(ceiling + 1), 0, false));
+        assert!(!should_self_restart(Some(ceiling * 10), 59, false));
         // Over the ceiling and quiet: restart.
-        assert!(should_self_restart(
-            Some(ceiling + 1),
-            60,
-            false
-        ));
-        assert!(should_self_restart(
-            Some(ceiling * 10),
-            5,
-            true
-        ));
+        assert!(should_self_restart(Some(ceiling + 1), 60, false));
+        assert!(should_self_restart(Some(ceiling * 10), 5, true));
         // A missing reading must never restart.
         assert!(!should_self_restart(None, 10_000, true));
     }

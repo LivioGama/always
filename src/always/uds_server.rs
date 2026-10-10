@@ -491,7 +491,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
             if write_end <= pos {
                 // Couldn't find a complete line, write what we have
                 if let Err(e) = tokio::time::timeout(WRITE_TIMEOUT, async {
-                    writer.write_all(initial_payload[pos..].as_bytes()).await?;
+                    writer.write_all(&initial_payload.as_bytes()[pos..]).await?;
                     writer.flush().await
                 })
                 .await
@@ -1006,13 +1006,13 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             // without an app relaunch. On non-macOS builds there is no
             // recorder to respawn (the CLI path uses a different source),
             // so the command is a no-op there.
-            #[cfg(feature = "macos")]
+            #[cfg(target_os = "macos")]
             {
                 if let Err(e) = crate::always::audio::RecChild::force_respawn() {
                     tracing::error!(error = %e, "uds_respawn_recorder_failed");
                 }
             }
-            #[cfg(not(feature = "macos"))]
+            #[cfg(not(target_os = "macos"))]
             {
                 tracing::debug!("RespawnRecorder ignored — no recorder on this build");
             }
@@ -1290,10 +1290,12 @@ fn spawn_llm_extraction(
                     for p in &new_pairs {
                         global_broadcaster().correction_logged(&p.wrong, &p.right);
                     }
-                    if let Err(e) = crate::always::correction::apply_pairs_to_glossary_with_provenance(
-                        &new_pairs,
-                        crate::always::correction::Provenance::Llm,
-                    ) {
+                    if let Err(e) =
+                        crate::always::correction::apply_pairs_to_glossary_with_provenance(
+                            &new_pairs,
+                            crate::always::correction::Provenance::Llm,
+                        )
+                    {
                         tracing::error!(error = %e, "llm_extraction_apply_failed");
                     }
                 }

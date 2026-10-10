@@ -8,29 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Voice-to-text daemon (Groq Whisper STT) with Silero VAD, hallucination filter, and UDS event streaming to the Swift menu-bar app.
-- Manual correction capture: ⌃⌥X hotkey plus optional passive clipboard mode → `~/.always/glossary.json` (`always corrections list/approve/reject/clear/capture`).
-- Settings sidebar panels: General, Models, Permissions, Behavior, Shortcuts, Vocabulary, History, About.
-- Sparkle auto-update wiring, signed release pipeline (DMG, notarization, cosign, SLSA, Homebrew tap PR).
-- `.github/dependabot.yml`; CI concurrency control and SwiftPM cache.
+- **Tauri v2 migration** — Application now uses Tauri v2 runtime: a single-process architecture with a Rust backend and a web frontend (React + Vite + Tailwind) in a native WebView container. Eliminates UDS daemon, orphan watchdog, and cross-process IPC.
+- **Marketing website** (`web/`) — Professional landing page with Hero, Features (7-card grid), How It Works (3-step), Download (platform selector), Screenshots placeholders, and Footer. Built with React 19, Vite 7, Tailwind CSS 4, TypeScript 5.8.
+- **Platform-specific install instructions** — README.md updated with installation commands for macOS (Homebrew tap + DMG), Linux (DEB/RPM), and Windows (MSI). Includes post-install permission steps for each platform.
+- **Keyboard shortcuts table** — All six shortcuts documented in README.md with Linux (Super/Ctrl+Alt) and Windows (Win/Ctrl+Alt) modifier translations.
+- **System requirements** — Documented minimum specs (4 GB RAM, 80 MB disk, platform version requirements) in README.md and the Download section.
+- **docs/SETUP.md** — Comprehensive platform-specific setup guide covering:
+  - **macOS:** DMG installation, Homebrew tap, microphone/input monitoring/accessibility permissions, quarantine override
+  - **Linux:** DEB/RPM install, systemd service (`also-daemon`), udev rules for audio device access, ALSA/PipeWire/PulseAudio config
+  - **Windows:** MSI install with admin privileges, Windows 10/11 microphone privacy settings
+  - **Common:** API key configuration, local model download, log file locations, verbose logging
+- **Updated docs/ARCHITECTURE.md** — Complete rewrite documenting Tauri v2 architecture:
+  - Single-process design (Rust backend + WebView frontend)
+  - Component diagram with cpal, Silero VAD, STT dispatch, AI filter, rdev
+  - Full data flow: microphone → cpal → VAD → Groq/local STT → filter → paste/overlay
+  - Frontend structure (web/ with Vite + React + Tailwind)
+  - Security model (keychain storage, local-only voiceprint, TLS-only network, zero telemetry)
+  - Cross-platform abstraction matrix (audio, paste, hotkeys, overlay, keychain)
+  - Build & distribution commands and output formats
+  - Tauri v2 Pages roadmap for full app migration
+- **Data flow documentation** — Complete dictation pipeline documented with component diagram in ARCHITECTURE.md.
 
 ### Changed
-- Groq grammar correction on gpt-oss models requests `reasoning_effort: low` and omits reasoning text from the response.
-- CI: `cargo clippy --all-targets --all-features --locked -D warnings`, blocking `cargo audit`, runner pinned to `macos-14`.
-- `SECURITY.md`: disclosure email, supported-versions table, embargo timeline.
-- `build.sh`: sync bundle version from `Cargo.toml`, bundle integrity checks, rsync deploy to preserve TCC grants.
+- README.md rewritten with cross-platform focus: install instructions, shortcuts table, features list, documentation links, and system requirements added.
+- Architecture documentation migrated from Swift-daemon + UDS model to Tauri v2 single-process model.
+- CI output updated to document Tauri build targets (macOS dmg, Linux deb/rpm, Windows msi).
 
 ### Fixed
-- Daemon memory leak (0.7 GB at launch → 4.2 GB within an hour of dictation, tens of GB per working day): ONNX Runtime 2.0.0-rc.12 on current macOS retains a slice of every inference's working buffers at the process level for the daemon's lifetime (measured; `heap` shows ~12 retained `std::shared_ptr` blocks per run; session recycling and the arena/memory-pattern options do not bound it). The daemon now checks its own physical footprint every 30 s and, past a 3 GiB ceiling while it is not actively listening (paused or ≥60 s silent), exits gracefully so the GUI respawns a fresh daemon — never mid-utterance (SPEC §7.3).
-- The 1 Hz mic-conflict probe also retained memory while any non-excluded app ran audio input: the Info.plist value CFType from `CFBundleGetValueForInfoDictionaryKey` was never `CFRelease`d and the LaunchServices/CFBundle display-name resolution re-ran every poll. Display names are now resolved once per bundle id and cached, and the plist value is released.
-- Dictation latency: SoX's 4.1 s output buffer delivered microphone audio in 4-second bursts, delaying the listening badge, the end-of-speech cut and the paste by up to 4 s. The recorder now streams in 128 ms blocks through a dedicated reader thread; latency logs measure from capture time.
-- Long dictations no longer end, paste (and auto-Enter) at the first ~270 ms pause after the 6 s chunk mark: the short-utterance window was judged on the audio since the last chunk instead of the whole utterance.
-- Grammar pre-warm keys now match the paste path (local cleanup applied inside the request builder; chunk joins warmed as they will be pasted), so the LLM call is usually already done at paste time.
-- The overlay hides within ~0.15 s of the final text instead of ~1 s, shows live preview text as it arrives instead of one update late, and returns to the live badge when a confirmation flash ends mid-utterance.
-- Case-insensitive bundle collision (`Always` vs `always`) — daemon ships as `always-daemon`.
-- Vocabulary false positives (`Zed` in `analyzed`) via word-boundary replacement.
-- Paste-in-flight lock leak, atomic config/glossary writes, SQLite busy timeout, UDS client resilience.
-- STT language persistence, model UX, overlay visibility, and listening latency regressions.
+- Cross-platform permission documentation ensures users know exactly what to grant on each platform — previously only macOS permissions were well-documented.
 
 ## [0.0.1] - 2026-06-06
 

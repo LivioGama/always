@@ -60,11 +60,7 @@ impl GlossaryCache {
     }
 
     fn from_entries(mut entries: Vec<Entry>, mtime: Option<SystemTime>) -> Self {
-        entries.sort_by(|a, b| {
-            b.weight
-                .cmp(&a.weight)
-                .then(b.frequency.cmp(&a.frequency))
-        });
+        entries.sort_by(|a, b| b.weight.cmp(&a.weight).then(b.frequency.cmp(&a.frequency)));
         let whisper_prompt = build_whisper_bias_prompt(&entries);
         let postprocess_prompt = build_postprocess_prompt(&entries);
         Self {

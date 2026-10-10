@@ -692,8 +692,12 @@ mod tests {
     #[test]
     fn tiered_exact_mistranscription_rewrites_immediately() {
         let glossary = entries(&[("Claude Code", &["cloud code"])]);
-        let (out, subs) =
-            apply_glossary_tiered("open cloud code now", &glossary, DEFAULT_THRESHOLD, FuzzyMode::LlmAvailable);
+        let (out, subs) = apply_glossary_tiered(
+            "open cloud code now",
+            &glossary,
+            DEFAULT_THRESHOLD,
+            FuzzyMode::LlmAvailable,
+        );
         assert_eq!(out, "open Claude Code now");
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].tier, SubstitutionTier::Exact);
@@ -710,7 +714,8 @@ mod tests {
             "deploy this to the cloud today",
             &glossary,
             DEFAULT_THRESHOLD,
-            FuzzyMode::LlmAvailable,        );
+            FuzzyMode::LlmAvailable,
+        );
         assert_eq!(out, "deploy this to the cloud today");
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].tier, SubstitutionTier::Fuzzy);
@@ -726,8 +731,12 @@ mod tests {
         // blindly rewriting "cloud" → "Claude". "the cloud today" has
         // no product-context verb, so the heuristic skips it.
         let glossary = entries(&[("Claude", &[])]);
-        let (out, subs) =
-            apply_glossary_tiered("the cloud today is great", &glossary, DEFAULT_THRESHOLD, FuzzyMode::NoLlm);
+        let (out, subs) = apply_glossary_tiered(
+            "the cloud today is great",
+            &glossary,
+            DEFAULT_THRESHOLD,
+            FuzzyMode::NoLlm,
+        );
         assert_eq!(out, "the cloud today is great");
         assert_eq!(subs.len(), 1);
         assert!(!subs[0].applied);
@@ -739,8 +748,12 @@ mod tests {
         // score against "Kubernetes" — high confidence, applies even
         // without an LLM.
         let glossary = entries(&[("Kubernetes", &[])]);
-        let (out, subs) =
-            apply_glossary_tiered("deploy kubernetics now", &glossary, DEFAULT_THRESHOLD, FuzzyMode::NoLlm);
+        let (out, subs) = apply_glossary_tiered(
+            "deploy kubernetics now",
+            &glossary,
+            DEFAULT_THRESHOLD,
+            FuzzyMode::NoLlm,
+        );
         assert_eq!(out, "deploy Kubernetes now");
         assert_eq!(subs.len(), 1);
         assert!(subs[0].applied);
@@ -755,7 +768,8 @@ mod tests {
             "deploy kubernetics today",
             &glossary,
             DEFAULT_THRESHOLD,
-            FuzzyMode::LlmAvailable,        );
+            FuzzyMode::LlmAvailable,
+        );
         assert_eq!(out, "deploy Kubernetes today");
         assert_eq!(subs[0].tier, SubstitutionTier::Exact);
     }
@@ -766,8 +780,12 @@ mod tests {
         // of "Claude". The exact hit must defer to the LLM rather than
         // rewriting unconditionally — "deploy to the cloud" should stay.
         let glossary = entries(&[("Claude", &["cloud"])]);
-        let (out, subs) =
-            apply_glossary_tiered("Hi cloud, hello!", &glossary, DEFAULT_THRESHOLD, FuzzyMode::LlmAvailable);
+        let (out, subs) = apply_glossary_tiered(
+            "Hi cloud, hello!",
+            &glossary,
+            DEFAULT_THRESHOLD,
+            FuzzyMode::LlmAvailable,
+        );
         assert_eq!(out, "Hi cloud, hello!");
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].tier, SubstitutionTier::ExactAmbiguous);
@@ -785,7 +803,8 @@ mod tests {
             "deploy kubernetics now",
             &glossary,
             DEFAULT_THRESHOLD,
-            FuzzyMode::LlmAvailable,        );
+            FuzzyMode::LlmAvailable,
+        );
         assert_eq!(out, "deploy Kubernetes now");
         assert_eq!(subs[0].tier, SubstitutionTier::Exact);
         assert!(subs[0].applied);
@@ -796,8 +815,12 @@ mod tests {
         // Without an LLM, "ask cloud" triggers the context heuristic
         // which recognizes "ask" as a product-context verb and applies.
         let glossary = entries(&[("Claude", &["cloud"])]);
-        let (out, subs) =
-            apply_glossary_tiered("ask cloud to help", &glossary, DEFAULT_THRESHOLD, FuzzyMode::NoLlm);
+        let (out, subs) = apply_glossary_tiered(
+            "ask cloud to help",
+            &glossary,
+            DEFAULT_THRESHOLD,
+            FuzzyMode::NoLlm,
+        );
         assert_eq!(out, "ask Claude to help");
         assert_eq!(subs[0].tier, SubstitutionTier::Exact);
         assert!(subs[0].applied);
@@ -824,8 +847,12 @@ mod tests {
         // multi-word window is checked as a whole. "cloud code" is not
         // a common English phrase, so it rewrites immediately.
         let glossary = entries(&[("Claude Code", &["cloud code"])]);
-        let (out, subs) =
-            apply_glossary_tiered("open cloud code now", &glossary, DEFAULT_THRESHOLD, FuzzyMode::LlmAvailable);
+        let (out, subs) = apply_glossary_tiered(
+            "open cloud code now",
+            &glossary,
+            DEFAULT_THRESHOLD,
+            FuzzyMode::LlmAvailable,
+        );
         assert_eq!(out, "open Claude Code now");
         assert_eq!(subs[0].tier, SubstitutionTier::Exact);
         assert!(subs[0].applied);

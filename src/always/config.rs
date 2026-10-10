@@ -30,10 +30,8 @@ const DEFAULT_IDLE_PAUSE_SECS: u32 = 600;
 /// Default bundle IDs excluded from mic-conflict detection — screen
 /// recording apps that hold the mic for the duration of a recording
 /// but aren't competing dictation tools.
-pub const DEFAULT_MIC_CONFLICT_EXCLUSION_BUNDLES: &[&str] = &[
-    "net.telestream.screenflow10",
-    "pl.maketheweb.cleanshotx",
-];
+pub const DEFAULT_MIC_CONFLICT_EXCLUSION_BUNDLES: &[&str] =
+    &["net.telestream.screenflow10", "pl.maketheweb.cleanshotx"];
 
 #[derive(Debug, Clone, Default)]
 pub enum VadMode {
@@ -282,17 +280,12 @@ impl Default for VocabConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PostprocessProvider {
+    #[default]
     Groq,
     Apple,
-}
-
-impl Default for PostprocessProvider {
-    fn default() -> Self {
-        Self::Groq
-    }
 }
 
 impl std::fmt::Display for PostprocessProvider {
@@ -401,10 +394,10 @@ impl AlwaysConfig {
         effective_postprocess.grammar_correction_enabled = postprocess_enabled;
 
         // Honor user pref for postprocess provider: DB > env > default (groq).
-        if let Some(ref provider_str) = prefs.postprocess_provider {
-            if let Ok(provider) = provider_str.parse::<PostprocessProvider>() {
-                effective_postprocess.provider = provider;
-            }
+        if let Some(provider_str) = &prefs.postprocess_provider
+            && let Ok(provider) = provider_str.parse::<PostprocessProvider>()
+        {
+            effective_postprocess.provider = provider;
         }
 
         // Apple Intelligence postprocess adds ~2-4s and can over-correct,
@@ -469,9 +462,7 @@ impl AlwaysConfig {
             post_processor,
             project_root,
             learning_enabled: postprocess_config.learning_history_limit > 0,
-            auto_learn_corrections: prefs
-                .auto_learn_corrections
-                .unwrap_or(true),
+            auto_learn_corrections: prefs.auto_learn_corrections.unwrap_or(true),
             groq_stt_api_key,
             transcriber_backend,
             vad_mode,
@@ -615,10 +606,9 @@ fn resolve_stt_live_preview(prefs: &Preferences) -> bool {
 fn resolve_mic_conflict_exclusion_bundles(prefs: &Preferences) -> Vec<String> {
     if let Some(saved) = &prefs.mic_conflict_exclusion_bundles
         && !saved.is_empty()
+        && let Ok(arr) = serde_json::from_str::<Vec<String>>(saved)
     {
-        if let Ok(arr) = serde_json::from_str::<Vec<String>>(saved) {
-            return arr;
-        }
+        return arr;
     }
     DEFAULT_MIC_CONFLICT_EXCLUSION_BUNDLES
         .iter()

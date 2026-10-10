@@ -153,9 +153,9 @@
       <section class="command-band shell" aria-label="Install command">
         <div>
           <p class="section-kicker">Start with one line</p>
-          <code>brew install --cask LivioGama/tap/always</code>
+          <code>curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash</code>
         </div>
-        <button class="copy-button" type="button" data-copy-command="brew install --cask LivioGama/tap/always" aria-label="Copy Homebrew install command">Copy command</button>
+        <button class="copy-button" type="button" data-copy-command="curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash" aria-label="Copy one-line install command">Copy command</button>
         <span class="copy-status" aria-live="polite"></span>
       </section>
 
@@ -255,14 +255,19 @@
           </div>
           <div class="install-options">
             <div class="install-option">
-              <p class="option-label">Homebrew</p>
-              <code>brew install --cask LivioGama/tap/always</code>
+              <p class="option-label">One-line installer</p>
+              <code>curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash</code>
               <a class="text-link" href="https://github.com/LivioGama/always#readme">Read the setup notes <span aria-hidden="true">↗</span></a>
             </div>
             <div class="install-option">
-              <p class="option-label">Signed DMG</p>
-              <p>Download the latest notarized macOS release and open the app. No account required.</p>
-              <a class="text-link" href="https://github.com/LivioGama/always/releases/latest">Download the latest release <span aria-hidden="true">↗</span></a>
+              <p class="option-label">Linux (DEB / AppImage)</p>
+              <p>Install webkit2gtk first: <code>sudo apt install libwebkit2gtk-4.1-dev</code>, then download the DEB or AppImage from releases.</p>
+              <a class="text-link" href="https://github.com/LivioGama/always/releases/latest">Download from releases <span aria-hidden="true">↗</span></a>
+            </div>
+            <div class="install-option">
+              <p class="option-label">Windows</p>
+              <p>Download the MSI or NSIS installer from GitHub Releases. Supports x86_64.</p>
+              <a class="text-link" href="https://github.com/LivioGama/always/releases/latest">Download from releases <span aria-hidden="true">↗</span></a>
             </div>
           </div>
           <div class="trust-strip" aria-label="Project details">

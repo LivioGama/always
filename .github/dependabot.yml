@@ -1,6 +1,7 @@
 version: 2
 
 updates:
+  # ── Rust ────────────────────────────────────────────────────────────────────
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
@@ -29,6 +30,35 @@ updates:
         patterns:
           - "serde*"
 
+  # ── npm (Tauri GUI) ────────────────────────────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/always-gui"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Zurich"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "gui"
+    commit-message:
+      prefix: "deps(npm)"
+      include: "scope"
+    groups:
+      react-stack:
+        patterns:
+          - "react*"
+          - "@types/react*"
+      tauri-stack:
+        patterns:
+          - "@tauri-apps*"
+      vite-stack:
+        patterns:
+          - "vite*"
+          - "@vitejs*"
+
+  # ── GitHub Actions ─────────────────────────────────────────────────────────
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -44,6 +74,7 @@ updates:
       prefix: "deps(actions)"
       include: "scope"
 
+  # ── Swift (Always app) ─────────────────────────────────────────────────────
   - package-ecosystem: "swift"
     directory: "/Always"
     schedule:

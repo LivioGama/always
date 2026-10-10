@@ -21,6 +21,9 @@ Always/.swiftpm/
 Always.app/
 Always/Always.app/
 .rust_build_timestamp
+node_modules/
+*.pem
+.p12
 
 # JetBrains IDE config
 .idea/

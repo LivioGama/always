@@ -323,9 +323,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         .prepare("SELECT auto_learn_corrections FROM preferences LIMIT 0")
         .is_ok();
     if !has_auto_learn_corrections {
-        conn.execute_batch(
-            "ALTER TABLE preferences ADD COLUMN auto_learn_corrections INTEGER;",
-        )?;
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN auto_learn_corrections INTEGER;")?;
     }
 
     let has_correction_model = conn
@@ -602,7 +600,9 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         }
         "postprocess_provider" => {
             let parsed: Result<crate::always::config::PostprocessProvider, _> = value.parse();
-            parsed.map_err(|e| anyhow::anyhow!("postprocess_provider must be 'groq' or 'apple': {e}"))?;
+            parsed.map_err(|e| {
+                anyhow::anyhow!("postprocess_provider must be 'groq' or 'apple': {e}")
+            })?;
         }
         "mic_conflict_exclusion_bundles" => {
             if !value.is_empty() {
@@ -701,7 +701,8 @@ fn decode_secret(value: Option<String>) -> Option<String> {
     }
 
     let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for pair in hex.as_bytes().chunks_exact(2) {
+    let byte_pairs = hex.as_bytes().as_chunks::<2>();
+    for pair in byte_pairs.0 {
         let Ok(pair) = std::str::from_utf8(pair) else {
             return Some(value);
         };

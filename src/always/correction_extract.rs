@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn dedup_against_already_found() {
-        let already = vec![CorrectionPair {
+        let already = [CorrectionPair {
             wrong: "kubernetics".to_string(),
             right: "Kubernetes".to_string(),
         }];

@@ -144,7 +144,7 @@ mod tests {
             // SAFETY: rusage is plain-old-data, filled in by the kernel.
             unsafe { libc::getrusage(libc::RUSAGE_SELF, ru.as_mut_ptr()) };
             // macOS reports ru_maxrss in BYTES.
-            unsafe { ru.assume_init() }.ru_maxrss as i64
+            unsafe { ru.assume_init() }.ru_maxrss
         };
         let before = peak_rss_bytes();
         for _ in 0..6000 {

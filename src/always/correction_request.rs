@@ -45,8 +45,16 @@ pub fn build(text: &str, llm_available: bool) -> CorrectionRequest {
     let cleaned = crate::always::postprocess::local_cleanup(text);
     let text = cleaned.as_str();
     let entries = crate::glossary::glossary_match_entries();
-    let (acoustic_text, substitutions) =
-        apply_glossary_tiered(text, &entries, DEFAULT_THRESHOLD, if llm_available { FuzzyMode::LlmAvailable } else { FuzzyMode::NoLlm });
+    let (acoustic_text, substitutions) = apply_glossary_tiered(
+        text,
+        &entries,
+        DEFAULT_THRESHOLD,
+        if llm_available {
+            FuzzyMode::LlmAvailable
+        } else {
+            FuzzyMode::NoLlm
+        },
+    );
     log_substitutions(text, &acoustic_text, &substitutions);
 
     // Bump frequency for applied substitutions so frequently-used terms
@@ -78,7 +86,13 @@ pub fn build(text: &str, llm_available: bool) -> CorrectionRequest {
 
     let deferred_candidates: Vec<(String, String)> = substitutions
         .iter()
-        .filter(|s| !s.applied && matches!(s.tier, SubstitutionTier::Fuzzy | SubstitutionTier::ExactAmbiguous))
+        .filter(|s| {
+            !s.applied
+                && matches!(
+                    s.tier,
+                    SubstitutionTier::Fuzzy | SubstitutionTier::ExactAmbiguous
+                )
+        })
         .map(|s| (s.original.clone(), s.replacement.clone()))
         .collect();
 

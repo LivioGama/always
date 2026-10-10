@@ -272,12 +272,11 @@ fn get_linux_applications() -> Vec<String> {
     if let Ok(entries) = std::fs::read_dir("/usr/share/applications") {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "desktop") {
-                if let Some(name) = path.file_stem() {
-                    if let Some(name_str) = name.to_str() {
-                        applications.push(name_str.to_string());
-                    }
-                }
+            if path.extension().is_some_and(|ext| ext == "desktop")
+                && let Some(name) = path.file_stem()
+                && let Some(name_str) = name.to_str()
+            {
+                applications.push(name_str.to_string());
             }
         }
     }
@@ -288,14 +287,13 @@ fn get_linux_applications() -> Vec<String> {
         if let Ok(entries) = std::fs::read_dir(&local_apps) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "desktop") {
-                    if let Some(name) = path.file_stem() {
-                        if let Some(name_str) = name.to_str() {
-                            let name_str = name_str.to_string();
-                            if !applications.contains(&name_str) {
-                                applications.push(name_str);
-                            }
-                        }
+                if path.extension().is_some_and(|ext| ext == "desktop")
+                    && let Some(name) = path.file_stem()
+                    && let Some(name_str) = name.to_str()
+                {
+                    let name_str = name_str.to_string();
+                    if !applications.contains(&name_str) {
+                        applications.push(name_str);
                     }
                 }
             }
@@ -306,14 +304,13 @@ fn get_linux_applications() -> Vec<String> {
         if let Ok(entries) = std::fs::read_dir(&flatpak_apps) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "desktop") {
-                    if let Some(name) = path.file_stem() {
-                        if let Some(name_str) = name.to_str() {
-                            let name_str = name_str.to_string();
-                            if !applications.contains(&name_str) {
-                                applications.push(name_str);
-                            }
-                        }
+                if path.extension().is_some_and(|ext| ext == "desktop")
+                    && let Some(name) = path.file_stem()
+                    && let Some(name_str) = name.to_str()
+                {
+                    let name_str = name_str.to_string();
+                    if !applications.contains(&name_str) {
+                        applications.push(name_str);
                     }
                 }
             }

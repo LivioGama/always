@@ -7,7 +7,10 @@
 The always-on dictation app. No push-to-talk, no window to open — just talk.
 
 [![Release](https://img.shields.io/github/v/release/LivioGama/always)](https://github.com/LivioGama/always/releases/latest)
-[![License](https://img.shields.io/github/license/LivioGama/always)](LICENSE)
+[![License](https://img.shields.io/github/license/LivioGama/also)](LICENSE)
+[![macOS](https://img.shields.io/badge/macOS-14%2B-000000?style=flat&logo=apple)](https://developer.apple.com/macos/)
+[![Linux](https://img.shields.io/badge/Linux-Ubuntu_22.04%2B%2C_Debian_12%2B%2C_Fedora_38%2B-000000?style=flat&logo=linux)](https://www.linux.org/)
+[![Windows](https://img.shields.io/badge/Windows_10_1909%2B%2C_Windows_11-0078D6?style=flat&logo=windows)](https://www.windows.com/)
 
 </div>
 
@@ -43,7 +46,9 @@ Other dictation tools want to be the center of attention. Always wants to disapp
 
 ---
 
-## ⌨️ Shortcuts
+## ⌨️ Keyboard Shortcuts
+
+All shortcuts are customizable in **Settings → Shortcuts**.
 
 | Shortcut | What it does |
 |---|---|
@@ -54,7 +59,75 @@ Other dictation tools want to be the center of attention. Always wants to disapp
 | **⌃⌥A** | Toggle auto-enter on/off |
 | **⌃⌥⇧P** | Master pause — survives across all pause sources |
 
-All shortcuts are customizable in Settings → Shortcuts.
+> **Linux:** Replace **⌘** with **Super/Win** and **⌃⌥** with **Ctrl+Alt**.
+> **Windows:** Replace **⌘** with **Win/Cmd** and **⌃⌥** with **Ctrl+Alt**.
+
+---
+
+## 🖥️ Installation
+
+### macOS (Apple Silicon / Intel)
+
+```bash
+# Option 1: Homebrew tap (recommended)
+brew install --cask liviogama/always/always
+
+# Option 2: Download the signed DMG from releases
+#   https://github.com/LivioGama/also/releases/latest
+#   Open the .dmg → drag Always.app to Applications
+```
+
+**After first install (macOS):**
+
+1. Open **System Settings → Privacy & Security**.
+2. Grant **Microphone** access to Always.
+3. Grant **Input Monitoring** and **Accessibility** access in **System Settings → Privacy & Security**.
+4. Launch Always from **Applications** or **Launchpad**.
+
+**System Requirements:** macOS 14 (Sonoma) or later, 4 GB RAM minimum.
+
+---
+
+### Linux
+
+```bash
+# Debian / Ubuntu (x86_64)
+wget https://github.com/LivioGama/also/releases/latest/download/always_0.0.1_amd64.deb
+sudo apt install ./also_0.0.1_amd64.deb
+
+# Fedora / RHEL (x86_64)
+wget https://github.com/LivioGama/also/releases/latest/download/always-0.0.1-x86_64.rpm
+sudo dnf install ./also-0.0.1-x86_64.rpm
+
+# Alternative: flatpak (coming soon)
+# flatpak install flathub com.liviogama.always
+```
+
+**After first install (Linux):**
+
+1. Enable the microphone for your desktop environment.
+2. Start the daemon with `sudo systemctl enable --now also-daemon` (systemd service provided).
+3. Configure udev rules for microphone access if needed — see [docs/SETUP.md](docs/SETUP.md#linux).
+
+**System Requirements:** Ubuntu 22.04+ / Debian 12+ / Fedora 38+, ALSA or PulseAudio/PipeWire, 4 GB RAM minimum.
+
+---
+
+### Windows
+
+```powershell
+# Download the MSI installer from releases
+#   https://github.com/LivioGama/also/releases/latest
+#   Run also-0.0.1-x64.msi as Administrator
+```
+
+**After first install (Windows):**
+
+1. Run the installer with **Administrator** privileges to grant full microphone access.
+2. Grant microphone permissions in **Settings → Privacy → Microphone**.
+3. Launch Always from the Start menu.
+
+**System Requirements:** Windows 10 1909+ or Windows 11, 4 GB RAM minimum.
 
 ---
 
@@ -62,7 +135,7 @@ All shortcuts are customizable in Settings → Shortcuts.
 
 Optional, but it makes a big difference. Record three short samples and Always builds a voiceprint that lets it ignore everything except you — other people in the room, the TV, a podcast, a Zoom call. Your voiceprint never leaves your machine.
 
-You can re-record anytime from Settings → My Voice.
+You can re-record anytime from **Settings → My Voice**.
 
 ---
 
@@ -94,6 +167,18 @@ Nine panels, all in the menu bar:
 
 ---
 
+## 📚 Documentation
+
+| Document | Description |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture and component diagrams |
+| [docs/SETUP.md](docs/SETUP.md) | Platform-specific setup and configuration |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Build, test, and contribute |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues and fixes |
+| [docs/RELEASE.md](docs/RELEASE.md) | Release process and signing |
+
+---
+
 ## 📝 License
 
 [AGPL-3.0](LICENSE). Open source. Use it, modify it, distribute it — but if you modify and distribute it (including as a network service), share your modifications under the same license.
@@ -105,8 +190,8 @@ Nine panels, all in the menu bar:
 **Built by humans who got tired of typing.**
 
 [⭐ Star this repo](../../) ·
-[Issues](https://github.com/LivioGama/always/issues) ·
-[Discussions](https://github.com/LivioGama/always/discussions) ·
-[Releases](https://github.com/LivioGama/always/releases)
+[Issues](https://github.com/LivioGama/also/issues) ·
+[Discussions](https://github.com/LivioGama/also/discussions) ·
+[Releases](https://github.com/LivioGama/also/releases)
 
 </div>

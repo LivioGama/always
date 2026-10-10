@@ -41,9 +41,11 @@ final class OnboardingNarrator: ObservableObject {
         process.standardOutput = devnull
         process.standardError = devnull
 
-        process.terminationHandler = { [weak self] _ in
-            Task { @MainActor in
-                self?.didFinishSpeaking()
+        process.terminationHandler = { [unowned self] _ in
+            // The handler may fire on a non-MainActor thread, so dispatch
+            // the state update to the main actor.
+            Task { @MainActor [self] in
+                self.didFinishSpeaking()
             }
         }
 
@@ -64,7 +66,8 @@ final class OnboardingNarrator: ObservableObject {
     }
 
     /// Called when the `say` process exits.
-    fileprivate func didFinishSpeaking() {
+    /// Must be called on the main actor.
+    private func didFinishSpeaking() {
         currentProcess = nil
         isSpeaking = false
     }

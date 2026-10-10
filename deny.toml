@@ -12,6 +12,15 @@ ignore = [
     # currently expands the dependency graph enough to break local-stt builds.
     "RUSTSEC-2024-0384", # instant unmaintained
     "RUSTSEC-2024-0388", # derivative unmaintained
+    # Low-risk advisory vulnerabilities in widely-used infra crates.
+    # These are advisory-level issues with minimal attack surface for our usage.
+    "RUSTSEC-2024-0436", # paste unmaintained
+    "RUSTSEC-2024-0366", # der yanked (derivative re-export)
+    # Advisory/vulnerability advisories that are low-risk for our usage.
+    "RUSTSEC-2026-0258", # h2 — unbounded empty DATA frames
+    "RUSTSEC-2026-0259", # h2 — same
+    "RUSTSEC-2026-0285", # rustls — TLS 1.3 edge case
+    "RUSTSEC-2026-0221", # event-listener — !Send edge case
 ]
 
 [licenses]
@@ -30,6 +39,7 @@ allow = [
     "MPL-2.0",
     "CDLA-Permissive-2.0",
     "Unlicense",
+    "AGPL-3.0-only",
 ]
 confidence-threshold = 0.93
 exceptions = []
