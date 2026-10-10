@@ -15,6 +15,9 @@
 
 FROM rust:1.88.0-slim-trixie AS builder
 
+# Trixie's glibc 2.39 provides the C23 strto{ull,l} symbols that the
+# ort (ONNX Runtime) crate's vendored C++ code needs at link time.
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         libssl-dev \
@@ -34,7 +37,7 @@ COPY . .
 RUN cargo build --release --no-default-features --features linux,cpal --locked
 
 # ---------- runtime stage ----------
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         sox \
