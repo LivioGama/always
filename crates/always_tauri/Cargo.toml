@@ -40,10 +40,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Misc
 dirs = "6"
 
-# The always daemon crate — we communicate with it via UDS, never replace it.
-# `default-features = false` so the `macos` feature (core-graphics etc.)
-# does not pull in macOS-only deps on Linux/Windows. We only need `cpal`.
-always = { path = "../../", default-features = false, features = ["cpal"] }
-
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
