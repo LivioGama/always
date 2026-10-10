@@ -110,7 +110,7 @@ futures = "0.3"
 parakeet-rs = { version = "=0.3.6", optional = true }
 # Cross-platform audio capture — replaces SoX on all platforms.
 # Shared mode by default: never acquires exclusive device access.
-cpal = { version = "0.15", optional = true }
+cpal = { version = "0.18", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # `core-graphics` uses framework linking which only works on macOS.
