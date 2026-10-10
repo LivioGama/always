@@ -59,7 +59,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Cache cargo build
         uses: actions/cache@v4
@@ -72,7 +72,28 @@ jobs:
           cargo build --release --locked --target aarch64-apple-darwin
           file target/aarch64-apple-darwin/release/always
 
+      - name: Build daemon (macOS x86_64)
+        run: |
+          cargo build --release --locked --target x86_64-apple-darwin
+          file target/x86_64-apple-darwin/release/always
+
+      - name: Code sign daemon binaries
+        run: |
+          codesign --force --sign "${MAC_CERT_IDENTITY}" \
+            target/aarch64-apple-darwin/release/always
+          codesign --force --sign "${MAC_CERT_IDENTITY}" \
+            target/x86_64-apple-darwin/release/always
+
+      - name: Upload daemon binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: daemon-binaries
+          path: |
+            target/aarch64-apple-darwin/release/always
+            target/x86_64-apple-darwin/release/always
+
       - name: Import signing certificate
+        id: cert
         env:
           MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
           MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
@@ -95,6 +116,9 @@ jobs:
           done < <(security list-keychains -d user | tr -d '"')
           security list-keychains -d user -s "$KEYCHAIN_PATH" "${USER_KEYCHAINS[@]}"
           rm "$RUNNER_TEMP/cert.p12"
+          # Extract the identity for signing daemon binaries
+          MAC_CERT_IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -oP '"[^"]+" \(' | head -1 | tr -d ' "')
+          echo "MAC_CERT_IDENTITY=$MAC_CERT_IDENTITY" >> "$GITHUB_OUTPUT"
 
       - name: Build + codesign + notarize Swift app
         env:
