@@ -325,12 +325,19 @@ pub fn record_utterance(
     record_with_local_vad(cfg, log, transcriber, rt)
 }
 
+/// No-op stub: wake-on-voice requires the cpal audio path.
+#[cfg(not(feature = "cpal"))]
+pub fn poll_speech_energy(_cfg: &AlwaysConfig) -> Result<bool> {
+    Ok(false)
+}
+
 /// Single-frame energy probe used while idle-paused so the user can wake
 /// listening by speaking without manually lifting pause.
 ///
 /// Uses the cpal audio path on all platforms (via `audio::get_or_spawn()`).
 /// Peeks at the newest frame from the ring buffer without consuming it,
 /// so subsequent `record_utterance` calls are not affected.
+#[cfg(feature = "cpal")]
 pub fn poll_speech_energy(cfg: &AlwaysConfig) -> Result<bool> {
     let source_arc = audio::get_or_spawn()?;
     // Peeking at the newest frame: this probe runs while capture is gated

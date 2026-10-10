@@ -356,17 +356,24 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         // user continuing to talk, and must be kept.
         if was_gated {
             was_gated = false;
-            if let Ok(source_arc) = audio::get_or_spawn() {
-                let mut source = source_arc.lock();
-                if let Some(rec) = source.as_mut() {
-                    // Logged even at 0.0: a gate that queued nothing is
-                    // itself worth seeing (it means `rec` got no samples
-                    // while the other app held the device), and silence
-                    // here previously made a working drain look like a
-                    // drain that never ran.
-                    let dropped_secs = rec.drain_pending();
-                    tracing::info!(dropped_secs, "stale_audio_dropped_after_pause");
+            #[cfg(feature = "cpal")]
+            {
+                if let Ok(source_arc) = audio::get_or_spawn() {
+                    let mut source = source_arc.lock();
+                    if let Some(rec) = source.as_mut() {
+                        // Logged even at 0.0: a gate that queued nothing is
+                        // itself worth seeing (it means `rec` got no samples
+                        // while the other app held the device), and silence
+                        // here previously made a working drain look like a
+                        // drain that never ran.
+                        let dropped_secs = rec.drain_pending();
+                        tracing::info!(dropped_secs, "stale_audio_dropped_after_pause");
+                    }
                 }
+            }
+            #[cfg(not(feature = "cpal"))]
+            {
+                tracing::debug!("stale_audio_drain_skipped_no_cpal");
             }
         }
 

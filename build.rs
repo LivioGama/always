@@ -6,6 +6,7 @@
 //! On macOS ARM64 we also compile the Apple Intelligence / Apple STT
 //! Swift bridges into static libraries and link them into the daemon.
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
