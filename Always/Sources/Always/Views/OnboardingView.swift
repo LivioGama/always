@@ -139,6 +139,16 @@ struct OnboardingView: View {
         .onChange(of: step) { _, newStep in
             narrator.speak(newStep.narration)
         }
+        .onChange(of: enrollment.isEnrolled) { _, isEnrolled in
+            // Completing all three samples must leave the gate ON — the
+            // step's own copy promises "Always will only listen to you",
+            // and the daemon truthfully reports `enabled: false` until
+            // SetVoiceProfileEnabled arrives. Leaving this to Settings
+            // meant users finished setup with the gate dark.
+            if isEnrolled {
+                enrollment.setEnabled(true)
+            }
+        }
     }
 
     // MARK: - Step chrome
