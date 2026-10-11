@@ -364,7 +364,7 @@ struct OnboardingView: View {
                 detail: "Optional — enables global shortcuts (⌃⌥P pause, ⌃⌥V paste).",
                 granted: inputMonitoringGranted,
                 waiting: false,
-                actionTitle: inputMonitoringGranted ? nil : "Grant",
+                actionTitle: inputMonitoringGranted ? nil : "Open System Settings",
                 action: handleInputMonitoringAction
             )
 
@@ -769,14 +769,13 @@ struct OnboardingView: View {
     }
 
     private func handleAccessibilityAction() {
-        requestAccessibility()
         if !AXIsProcessTrusted() {
             openAccessibilitySettings()
         }
     }
 
     private func handleInputMonitoringAction() {
-        requestInputMonitoring()
+        openInputMonitoringSettings()
     }
 
     // MARK: - Microphone
@@ -818,10 +817,11 @@ struct OnboardingView: View {
 
     // MARK: - Input Monitoring
 
-    private func requestInputMonitoring() {
-        _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
-    }
-
+    /// Open System Settings to the Input Monitoring pane.
+    ///
+    /// `IOHIDRequestAccess` and `CGRequestListenEventAccess` do not reliably
+    /// trigger the TCC prompt on macOS 27+, so we skip those and deep-link
+    /// directly to System Settings where the user can toggle Always ON.
     private func openInputMonitoringSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
             NSWorkspace.shared.open(url)
