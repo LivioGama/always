@@ -92,7 +92,7 @@ impl Transcriber for AppleTranscriber {
 /// biasing. Default tech terms are merged with every canonical glossary term;
 /// the engine only boosts, never rewrites, so the full glossary is safe to
 /// include. Capped at 100 phrases (Apple's documented budget).
-fn context_phrases() -> Vec<String> {
+pub fn context_phrases() -> Vec<String> {
     const DEFAULTS: &[&str] = &[
         "Claude Code",
         "Claude",

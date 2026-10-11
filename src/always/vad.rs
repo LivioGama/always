@@ -282,6 +282,13 @@ const SPEAKER_GATE_EARLY_SAMPLES: usize = 32_000;
 /// streak only builds when NOTHING has ever matched.
 const SPEAKER_GATE_REJECT_STREAK: usize = 4;
 
+/// How long `StreamSession::finish` waits for SFSpeechRecognizer to
+/// report its final result after end-of-utterance. The recognizer has
+/// been consuming audio since speech onset, so finalization is usually
+/// near-instant; 1.5s is a generous ceiling after which the best
+/// partial is used instead of re-transcribing from scratch.
+const APPLE_STREAM_FINISH_MS: u32 = 1500;
+
 /// Speaker-aware end-of-utterance. Generic VAD keeps the utterance open
 /// as long as ANY speech-like audio continues — background media held
 /// recordings hostage until the user paused the video (observed live:
@@ -870,6 +877,17 @@ fn record_with_local_vad(
     // tail cut truncates here so foreign trailing audio (movie line
     // after the user's last word) is never sent to STT.
     let mut confirmed_user_len = 0usize;
+    // Live streaming recognition session (Apple backend only). Created at
+    // speech onset, fed every frame; partials broadcast as interim
+    // transcripts and the final result replaces the end-of-utterance WAV
+    // round trip. `None` on other backends or when the engine is
+    // unavailable — everything below degrades to the existing paths.
+    let mut stream_session: Option<crate::always::apple_stt::StreamSession> = None;
+    let stream_session_lang = if cfg.lang == "auto" || cfg.lang.is_empty() {
+        None
+    } else {
+        Some(cfg.lang.as_str())
+    };
 
     loop {
         // A queued "My Voice" enrollment recording needs the mic and the
@@ -1097,6 +1115,24 @@ fn record_with_local_vad(
             consecutive_silence = 0;
             if consecutive_speech >= min_speech_frames {
                 in_speech = true;
+                // Start live recognition the moment speech is confirmed —
+                // partials flowing early is the whole point. Only the Apple
+                // backend has a streaming engine wired up.
+                if stream_session.is_none()
+                    && matches!(
+                        cfg.transcriber_backend,
+                        crate::stt_dispatch::TranscriberBackendChoice::Apple
+                    )
+                    && crate::always::apple_stt::check_availability()
+                {
+                    stream_session = crate::always::apple_stt::StreamSession::start(
+                        stream_session_lang,
+                        &crate::always::stt_apple::context_phrases(),
+                    );
+                    if stream_session.is_none() {
+                        tracing::debug!("apple_stream_session_unavailable");
+                    }
+                }
                 if !voice_logged {
                     // Fast energy check for very low thresholds to minimize latency
                     let passes_energy_check = if use_fast_energy_check {
@@ -1180,6 +1216,18 @@ fn record_with_local_vad(
                 speech_samples.extend_from_slice(samples);
                 voiced_since_flush = true;
                 voiced_samples += samples.len();
+                // Live recognition: feed the frame and broadcast any new
+                // partial. Interim text stays hidden until the speaker is
+                // verified — a stranger's words must never reach the
+                // overlay even as a preview.
+                if let Some(session) = stream_session.as_mut() {
+                    session.feed(samples);
+                    if speaker_checked
+                        && let Some(partial) = session.poll_partial()
+                    {
+                        event::global_broadcaster().transcription_interim(partial);
+                    }
+                }
                 // Same anchor refresh for the case where we were already in
                 // speech (consecutive_speech overflows min_speech_frames
                 // immediately) — keep the watchdog clock pinned to "right
@@ -1952,7 +2000,39 @@ fn record_with_local_vad(
     // flipped the badge back to "Listening" for that stretch. The state
     // is closed by the utterance's terminal events in `event_loop`
     // (TranscriptFinal, a filter/drop, or `emit_utterance_terminal`).
-    let (result, speculation_used) = match speculation {
+    //
+    // Consume the live session BEFORE considering speculation: the
+    // recognizer ran while the user was speaking, so the final text is
+    // typically already available — no speculation wait, no WAV round
+    // trip. This is the path that takes end-of-utterance paste latency
+    // from ~1s down to ~0-300ms. Empty result (no speech recognized)
+    // falls through to the established paths.
+    let streaming_final = match stream_session.take() {
+        Some(session) => {
+            let text = session.finish(APPLE_STREAM_FINISH_MS);
+            match &text {
+                Some(t) => {
+                    tracing::info!(chars = t.chars().count(), "streaming_final_used");
+                }
+                None => {
+                    tracing::info!("streaming_final_empty");
+                }
+            }
+            text.filter(|t| !t.trim().is_empty())
+        }
+        None => None,
+    };
+
+    let (result, speculation_used) = if let Some(text) = streaming_final {
+        (
+            crate::stt::TranscriptionResult {
+                text,
+                ..Default::default()
+            },
+            true,
+        )
+    } else {
+        match speculation {
         Some(Ok(r)) => (r, true),
         _ => {
             // No speculation, speculation errored, or timeout — do a fresh
@@ -2008,6 +2088,7 @@ fn record_with_local_vad(
                     return Err(err).context("failed to transcribe utterance");
                 }
             }
+        }
         }
     };
     let stt_done_at = std::time::Instant::now();

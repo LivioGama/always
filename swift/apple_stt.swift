@@ -375,3 +375,234 @@ public func freeAppleSttResult(_ response: UnsafeMutablePointer<AppleSttResponse
 
     response.deallocate()
 }
+
+// MARK: - Streaming recognition (SFSpeechAudioBufferRecognitionRequest)
+//
+// The file-based paths above only return text AFTER end-of-utterance —
+// the user waits silence-detection + a full WAV round trip before the
+// first word appears. A buffer request fed live yields partial results
+// within ~200-400ms of speech, which is what dictation is supposed to
+// feel like. The daemon creates one session per utterance, feeds 16 kHz
+// mono i16 frames as they arrive, polls partials, and finishes at the
+// end-of-speech cut.
+
+/// One live dictation session. Thread-safe: the recognition task
+/// callbacks arrive on the recognizer's queue while the daemon's
+/// event-loop thread feeds audio and polls.
+final class AppleSttStreamSession: @unchecked Sendable {
+    private let lock = NSLock()
+    private var request: SFSpeechAudioBufferRecognitionRequest?
+    private var task: SFSpeechRecognitionTask?
+    /// Monotonic partial text — grows as recognition proceeds.
+    private var latestText: String = ""
+    /// Set once when the task reports `isFinal` (or a terminal error).
+    private var finalText: String?
+    private var failed = false
+    /// Set by `finishHandle()` so late callbacks don't resurrect state.
+    private var closed = false
+
+    private init() {}
+
+    /// Build and start a streaming session. Returns nil when speech
+    /// recognition is unavailable/authorized-out — the caller falls back
+    /// to the file-based path.
+    static func start(langHint: String?, phrases: [String]) -> AppleSttStreamSession? {
+        var authStatus = SFSpeechRecognizer.authorizationStatus()
+        if authStatus == .notDetermined {
+            let semaphore = DispatchSemaphore(value: 0)
+            SFSpeechRecognizer.requestAuthorization { newStatus in
+                authStatus = newStatus
+                semaphore.signal()
+            }
+            _ = semaphore.wait(timeout: .now() + 5)
+        }
+        guard authStatus == .authorized else {
+            appleLog("[apple-stt-stream] not authorized, status=\(authStatus.rawValue)")
+            return nil
+        }
+        let locale: Locale = langHint.map { Locale(identifier: $0) } ?? Locale.current
+        guard let recognizer = SFSpeechRecognizer(locale: locale) else {
+            appleLog("[apple-stt-stream] no recognizer for locale \(locale.identifier)")
+            return nil
+        }
+
+        let session = AppleSttStreamSession()
+        let callbackQueue = OperationQueue()
+        callbackQueue.maxConcurrentOperationCount = 1
+        callbackQueue.name = "com.always.apple-stt-stream"
+        callbackQueue.qualityOfService = .userInitiated
+        callbackQueue.underlyingQueue = LegacyStt.dispatchQueue
+        recognizer.queue = callbackQueue
+
+        let req = SFSpeechAudioBufferRecognitionRequest()
+        req.shouldReportPartialResults = true
+        // On-device keeps partials private and avoids network jitter.
+        // Cloud fallback stays available for accuracy parity with the
+        // file path (which also leaves it off).
+        req.requiresOnDeviceRecognition = false
+        if !phrases.isEmpty {
+            req.contextualStrings = phrases
+        }
+        session.request = req
+
+        session.task = recognizer.recognitionTask(with: req) { [weak session] result, error in
+            guard let session else { return }
+            session.lock.lock()
+            defer { session.lock.unlock() }
+            if let result {
+                let text = result.bestTranscription.formattedString
+                if !text.isEmpty { session.latestText = text }
+                if result.isFinal {
+                    session.finalText = session.latestText
+                }
+            }
+            if let error {
+                // "No speech detected" is a normal terminal outcome for an
+                // empty/quiet session — not a failure worth reporting.
+                if isNoSpeechError(error) {
+                    session.finalText = session.finalText ?? ""
+                } else {
+                    appleLog("[apple-stt-stream] task error: \(error.localizedDescription)")
+                    session.failed = true
+                }
+            }
+        }
+        appleLog("[apple-stt-stream] session started locale=\(locale.identifier)")
+        return session
+    }
+
+    /// Append 16 kHz mono i16 samples. Converting to float32 here keeps
+    /// the Rust side a plain memcpy-free pointer pass.
+    func feed(_ samples: UnsafePointer<Int16>, count: Int) {
+        lock.lock()
+        let request = self.request
+        let closed = self.closed
+        lock.unlock()
+        guard let request, !closed, count > 0 else { return }
+        guard
+            let format = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: 16_000,
+                channels: 1,
+                interleaved: false
+            ),
+            let buffer = AVAudioPCMBuffer(
+                pcmFormat: format,
+                frameCapacity: AVAudioFrameCount(count)
+            )
+        else { return }
+        buffer.frameLength = AVAudioFrameCount(count)
+        let dst = buffer.floatChannelData![0]
+        for i in 0..<count {
+            dst[i] = Float(samples[i]) / 32768.0
+        }
+        request.append(buffer)
+    }
+
+    /// Latest partial text, or nil when unchanged since `since` —
+    /// the caller passes its last-seen text to dedupe broadcasts.
+    func partial(after seen: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        if latestText.isEmpty || latestText == seen { return nil }
+        return latestText
+    }
+
+    /// End audio and wait up to `timeoutMs` for the final result.
+    /// Falls back to the latest partial when the task won't finalize in
+    /// time — a slightly stale word beats re-transcribing from scratch.
+    func finish(timeoutMs: Int32) -> String? {
+        lock.lock()
+        let request = self.request
+        closed = true
+        lock.unlock()
+        request?.endAudio()
+
+        let deadline = Date().addingTimeInterval(TimeInterval(timeoutMs) / 1000.0)
+        while Date() < deadline {
+            lock.lock()
+            let done = finalText != nil || failed
+            lock.unlock()
+            if done { break }
+            usleep(20_000)
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        if let t = finalText { return t }
+        if failed { return nil }
+        return latestText.isEmpty ? nil : latestText
+    }
+
+    func abort() {
+        lock.lock()
+        closed = true
+        let task = self.task
+        let request = self.request
+        lock.unlock()
+        task?.finish() // deliver whatever was recognized, then
+        request?.endAudio()
+    }
+}
+
+@_cdecl("apple_stt_stream_start")
+public func appleSttStreamStart(
+    _ lang: UnsafePointer<CChar>?,
+    _ phrases: UnsafePointer<CChar>?
+) -> UnsafeMutableRawPointer? {
+    let langHint = lang.map { String(cString: $0) }.flatMap { $0.isEmpty ? nil : $0 }
+    let phraseList = phrases
+        .map { String(cString: $0) }
+        .map { $0.split(separator: "\n").map { String($0) } } ?? []
+    guard let session = AppleSttStreamSession.start(langHint: langHint, phrases: phraseList)
+    else { return nil }
+    return Unmanaged.passRetained(session).toOpaque()
+}
+
+@_cdecl("apple_stt_stream_feed")
+public func appleSttStreamFeed(
+    _ handle: UnsafeMutableRawPointer,
+    _ samples: UnsafePointer<Int16>,
+    _ count: Int32
+) {
+    let session = Unmanaged<AppleSttStreamSession>.fromOpaque(handle).takeUnretainedValue()
+    session.feed(samples, count: Int(count))
+}
+
+/// Returns the latest partial as a freshly-allocated C string the caller
+/// must free with `free_apple_stt_string`, or NULL when nothing new.
+@_cdecl("apple_stt_stream_partial")
+public func appleSttStreamPartial(
+    _ handle: UnsafeMutableRawPointer,
+    _ seen: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    let session = Unmanaged<AppleSttStreamSession>.fromOpaque(handle).takeUnretainedValue()
+    let seenText = seen.map { String(cString: $0) } ?? ""
+    guard let text = session.partial(after: seenText) else { return nil }
+    return duplicateCString(text)
+}
+
+/// Ends the audio stream and blocks up to timeout_ms for the final text.
+/// Returns a freshly-allocated C string (free with
+/// `free_apple_stt_string`) or NULL when recognition produced nothing.
+@_cdecl("apple_stt_stream_finish")
+public func appleSttStreamFinish(
+    _ handle: UnsafeMutableRawPointer,
+    _ timeoutMs: Int32
+) -> UnsafeMutablePointer<CChar>? {
+    let session = Unmanaged<AppleSttStreamSession>.fromOpaque(handle).takeUnretainedValue()
+    guard let text = session.finish(timeoutMs: timeoutMs), !text.isEmpty else { return nil }
+    return duplicateCString(text)
+}
+
+@_cdecl("apple_stt_stream_free")
+public func appleSttStreamFree(_ handle: UnsafeMutableRawPointer?) {
+    guard let handle else { return }
+    let session = Unmanaged<AppleSttStreamSession>.fromOpaque(handle).takeRetainedValue()
+    session.abort()
+}
+
+@_cdecl("free_apple_stt_string")
+public func freeAppleSttString(_ ptr: UnsafeMutablePointer<CChar>?) {
+    guard let ptr else { return }
+    free(ptr)
+}

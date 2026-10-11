@@ -23,6 +23,32 @@ AppleSttResponse* transcribe_wav_with_apple_stt(const char* wav_path, const char
 /* Free memory allocated by an Apple STT response */
 void free_apple_stt_result(AppleSttResponse* response);
 
+/* ---- Streaming recognition (live partials) ---- */
+
+/* Start a live streaming session. lang is an ISO 639-1 hint or NULL;
+ * phrases is a newline-joined contextual-bias list or NULL.
+ * Returns an opaque session handle or NULL when recognition is
+ * unavailable/unauthorized (caller falls back to the file path). */
+void* apple_stt_stream_start(const char* lang, const char* phrases);
+
+/* Feed 16 kHz mono signed-LE i16 samples into the session. */
+void apple_stt_stream_feed(void* handle, const short* samples, int count);
+
+/* Latest partial text as a freshly-allocated C string, or NULL when
+ * unchanged since `seen` (pass the previous result to dedupe). */
+char* apple_stt_stream_partial(void* handle, const char* seen);
+
+/* End the audio stream and block up to timeout_ms for the final text.
+ * Returns a freshly-allocated C string or NULL when nothing was
+ * recognized. Falls back to the best partial on timeout. */
+char* apple_stt_stream_finish(void* handle, int timeout_ms);
+
+/* Cancel a session and release it. */
+void apple_stt_stream_free(void* handle);
+
+/* Free strings returned by apple_stt_stream_partial / _finish. */
+void free_apple_stt_string(char* ptr);
+
 #ifdef __cplusplus
 }
 #endif
