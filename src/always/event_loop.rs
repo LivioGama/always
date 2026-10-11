@@ -337,6 +337,24 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
                 continue;
             }
 
+            // Keep rec's pipe drained while gated. Nobody reads during a
+            // pause, so after ~4s the 131KB buffer overflows and CoreAudio
+            // discards at the device level (rec_coreaudio_overrun spam on
+            // every focus-driven pause). The backlog is stale by
+            // definition — the resume path drops it anyway — so discard it
+            // here instead: the pipe stays empty, the overrun never fires,
+            // and the live wake-on-voice probes below see current audio
+            // rather than a shifting stale backlog.
+            if let Ok(recorder_arc) = audio::RecChild::get_or_spawn() {
+                let mut recorder = recorder_arc.lock();
+                if let Some(rec) = recorder.as_mut() {
+                    let stale = rec.drain_pending();
+                    if stale > 0.0 {
+                        tracing::debug!(stale_secs = format!("{stale:.2}"), "gated_drain");
+                    }
+                }
+            }
+
             std::thread::sleep(Duration::from_millis(100));
             continue;
         }
