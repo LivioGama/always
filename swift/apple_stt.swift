@@ -436,10 +436,14 @@ final class AppleSttStreamSession: @unchecked Sendable {
 
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.shouldReportPartialResults = true
-        // On-device keeps partials private and avoids network jitter.
-        // Cloud fallback stays available for accuracy parity with the
-        // file path (which also leaves it off).
-        req.requiresOnDeviceRecognition = false
+        // Strictly on-device. The session is fed audio from speech ONSET,
+        // before the speaker gate has verified whose voice it is — media
+        // (YouTube) speech gets fed too and its output discarded. With
+        // cloud fallback enabled that audio would be shipped to Apple's
+        // servers for recognition we then throw away. On-device keeps the
+        // entire path local: nothing about unverified audio ever leaves
+        // the machine.
+        req.requiresOnDeviceRecognition = true
         if !phrases.isEmpty {
             req.contextualStrings = phrases
         }
