@@ -127,10 +127,14 @@ struct OnboardingView: View {
             startPermissionRefreshTimer()
             enrollment.requestStatus()
             narrator.speak(Step.welcome.narration)
+            // Bypass per-app pause rules during onboarding so the user can
+            // test voice typing without adding an app to the allowlist first.
+            StateMonitor.shared.setSetupMode(enabled: true)
         }
         .onDisappear {
             stopPermissionRefreshTimer()
             narrator.stop()
+            StateMonitor.shared.setSetupMode(enabled: false)
         }
         .onChange(of: step) { _, newStep in
             narrator.speak(newStep.narration)

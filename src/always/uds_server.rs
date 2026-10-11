@@ -1022,6 +1022,14 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             // DB and swap the live keyboard listener's shortcut set.
             crate::always::keyboard::reload_shortcuts();
         }
+        DaemonCommand::SetupMode { enabled } => {
+            // Toggle setup mode: when enabled, bypasses per-app pause
+            // rules so recording and pasting work during onboarding even
+            // when the focused app is Always itself.
+            pause::set_setup_mode(enabled);
+            pause::recompute_effective();
+            tracing::info!(enabled, "setup_mode_toggled");
+        }
     }
 }
 

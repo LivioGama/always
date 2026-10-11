@@ -1035,6 +1035,19 @@ class UDSClient: ObservableObject {
         }
     }
 
+    /// Toggle daemon setup mode (bypasses per-app pause rules).
+    /// Used by the onboarding flow so users can test voice typing
+    /// without having to add an app to the resumed-app allowlist first.
+    func sendSetupMode(enabled: Bool) {
+        guard isConnected else {
+            self.logger.warning("sendSetupMode(\(enabled)) skipped — not connected")
+            return
+        }
+        // Manual JSON construction — Any doesn't conform to Encodable.
+        let line = "{\"type\":\"SetupMode\",\"data\":{\"enabled\":\(enabled ? "true" : "false")}}\n"
+        writeLine(line, commandType: "SetupMode")
+    }
+
     /// Single funnel for socket writes. Logs success/failure consistently
     /// so misrouted commands are easy to spot in the daemon side-channel
     /// log. Hops onto `queue` so the fd is read/written only there — never

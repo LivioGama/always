@@ -593,6 +593,14 @@ pub enum DaemonCommand {
     /// no restart needed. Sent after each `always config set shortcut_*`
     /// call from the Swift app.
     ReloadShortcuts,
+    /// Setup mode — bypasses per-app pause rules so the daemon allows
+    /// recording + pasting while the onboarding wizard is visible.
+    /// This lets users test voice typing during setup without having
+    /// to add an app to the resumed-app allowlist first. Sent by the
+    /// Swift GUI when onboarding appears/dismisses.
+    SetupMode {
+        enabled: bool,
+    },
 }
 
 impl DaemonCommand {

@@ -127,6 +127,11 @@ fn compute_effective() -> bool {
     if IDLE_AUTO_PAUSED.load(Ordering::Relaxed) {
         return true;
     }
+    // Setup mode: bypass per-app pause rules so onboarding users can test
+    // voice typing without adding an app to the resumed-app allowlist first.
+    if SETUP_MODE.load(Ordering::Relaxed) {
+        return false;
+    }
     crate::always::per_app::effective_paused_for_current_app()
 }
 
@@ -246,6 +251,20 @@ pub fn is_no_gui_paused() -> bool {
 /// state transition (so you CAN force dictation while music plays).
 pub fn is_any_global_pause() -> bool {
     is_master_paused() || is_audio_output_paused() || is_mic_conflict_paused()
+}
+
+/// Setup mode: when true, bypasses per-app pause rules so the daemon
+/// allows recording and pasting while onboarding is visible. This lets
+/// users test voice typing during setup without needing a resumed app.
+/// Cleared when onboarding is dismissed.
+static SETUP_MODE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_setup_mode(v: bool) {
+    SETUP_MODE.store(v, Ordering::Relaxed);
+}
+
+pub fn is_setup_mode() -> bool {
+    SETUP_MODE.load(Ordering::Relaxed)
 }
 
 /// Should the capture loop stop recording/transcribing right now?

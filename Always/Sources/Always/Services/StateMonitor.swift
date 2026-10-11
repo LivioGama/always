@@ -43,6 +43,11 @@ class StateMonitor: ObservableObject {
     /// active. Drives explanatory copy in the menu/overlay.
     @Published var pauseReason: String? = nil
 
+    /// True while onboarding is visible. Toggles the daemon's setup mode,
+    /// which bypasses per-app pause rules so the user can test voice
+    /// typing during setup without having to add an app to the allowlist.
+    @Published var isSetupMode: Bool = false
+
     private var cancellables = Set<AnyCancellable>()
     private var udsClient: UDSClient
     private let cliService = CLIService()
@@ -216,6 +221,19 @@ class StateMonitor: ObservableObject {
         }
         StatusOverlayController.shared.flash(state: isPaused ? .paused : .resumed)
         udsClient.sendCommand("TogglePause")
+    }
+
+    /// Toggle daemon setup mode: when enabled, bypasses per-app pause rules
+    /// so recording and pasting work during onboarding even when the focused
+    /// app is Always itself. Used by OnboardingView on appear/disappear.
+    func setSetupMode(enabled: Bool) {
+        isSetupMode = enabled
+        udsClient.sendSetupMode(enabled: enabled)
+        if enabled {
+            logger.info("setup mode enabled — per-app pause bypassed")
+        } else {
+            logger.info("setup mode disabled — per-app pause restored")
+        }
     }
 
     /// Predict `isPaused` from master + idle + focused-app allowlist.
