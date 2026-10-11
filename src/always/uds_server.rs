@@ -363,21 +363,30 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     // chunked, the bigger buffer only avoids the extra round-trips.
     {
         use std::os::fd::AsRawFd;
-        let size: libc::c_int = 1024 * 1024;
-        let rc = unsafe {
-            libc::setsockopt(
-                stream.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_SNDBUF,
-                std::ptr::from_ref(&size).cast::<libc::c_void>(),
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-        if rc != 0 {
-            tracing::warn!(
-                error = %std::io::Error::last_os_error(),
-                "failed to increase send buffer size"
-            );
+        // macOS caps SO_SNDBUF on Unix domain streams well below 1 MB —
+        // asking for it fails with EINVAL on every boot (observed live).
+        // Step down to a size the kernel accepts and log at debug: this
+        // is a throughput nicety, not a correctness requirement.
+        for size in [1024 * 1024, 256 * 1024, 64 * 1024] {
+            let size: libc::c_int = size;
+            let rc = unsafe {
+                libc::setsockopt(
+                    stream.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    std::ptr::from_ref(&size).cast::<libc::c_void>(),
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+            if rc == 0 {
+                break;
+            }
+            if size == 64 * 1024 {
+                tracing::debug!(
+                    error = %std::io::Error::last_os_error(),
+                    "uds_send_buffer_increase_failed (kernel default in use)"
+                );
+            }
         }
     }
 
@@ -605,7 +614,18 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         };
 
         if let Err(e) = writer.write_all(json_line.as_bytes()).await {
-            tracing::error!(error = %e, "uds_write_failed");
+            // A client that vanishes during the initial-state burst (the
+            // GUI opens a second connection and drops the first) surfaces
+            // here as EPIPE on every boot. That is normal connection
+            // lifecycle, not an error — log it at debug and stop writing.
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ) {
+                tracing::debug!(error = %e, "uds_client_left_during_write");
+            } else {
+                tracing::error!(error = %e, "uds_write_failed");
+            }
             break;
         }
 
