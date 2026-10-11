@@ -54,6 +54,14 @@ const READ_FRAME_TIMEOUT_MS: i32 = 15_000;
 // 2-3s value that cut utterances off — keep this guard.
 const _: () = assert!(READ_FRAME_TIMEOUT_MS >= 10_000);
 
+/// Conservative hygiene recycle for a healthy recorder. The old call-count
+/// guard (1000 `get_or_spawn` calls ≈ every 100 s while media plays) paid a
+/// device cold start and dropped audio on every recycle to guard against a
+/// SoX memory leak nobody has measured. Health checks cover the real
+/// failure modes; this 24 h cap is the remaining backstop.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const REC_MAX_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// SoX `--buffer`, in bytes. SoX uses it both as its processing block
 /// size AND as the full-buffering size of its stdout (`formats.c`:
 /// `setvbuf(fp, NULL, _IOFBF, bufsiz)`, never flushed per block). So it
@@ -381,6 +389,9 @@ pub struct RecChild {
     /// [`Self::read_frame`] / [`Self::read_newest_frame`].
     last_captured_at: Option<Instant>,
     reuse_count: u32,
+    /// Wall-clock age anchor for the daily hygiene recycle (see
+    /// `get_or_spawn`).
+    spawned_at: std::time::Instant,
     /// Fed by the stderr drainer on CoreAudio buffer overruns.
     overruns: Arc<OverrunWindow>,
 }
@@ -496,8 +507,14 @@ impl RecChild {
             ring,
             last_captured_at: None,
             reuse_count: 0,
+            spawned_at: std::time::Instant::now(),
             overruns,
         })
+    }
+
+    /// Wall-clock age of this recorder process.
+    fn age(&self) -> std::time::Duration {
+        self.spawned_at.elapsed()
     }
 
     pub fn get_or_spawn() -> Result<Arc<Mutex<Option<RecChild>>>> {
@@ -508,8 +525,18 @@ impl RecChild {
             Some(rec) => {
                 if rec.is_healthy() {
                     rec.reuse_count += 1;
-                    // Restart every 1000 uses to prevent memory leaks
-                    rec.reuse_count > 1000
+                    // Time-based hygiene cap ONLY. The previous guard
+                    // recycled after 1000 *calls* — but the gated loop
+                    // calls get_or_spawn every 100 ms tick (wake-on-voice
+                    // probe, pipe drain), so a user with media playing
+                    // recycled a healthy recorder every ~100 s, each time
+                    // paying the ~4.5 s device cold start and dropping
+                    // audio mid-window. Real failure modes are covered
+                    // below and in `is_healthy`: process death, wedge
+                    // timeout, overrun storms, device switches. A daily
+                    // quiet recycle remains as a conservative backstop
+                    // against slow SoX memory growth.
+                    rec.age() > REC_MAX_LIFETIME
                 } else {
                     true
                 }
