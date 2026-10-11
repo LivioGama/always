@@ -230,7 +230,10 @@ class StateMonitor: ObservableObject {
         isSetupMode = enabled
         udsClient.sendSetupMode(enabled: enabled)
         if enabled {
-            logger.info("setup mode enabled — per-app pause bypassed")
+            // The setup window is the only UI: kill any toast that was
+            // mid-animation and suppress all future HUD surfaces.
+            StatusOverlayController.shared.hideAllForSetup()
+            logger.info("setup mode enabled — per-app pause bypassed, HUD suppressed")
         } else {
             logger.info("setup mode disabled — per-app pause restored")
         }

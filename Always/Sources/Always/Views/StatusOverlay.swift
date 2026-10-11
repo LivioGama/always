@@ -1243,6 +1243,11 @@ class StatusOverlayController {
     /// Everything else defers until the flash completes so the user
     /// actually sees the toggle confirmation.
     func show(state: OverlayState) {
+        // Setup mode: the onboarding window is the only UI. No HUD.
+        guard !StateMonitor.shared.isSetupMode else {
+            window?.hide()
+            return
+        }
         // Hidden mode: the user opted out of the HUD entirely.
         guard OverlayDisplayMode.current != .hidden else {
             window?.hide()
@@ -1265,6 +1270,11 @@ class StatusOverlayController {
     /// notifications like Pause/Resume or Auto-Enter on/off toggles.
     /// Always lasts the full `duration` regardless of voice activity.
     func flash(state: OverlayState, duration: TimeInterval = 1.5, forceVisible: Bool = false) {
+        // Setup mode: no pause/resume/filtered toasts over the setup window.
+        guard !StateMonitor.shared.isSetupMode else {
+            window?.hide()
+            return
+        }
         guard forceVisible || OverlayDisplayMode.current != .hidden else {
             window?.hide()
             return
@@ -1307,6 +1317,8 @@ class StatusOverlayController {
     /// Phase 1 (0-2s): Show full overlay with idle state
     /// Phase 2 (2s+): Hide main overlay, animate corner widget with play button
     func showIdleTimeoutAnimation(seconds: Int) {
+        // Setup mode: the setup window speaks for itself; no idle HUD.
+        guard !StateMonitor.shared.isSetupMode else { return }
         // Hidden mode: skip the HUD phase but keep the corner resume
         // widget — it's a functional control, not a status flash.
         guard OverlayDisplayMode.current != .hidden else {
@@ -1338,6 +1350,8 @@ class StatusOverlayController {
 
     /// Show the persistent corner widget for manual resume during idle timeout.
     private func showIdleResumeWidget() {
+        // Setup mode: no corner widget — nothing to resume from onboarding.
+        guard !StateMonitor.shared.isSetupMode else { return }
         if idleResumeWindow == nil {
             overlayLogger.info("creating idle resume widget")
             idleResumeWindow = IdleResumeWindow()
@@ -1391,6 +1405,15 @@ class StatusOverlayController {
         }
         cancelPendingHide()
         cancelIdleAnimation()
+        window?.hide()
+        idleResumeWindow?.hide()
+    }
+
+    /// Tear down every HUD surface immediately, including an in-flight
+    /// flash. Called when onboarding opens — the setup window must be the
+    /// only UI, and whatever toast was mid-animation is now noise.
+    func hideAllForSetup() {
+        cancelPendingHide()
         window?.hide()
         idleResumeWindow?.hide()
     }
