@@ -123,7 +123,7 @@ oslog = { version = "0.2" }
 rdev = { version = "0.5" }
 # macOS: same build flags as Handy 0.8.3 — Metal-accelerated whisper +
 # ONNX Runtime for the non-whisper engines. Pinned to 0.3.3 for parity.
-transcribe-rs = { version = "=0.3.8", features = ["whisper-metal", "onnx"], optional = true }
+transcribe-rs = { version = "=0.3.12", features = ["whisper-metal", "onnx"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Windows API bindings for clipboard and keyboard simulation.
