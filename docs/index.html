@@ -2,322 +2,330 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#090b12">
-    <meta name="description" content="Always is hands-free computing for AI-native developers: speak naturally and your words land at the cursor in any app.">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0d1420">
+    <title>Always — speak, it types, anywhere</title>
+    <meta name="description" content="Always is always-on dictation with no push-to-talk. Speak, and your words land at the cursor — in your terminal, your editor, your AI chat. Open source, no account, no telemetry.">
     <link rel="canonical" href="https://liviogama.github.io/always/">
     <meta property="og:type" content="website">
-    <meta property="og:title" content="Always — hands-free computing for AI-native developers">
-    <meta property="og:description" content="Think out loud. Build at the speed of thought. Always turns speech into text at your cursor without a hotkey or mode switch.">
+    <meta property="og:title" content="Always — speak, it types, anywhere">
+    <meta property="og:description" content="Dictation with no push-to-talk. The microphone stays live, and your words land wherever your cursor already is.">
     <meta property="og:url" content="https://liviogama.github.io/always/">
     <meta property="og:image" content="https://liviogama.github.io/always/always-mark.webp">
     <meta name="twitter:card" content="summary">
     <link rel="icon" href="always-mark.webp" type="image/webp">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500&family=Instrument+Serif&display=swap">
+    <link rel="stylesheet" href="tokens.css">
     <link rel="stylesheet" href="styles.css">
-    <title>Always — hands-free computing for AI-native developers</title>
+    <script src="site.js" defer></script>
   </head>
-  <body id="top">
-    <a class="skip-link" href="#main-content">Skip to content</a>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
 
-    <header class="site-header">
-      <nav class="nav shell" aria-label="Primary navigation">
-        <a class="brand" href="#top" aria-label="Always home">
-          <img src="always-mark.webp" alt="Always infinity mark" width="36" height="36">
-          <span>Always</span>
+    <!-- The nav is the Always overlay: three dots + a live state line that narrates the scroll. -->
+    <header class="overlay" data-state="listening">
+      <nav class="overlay__inner" aria-label="Primary">
+        <a class="overlay__brand" href="#top" aria-label="Always, back to top">
+          <img src="always-mark.webp" alt="" width="28" height="28">
+          <span class="wordmark">Always</span>
         </a>
-        <div class="nav-links">
-          <a href="#why">Why</a>
-          <a href="#features">Experience</a>
-          <a href="#compare">Contrast</a>
-          <a href="#privacy">Trust</a>
-        </div>
-        <a class="button button-small button-primary nav-cta" href="#install">Install Always</a>
+        <span class="overlay__live" aria-hidden="true">
+          <span class="dots"><i></i><i></i><i></i></span>
+          <span class="overlay__state" data-overlay-state>Listening</span>
+        </span>
+        <span class="overlay__links">
+          <a href="#story">Story</a>
+          <a href="#privacy">Privacy</a>
+        </span>
+        <a class="btn btn--accent btn--sm" href="#install">Install</a>
       </nav>
     </header>
 
-    <main id="main-content">
-      <section class="hero shell" aria-labelledby="hero-title">
-        <div class="hero-copy">
-          <p class="eyebrow"><span class="signal-dot" aria-hidden="true"></span> Hands-free computing for AI-native developers.</p>
-          <h1 id="hero-title">Think out loud.<br><em>Build at the speed of thought.</em></h1>
-          <p class="lede">Always turns your voice into text at the cursor — in editors, terminals, chats, and AI tools. No hotkey. No mode switch. Just keep thinking.</p>
-          <div class="hero-actions">
-            <a class="button button-primary" href="#install">Install Always <span aria-hidden="true">↗</span></a>
-            <a class="button button-quiet" href="https://github.com/LivioGama/always">View source <span aria-hidden="true">↗</span></a>
+    <main id="main">
+      <!-- 1 · Hero ─────────────────────────────────────────────── -->
+      <section class="hero page" id="top" data-narrate="Listening">
+        <div class="hero__copy reveal" style="--i: 0">
+          <h1 class="hero__title">Speak. It types. <span class="mark-under">Anywhere.</span></h1>
+          <p class="hero__lede">Always is dictation without the push-to-talk. The microphone stays live, your voice becomes text, and the text lands wherever your cursor already is — a terminal, an editor, a chat with your AI.</p>
+          <div class="hero__actions">
+            <a class="btn btn--accent" href="#install">Install Always</a>
+            <a class="btn btn--ghost" href="https://github.com/LivioGama/always">Read the source</a>
           </div>
-          <p class="hero-note">Open source · macOS · local or cloud transcription</p>
+          <p class="hero__meta">Open source · AGPL-3.0 · macOS, Linux, Windows · No account</p>
         </div>
 
-        <div class="signal-stage">
-          <div class="signal-glow" aria-hidden="true"></div>
-          <svg class="signal-art" viewBox="0 0 720 620" role="img" aria-labelledby="signal-title signal-desc">
-            <title id="signal-title">Thought becomes a prompt</title>
-            <desc id="signal-desc">Layered voice ribbons and points of light converge through an infinity mark, then resolve into a developer prompt.</desc>
-            <defs>
-              <radialGradient id="core-halo">
-                <stop offset="0" stop-color="#6ce8ff" stop-opacity=".24"></stop>
-                <stop offset=".48" stop-color="#9184d9" stop-opacity=".1"></stop>
-                <stop offset="1" stop-color="#090b12" stop-opacity="0"></stop>
-              </radialGradient>
-              <linearGradient id="ribbon-cyan" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0" stop-color="#6ce8ff" stop-opacity="0"></stop>
-                <stop offset=".42" stop-color="#6ce8ff" stop-opacity=".86"></stop>
-                <stop offset="1" stop-color="#b9f4ff" stop-opacity=".12"></stop>
-              </linearGradient>
-              <linearGradient id="ribbon-violet" x1="0" y1="1" x2="1" y2="0">
-                <stop offset="0" stop-color="#9184d9" stop-opacity="0"></stop>
-                <stop offset=".5" stop-color="#a99cff" stop-opacity=".66"></stop>
-                <stop offset="1" stop-color="#6ce8ff" stop-opacity=".08"></stop>
-              </linearGradient>
-              <linearGradient id="mark-gradient" x1=".1" y1="0" x2=".9" y2="1">
-                <stop offset="0" stop-color="#ffffff"></stop>
-                <stop offset=".48" stop-color="#b9f4ff"></stop>
-                <stop offset="1" stop-color="#f5b764"></stop>
-              </linearGradient>
-              <linearGradient id="prompt-line" x1="0" x2="1">
-                <stop offset="0" stop-color="#6ce8ff"></stop>
-                <stop offset="1" stop-color="#f5b764"></stop>
-              </linearGradient>
-              <filter id="constellation-glow" x="-80%" y="-80%" width="260%" height="260%">
-                <feGaussianBlur stdDeviation="7" result="blur"></feGaussianBlur>
-                <feMerge><feMergeNode in="blur"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge>
-              </filter>
-              <filter id="deep-blur" x="-50%" y="-50%" width="200%" height="200%">
-                <feGaussianBlur stdDeviation="24"></feGaussianBlur>
-              </filter>
-              <clipPath id="prompt-clip"><rect x="188" y="468" width="344" height="94" rx="18"></rect></clipPath>
-            </defs>
-
-            <circle class="core-aura" cx="360" cy="282" r="252" fill="url(#core-halo)"></circle>
-            <ellipse class="orbit orbit-outer" cx="360" cy="282" rx="279" ry="208" transform="rotate(-12 360 282)"></ellipse>
-            <ellipse class="orbit orbit-inner" cx="360" cy="282" rx="210" ry="145" transform="rotate(18 360 282)"></ellipse>
-
-            <g class="voice-ribbons" aria-hidden="true">
-              <path class="ribbon ribbon-one" d="M38 300C116 192 175 198 234 264C290 326 325 348 366 294C414 230 454 174 511 208C568 242 585 328 682 286" stroke="url(#ribbon-cyan)"></path>
-              <path class="ribbon ribbon-two" d="M20 338C102 376 146 332 196 255C250 173 308 171 357 258C405 345 463 390 515 314C568 236 602 206 700 247" stroke="url(#ribbon-violet)"></path>
-              <path class="ribbon ribbon-three" d="M70 222C135 244 161 302 218 325C280 350 318 238 370 225C426 211 466 306 522 342C576 376 620 330 662 304" stroke="url(#ribbon-cyan)"></path>
-            </g>
-
-            <g class="constellation constellation-back" aria-hidden="true">
-              <path d="M111 179L206 132L279 185L360 92L448 168L581 137L629 228"></path>
-              <path d="M86 358L187 399L278 359L360 430L454 374L589 406"></path>
-              <circle cx="111" cy="179" r="3"></circle><circle cx="206" cy="132" r="2"></circle>
-              <circle cx="279" cy="185" r="4"></circle><circle cx="360" cy="92" r="3"></circle>
-              <circle cx="448" cy="168" r="2"></circle><circle cx="581" cy="137" r="4"></circle>
-              <circle cx="629" cy="228" r="2"></circle><circle cx="86" cy="358" r="3"></circle>
-              <circle cx="187" cy="399" r="2"></circle><circle cx="278" cy="359" r="4"></circle>
-              <circle cx="360" cy="430" r="3"></circle><circle cx="454" cy="374" r="2"></circle>
-              <circle cx="589" cy="406" r="4"></circle>
-            </g>
-
-            <g class="thought-particles" aria-hidden="true">
-              <circle class="particle particle-a" cx="92" cy="273" r="4"></circle>
-              <circle class="particle particle-b" cx="147" cy="234" r="2.5"></circle>
-              <circle class="particle particle-c" cx="202" cy="309" r="3"></circle>
-              <circle class="particle particle-d" cx="516" cy="227" r="2.5"></circle>
-              <circle class="particle particle-e" cx="579" cy="304" r="4"></circle>
-              <circle class="particle particle-f" cx="639" cy="265" r="2"></circle>
-            </g>
-
-            <g class="infinity-core" aria-hidden="true">
-              <circle class="core-blur" cx="360" cy="282" r="86"></circle>
-              <circle class="core-ring" cx="360" cy="282" r="94"></circle>
-              <circle class="core-ring core-ring-two" cx="360" cy="282" r="72"></circle>
-              <path class="infinity-shadow" d="M360 282C323 218 266 215 245 253C222 295 255 331 292 319C319 310 339 284 360 250C381 216 401 190 428 181C465 169 498 205 475 247C454 285 397 282 360 218"></path>
-              <path class="infinity-symbol" d="M360 282C323 218 266 215 245 253C222 295 255 331 292 319C319 310 339 284 360 250C381 216 401 190 428 181C465 169 498 205 475 247C454 285 397 282 360 218"></path>
-              <circle class="human-pulse" cx="360" cy="250" r="5"></circle>
-            </g>
-
-            <g class="prompt-bridge" aria-hidden="true">
-              <path d="M360 365V433"></path>
-              <circle cx="360" cy="391" r="3"></circle>
-              <circle cx="360" cy="418" r="2"></circle>
-            </g>
-
-            <g class="prompt-shell">
-              <rect class="prompt-halo" x="174" y="454" width="372" height="122" rx="26"></rect>
-              <rect class="prompt-surface" x="188" y="468" width="344" height="94" rx="18"></rect>
-              <g clip-path="url(#prompt-clip)">
-                <rect class="prompt-sheen" x="120" y="468" width="104" height="94"></rect>
-              </g>
-              <circle class="prompt-presence" cx="218" cy="497" r="5"></circle>
-              <text class="prompt-label" x="235" y="501">VOICE → CURSOR</text>
-              <text class="prompt-text" x="218" y="535">refactor this with me</text>
-              <path class="prompt-cursor" d="M440 538h36" stroke="url(#prompt-line)"></path>
-            </g>
-          </svg>
-          <p class="visual-caption"><span>voice</span><span class="caption-line" aria-hidden="true"></span><span>intent</span><span class="caption-line" aria-hidden="true"></span><span>cursor</span></p>
-        </div>
-      </section>
-
-      <section class="command-band shell" aria-label="Install command">
-        <div>
-          <p class="section-kicker">Start with one line</p>
-          <code>curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash</code>
-        </div>
-        <button class="copy-button" type="button" data-copy-command="curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash" aria-label="Copy one-line install command">Copy command</button>
-        <span class="copy-status" aria-live="polite"></span>
-      </section>
-
-      <section class="manifesto section shell" id="why" aria-labelledby="why-title">
-        <div class="section-intro">
-          <p class="section-kicker">Why Always</p>
-          <h2 id="why-title">AI changed the unit of work from keystrokes to intent.</h2>
-        </div>
-        <div class="manifesto-body">
-          <p>Keyboards were designed for documents: one character, one gesture, one finished thought. AI development is different. You hold a system in your head, describe the shape of a change, and refine it in conversation.</p>
-          <p>The bottleneck is no longer typing. It is translating a large, contextual thought into a sequence of small actions. Always removes that translation step. Speak where you are, and your words arrive where the work is already happening.</p>
-          <blockquote>“Always exists to make the distance between thought and machine so small that the technology disappears.” <cite>— Livio, author of Always</cite></blockquote>
-        </div>
-      </section>
-
-      <section class="experience section shell" id="features" aria-labelledby="features-title">
-        <div class="section-intro section-intro-wide">
-          <p class="section-kicker">The experience</p>
-          <h2 id="features-title">Your hands keep building.<br><em>Your voice keeps thinking.</em></h2>
-          <p class="section-summary">Always is not another window to manage. It is an ambient layer between your intent and the tools you already use.</p>
-        </div>
-        <div class="chapters">
-          <article class="chapter">
-            <p class="chapter-number">01</p>
-            <h3>Prompt anywhere without interrupting the current task.</h3>
-            <p>Editors, terminals, chats, browser fields, AI workspaces — wherever your cursor is, that is where your thought goes. No context switch required.</p>
-          </article>
-          <article class="chapter">
-            <p class="chapter-number">02</p>
-            <h3>Remain in the thought because there is no push-to-talk ritual.</h3>
-            <p>You do not reach for a key before you speak or a window after you speak. The interface stays quiet while your ideas stay continuous.</p>
-          </article>
-          <article class="chapter">
-            <p class="chapter-number">03</p>
-            <h3>Teach Always the vocabulary that makes your work yours.</h3>
-            <p>Correct a mistranscription once. Add project language when you need it. Your glossary keeps the machine closer to the way you actually think.</p>
-          </article>
-        </div>
-        <a class="text-link" href="https://github.com/LivioGama/always#readme">See the complete capability list <span aria-hidden="true">↗</span></a>
-      </section>
-
-      <section class="trust section shell" id="privacy" aria-labelledby="privacy-title">
-        <div class="section-intro">
-          <p class="section-kicker">Trust is part of the interface</p>
-          <h2 id="privacy-title">Always-on only works when trust is designed in.</h2>
-        </div>
-        <div class="trust-grid">
-          <div class="trust-lede">
-            <p class="big-statement">An ambient interface has to earn the right to disappear.</p>
-            <p>Always makes its listening state visible, keeps your voice profile on your machine, and treats uncertainty as a reason to pause rather than guess.</p>
+        <figure class="liveline reveal" style="--i: 1" aria-label="Demonstration: spoken sentences typing themselves into different apps">
+          <div class="liveline__head">
+            <span class="liveline__target">into <b data-live-target>Ghostty</b></span>
+            <span class="liveline__status" data-live-status>Listening</span>
           </div>
-          <ul class="trust-list">
-            <li><strong>My Voice verification</strong><span>Optional speaker verification keeps other voices, media, and calls out of your workflow.</span></li>
-            <li><strong>Pause and conflict safeguards</strong><span>Manual pause, focused-app rules, and microphone conflict handling prevent words from landing in the wrong place.</span></li>
-            <li><strong>Local transcription</strong><span>Run supported models on-device when you want audio to stay on your machine.</span></li>
-            <li><strong>No telemetry</strong><span>No account, analytics, or dashboard waiting to turn your work into a product signal.</span></li>
-            <li><strong>Keychain storage</strong><span>Cloud credentials belong in the operating system Keychain, not in config files or logs.</span></li>
+          <div class="wave" aria-hidden="true" data-wave></div>
+          <p class="liveline__text"><span class="typed" data-live-text></span><span class="caret" aria-hidden="true"></span></p>
+          <div class="liveline__foot">
+            <span class="liveline__sent" data-live-sent aria-hidden="true">↵ sent</span>
+            <button class="chip" type="button" data-live-toggle aria-pressed="false">Pause demo</button>
+          </div>
+          <figcaption class="sr-only">A looping demonstration. Each sentence is spoken, typed at the cursor of a named app, and sent automatically.</figcaption>
+        </figure>
+      </section>
+
+      <!-- 2 · The ritual ───────────────────────────────────────── -->
+      <section class="ritual page" id="story" data-narrate="Hearing you">
+        <h2 class="h2 ritual__title">Every other dictation app asks for a gesture first.</h2>
+        <div class="ritual__rows">
+          <div class="ritual__row ritual__row--old">
+            <p class="ritual__label">Push-to-talk</p>
+            <ol class="steps">
+              <li><kbd>hold a key</kbd></li>
+              <li>speak</li>
+              <li><kbd>release</kbd></li>
+              <li>wait</li>
+              <li>check it</li>
+              <li><kbd>↵</kbd></li>
+            </ol>
+          </div>
+          <div class="ritual__row ritual__row--new">
+            <p class="ritual__label">Always</p>
+            <ol class="steps steps--one">
+              <li>speak</li>
+            </ol>
+          </div>
+        </div>
+        <div class="ritual__body prose">
+          <p>The gesture costs more than a second. It costs the thought you were holding — the half-formed sentence you were about to say to your terminal, your teammate, your model.</p>
+          <p>Always removes the gesture. Speaking is the only step. Text is typed and sent for you; hold <kbd>⌘</kbd> while you talk and the words land without sending.</p>
+        </div>
+      </section>
+
+      <!-- 3 · One thought, many cursors ─────────────────────────── -->
+      <section class="cursors page" data-narrate="Typing into Terminal">
+        <div class="cursors__head">
+          <h2 class="h2">Your words land where you’re already looking.</h2>
+          <p class="prose">No window to open, nothing to copy across. Xcode, Slack, Notion, Terminal, the browser — if it has a cursor, Always can type into it.</p>
+        </div>
+        <ul class="surfaces" role="list">
+          <li class="surface surface--wide">
+            <p class="surface__app">Ghostty</p>
+            <p class="surface__line"><span class="surface__prompt" aria-hidden="true">›</span> claude, move the session store off the audio thread</p>
+          </li>
+          <li class="surface">
+            <p class="surface__app">Claude</p>
+            <p class="surface__line">Explain why this test only fails on Linux.</p>
+          </li>
+          <li class="surface">
+            <p class="surface__app">IntelliJ IDEA</p>
+            <p class="surface__line">// debounce the overlay so it stops flickering</p>
+          </li>
+          <li class="surface surface--wide">
+            <p class="surface__app">Slack</p>
+            <p class="surface__line">Pushed the fix — can you try it on your machine before lunch?</p>
+          </li>
+        </ul>
+        <figure class="shot">
+          <img src="always_settings.png" alt="Always Settings, General panel. The Voice Typing Allowlist reads: Always is paused by default; add an app to resume voice typing while you’re in it. The list includes Claude, Terminal, Ghostty, IntelliJ IDEA, Safari and more." width="1796" height="1842" loading="lazy" decoding="async">
+          <figcaption><strong>You choose where it listens.</strong> The allowlist keeps Always paused everywhere except the apps you resume — your terminal and editor, not your banking tab.</figcaption>
+        </figure>
+      </section>
+
+      <!-- 4 · My Voice ──────────────────────────────────────────── -->
+      <section class="room page" data-narrate="Only you">
+        <div class="room__head">
+          <h2 class="h2">It only hears you.</h2>
+          <p class="prose">Record three short samples and Always builds a voiceprint. Once enrolled, it ignores everyone else — the colleague, the TV, the podcast, the Zoom call — even with media playing at full volume. The voiceprint never leaves your machine.</p>
+          <button class="switch" type="button" role="switch" aria-checked="false" data-voice-toggle>
+            <span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span>
+            <span class="switch__label">My Voice</span>
+          </button>
+        </div>
+        <div class="room__stage" data-room data-voice="off">
+          <ul class="sources" role="list">
+            <li class="source source--you"><span class="source__who">You</span><span class="source__said">ship the migration after the standup</span></li>
+            <li class="source"><span class="source__who">Colleague</span><span class="source__said">did anyone order lunch</span></li>
+            <li class="source"><span class="source__who">YouTube</span><span class="source__said">smash that subscribe button</span></li>
+            <li class="source"><span class="source__who">Zoom call</span><span class="source__said">can everyone see my screen</span></li>
+            <li class="source"><span class="source__who">Podcast</span><span class="source__said">this episode is brought to you by</span></li>
           </ul>
-        </div>
-      </section>
-
-      <section class="contrast section shell" id="compare" aria-labelledby="compare-title">
-        <div class="section-intro section-intro-wide">
-          <p class="section-kicker">A different relationship</p>
-          <h2 id="compare-title">From operating tools<br><em>to expressing intent.</em></h2>
-        </div>
-        <div class="contrast-grid">
-          <div class="contrast-column contrast-muted">
-            <p class="column-label">Tool-operated</p>
-            <ol>
-              <li>Activate</li>
-              <li>Switch context</li>
-              <li>Dictate</li>
-              <li>Transfer the text</li>
-              <li>Resume the work</li>
-            </ol>
-          </div>
-          <div class="contrast-column contrast-highlight">
-            <p class="column-label">Thought-driven</p>
-            <ol>
-              <li>Speak naturally</li>
-              <li>Text reaches the cursor</li>
-              <li>Keep the thread</li>
-              <li>Refine the idea</li>
-              <li>Continue building</li>
-            </ol>
+          <div class="cursorbox" aria-live="polite">
+            <p class="cursorbox__label">At your cursor</p>
+            <p class="cursorbox__text" data-room-out></p>
           </div>
         </div>
       </section>
 
-      <section class="install section shell" id="install" aria-labelledby="install-title">
-        <div class="install-panel">
-          <div class="section-intro section-intro-wide">
-            <p class="section-kicker">Open source, ready when you are</p>
-            <h2 id="install-title">Try quitting it after a week.</h2>
-            <p class="section-summary">The absence is the proof. If your hands look for a key before you speak, Always was doing something right.</p>
-          </div>
-          <div class="install-options">
-            <div class="install-option">
-              <p class="option-label">One-line installer</p>
-              <code>curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash</code>
-              <a class="text-link" href="https://github.com/LivioGama/always#readme">Read the setup notes <span aria-hidden="true">↗</span></a>
-            </div>
-            <div class="install-option">
-              <p class="option-label">Linux (DEB / AppImage)</p>
-              <p>Install webkit2gtk first: <code>sudo apt install libwebkit2gtk-4.1-dev</code>, then download the DEB or AppImage from releases.</p>
-              <a class="text-link" href="https://github.com/LivioGama/always/releases/latest">Download from releases <span aria-hidden="true">↗</span></a>
-            </div>
-            <div class="install-option">
-              <p class="option-label">Windows</p>
-              <p>Download the MSI or NSIS installer from GitHub Releases. Supports x86_64.</p>
-              <a class="text-link" href="https://github.com/LivioGama/always/releases/latest">Download from releases <span aria-hidden="true">↗</span></a>
-            </div>
-          </div>
-          <div class="trust-strip" aria-label="Project details">
-            <span>AGPL-3.0</span><span>Rust + Swift</span><span>Cloud or local</span><span>No account</span>
+      <!-- 5 · What silence says ─────────────────────────────────── -->
+      <section class="silence page" data-narrate="Filtering">
+        <div class="silence__head">
+          <h2 class="h2">Speech models hallucinate in the quiet.</h2>
+          <p class="prose">Give a speech model a few seconds of silence and it fills the gap with lines it read a million times in subtitles. Always catches them before they reach your cursor.</p>
+        </div>
+        <ul class="phantoms" role="list">
+          <li><s>Thank you for watching.</s></li>
+          <li><s>Subtitles by the Amara.org community</s></li>
+          <li><s>[Music]</s></li>
+          <li><s>mm hmm</s></li>
+          <li><s>Thanks for listening.</s></li>
+        </ul>
+        <p class="silence__note">The list is public and editable — it lives in <a href="https://github.com/LivioGama/always/blob/main/filter_config.json"><code>filter_config.json</code></a>.</p>
+      </section>
+
+      <!-- 6 · Vocabulary ────────────────────────────────────────── -->
+      <section class="teach page" data-narrate="Learning a word">
+        <div class="teach__head">
+          <h2 class="h2">Say it wrong once. It stays fixed.</h2>
+          <p class="prose">Correct a mistranscription and Always learns the fix for good. Add your project’s jargon, and it stops turning “Kubernetes” into “cuber netties”.</p>
+        </div>
+        <div class="teach__card" data-teach data-state="wrong">
+          <p class="teach__line"><span class="teach__n" aria-hidden="true">1</span><span>we should move the <mark class="teach__word" data-teach-word>cuber netties</mark> config into the helm chart</span></p>
+          <p class="teach__line teach__line--later"><span class="teach__n" aria-hidden="true">2</span><span>the <mark class="teach__word teach__word--auto">Kubernetes</mark> pods restart cleanly now</span></p>
+          <div class="teach__actions">
+            <button class="btn btn--accent btn--sm" type="button" data-teach-fix><kbd>⌃⌥W</kbd> Teach the fix</button>
+            <button class="chip" type="button" data-teach-reset hidden>Reset</button>
+            <p class="teach__learned" data-teach-learned aria-live="polite"></p>
           </div>
         </div>
-        <p class="closing-line">Hands-free computing starts here.</p>
+      </section>
+
+      <!-- 7 · Shortcuts ─────────────────────────────────────────── -->
+      <section class="keys page" data-narrate="Waiting">
+        <div class="keys__head">
+          <h2 class="h2">Hands-free. Not hands-banned.</h2>
+          <p class="prose">A few chords for when you want control. Press them here — the row lights up.</p>
+          <div class="seg" role="group" aria-label="Keyboard layout">
+            <button type="button" class="seg__btn" aria-pressed="true" data-os="mac">macOS</button>
+            <button type="button" class="seg__btn" aria-pressed="false" data-os="pc">Linux · Windows</button>
+          </div>
+        </div>
+        <dl class="chords" data-chords data-os="mac">
+          <div class="chord" data-chord="hold-cmd"><dt><kbd data-mac="⌘" data-pc="Super">⌘</kbd> <span class="chord__hold">hold while speaking</span></dt><dd>Type without sending</dd></div>
+          <div class="chord" data-chord="v"><dt><kbd data-mac="⌃" data-pc="Ctrl">⌃</kbd><kbd data-mac="⌥" data-pc="Alt">⌥</kbd><kbd>V</kbd></dt><dd>Paste the raw, unfiltered text</dd></div>
+          <div class="chord" data-chord="w"><dt><kbd data-mac="⌃" data-pc="Ctrl">⌃</kbd><kbd data-mac="⌥" data-pc="Alt">⌥</kbd><kbd>W</kbd></dt><dd>Correct the last transcript and teach the fix</dd></div>
+          <div class="chord" data-chord="p"><dt><kbd data-mac="⌃" data-pc="Ctrl">⌃</kbd><kbd data-mac="⌥" data-pc="Alt">⌥</kbd><kbd>P</kbd></dt><dd>Pause or resume dictation</dd></div>
+          <div class="chord" data-chord="a"><dt><kbd data-mac="⌃" data-pc="Ctrl">⌃</kbd><kbd data-mac="⌥" data-pc="Alt">⌥</kbd><kbd>A</kbd></dt><dd>Toggle auto-enter</dd></div>
+          <div class="chord" data-chord="shift-p"><dt><kbd data-mac="⌃" data-pc="Ctrl">⌃</kbd><kbd data-mac="⌥" data-pc="Alt">⌥</kbd><kbd data-mac="⇧" data-pc="Shift">⇧</kbd><kbd>P</kbd></dt><dd>Master pause — survives every other pause source</dd></div>
+        </dl>
+        <p class="keys__note">Every shortcut is editable in Settings → Shortcuts.</p>
+      </section>
+
+      <!-- 8 · Pipeline ──────────────────────────────────────────── -->
+      <section class="pipe page" data-narrate="Transcribing">
+        <h2 class="h2 pipe__title">From the air to your cursor, in one process.</h2>
+        <ol class="pipe__flow" role="list">
+          <li class="stage">
+            <h3>Microphone</h3>
+            <p>Captured in shared mode, so other apps keep the device and their volume.</p>
+          </li>
+          <li class="stage">
+            <h3>Voice activity</h3>
+            <p>Silero VAD separates speech from silence in 128&nbsp;ms chunks.</p>
+          </li>
+          <li class="stage stage--fork">
+            <h3>Speech to text</h3>
+            <p><b>Cloud:</b> Groq. <b>Local:</b> Parakeet, Whisper.cpp, Moonshine, SenseVoice or Canary — on-device, offline. Local can back up the cloud automatically.</p>
+          </li>
+          <li class="stage">
+            <h3>Filters</h3>
+            <p>Hallucinations removed, your vocabulary applied, spacing and punctuation tidied.</p>
+          </li>
+          <li class="stage stage--end">
+            <h3>Your cursor</h3>
+            <p>Pasted and, unless you held <kbd>⌘</kbd>, sent.</p>
+          </li>
+        </ol>
+        <p class="pipe__note">A Rust core inside a Tauri v2 shell. The full map is in <a href="https://github.com/LivioGama/always/blob/main/docs/ARCHITECTURE.md">ARCHITECTURE.md</a>.</p>
+      </section>
+
+      <!-- 9 · Privacy ledger ────────────────────────────────────── -->
+      <section class="ledger page" id="privacy" data-narrate="Nothing sent">
+        <div class="ledger__head">
+          <h2 class="h2">What leaves your machine.</h2>
+          <p class="prose">An always-on microphone has to earn its place. So here is the whole list.</p>
+        </div>
+        <div class="ledger__table" role="table" aria-label="What leaves your machine, by mode">
+          <div class="ledger__row ledger__row--head" role="row">
+            <span role="columnheader"><span class="sr-only">Data</span></span>
+            <span role="columnheader">Local mode</span>
+            <span role="columnheader">Cloud mode</span>
+          </div>
+          <div class="ledger__row" role="row">
+            <span role="rowheader">Your audio</span>
+            <span role="cell" class="stays">Stays on your machine</span>
+            <span role="cell" class="goes">Sent to Groq over TLS — the only network destination</span>
+          </div>
+          <div class="ledger__row" role="row">
+            <span role="rowheader">Your voiceprint</span>
+            <span role="cell" class="stays">Stays on your machine</span>
+            <span role="cell" class="stays">Stays on your machine</span>
+          </div>
+          <div class="ledger__row" role="row">
+            <span role="rowheader">API key</span>
+            <span role="cell" class="stays">Not needed</span>
+            <span role="cell" class="stays">OS keychain — never in config files or logs</span>
+          </div>
+          <div class="ledger__row" role="row">
+            <span role="rowheader">Transcripts</span>
+            <span role="cell" class="stays">Not logged by default in release builds</span>
+            <span role="cell" class="stays">Not logged by default in release builds</span>
+          </div>
+          <div class="ledger__row" role="row">
+            <span role="rowheader">Telemetry, account</span>
+            <span role="cell" class="stays">None</span>
+            <span role="cell" class="stays">None</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 10 · Install ──────────────────────────────────────────── -->
+      <section class="install page" id="install" data-narrate="Ready">
+        <div class="install__head">
+          <h2 class="h2">Try quitting it after a week.</h2>
+          <p class="prose">Install it, grant the microphone, and go back to work. If your hand reaches for a key before you speak, Always is doing its job.</p>
+        </div>
+        <div class="tabs" data-tabs>
+          <div class="tabs__list" role="tablist" aria-label="Install for">
+            <button role="tab" id="tab-mac" aria-controls="panel-mac" aria-selected="true">macOS</button>
+            <button role="tab" id="tab-linux" aria-controls="panel-linux" aria-selected="false" tabindex="-1">Linux</button>
+            <button role="tab" id="tab-win" aria-controls="panel-win" aria-selected="false" tabindex="-1">Windows</button>
+            <button role="tab" id="tab-src" aria-controls="panel-src" aria-selected="false" tabindex="-1">Source</button>
+          </div>
+
+          <div class="tabs__panel" role="tabpanel" id="panel-mac" aria-labelledby="tab-mac" tabindex="0">
+            <div class="cmd"><code>curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash</code><button class="chip" type="button" data-copy>Copy</button></div>
+            <p class="tabs__alt">Or with Homebrew: <code>brew install --cask LivioGama/tap/always</code></p>
+            <p class="tabs__then">Then grant <b>Microphone</b>, <b>Accessibility</b> and <b>Input Monitoring</b> in System Settings → Privacy &amp; Security. macOS 14 or later.</p>
+          </div>
+          <div class="tabs__panel" role="tabpanel" id="panel-linux" aria-labelledby="tab-linux" tabindex="0" hidden>
+            <div class="cmd"><code>sudo apt install libwebkit2gtk-4.1-dev</code><button class="chip" type="button" data-copy>Copy</button></div>
+            <div class="cmd"><code>curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash</code><button class="chip" type="button" data-copy>Copy</button></div>
+            <p class="tabs__then">Installs the DEB, or falls back to the AppImage. Ubuntu 22.04+, Debian 12+, Fedora 38+ with PipeWire, PulseAudio or ALSA. Setup notes in <a href="https://github.com/LivioGama/always/blob/main/docs/SETUP.md">SETUP.md</a>.</p>
+          </div>
+          <div class="tabs__panel" role="tabpanel" id="panel-win" aria-labelledby="tab-win" tabindex="0" hidden>
+            <p class="tabs__then">Download the MSI installer from <a href="https://github.com/LivioGama/always/releases/latest">GitHub Releases</a> and run it as Administrator, then allow microphone access in Settings → Privacy → Microphone. Windows 10 1909+ or Windows 11.</p>
+          </div>
+          <div class="tabs__panel" role="tabpanel" id="panel-src" aria-labelledby="tab-src" tabindex="0" hidden>
+            <div class="cmd"><code>git clone https://github.com/LivioGama/always &amp;&amp; cd always &amp;&amp; cargo build --release</code><button class="chip" type="button" data-copy>Copy</button></div>
+            <p class="tabs__then">Rust toolchain required. Build, test and contribution notes in <a href="https://github.com/LivioGama/always/blob/main/docs/DEVELOPMENT.md">DEVELOPMENT.md</a>.</p>
+          </div>
+        </div>
+        <p class="copy-status" role="status" data-copy-status></p>
       </section>
     </main>
 
-    <footer class="site-footer">
-      <div class="footer-inner shell">
-        <a class="brand" href="#top" aria-label="Always home"><img src="always-mark.webp" alt="" width="28" height="28"><span>Always</span></a>
-        <p>Built for people who think in systems.</p>
-        <div class="footer-links">
+    <!-- Ft5 · Statement footer -->
+    <footer class="foot page">
+      <p class="foot__statement">Other dictation tools want to be the center of attention. <span class="foot__turn">Always wants to disappear.</span></p>
+      <div class="foot__row">
+        <a class="overlay__brand" href="#top" aria-label="Always, back to top"><img src="always-mark.webp" alt="" width="24" height="24"><span class="wordmark">Always</span></a>
+        <nav class="foot__links" aria-label="Project">
           <a href="https://github.com/LivioGama/always">GitHub</a>
           <a href="https://github.com/LivioGama/always/releases">Releases</a>
-          <a href="https://github.com/LivioGama/always/blob/main/docs/ARCHITECTURE.md">Docs</a>
-        </div>
+          <a href="https://github.com/LivioGama/always/blob/main/docs/ARCHITECTURE.md">Architecture</a>
+          <a href="https://github.com/LivioGama/always/issues">Issues</a>
+          <a href="https://github.com/LivioGama/always/blob/main/LICENSE">AGPL-3.0</a>
+        </nav>
+        <p class="foot__sign">Built by humans who got tired of typing.</p>
       </div>
     </footer>
-
-    <script>
-      document.querySelectorAll('[data-copy-command]').forEach((button) => {
-        button.addEventListener('click', () => {
-          const command = button.dataset.copyCommand;
-          const status = button.parentElement.querySelector('.copy-status');
-          if (!command || !status) return;
-          const showSuccess = () => {
-            button.textContent = 'Copied';
-            status.textContent = 'Install command copied to clipboard.';
-            window.setTimeout(() => { button.textContent = 'Copy command'; status.textContent = ''; }, 2200);
-          };
-          const showFailure = () => { status.textContent = 'Copy unavailable — select the command above.'; };
-          if (navigator.clipboard?.writeText) {
-            navigator.clipboard.writeText(command).then(showSuccess, showFailure);
-            return;
-          }
-          const selection = document.createElement('textarea');
-          selection.value = command;
-          selection.setAttribute('readonly', '');
-          selection.style.position = 'fixed';
-          selection.style.opacity = '0';
-          document.body.append(selection);
-          selection.select();
-          const copied = document.execCommand('copy');
-          selection.remove();
-          copied ? showSuccess() : showFailure();
-        });
-      });
-    </script>
   </body>
 </html>

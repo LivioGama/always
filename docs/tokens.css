@@ -1,0 +1,87 @@
+/* Hallmark · route: custom (bespoke) · structure: overlay-narrated transcript · idea: "the page is listening"
+ * paper: oklch(16% 0.018 250) · accent: oklch(80% 0.15 70) · display: Instrument Serif · body: Geist · mono: Geist Mono
+ * axes: dark / roman-serif / warm · gates: all-pass · studied: no
+ */
+:root {
+  color-scheme: dark;
+
+  /* Paper — navy lifted from the Always mark */
+  --color-paper:    oklch(16% 0.018 250);
+  --color-paper-2:  oklch(19.5% 0.02 250);
+  --color-paper-3:  oklch(24% 0.022 250);
+  --color-paper-4:  oklch(29% 0.024 250);
+
+  /* Ink */
+  --color-ink:      oklch(95% 0.010 85);
+  --color-ink-2:    oklch(82% 0.012 250);
+  --color-muted:    oklch(66% 0.016 250);
+  --color-faint:    oklch(48% 0.018 250);
+  --color-rule:     oklch(30% 0.020 250);
+  --color-rule-2:   oklch(25% 0.020 250);
+
+  /* Accent — the amber "live" LED on the mic */
+  --color-accent:     oklch(80% 0.15 70);
+  --color-accent-dim: oklch(56% 0.10 70);
+  --color-accent-ink: oklch(18% 0.03 70);
+  --color-focus:      oklch(84% 0.18 70);
+
+  /* Signal — the cyan voice wave. Waveform + heard-voice marks only. */
+  --color-signal:     oklch(82% 0.11 205);
+  --color-signal-dim: oklch(46% 0.07 205);
+
+  /* Bloom stops (background atmosphere only) */
+  --color-bloom-warm: oklch(80% 0.15 70 / 0.10);
+  --color-bloom-cool: oklch(82% 0.11 205 / 0.08);
+  --color-veil:       oklch(16% 0.018 250 / 0.72);
+  --color-shadow:     oklch(8% 0.02 250 / 0.6);
+
+  /* Type */
+  --font-display: "Instrument Serif", ui-serif, Georgia, serif;
+  --font-body:    "Geist", ui-sans-serif, sans-serif;
+  --font-mono:    "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --text-xs:   0.8rem;
+  --text-sm:   0.9rem;
+  --text-base: 1.0625rem;
+  --text-md:   1.25rem;
+  --text-lg:   1.5625rem;
+  --text-xl:   clamp(1.75rem, 2vw + 1rem, 2.4rem);
+  --text-2xl:  clamp(2.2rem, 3.2vw + 1rem, 3.6rem);
+  --text-display: clamp(3rem, 6vw + 1rem, 6rem);
+
+  /* Space — 4pt */
+  --space-3xs: 0.125rem;
+  --space-2xs: 0.25rem;
+  --space-xs:  0.5rem;
+  --space-sm:  0.75rem;
+  --space-md:  1rem;
+  --space-lg:  1.5rem;
+  --space-xl:  2.5rem;
+  --space-2xl: 4rem;
+  --space-3xl: 6rem;
+  --space-4xl: 9rem;
+
+  --gutter: max(1rem, env(safe-area-inset-left));
+  --measure: 62ch;
+  --page: 74rem;
+
+  --radius-sm: 0.5rem;
+  --radius-md: 0.875rem;
+  --radius-lg: 1.375rem;
+  --radius-pill: 999px;
+
+  --rule-hair: 1px solid var(--color-rule);
+  --rule-soft: 1px solid var(--color-rule-2);
+
+  --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in:     cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms;
+  --dur-short: 220ms;
+  --dur-long:  420ms;
+
+  --z-base: 1;
+  --z-raised: 10;
+  --z-sticky: 200;
+  --z-toast: 500;
+}
