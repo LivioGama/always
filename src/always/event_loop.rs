@@ -353,6 +353,7 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
             // here instead: the pipe stays empty, the overrun never fires,
             // and the live wake-on-voice probes below see current audio
             // rather than a shifting stale backlog.
+            #[cfg(target_os = "macos")]
             if let Ok(recorder_arc) = audio::RecChild::get_or_spawn() {
                 let mut recorder = recorder_arc.lock();
                 if let Some(rec) = recorder.as_mut() {

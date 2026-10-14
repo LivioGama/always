@@ -953,6 +953,7 @@ const PREVIEW_PREROLL_FRAMES: usize = 16;
 impl UtterancePreview {
     /// Arm the preview for an Apple streaming session. Parakeet joins
     /// when the dictation language is English and the helper is warm.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     fn start(
         &mut self,
         session: &mut crate::always::apple_stt::StreamSession,
