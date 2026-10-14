@@ -198,6 +198,25 @@ session's final is never used as the tail — it overlaps already-committed
 chunks and duplicated text (observed 2026-10-13); the tail is transcribed from
 its own samples instead.
 
+**A failed tail never loses the chunks (fixed 2026-10-15, user request: "his
+words are lost").** When the recognizer fails on the tail of a chunked
+utterance (2026-10-14T17:48:45Z: Apple STT timed out on a ~1 s tail and the
+three committed chunks, 480 characters already transcribed, were discarded
+with it), the committed chunks are still assembled and pasted. The tail's
+audio is saved to `~/.always/failed-chunks/` (`chunk-<ns>-<N>-tail.wav`,
+owner-only), and the tail's text is the Parakeet preview helper's
+transcription of that same span when it heard words (Apple backend, English,
+helper warm), otherwise the `[audio saved: chunk N]` placeholder a failed
+chunk gets. The Parakeet pass starts only once the recognizer's tail pass has
+run `TAIL_RESCUE_ARM_MS` (4 s; fresh passes 2026-10-13/14: n=271, p99 2.8 s,
+max 3.5 s) or failed, so the normal path never shares the Neural Engine with
+it; after a failure the paste waits at most `TAIL_RESCUE_MAX_EXTRA_MS`
+(1.5 s) more for it. Measured on replay (Apple's 12 s timeout simulated):
+the Parakeet text of a 4.9 s tail was ready 588 ms after the rescue started,
+so the paste landed when the timeout fired — no added wait. The log line
+`chunked_tail_stt_failed` marks the recovery (`recovered_by`, saved path;
+no transcript text).
+
 **Chunked dictation keeps its pauses (fixed 2026-10-14).** The 200 ms
 short-utterance cut applies only while the *whole* utterance (committed
 chunks + live buffer) is under `SHORT_SPEECH_MS`. It used to judge the live
@@ -346,7 +365,8 @@ callbacks (no per-frame polling) into one merger (`live_preview.rs`):
   pre-buffer at onset plus every in-utterance frame. **English only**
   (`lang` `en*`, or `auto` with an English system locale); other languages
   keep the Apple partials alone. **Its text is never pasted** and never
-  used as a final.
+  used as a final — with one exception: the tail of a chunked utterance
+  whose Apple pass failed (§4, 2026-10-15).
 - **The Apple streaming recognizer** — the source of the PASTED final, as
   before. Wherever Apple already has words, Apple's words replace
   Parakeet's; Parakeet supplies only the words past Apple's last one

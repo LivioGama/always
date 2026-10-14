@@ -250,4 +250,219 @@ mod tests {
         std::fs::write(&out, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
         eprintln!("report written to {out}");
     }
+
+    /// Fake capture helper: streams one WAV (16 kHz mono s16) to stdout in
+    /// real time after 1.5 s of room tone, touches `<wav>.done` once the
+    /// last speech sample is out, then streams room tone until the pipe
+    /// closes. Pacing / format only.
+    const PACER_PY: &str = r#"
+import os, sys, time, wave, struct, random
+out = sys.stdout.buffer
+wav = sys.argv[1]
+FRAME = 480
+t0 = time.time(); sent = 0
+def emit(pcm):
+    global sent
+    for i in range(0, len(pcm), FRAME * 2):
+        d = t0 + (sent + FRAME) / 16000.0 - time.time()
+        if d > 0: time.sleep(d)
+        out.write(pcm[i:i + FRAME * 2]); out.flush()
+        sent += len(pcm[i:i + FRAME * 2]) // 2
+def quiet(secs):
+    emit(b"".join(struct.pack("<h", random.randint(-30, 30)) for _ in range(int(secs * 16000))))
+quiet(1.5)
+wf = wave.open(wav)
+emit(wf.readframes(wf.getnframes()))
+open(wav + ".done", "w").close()
+while True:
+    quiet(1.0)
+"#;
+
+    /// Stand-in for Apple STT: committed chunks transcribe fine; every call
+    /// that starts after the speech is over (the tail's speculation and its
+    /// fresh pass) fails the way Apple did at 2026-10-14T17:48:45Z.
+    struct TailTimesOut {
+        speech_done: std::path::PathBuf,
+        /// How long a failing call blocks first (Apple's timeout is 12 s).
+        fail_after: std::time::Duration,
+        ok_texts: parking_lot::Mutex<Vec<String>>,
+        failed: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Transcriber for TailTimesOut {
+        fn transcribe_from_bytes(
+            &self,
+            audio: Vec<u8>,
+        ) -> Result<crate::stt::TranscriptionResult, crate::stt::SttError> {
+            let secs = audio.len().saturating_sub(44) as f64 / 32_000.0;
+            if self.speech_done.exists() {
+                self.failed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::thread::sleep(self.fail_after);
+                eprintln!("mock_stt: FAIL (tail) secs={secs:.2} after {:?}", self.fail_after);
+                return Err(crate::stt::SttError::Other(anyhow::anyhow!(
+                    "Apple STT failed: speech recognition timed out"
+                )));
+            }
+            let mut texts = self.ok_texts.lock();
+            let text = format!("committed chunk number {}", texts.len() + 1);
+            eprintln!("mock_stt: ok secs={secs:.2} -> {text:?}");
+            texts.push(text.clone());
+            Ok(crate::stt::TranscriptionResult { text, ..Default::default() })
+        }
+
+        fn transcribe_streaming(
+            &self,
+            audio: Vec<u8>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<crate::stt::StreamingTranscriptionResult, crate::stt::SttError>,
+                    > + Send,
+            >,
+        > {
+            let r = self.transcribe_from_bytes(audio).map(|r| {
+                crate::stt::StreamingTranscriptionResult { text: r.text, is_final: true, is_interim: false }
+            });
+            Box::pin(futures::stream::once(async move { r }))
+        }
+    }
+
+    /// 2026-10-14T17:48:45Z: a 3-chunk dictation (189 + 196 + 95 chars
+    /// already transcribed) was lost whole because Apple STT timed out on
+    /// the ~1 s tail — the tail error returned before `finalize_chunked`.
+    /// Real capture pipeline (VAD, hard-flush chunking, speculation, tail
+    /// transcription) on a 15.5 s TTS sentence through a fake capture
+    /// helper; only the recognizer is scripted. Needs `say` + python3:
+    /// `cargo test --features local-stt --lib last_chunk_stt_timeout -- --ignored --nocapture`
+    ///
+    /// `LASTCHUNK_RESCUE=1` runs the production configuration instead
+    /// (Apple backend, English, warm Parakeet preview helper; the failing
+    /// tail call blocks 12 s like Apple's timeout) and expects Parakeet's
+    /// words for the tail. The Apple live session needs the Speech grant:
+    /// run it from a `com.always.v3`-signed harness bundle.
+    #[test]
+    #[ignore = "real-time capture replay (~25 s); needs `say` + python3; run explicitly"]
+    fn last_chunk_stt_timeout_keeps_committed_chunks() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("info")
+            .with_writer(std::io::stderr)
+            .try_init();
+        let dir = std::env::temp_dir().join(format!("always-lastchunk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("speech.wav");
+        let said = std::process::Command::new("/usr/bin/say")
+            .args(["-o", wav.to_str().unwrap(), "--data-format=LEI16@16000"])
+            .arg(
+                "So the plan for this afternoon is to walk through the whole release checklist \
+                 with the team and make sure every single item on it has an owner and a date and \
+                 a clear way to check it before we ship the new build to everyone who has been \
+                 waiting on it because the last one had that nasty crash on startup",
+            )
+            .status()
+            .unwrap();
+        assert!(said.success());
+        let pacer = dir.join("pacer.py");
+        std::fs::write(&pacer, PACER_PY).unwrap();
+        let capture = dir.join("capture.sh");
+        std::fs::write(
+            &capture,
+            format!("#!/bin/sh\nexec /usr/bin/python3 -I '{}' '{}'\n", pacer.display(), wav.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&capture, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        // SAFETY: set before the recorder is spawned; this test is the only
+        // reader and is run on its own (`--ignored`, by name).
+        let rescue = std::env::var("LASTCHUNK_RESCUE").as_deref() == Ok("1");
+        unsafe {
+            std::env::set_var("ALWAYS_CAPTURE_BIN", &capture);
+            if !rescue {
+                std::env::set_var("ALWAYS_PREVIEW_ASR", "0");
+            }
+        }
+
+        let mut cfg = AlwaysConfig::default();
+        cfg.transcriber_backend = if rescue {
+            crate::stt_dispatch::TranscriberBackendChoice::Apple
+        } else {
+            crate::stt_dispatch::TranscriberBackendChoice::Groq
+        };
+        if rescue {
+            crate::always::preview_asr::prewarm("en", true);
+            let t = std::time::Instant::now();
+            while crate::always::preview_asr::global().is_some_and(|a| !a.is_ready())
+                && t.elapsed().as_secs() < 300
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            assert!(crate::always::preview_asr::global().is_some_and(|a| a.is_ready()), "helper warm");
+        }
+        cfg.lang = "en".into();
+        cfg.speaker_gate_enabled = false;
+        // No periodic preview passes through the scripted recognizer.
+        cfg.stt_live_preview = false;
+        cfg.silence_secs = 1.0;
+        cfg.timeout_secs = 4;
+
+        let mock = Arc::new(TailTimesOut {
+            speech_done: std::path::PathBuf::from(format!("{}.done", wav.display())),
+            fail_after: std::time::Duration::from_secs(if rescue { 12 } else { 0 }),
+            ok_texts: Default::default(),
+            failed: Default::default(),
+        });
+        let transcriber: Arc<dyn Transcriber> = mock.clone();
+        let spill_dir = std::env::temp_dir().join("always-test-failed-chunks");
+        let spilled_before = std::fs::read_dir(&spill_dir).map(|d| d.count()).unwrap_or(0);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut log = Logger;
+        let mut outcome = None;
+        for _ in 0..4 {
+            let r = vad::record_utterance(&cfg, &mut log, &transcriber, rt.handle());
+            match &r {
+                Ok(RecordResult::Silence) | Ok(RecordResult::Timeout) => continue,
+                _ => {
+                    outcome = Some(r);
+                    break;
+                }
+            }
+        }
+        let outcome = outcome.expect("an utterance was recorded");
+        let since_speech_end = std::fs::metadata(&mock.speech_done)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok());
+        eprintln!("result {since_speech_end:?} after the last speech sample");
+        let committed = mock.ok_texts.lock().clone();
+        let failed = mock.failed.load(std::sync::atomic::Ordering::SeqCst);
+        eprintln!("committed={committed:?} failed_calls={failed}");
+        assert!(!committed.is_empty(), "the dictation must have been chunked");
+        assert!(failed >= 1, "the tail transcription must have been attempted and failed");
+
+        let text = match outcome {
+            Ok(RecordResult::Speech { text, .. }) => text,
+            other => panic!(
+                "committed chunks {committed:?} were lost: {:?}",
+                other.map(|_| "non-speech result").map_err(|e| format!("{e:#}"))
+            ),
+        };
+        eprintln!("pasted: {text:?}");
+        assert!(
+            text.starts_with("committed chunk number"),
+            "committed chunk text missing: {text:?}"
+        );
+        if rescue {
+            // The tail is the end of the sentence ("…nasty crash on startup").
+            let lower = text.to_lowercase();
+            assert!(!text.contains("[audio saved"), "Parakeet rescue not used: {text:?}");
+            assert!(lower.contains("crash") || lower.contains("startup"), "tail words missing: {text:?}");
+        } else {
+            assert!(
+                text.ends_with("]") && text.contains("[audio saved: chunk "),
+                "tail placeholder missing: {text:?}"
+            );
+        }
+        let spilled_after = std::fs::read_dir(&spill_dir).map(|d| d.count()).unwrap_or(0);
+        assert!(spilled_after > spilled_before, "tail audio was not saved for recovery");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

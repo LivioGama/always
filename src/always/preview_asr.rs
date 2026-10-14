@@ -8,7 +8,8 @@
 //! is never shown under the next one.
 //!
 //! **Preview only.** Text from this engine is never pasted and never used
-//! as a final — see SPEC.md §5. English only: other languages keep the
+//! as a final — see SPEC.md §5 — except as the rescue for a chunked tail
+//! whose Apple pass failed ([`PreviewAsr::transcribe_span`], SPEC.md §4). English only: other languages keep the
 //! Apple recognizer's own partials.
 //!
 //! Wire protocol: see the header of `preview-asr/Sources/.../main.swift`.
@@ -228,6 +229,42 @@ impl PreviewAsr {
             samples: 0,
             level: LevelNormalizer::new(),
         })
+    }
+
+    /// Recover the words of one finished audio span when the pasting
+    /// recognizer failed on it (SPEC.md §4, chunked tail): feed the whole
+    /// span as one utterance and wait up to `timeout` for the helper's
+    /// `final`. `None` when the helper is not already warm (never spawns
+    /// or waits for a cold load), a frame could not be queued, or no
+    /// final arrived in time.
+    pub fn transcribe_span(self: &Arc<Self>, samples: &[i16], timeout: Duration) -> Option<String> {
+        if samples.is_empty() || !self.is_ready() {
+            return None;
+        }
+        let (tx, rx) = mpsc::sync_channel::<String>(1);
+        let mut utt = self.begin(Arc::new(move |ev| {
+            if let PreviewEvent::Final(text) = ev {
+                let _ = tx.try_send(text);
+            }
+        }))?;
+        // ~1 s frames: a 15 s tail is 15 of the 100 queue slots.
+        let mut queued = true;
+        for part in samples.chunks(16_000) {
+            utt.samples += part.len();
+            let boosted = utt.level.process(part);
+            queued &= self.send(Frame::Audio(utt.seq, boosted));
+        }
+        // End WITHOUT detaching the sink (Drop detaches first, which would
+        // discard the very `final` this call waits for).
+        queued &= self.send(Frame::End(utt.seq));
+        let seq = utt.seq;
+        std::mem::forget(utt);
+        let text = if queued { rx.recv_timeout(timeout).ok() } else { None };
+        let mut cur = self.current.lock();
+        if cur.as_ref().is_some_and(|(s, _)| *s == seq) {
+            *cur = None;
+        }
+        text
     }
 }
 
@@ -645,6 +682,59 @@ mod tests {
                 let _ = p.child.kill();
                 let _ = p.child.wait();
             }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Real helper: a finished span fed at once comes back as one final
+    /// (decode time printed: the chunked-tail rescue in `vad.rs` is sized
+    /// on it).
+    /// `cargo test --lib live_span_recovery -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs the preview helper + `say`; run explicitly"]
+    fn live_span_recovery() {
+        let dir = std::env::temp_dir().join(format!("always-span-live-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = locate_helper().expect("helper binary");
+        let asr = PreviewAsr::new(bin);
+        assert!(asr.ensure_spawned());
+        let t = Instant::now();
+        while !asr.is_ready() && t.elapsed() < Duration::from_secs(300) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(asr.is_ready(), "helper not ready after {:?}", t.elapsed());
+        eprintln!("live_span_recovery helper ready after {:?}", t.elapsed());
+        for (i, sentence) in [
+            "much expanded view, right? So then the music would be playing back.",
+            "So the plan for this afternoon is to walk through the whole release checklist with the team and make sure every single item on it has an owner and a date.",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let wav = dir.join(format!("s{i}.wav"));
+            assert!(Command::new("/usr/bin/say")
+                .args(["-o", wav.to_str().unwrap(), "--data-format=LEI16@16000"])
+                .arg(sentence)
+                .status()
+                .unwrap()
+                .success());
+            let bytes = std::fs::read(&wav).unwrap();
+            let data = bytes.windows(4).position(|w| w == b"data").unwrap() + 8;
+            let speech: Vec<i16> =
+                bytes[data..].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+            let t0 = Instant::now();
+            let text = asr.transcribe_span(&speech, Duration::from_secs(15));
+            let took = t0.elapsed();
+            eprintln!(
+                "live_span_recovery audio={:.2}s took={took:?} text={text:?}",
+                speech.len() as f64 / 16_000.0
+            );
+            let text = text.expect("final");
+            assert!(text.to_lowercase().contains(if i == 0 { "music" } else { "checklist" }), "{text}");
+        }
+        if let Some(mut p) = asr.proc_.lock().take() {
+            let _ = p.child.kill();
+            let _ = p.child.wait();
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

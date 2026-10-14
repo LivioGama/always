@@ -2887,14 +2887,40 @@ fn record_with_local_vad(
                     }
                 })
             };
+            // Chunked tail: a Parakeet rescue starts only if this call
+            // runs abnormally long, so a recognizer timeout still has the
+            // tail's words ready without adding wait (see `TailRescue`).
+            let tail_rescue = has_chunks.then(|| TailRescue::arm(cfg, &speech_samples));
             let transcribed = transcriber.transcribe_from_bytes(wav_data);
             heartbeat_stop.store(true, Ordering::Relaxed);
             let _ = heartbeat_handle.join();
             match transcribed {
-                Ok(result) => (result, false),
-                Err(err) => {
+                Ok(result) => {
+                    if let Some(rescue) = tail_rescue {
+                        rescue.cancel();
+                    }
+                    (result, false)
+                }
+                Err(err) if !has_chunks => {
                     event::global_broadcaster().transcribing_stopped();
                     return Err(err).context("failed to transcribe utterance");
+                }
+                // The tail of a chunked utterance failed: the committed
+                // chunks are already transcribed and must still be pasted.
+                Err(err) => {
+                    let text = recover_failed_chunked_tail(
+                        &speech_samples,
+                        &anyhow::Error::from(err),
+                        chunker.chunk_count(),
+                        |_| tail_rescue.and_then(TailRescue::finish),
+                    );
+                    (
+                        crate::stt::TranscriptionResult {
+                            text,
+                            ..Default::default()
+                        },
+                        false,
+                    )
                 }
             }
         }
@@ -2998,6 +3024,114 @@ fn record_with_local_vad(
     Err(anyhow::anyhow!(
         "Audio capture not supported on this platform"
     ))
+}
+
+/// Text for the tail of a chunked utterance whose transcription failed
+/// (2026-10-14T17:48:45Z: Apple STT timed out on a ~1 s tail and the
+/// 480 already-transcribed characters of the three committed chunks were
+/// discarded with it). The tail audio is saved to the failed-chunks
+/// recovery dir first; `fallback` gets one try at the same span (the
+/// Parakeet helper in production). Its text is returned when it heard
+/// words, otherwise the `[audio saved: chunk N]` placeholder the chunker
+/// uses for a chunk that failed — so the committed chunks are always
+/// assembled and pasted.
+#[cfg(target_os = "macos")]
+fn recover_failed_chunked_tail(
+    tail: &[i16],
+    err: &anyhow::Error,
+    committed_chunks: usize,
+    fallback: impl FnOnce(&[i16]) -> Option<String>,
+) -> String {
+    let chunk_no = committed_chunks + 1;
+    let saved = crate::always::chunker::spill_audio(tail, &format!("{chunk_no}-tail"));
+    let recovered = fallback(tail)
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    tracing::warn!(
+        error = %format!("{err:#}"),
+        committed_chunks,
+        tail_secs = tail.len() as f64 / 16_000.0,
+        saved = saved.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+        recovered_by = if recovered.is_some() { "parakeet_preview" } else { "none" },
+        recovered_chars = recovered.as_ref().map_or(0, |t| t.chars().count()),
+        "chunked_tail_stt_failed"
+    );
+    recovered.unwrap_or_else(|| format!("[audio saved: chunk {chunk_no}]"))
+}
+
+/// The pasting recognizer's tail pass normally returns well inside this
+/// (fresh passes 2026-10-13/14: n=271, p99 2.8 s, max 3.5 s). Still
+/// running past it means trouble (Apple times out at 12 s), so the
+/// Parakeet rescue of the tail starts here, in parallel, and is usually
+/// done before the recognizer gives up.
+#[cfg(target_os = "macos")]
+const TAIL_RESCUE_ARM_MS: u64 = 4_000;
+/// Extra wait for the rescue text once the recognizer has failed. Bounds
+/// what a failure can add on top of the recognizer's own timeout.
+#[cfg(target_os = "macos")]
+const TAIL_RESCUE_MAX_EXTRA_MS: u64 = 1_500;
+/// Ceiling for the helper's own decode of one span (it runs off-thread;
+/// the paste never waits on it longer than `TAIL_RESCUE_MAX_EXTRA_MS`).
+#[cfg(target_os = "macos")]
+const TAIL_RESCUE_DECODE_MS: u64 = 15_000;
+
+/// Parakeet recovery of a chunked utterance's tail, armed alongside the
+/// pasting recognizer's tail pass. Starts decoding only after
+/// `TAIL_RESCUE_ARM_MS` (or at once when the recognizer fails sooner), so
+/// the normal path never shares the Neural Engine with it; only where the
+/// Parakeet helper already runs (Apple backend, English) and is warm.
+#[cfg(target_os = "macos")]
+struct TailRescue {
+    go: std::sync::mpsc::Sender<bool>,
+    text: std::sync::mpsc::Receiver<Option<String>>,
+}
+
+#[cfg(target_os = "macos")]
+impl TailRescue {
+    fn arm(cfg: &AlwaysConfig, tail: &[i16]) -> Self {
+        let (go, go_rx) = std::sync::mpsc::channel::<bool>();
+        let (text_tx, text) = std::sync::mpsc::channel();
+        let usable = cfg.transcriber_backend.is_apple()
+            && crate::always::preview_asr::lang_is_english(&cfg.lang);
+        let tail = usable.then(|| tail.to_vec());
+        std::thread::spawn(move || {
+            let Some(tail) = tail else {
+                let _ = text_tx.send(None);
+                return;
+            };
+            match go_rx.recv_timeout(std::time::Duration::from_millis(TAIL_RESCUE_ARM_MS)) {
+                Ok(true) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Ok(false) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+            let started = std::time::Instant::now();
+            let words = crate::always::preview_asr::global().and_then(|asr| {
+                asr.transcribe_span(&tail, std::time::Duration::from_millis(TAIL_RESCUE_DECODE_MS))
+            });
+            tracing::info!(
+                tail_secs = tail.len() as f64 / 16_000.0,
+                decode_ms = started.elapsed().as_millis() as u64,
+                heard = words.as_ref().is_some_and(|w| !w.trim().is_empty()),
+                "chunked_tail_rescue_decoded"
+            );
+            let _ = text_tx.send(words);
+        });
+        Self { go, text }
+    }
+
+    /// The recognizer succeeded: never start the rescue.
+    fn cancel(self) {
+        let _ = self.go.send(false);
+    }
+
+    /// The recognizer failed: start now if not yet started, and take the
+    /// rescue's text if it lands within `TAIL_RESCUE_MAX_EXTRA_MS`.
+    fn finish(self) -> Option<String> {
+        let _ = self.go.send(true);
+        self.text
+            .recv_timeout(std::time::Duration::from_millis(TAIL_RESCUE_MAX_EXTRA_MS))
+            .ok()
+            .flatten()
+    }
 }
 
 /// Assemble a chunked utterance: wait for committed chunks, join them in
@@ -3296,6 +3430,58 @@ mod tests {
     use crate::always::AlwaysConfig;
 
     static CHUNK_TARGET_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Spilled tail WAVs in the test recovery dir whose name carries `label`.
+    #[cfg(target_os = "macos")]
+    fn spilled_tails(label: &str) -> Vec<std::path::PathBuf> {
+        let dir = std::env::temp_dir().join("always-test-failed-chunks");
+        std::fs::read_dir(dir)
+            .map(|d| {
+                d.filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.to_string_lossy().ends_with(&format!("-{label}.wav")))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Last-chunk STT failure: the fallback's words become the tail, and
+    /// the tail audio is saved for recovery either way.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn failed_chunked_tail_uses_fallback_text_and_saves_audio() {
+        let tail: Vec<i16> = (0..16_000).map(|i| ((i as f32 * 0.05).sin() * 3000.0) as i16).collect();
+        let err = anyhow::anyhow!("Apple STT failed: speech recognition timed out");
+        let before = spilled_tails("41-tail").len();
+        let mut fed = 0;
+        let text = super::recover_failed_chunked_tail(&tail, &err, 40, |span| {
+            fed = span.len();
+            Some("  I mean, actually. ".into())
+        });
+        assert_eq!(text, "I mean, actually.");
+        assert_eq!(fed, tail.len(), "the fallback gets the whole failed span");
+        let saved = spilled_tails("41-tail");
+        assert_eq!(saved.len(), before + 1, "tail audio saved");
+        let newest = saved.iter().max_by_key(|p| std::fs::metadata(p).unwrap().modified().unwrap()).unwrap();
+        assert_eq!(std::fs::metadata(newest).unwrap().len(), 44 + 2 * tail.len() as u64);
+    }
+
+    /// No fallback text (helper absent, cold, timed out, or heard nothing):
+    /// the chunker's placeholder keeps the tail's position in the paste.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn failed_chunked_tail_without_fallback_is_a_placeholder() {
+        let tail = vec![500i16; 8_000];
+        let err = anyhow::anyhow!("speech recognition timed out");
+        assert_eq!(
+            super::recover_failed_chunked_tail(&tail, &err, 52, |_| None),
+            "[audio saved: chunk 53]"
+        );
+        assert_eq!(
+            super::recover_failed_chunked_tail(&tail, &err, 52, |_| Some("  ".into())),
+            "[audio saved: chunk 53]"
+        );
+        assert!(spilled_tails("53-tail").len() >= 2);
+    }
 
     /// 2026-10-14 14:51:09Z: after the last chunk flush the user said
     /// "Disappoint me when I get back." (~2 s, quiet mic) and stopped; the

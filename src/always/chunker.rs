@@ -637,27 +637,35 @@ impl ChunkAccumulator {
             // racing path — nothing to spill.
             return placeholder;
         };
-        let dir = failed_chunks_dir();
-        if let Err(err) = create_private_dir(&dir) {
-            tracing::error!(error = %err, "failed_chunks_dir_create_failed");
-            return placeholder;
-        }
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let path = dir.join(format!("chunk-{stamp}-{}.wav", slot.index + 1));
-        match audio::create_wav_bytes_i16_mono_16k(&audio_samples)
-            .and_then(|wav| write_private_file(&path, &wav))
-        {
-            Ok(()) => {
-                tracing::warn!(chunk = slot.index, path = %path.display(), "chunk_audio_spilled");
-            }
-            Err(err) => {
-                tracing::error!(chunk = slot.index, error = %err, "chunk_audio_spill_failed");
-            }
+        if let Some(path) = spill_audio(&audio_samples, &format!("{}", slot.index + 1)) {
+            tracing::warn!(chunk = slot.index, path = %path.display(), "chunk_audio_spilled");
         }
         placeholder
+    }
+}
+
+/// Write `samples` as a WAV into the failed-chunks recovery dir
+/// (`~/.always/failed-chunks/chunk-<nanos>-<label>.wav`, owner-only).
+/// `None` (logged) when the write failed.
+pub(crate) fn spill_audio(samples: &[i16], label: &str) -> Option<std::path::PathBuf> {
+    let dir = failed_chunks_dir();
+    if let Err(err) = create_private_dir(&dir) {
+        tracing::error!(error = %err, "failed_chunks_dir_create_failed");
+        return None;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = dir.join(format!("chunk-{stamp}-{label}.wav"));
+    match audio::create_wav_bytes_i16_mono_16k(samples)
+        .and_then(|wav| write_private_file(&path, &wav))
+    {
+        Ok(()) => Some(path),
+        Err(err) => {
+            tracing::error!(label, error = %err, "chunk_audio_spill_failed");
+            None
+        }
     }
 }
 
