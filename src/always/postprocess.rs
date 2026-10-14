@@ -422,7 +422,76 @@ fn sanitize_corrected_text(input: &str, output: &str) -> Option<String> {
         }
     }
 
+    if drops_spoken_content(input, cleaned) {
+        tracing::warn!(stage = "grammar_correction", "rejected correction that drops spoken words");
+        return None;
+    }
+
     Some(cleaned.to_string())
+}
+
+/// Hesitation sounds the correction may always remove.
+const DISFLUENCY_WORDS: &[&str] = &["um", "uh", "ah", "eh", "er", "erm", "hmm", "mm", "uhm"];
+/// Longest run of consecutive spoken words a correction may delete — a
+/// false start ("go to the, go to the store") or a duplicate.
+const MAX_DROPPED_RUN: usize = 4;
+
+/// The correction deleted words the user actually said, beyond removing
+/// hesitations and a short false start. The word-count guard above only
+/// bounds the ratio, so a long chunk could lose a whole clause and pass:
+/// 2026-10-14 14:48:18Z the Apple pass turned "Well, for anything I say,
+/// uh, I mean, anything I explicitly say, uh, she should not ask at all"
+/// into "Well, for anything I say, she should not ask at all" (23 of 31
+/// words, above the 2/3 floor) and the clause the user meant was gone.
+///
+/// Aligns the spoken (non-hesitation) input words against the output by
+/// longest common subsequence and rejects when more than `MAX_DROPPED_RUN`
+/// consecutive spoken words are unmatched, or when the total unmatched
+/// exceeds max(`MAX_DROPPED_RUN`, 10 %). A word the model *replaced*
+/// (acoustic fix, glossary rewrite) costs one unmatched word, so legitimate
+/// edits stay well under both bounds. Rejection falls back to the raw
+/// transcript — never to a guess.
+fn drops_spoken_content(input: &str, output: &str) -> bool {
+    let spoken: Vec<String> = normalized_words(input)
+        .into_iter()
+        .filter(|w| !DISFLUENCY_WORDS.contains(&w.as_str()))
+        .collect();
+    let out = normalized_words(output);
+    let n = spoken.len();
+    let m = out.len();
+    if n == 0 {
+        return false;
+    }
+    // GRAMMAR_MAX_CHARS bounds this at a few hundred words per side.
+    let mut lcs = vec![0u32; (n + 1) * (m + 1)];
+    let at = |i: usize, j: usize| i * (m + 1) + j;
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[at(i, j)] = if spoken[i] == out[j] {
+                lcs[at(i + 1, j + 1)] + 1
+            } else {
+                lcs[at(i + 1, j)].max(lcs[at(i, j + 1)])
+            };
+        }
+    }
+    let (mut i, mut j) = (0usize, 0usize);
+    let (mut run, mut longest, mut dropped) = (0usize, 0usize, 0usize);
+    while i < n {
+        if j < m && spoken[i] == out[j] && lcs[at(i, j)] == lcs[at(i + 1, j + 1)] + 1 {
+            i += 1;
+            j += 1;
+            run = 0;
+        } else if j < m && lcs[at(i, j + 1)] >= lcs[at(i + 1, j)] {
+            // Output-only word (an insertion or a replacement's new form).
+            j += 1;
+        } else {
+            dropped += 1;
+            run += 1;
+            longest = longest.max(run);
+            i += 1;
+        }
+    }
+    longest > MAX_DROPPED_RUN || dropped > MAX_DROPPED_RUN.max(n / 10)
 }
 
 fn has_appended_gratitude(input: &str, output: &str) -> bool {
@@ -970,6 +1039,48 @@ mod tests {
         assert!(Arc::ptr_eq(&cell_a, &cell_b));
         cell_a.set("Corrected.".to_string()).unwrap();
         assert_eq!(cell_b.get().map(String::as_str), Some("Corrected."));
+    }
+
+    #[test]
+    fn correction_that_deletes_a_spoken_clause_is_rejected() {
+        // Real chunk 0 of the 2026-10-14 14:48:18Z dictation and the
+        // correction that was pasted.
+        let input = "Well, for anything I say, uh, I mean, anything I explicitly say, uh, \
+                     she should not ask at all, right? Generally asking this is not a very \
+                     nice approach at all.";
+        let lossy = "Well, for anything I say, she should not ask at all, right? Generally \
+                     asking this is not a very nice approach at all.";
+        assert!(drops_spoken_content(input, lossy));
+        assert_eq!(sanitize_corrected_text(input, lossy), None, "falls back to raw");
+    }
+
+    #[test]
+    fn ordinary_cleanup_is_not_flagged_as_word_loss() {
+        // Hesitations, a duplicated word, punctuation, case, one acoustic
+        // fix and a short false start are all allowed.
+        let input = "okay the incremental thing is not working uh and like uh on on this \
+                     I was like speaking she did not even take any action";
+        let out = "Okay, the incremental thing is not working, and like, on this, I was \
+                   like speaking. She did not even take any action.";
+        assert!(!drops_spoken_content(input, out));
+        assert!(!drops_spoken_content(
+            "you need to check the locks and fix everything",
+            "You need to check the logs and fix everything."
+        ));
+        assert!(!drops_spoken_content(
+            "so we go to the go to the store tomorrow",
+            "So we go to the store tomorrow."
+        ));
+        assert!(!drops_spoken_content("", "anything"));
+        assert!(sanitize_corrected_text(input, out).is_some());
+    }
+
+    #[test]
+    fn many_scattered_deletions_are_rejected() {
+        let input = "one two three four five six seven eight nine ten eleven twelve";
+        // Six words gone, none consecutive beyond 1 — total bound trips.
+        let out = "one three five seven nine eleven";
+        assert!(drops_spoken_content(input, out));
     }
 
     #[test]

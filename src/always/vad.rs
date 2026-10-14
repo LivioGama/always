@@ -670,6 +670,28 @@ fn chunk_target_secs() -> u32 {
 /// This keeps uninterrupted monologues from becoming one large final STT
 /// call; natural-silence chunking above handles the common case.
 const CHUNK_HARD_MAX_SECS: u32 = 15;
+/// How far back from the hard-flush ceiling to look for the quietest
+/// inter-word gap to cut at (see `chunker::quiet_cut_point`). Chunks cut
+/// this way are 12–15 s; the remainder rides into the next chunk.
+const HARD_FLUSH_SEARCH_SECS: u32 = 3;
+/// Voiced (VAD speech-frame) audio in the open buffer after the last chunk
+/// flush that makes the chunked tail worth transcribing even when its RMS
+/// is under `energy_threshold` (see `chunked_tail_has_voice`). 0.3 s: a
+/// single short word, well above an isolated noise frame.
+const CHUNKED_TAIL_MIN_VOICED_SAMPLES: usize = 4_800;
+
+/// Whether the open buffer after the last chunk flush holds speech worth
+/// transcribing. The energy gate alone was tuned for whole utterances; for
+/// a chunked tail it measured RMS over the tail INCLUDING the trailing
+/// final-silence window, so a quiet mic's last sentence fell under 0.012
+/// and was discarded as "pure trailing silence" — 2026-10-14 14:51:09Z:
+/// the tail "Disappoint me when I get back." was recognised by the
+/// speculative pass (twice) yet never pasted; the dictation ended
+/// "…do everything. Um, uh, don't." The VAD already classified those
+/// frames as speech, so either signal is enough.
+fn chunked_tail_has_voice(energy: f64, threshold: f64, tail_voiced_samples: usize) -> bool {
+    energy >= threshold || tail_voiced_samples >= CHUNKED_TAIL_MIN_VOICED_SAMPLES
+}
 /// First-speculation cadence, used in EVERY mode (not just consume mode):
 /// fire the speculative transcription at a brief inter-phrase pause (~240ms
 /// = 8 × 30ms frames) so a stream consumer sees text land as the user
@@ -1182,6 +1204,13 @@ fn record_with_local_vad(
     let mut chunker = crate::always::chunker::ChunkAccumulator::new();
     let mut committed_samples = 0usize;
     let mut voiced_since_flush = true;
+    // VAD-voiced samples in the open buffer since the last chunk flush —
+    // decides whether a chunked tail is transcribed (see
+    // `chunked_tail_has_voice`).
+    let mut tail_voiced_samples = 0usize;
+    // End of the last hard-cut chunk, fed as lead-in to the NEXT committed
+    // chunk (never the tail) — see `chunker::SEAM_CONTEXT_SAMPLES`.
+    let mut seam_context: Vec<i16> = Vec::new();
 
     // "My Voice" gate — resolved once per utterance, retried on a short
     // cadence until verified (first check at ~0.3s of voice, then every
@@ -1722,6 +1751,7 @@ fn record_with_local_vad(
                 speech_samples.extend_from_slice(samples);
                 voiced_since_flush = true;
                 voiced_samples += samples.len();
+                tail_voiced_samples += samples.len();
                 // Live recognition: feed the frame and broadcast any new
                 // partial. Interim text stays hidden until the speaker is
                 // verified — a stranger's words must never reach the
@@ -1908,8 +1938,19 @@ fn record_with_local_vad(
                 if speech_samples.len() >= CHUNK_HARD_MAX_SECS as usize * 16_000
                     && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
                 {
+                    // Cut in the quietest 30 ms of the last few seconds
+                    // (an inter-word gap), not at the ceiling sample — a
+                    // mid-word cut split one word across two recognitions
+                    // and lost it on both sides (see `quiet_cut_point`).
+                    // Audio after the cut is carried into the next chunk.
+                    let cut = crate::always::chunker::quiet_cut_point(
+                        &speech_samples,
+                        HARD_FLUSH_SEARCH_SECS as usize * 16_000,
+                    );
+                    let carry = speech_samples.split_off(cut);
                     tracing::info!(
                         chunk_secs = speech_samples.len() / 16_000,
+                        carry_ms = carry.len() / 16,
                         "chunk_hard_flush"
                     );
                     committed_samples += speech_samples.len();
@@ -1918,18 +1959,24 @@ fn record_with_local_vad(
                     } else {
                         None
                     };
-                    chunker.flush(
-                        std::mem::take(&mut speech_samples),
-                        transcriber,
-                        grammar,
-                        rt,
+                    let head = std::mem::replace(&mut speech_samples, carry);
+                    let context = std::mem::replace(
+                        &mut seam_context,
+                        head[head.len().saturating_sub(crate::always::chunker::SEAM_CONTEXT_SAMPLES)..]
+                            .to_vec(),
                     );
+                    chunker.flush_with_context(context, head, transcriber, grammar, rt);
                     speculation_pending = false;
                     speculation_slot.invalidate();
-                    voiced_since_flush = false;
+                    // The carried audio is the start of the user's next
+                    // word: the open buffer is voiced.
+                    voiced_since_flush = !speech_samples.is_empty();
+                    tail_voiced_samples = speech_samples.len();
                     // The tail monitor's boundary points into the drained
-                    // buffer — rebase to the fresh (empty) one.
-                    confirmed_user_len = 0;
+                    // buffer — rebase to the fresh one. The carry-over was
+                    // part of the verified chunk, so a later tail cut must
+                    // keep it.
+                    confirmed_user_len = speech_samples.len();
                     tail_fail_streak = 0;
                     gate_fail_streak = 0;
                 }
@@ -2001,7 +2048,8 @@ fn record_with_local_vad(
                 } else {
                     None
                 };
-                chunker.flush(
+                chunker.flush_with_context(
+                    std::mem::take(&mut seam_context),
                     std::mem::take(&mut speech_samples),
                     transcriber,
                     grammar,
@@ -2011,6 +2059,7 @@ fn record_with_local_vad(
                 speculation_slot.invalidate();
                 midsentence_decided = false;
                 voiced_since_flush = false;
+                tail_voiced_samples = 0;
                 pause_text = None;
                 partial_hesitating = false;
                 // The tail monitor's boundary points into the drained
@@ -2369,7 +2418,18 @@ fn record_with_local_vad(
     // chunks in flight this gate applies to the TAIL only (it decides
     // whether the tail is worth transcribing) — a whisper-quiet ending
     // must never discard ten minutes of already-committed speech.
-    let tail_has_voice = speech_energy >= cfg.energy_threshold;
+    let tail_has_voice = if has_chunks {
+        chunked_tail_has_voice(speech_energy, cfg.energy_threshold, tail_voiced_samples)
+    } else {
+        speech_energy >= cfg.energy_threshold
+    };
+    if has_chunks && tail_has_voice && speech_energy < cfg.energy_threshold {
+        tracing::info!(
+            energy = speech_energy,
+            tail_voiced_ms = tail_voiced_samples / 16,
+            "chunked_tail_kept_by_vad"
+        );
+    }
     if !has_chunks && !tail_has_voice {
         event::global_broadcaster().voice_activity_ended();
         // Predictive overlay may have flipped to Transcribing during the
@@ -3031,7 +3091,8 @@ fn final_silence_cut_frames(
 #[cfg(test)]
 mod tests {
     use super::{
-        SHORT_SPEECH_MS, chunk_target_secs, early_voice_frame_ok, extended_silence_frames,
+        CHUNKED_TAIL_MIN_VOICED_SAMPLES, SHORT_SPEECH_MS, chunk_target_secs,
+        chunked_tail_has_voice, early_voice_frame_ok, extended_silence_frames,
         fast_energy_check, fast_normalized_energy, is_short_utterance_so_far, looks_mid_sentence,
         normal_silence_frames, normalized_energy, speaker_gate_allows_score,
         speaker_gate_allows_stt, speaker_gate_allows_transcription,
@@ -3040,6 +3101,37 @@ mod tests {
     use crate::always::AlwaysConfig;
 
     static CHUNK_TARGET_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 2026-10-14 14:51:09Z: after the last chunk flush the user said
+    /// "Disappoint me when I get back." (~2 s, quiet mic) and stopped; the
+    /// open buffer was that speech plus the final-silence window. Its RMS
+    /// fell under the 0.012 gate, so the tail was discarded as silence
+    /// and the paste ended "…Um, uh, don't." The VAD had voiced frames.
+    #[test]
+    fn quiet_chunked_tail_with_vad_speech_is_kept() {
+        let threshold = 0.012;
+        let voiced = 2 * 16_000;
+        let mut tail: Vec<i16> = (0..voiced)
+            .map(|i| ((i as f32 * 0.07).sin() * 700.0) as i16)
+            .collect();
+        tail.extend(std::iter::repeat_n(0i16, 33_600)); // 2.1 s final silence
+        let energy = normalized_energy(&tail);
+        assert!(energy < threshold, "fixture must be under the old gate: {energy}");
+        // Old rule (energy only) dropped it; the new one keeps it.
+        assert!(chunked_tail_has_voice(energy, threshold, voiced));
+    }
+
+    #[test]
+    fn silent_chunked_tail_is_still_skipped() {
+        // Pause-flushed chunk followed by pure trailing silence: no voiced
+        // frames, no energy — nothing to transcribe.
+        assert!(!chunked_tail_has_voice(0.001, 0.012, 0));
+        // An isolated noise frame or two is not a word.
+        assert!(!chunked_tail_has_voice(0.001, 0.012, 960));
+        assert!(!chunked_tail_has_voice(0.001, 0.012, CHUNKED_TAIL_MIN_VOICED_SAMPLES - 1));
+        // Loud tails keep the old behaviour.
+        assert!(chunked_tail_has_voice(0.02, 0.012, 0));
+    }
 
     #[test]
     fn normalized_energy_handles_empty_input() {

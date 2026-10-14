@@ -42,6 +42,11 @@ static TEST_PAUSE_AFTER_RAW_PUBLISH: std::sync::Mutex<Option<std::sync::mpsc::Re
 /// succeeds so a failed chunk can be retried / spilled, never dropped.
 struct ChunkSlot {
     index: usize,
+    /// The chunk's audio starts with [`SEAM_CONTEXT_SAMPLES`] already
+    /// committed in the previous chunk (it follows a hard cut), so its
+    /// first words may repeat the previous chunk's last ones — the join
+    /// drops that duplicate (see [`join_chunk_parts`]).
+    overlaps_prev: bool,
     /// `None` while the background transcription is in flight.
     result: Mutex<Option<Result<ChunkText, String>>>,
     audio: Mutex<Option<Vec<i16>>>,
@@ -126,20 +131,20 @@ impl ChunkJoinHandle {
 /// published, correction landed), so whichever state the utterance ends
 /// in, the paste-path grammar key has already been warmed.
 fn current_join(slots: &[Arc<ChunkSlot>]) -> Option<String> {
-    let mut parts: Vec<String> = Vec::with_capacity(slots.len());
+    let mut parts: Vec<(String, bool)> = Vec::with_capacity(slots.len());
     for slot in slots {
         let guard = slot.result.lock();
         match guard.as_ref() {
             Some(Ok(text)) => {
                 let chosen = text.corrected.clone().unwrap_or_else(|| text.raw.clone());
                 if !chosen.is_empty() {
-                    parts.push(chosen);
+                    parts.push((chosen, slot.overlaps_prev));
                 }
             }
             _ => return None,
         }
     }
-    Some(join_chunk_texts(&parts))
+    Some(join_chunk_parts(&parts))
 }
 
 /// Strip a trailing ellipsis ("..." or "…", plus any whitespace around it)
@@ -166,10 +171,67 @@ pub fn strip_cut_ellipsis(text: &str) -> &str {
 /// The last one is left alone here — whether IT ends at a cut depends on
 /// whether a tail follows, which `vad::finalize_chunked` decides.
 pub fn join_chunk_texts(parts: &[String]) -> String {
+    let flagged: Vec<(String, bool)> = parts.iter().map(|p| (p.clone(), false)).collect();
+    join_chunk_parts(&flagged)
+}
+
+/// Audio from the end of a hard-cut chunk that is also fed, as leading
+/// context, to the chunk after it. A recogniser handed audio that starts
+/// right at a word onset drops that word: replayed 2026-10-14 through the
+/// real VAD + chunker, cuts landing in an inter-word gap still lost "and"
+/// ("very weird | annoying") and "ask but" ("should never | for a
+/// reversible") at the start of the next chunk; with 0.5 s of the
+/// previous audio in front, both were recognised. 0.6 s for margin.
+/// The open tail never gets this context — it is transcribed on the paste
+/// path, and the extra audio would add recognition time there.
+pub const SEAM_CONTEXT_SAMPLES: usize = 9_600;
+/// Longest run of words the seam merge will treat as a duplicate: 0.6 s
+/// of context holds at most a few words.
+const SEAM_MAX_DUP_WORDS: usize = 4;
+
+fn word_core(w: &str) -> String {
+    w.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// How many leading words of `next` repeat the trailing words of `prev`
+/// exactly (case/punctuation-insensitive), up to `SEAM_MAX_DUP_WORDS`.
+/// Only an exact suffix==prefix match counts: a word that is not a
+/// verbatim repeat is never removed, so the merge cannot lose speech —
+/// at worst a genuinely repeated word at the seam ("very, very") is
+/// collapsed, which `local_cleanup` does to adjacent repeats anyway.
+pub fn seam_duplicate_words(prev: &str, next: &str) -> usize {
+    let p: Vec<String> = prev.split_whitespace().map(word_core).collect();
+    let n: Vec<String> = next.split_whitespace().map(word_core).collect();
+    let max = SEAM_MAX_DUP_WORDS.min(p.len()).min(n.len());
+    (1..=max)
+        .rev()
+        .find(|&k| {
+            let tail = &p[p.len() - k..];
+            let head = &n[..k];
+            tail.iter().all(|w| !w.is_empty()) && tail == head
+        })
+        .unwrap_or(0)
+}
+
+/// Join committed chunk texts in flush order; `overlaps_prev` marks a part
+/// whose audio began with [`SEAM_CONTEXT_SAMPLES`] of the previous chunk,
+/// and its duplicated leading words are dropped (see
+/// [`seam_duplicate_words`]). Every part but the last ends at a cut, so
+/// its trailing ellipsis is dropped too (see `strip_cut_ellipsis`).
+pub fn join_chunk_parts(parts: &[(String, bool)]) -> String {
     let n = parts.len();
     let mut out = String::new();
-    for (i, part) in parts.iter().enumerate() {
-        let piece = if i + 1 < n { strip_cut_ellipsis(part) } else { part.as_str() };
+    for (i, (part, overlaps_prev)) in parts.iter().enumerate() {
+        let mut piece = if i + 1 < n { strip_cut_ellipsis(part) } else { part.as_str() };
+        if *overlaps_prev && !out.is_empty() {
+            let dup = seam_duplicate_words(&out, piece);
+            if dup > 0 {
+                piece = skip_words(piece, dup);
+            }
+        }
         if piece.is_empty() {
             continue;
         }
@@ -201,6 +263,82 @@ fn warm_current_join(
             let _ = pp.process_request(&req).await;
         });
     }
+}
+
+/// `text` without its first `k` whitespace-separated words.
+fn skip_words(text: &str, k: usize) -> &str {
+    let mut rest = text.trim_start();
+    for _ in 0..k {
+        match rest.find(char::is_whitespace) {
+            Some(end) => rest = rest[end..].trim_start(),
+            None => return "",
+        }
+    }
+    rest
+}
+
+/// Energy window and hop for [`quiet_cut_point`]: 30 ms windows every 10 ms
+/// at 16 kHz.
+const QUIET_WIN: usize = 480;
+const QUIET_HOP: usize = 160;
+
+/// Where to cut an oversized chunk that never reached a natural pause.
+///
+/// The hard flush used to cut at whatever sample the 15 s ceiling landed on
+/// — mid-word, with no overlap — so the word straddling the cut was split
+/// across two independent recognitions and garbled or lost on both sides.
+/// Observed 2026-10-14 14:48:33Z: "irreversible" became chunk 1's last word
+/// "Eriver." and chunk 2's first word "Yes,"; 14:44:35Z "you can surely
+/// see|in the logs" became "surely she," + "See in the locks".
+///
+/// Returns the centre of the quietest 30 ms window within the last
+/// `search_samples` of `samples` — in fluent speech that is the gap between
+/// two words (or at worst a stop-consonant closure), never a vowel. Every
+/// sample is kept: the caller commits `[..cut]` and carries `[cut..]` into
+/// the next chunk, so no audio is dropped or duplicated and no text merge
+/// is needed. Returns `samples.len()` when there is nothing to search.
+pub fn quiet_cut_point(samples: &[i16], search_samples: usize) -> usize {
+    let len = samples.len();
+    if len < QUIET_WIN {
+        return len;
+    }
+    let energy = |start: usize| -> u64 {
+        samples[start..start + QUIET_WIN]
+            .iter()
+            .map(|&s| (s as i64 * s as i64) as u64)
+            .sum()
+    };
+    let search_start = len.saturating_sub(search_samples.max(QUIET_WIN));
+    let mut best_start = len - QUIET_WIN;
+    let mut best_energy = u64::MAX;
+    let mut start = search_start;
+    while start + QUIET_WIN <= len {
+        let e = energy(start);
+        // `<=` prefers the LATEST of equally quiet windows: the longest
+        // chunk, the shortest carry-over.
+        if e <= best_energy {
+            best_energy = e;
+            best_start = start;
+        }
+        start += QUIET_HOP;
+    }
+    // A minimum on the window's leading edge is the tail of a slope that
+    // continues outside it — cutting there clips the onset of the next
+    // word (replayed 2026-10-14: a cut 15 ms into the window dropped
+    // "and"). Follow the slope back to the real gap, bounded by the same
+    // distance again so a chunk never shrinks below ~9 s.
+    if best_start < search_start + 2 * QUIET_HOP {
+        let floor = search_start.saturating_sub(search_samples);
+        while best_start >= floor + QUIET_HOP {
+            let e = energy(best_start - QUIET_HOP);
+            if e > best_energy {
+                break;
+            }
+            best_energy = e;
+            best_start -= QUIET_HOP;
+        }
+    }
+    best_start + QUIET_WIN / 2
 }
 
 impl ChunkAccumulator {
@@ -248,15 +386,39 @@ impl ChunkAccumulator {
         grammar: Option<Arc<crate::always::postprocess::PostProcessor>>,
         rt: &tokio::runtime::Handle,
     ) {
+        self.flush_with_context(Vec::new(), audio_chunk, transcriber, grammar, rt);
+    }
+
+    /// [`flush`](Self::flush) with `context` — the end of the previous,
+    /// hard-cut chunk — transcribed in front of `audio_chunk` so the
+    /// recogniser hears the chunk's first word with lead-in (see
+    /// [`SEAM_CONTEXT_SAMPLES`]). Empty `context` is a plain flush.
+    pub fn flush_with_context(
+        &mut self,
+        context: Vec<i16>,
+        audio_chunk: Vec<i16>,
+        transcriber: &Arc<dyn Transcriber>,
+        grammar: Option<Arc<crate::always::postprocess::PostProcessor>>,
+        rt: &tokio::runtime::Handle,
+    ) {
         let index = self.slots.lock().len();
         let secs = audio_chunk.len() as f64 / 16_000.0;
+        let overlaps_prev = !context.is_empty() && index > 0;
+        let context_ms = context.len() / 16;
+        let mut audio_chunk = audio_chunk;
+        if overlaps_prev {
+            let mut with_context = context;
+            with_context.extend_from_slice(&audio_chunk);
+            audio_chunk = with_context;
+        }
         let slot = Arc::new(ChunkSlot {
             index,
+            overlaps_prev,
             result: Mutex::new(None),
             audio: Mutex::new(Some(audio_chunk.clone())),
         });
         self.slots.lock().push(Arc::clone(&slot));
-        tracing::info!(chunk = index, secs, "chunk_flush");
+        tracing::info!(chunk = index, secs, context_ms, "chunk_flush");
 
         let transcriber = Arc::clone(transcriber);
         let rt = rt.clone();
@@ -373,7 +535,7 @@ impl ChunkAccumulator {
     /// lease can't expire during a long straggler.
     pub fn finalize(&self, transcriber: &Arc<dyn Transcriber>) -> ChunkedTranscript {
         let slots: Vec<Arc<ChunkSlot>> = self.slots.lock().clone();
-        let mut parts: Vec<String> = Vec::with_capacity(slots.len());
+        let mut parts: Vec<(String, bool)> = Vec::with_capacity(slots.len());
         let mut scored: Vec<(Option<f32>, usize)> = Vec::with_capacity(slots.len());
         let mut failed = 0usize;
         for slot in &slots {
@@ -414,17 +576,17 @@ impl ChunkAccumulator {
                     }
                     let chosen = text.corrected.unwrap_or(text.raw);
                     if !chosen.is_empty() {
-                        parts.push(chosen);
+                        parts.push((chosen, slot.overlaps_prev));
                     }
                 }
                 Some(Err(err)) => {
                     tracing::warn!(chunk = slot.index, error = %err, "chunk_retry_sync");
                     scored.push((None, 0));
                     match self.retry_sync(slot, transcriber) {
-                        Some(text) => parts.push(text),
+                        Some(text) => parts.push((text, slot.overlaps_prev)),
                         None => {
                             failed += 1;
-                            parts.push(self.spill_placeholder(slot));
+                            parts.push((self.spill_placeholder(slot), false));
                         }
                     }
                 }
@@ -436,13 +598,13 @@ impl ChunkAccumulator {
                     tracing::warn!(chunk = slot.index, "chunk_wait_timeout");
                     scored.push((None, 0));
                     failed += 1;
-                    parts.push(self.spill_placeholder(slot));
+                    parts.push((self.spill_placeholder(slot), false));
                 }
             }
         }
 
         ChunkedTranscript {
-            text: join_chunk_texts(&parts),
+            text: join_chunk_parts(&parts),
             chunk_count: slots.len(),
             failed_chunks: failed,
             confidence_parts: scored,
@@ -524,6 +686,11 @@ fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn failed_chunks_dir() -> std::path::PathBuf {
+    // Unit tests spill silent fixture chunks; never into the user's real
+    // recovery folder (they used to land in ~/.always/failed-chunks).
+    if cfg!(test) {
+        return std::env::temp_dir().join("always-test-failed-chunks");
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     std::path::PathBuf::from(home)
         .join(".always")
@@ -540,6 +707,129 @@ mod tests {
             "and the end...".to_string(),
         ];
         assert_eq!(join_chunk_texts(&parts), "For the but the UX and the end...");
+    }
+
+    /// Synthetic "speech": loud tone with a short inter-word gap.
+    fn tone(n: usize, amp: f32) -> Vec<i16> {
+        (0..n)
+            .map(|i| ((i as f32 * 0.07).sin() * amp) as i16)
+            .collect()
+    }
+
+    #[test]
+    fn hard_cut_lands_in_the_inter_word_gap_not_mid_word() {
+        // 13.0 s word-stream, an 80 ms gap at 13.0 s, then 1.92 s of a word
+        // still being spoken when the 15 s ceiling fires. The old cut was
+        // `len` (mid-word); the quiet cut must land inside the gap.
+        let mut s = tone(13 * 16_000, 12_000.0);
+        let gap_start = s.len();
+        s.extend(tone(1_280, 40.0)); // 80 ms near-silence
+        let gap_end = s.len();
+        s.extend(tone(15 * 16_000 - s.len(), 12_000.0));
+        assert_eq!(s.len(), 15 * 16_000);
+        let cut = quiet_cut_point(&s, 3 * 16_000);
+        assert!(
+            cut > gap_start && cut < gap_end,
+            "cut {cut} not inside gap {gap_start}..{gap_end}"
+        );
+        // No sample is lost or duplicated: head + carry-over == original.
+        let (head, rest) = s.split_at(cut);
+        assert_eq!(head.len() + rest.len(), 15 * 16_000);
+    }
+
+    #[test]
+    fn hard_cut_only_searches_the_tail_window() {
+        // Gap at 5 s (outside the 3 s window) must be ignored.
+        let mut s = tone(5 * 16_000, 12_000.0);
+        s.extend(vec![0i16; 1_600]);
+        s.extend(tone(15 * 16_000 - s.len(), 12_000.0));
+        let cut = quiet_cut_point(&s, 3 * 16_000);
+        assert!(cut >= 12 * 16_000, "cut {cut} left the search window");
+        assert!(cut <= 15 * 16_000);
+    }
+
+    #[test]
+    fn hard_cut_follows_a_slope_back_to_a_gap_just_outside_the_window() {
+        // Gap at 11.9 s, 100 ms BEFORE the 12 s search start, with the
+        // next word fading in across the window edge. The edge window is
+        // the in-window minimum but sits on the onset of a word.
+        let mut s = tone(11 * 16_000 + 14_400, 12_000.0); // to 11.9 s
+        let gap_start = s.len();
+        s.extend(std::iter::repeat_n(0i16, 1_600)); // 11.9–12.0 s silence
+        let gap_end = s.len();
+        // 12.0–12.3 s: onset ramp (quiet → loud), then loud speech.
+        s.extend((0..4_800).map(|i| ((i as f32 * 0.07).sin() * (i as f32 * 2.5)) as i16));
+        s.extend(tone(15 * 16_000 - s.len(), 12_000.0));
+        let cut = quiet_cut_point(&s, 3 * 16_000);
+        assert!(
+            cut >= gap_start && cut <= gap_end,
+            "cut {cut} not in gap {gap_start}..{gap_end}"
+        );
+    }
+
+    #[test]
+    fn hard_cut_on_short_buffers_is_the_end() {
+        assert_eq!(quiet_cut_point(&[], 48_000), 0);
+        assert_eq!(quiet_cut_point(&[1, 2, 3], 48_000), 3);
+    }
+
+    #[test]
+    fn seam_merge_drops_only_verbatim_repeats_from_the_context() {
+        // Replayed 2026-10-14: 1.0 s of context made the next chunk start
+        // "very weird and annoying" after a chunk ending "which is very
+        // weird" — the repeat goes, nothing else does.
+        let parts = vec![
+            ("any action which is very weird".to_string(), false),
+            ("very weird and annoying and must be fixed".to_string(), true),
+        ];
+        assert_eq!(
+            join_chunk_parts(&parts),
+            "any action which is very weird and annoying and must be fixed"
+        );
+        // Punctuation / case differences are still a repeat.
+        assert_eq!(seam_duplicate_words("she should never,", "Never ask, but for"), 1);
+        // No repeat (context words not recognised): nothing removed.
+        let parts = vec![
+            ("she should never".to_string(), false),
+            ("ask but for irreversible actions".to_string(), true),
+        ];
+        assert_eq!(
+            join_chunk_parts(&parts),
+            "she should never ask but for irreversible actions"
+        );
+        // A non-overlapping part is never deduplicated.
+        let parts = vec![("go to the".to_string(), false), ("the store".to_string(), false)];
+        assert_eq!(join_chunk_parts(&parts), "go to the the store");
+        // Bounded: a long coincidental match beyond the context is kept.
+        assert_eq!(seam_duplicate_words("a b c d e f", "a b c d e f g"), 0);
+    }
+
+    #[test]
+    fn flush_with_context_marks_the_seam_and_join_dedupes() {
+        let rt = rt();
+        let t = mock(vec!["which is very weird", "very weird and annoying"], vec![]);
+        let mut acc = ChunkAccumulator::new();
+        acc.flush(vec![0i16; 16_000], &t, None, rt.handle());
+        std::thread::sleep(Duration::from_millis(50));
+        acc.flush_with_context(vec![0i16; SEAM_CONTEXT_SAMPLES], vec![0i16; 16_000], &t, None, rt.handle());
+        let joined = acc.finalize(&t);
+        assert_eq!(joined.text, "which is very weird and annoying");
+        // current_join reproduces finalize's text byte-for-byte.
+        let mut acc2 = ChunkAccumulator::new();
+        let t2 = mock(vec!["which is very weird", "very weird and annoying"], vec![]);
+        acc2.flush(vec![0i16; 16_000], &t2, None, rt.handle());
+        std::thread::sleep(Duration::from_millis(50));
+        acc2.flush_with_context(vec![0i16; SEAM_CONTEXT_SAMPLES], vec![0i16; 16_000], &t2, None, rt.handle());
+        let handle = acc2.join_handle();
+        let started = Instant::now();
+        let settled = loop {
+            if let Some(j) = handle.current_join() {
+                break j;
+            }
+            assert!(started.elapsed() < Duration::from_secs(2));
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(settled, "which is very weird and annoying");
     }
 
     #[test]
@@ -721,6 +1011,7 @@ mod tests {
     fn slot_with(result: Option<Result<ChunkText, String>>) -> Arc<ChunkSlot> {
         Arc::new(ChunkSlot {
             index: 0,
+            overlaps_prev: false,
             result: Mutex::new(result),
             audio: Mutex::new(None),
         })

@@ -16,6 +16,7 @@
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufRead, Write};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,6 +25,102 @@ mod tests {
     use crate::always::log::Logger;
     use crate::always::vad::{self, RecordResult};
     use crate::stt::Transcriber;
+
+
+    /// Whole-file transcription through the Parakeet preview helper
+    /// (`B`/`A`/`E` frames, `final` JSON line). Replay-only.
+    struct ParakeetFileTranscriber {
+        io: parking_lot::Mutex<(
+            std::process::ChildStdin,
+            std::io::BufReader<std::process::ChildStdout>,
+            u32,
+        )>,
+    }
+
+    impl ParakeetFileTranscriber {
+        fn spawn() -> Self {
+            let bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("preview-asr/.build/release/always-preview-asr");
+            let mut child = std::process::Command::new(bin)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn preview helper");
+            let stdin = child.stdin.take().unwrap();
+            let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+            let mut line = String::new();
+            while out.read_line(&mut line).unwrap() > 0 {
+                if line.contains("\"ready\"") {
+                    break;
+                }
+                line.clear();
+            }
+            std::mem::forget(child);
+            Self { io: parking_lot::Mutex::new((stdin, out, 0)) }
+        }
+    }
+
+    fn frame(op: u8, seq: u32, payload: &[u8]) -> Vec<u8> {
+        let mut f = vec![op];
+        f.extend_from_slice(&seq.to_le_bytes());
+        f.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        f.extend_from_slice(payload);
+        f
+    }
+
+    impl Transcriber for ParakeetFileTranscriber {
+        fn transcribe_from_bytes(
+            &self,
+            audio: Vec<u8>,
+        ) -> Result<crate::stt::TranscriptionResult, crate::stt::SttError> {
+            let pcm = &audio[44.min(audio.len())..];
+            let mut io = self.io.lock();
+            io.2 += 1;
+            let seq = io.2;
+            if let Ok(dir) = std::env::var("REPLAY_DUMP_DIR") {
+                let _ = std::fs::write(format!("{dir}/call-{seq:03}.wav"), &audio);
+            }
+            io.0.write_all(&frame(b'B', seq, &[])).unwrap();
+            for part in pcm.chunks(16_000 * 2) {
+                io.0.write_all(&frame(b'A', seq, part)).unwrap();
+            }
+            io.0.write_all(&frame(b'E', seq, &[])).unwrap();
+            io.0.flush().unwrap();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if io.1.read_line(&mut line).unwrap() == 0 {
+                    panic!("preview helper exited");
+                }
+                let v: serde_json::Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v["ev"] == "final" && v["seq"] == seq {
+                    let text = v["text"].as_str().unwrap_or_default().to_string();
+                    eprintln!("parakeet_file_final secs={:.2} text={text:?}", pcm.len() as f64 / 32_000.0);
+                    return Ok(crate::stt::TranscriptionResult { text, ..Default::default() });
+                }
+            }
+        }
+
+        fn transcribe_streaming(
+            &self,
+            audio: Vec<u8>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<crate::stt::StreamingTranscriptionResult, crate::stt::SttError>,
+                    > + Send,
+            >,
+        > {
+            let r = self.transcribe_from_bytes(audio).map(|r| {
+                crate::stt::StreamingTranscriptionResult { text: r.text, is_final: true, is_interim: false }
+            });
+            Box::pin(futures::stream::once(async move { r }))
+        }
+    }
 
     fn wall_ms() -> f64 {
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0
@@ -96,10 +193,21 @@ mod tests {
             }
         });
 
-        let transcriber: Arc<dyn Transcriber> = Arc::new(
-            crate::always::stt_apple::AppleTranscriber::new(Some(cfg.lang.clone()))
-                .expect("Apple STT available"),
-        );
+        // `REPLAY_STT=parakeet`: finals from the Parakeet helper instead of
+        // Apple STT, for hosts where this test binary has no Speech
+        // Recognition grant (TCC aborts it). No Apple live session runs
+        // then, so every chunk / tail text comes from the file path.
+        let transcriber: Arc<dyn Transcriber> = if std::env::var("REPLAY_STT").as_deref()
+            == Ok("parakeet")
+        {
+            cfg.transcriber_backend = crate::stt_dispatch::TranscriberBackendChoice::Groq;
+            Arc::new(ParakeetFileTranscriber::spawn())
+        } else {
+            Arc::new(
+                crate::always::stt_apple::AppleTranscriber::new(Some(cfg.lang.clone()))
+                    .expect("Apple STT available"),
+            )
+        };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut log = Logger;
         let mut results = Vec::new();
