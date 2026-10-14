@@ -45,6 +45,7 @@ pub mod rejected;
 mod replay_tests;
 pub mod snippets;
 pub mod speaker_embed;
+pub mod speaker_trim;
 pub mod speech_action;
 pub mod status_sound;
 #[cfg(feature = "local-stt")]

@@ -198,7 +198,10 @@ pub(crate) fn speaker_gate_ready(cfg: &AlwaysConfig) -> bool {
 /// Score `samples` against the enrolled voiceprint. `None` means the
 /// speaker could not be verified; gated callers must not treat it as a
 /// match.
-fn speaker_gate_score(gate: &SpeakerGate, samples: &[i16]) -> Option<f32> {
+///
+/// Also returns the embedding the score was computed from (the
+/// recent-impostor cohort needs it — see `speaker_trim`).
+fn speaker_gate_embed_score(gate: &SpeakerGate, samples: &[i16]) -> Option<(f32, Vec<f32>)> {
     let started = std::time::Instant::now();
     match gate.embedder.embed(samples) {
         Ok(e) => {
@@ -226,7 +229,7 @@ fn speaker_gate_score(gate: &SpeakerGate, samples: &[i16]) -> Option<f32> {
                 audio_secs = samples.len() as f64 / 16_000.0,
                 "speaker_gate_scored"
             );
-            Some(score)
+            Some((score, e))
         }
         Err(err) => {
             tracing::warn!(error = %err, "speaker_gate_embed_failed");
@@ -257,6 +260,17 @@ fn speaker_gate_admit_accepted(gate: &SpeakerGate, samples: &[i16], voiced_sampl
             tracing::debug!(enrolled, "speaker_gate_pool_admitted");
         }
     });
+}
+
+/// A rejected utterance becomes a recent impostor (cohort member) when it
+/// was clearly not the user — see `speaker_trim::remember_foreign` for
+/// the admission guards.
+fn speaker_gate_remember_foreign(embedding: Option<&Vec<f32>>, score: f32) {
+    if let Some(e) = embedding
+        && crate::always::speaker_trim::remember_foreign(e.clone(), score)
+    {
+        tracing::info!(score, "speaker_gate_cohort_admitted");
+    }
 }
 
 /// System audio (music, video) is currently playing. Set by the UDS
@@ -353,6 +367,12 @@ struct GateJob {
     /// a verdict on audio that straddles an echo-canceller engage edge
     /// is not trusted — see [`gate_audio_straddles_aec_engage`].
     audio_started_at: std::time::Instant,
+    /// Samples scored (window = `len_at_submit - scored_len ..
+    /// len_at_submit` of the live buffer) — for the segment timeline.
+    scored_len: usize,
+    /// Set by the worker BEFORE the score is sent: the embedding and its
+    /// similarity to the recent-impostor cohort (`speaker_trim`).
+    extra: Arc<std::sync::OnceLock<(Vec<f32>, Option<f32>)>>,
 }
 
 impl GateJob {
@@ -371,13 +391,22 @@ impl GateJob {
         let audio_started_at = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs_f64(samples.len() as f64 / 16_000.0))
             .unwrap_or_else(std::time::Instant::now);
+        let scored_len = samples.len();
+        let extra = Arc::new(std::sync::OnceLock::new());
+        let extra_w = Arc::clone(&extra);
         std::thread::spawn(move || {
             let local = SpeakerGate {
                 embedder,
                 voiceprint,
                 threshold,
             };
-            let _ = tx.send(speaker_gate_score(&local, &samples));
+            let scored = speaker_gate_embed_score(&local, &samples);
+            let score = scored.map(|(score, e)| {
+                let cohort = crate::always::speaker_trim::cohort_similarity(&e);
+                let _ = extra_w.set((e, cohort));
+                score
+            });
+            let _ = tx.send(score);
         });
         Self {
             kind,
@@ -386,6 +415,28 @@ impl GateJob {
             committed_at_submit,
             voiced_at_submit,
             audio_started_at,
+            scored_len,
+            extra,
+        }
+    }
+
+    /// Similarity of the scored audio to the recent-impostor cohort
+    /// (`None`: no cohort, or no embedding).
+    fn cohort(&self) -> Option<f32> {
+        self.extra.get().and_then(|(_, c)| *c)
+    }
+
+    fn embedding(&self) -> Option<&Vec<f32>> {
+        self.extra.get().map(|(e, _)| e)
+    }
+
+    /// The timeline entry for a landed WINDOW verdict.
+    fn window_verdict(&self, score: f32) -> crate::always::speaker_trim::WindowVerdict {
+        crate::always::speaker_trim::WindowVerdict {
+            start: self.len_at_submit - self.scored_len,
+            end: self.len_at_submit,
+            score,
+            cohort: self.cohort(),
         }
     }
 
@@ -1170,6 +1221,8 @@ fn record_with_local_vad(
     // discarded if speech resumes before final silence.
     let speculation_slot = SpeculationSlot::new();
     let mut speculation_pending = false;
+    // Speaker-trim plan the in-flight speculation's snapshot was cut with.
+    let mut spec_trim = crate::always::speaker_trim::TrimPlan::default();
     // Live streaming preview: a lightweight PREVIEW stream that runs WHILE
     // the user is still speaking (the tentative speculation above only fires
     // at a pause). Armed by consume mode OR a genuinely-streaming active
@@ -1260,6 +1313,13 @@ fn record_with_local_vad(
     // tail cut truncates here so foreign trailing audio (movie line
     // after the user's last word) is never sent to STT.
     let mut confirmed_user_len = 0usize;
+    // Segment-level view of this buffer: every full ladder window's
+    // profile + recent-impostor scores, so foreign speech before the
+    // user's first words / after his last ones is cut before STT (see
+    // `speaker_trim`). `speaker_trimmed` = this utterance's audio was cut,
+    // so the live stream (which heard everything) cannot supply its text.
+    let mut speaker_timeline = crate::always::speaker_trim::Timeline::default();
+    let mut speaker_trimmed = false;
     // At most one speaker check in flight, scored off this thread (see
     // `GateJob`). Its verdict is applied by `gate_apply_verdict!` on the
     // first frame after it lands — voiced or silent.
@@ -1271,6 +1331,58 @@ fn record_with_local_vad(
                 if let Some(gate) = &speaker_gate
                     && !job.is_stale(speech_samples.len(), committed_samples)
                 {
+                    if job.kind == GateJobKind::Window
+                        && job.scored_len >= crate::always::speaker_trim::WINDOW_SAMPLES
+                        && let Some(s) = score
+                    {
+                        speaker_timeline.push(committed_samples, job.window_verdict(s));
+                        // Endpoint on HIS voice: once the impostor just
+                        // rejected (a phone reel) has talked for as many
+                        // windows as the user's pause tolerance after his
+                        // last words, the utterance ends there — the reel
+                        // never reaches a chunk or the paste.
+                        if speaker_checked && SPEAKER_GATE_ENFORCE_DROP {
+                            let len = speech_samples.len();
+                            let run = speaker_timeline.trailing_foreign(committed_samples, len);
+                            if run >= speaker_tail_fail_checks.max(crate::always::speaker_trim::MIN_FOREIGN_RUN)
+                                && let Some(cut) = speaker_timeline.plan(committed_samples, len).trail_from
+                            {
+                                tracing::info!(
+                                    foreign_windows = run,
+                                    kept_secs = cut as f64 / 16_000.0,
+                                    trimmed_secs = (len - cut) as f64 / 16_000.0,
+                                    "speaker_gate_trail_cut"
+                                );
+                                speech_samples.truncate(cut);
+                                speaker_trimmed = true;
+                                // Whatever was speculated included the reel.
+                                speculation_pending = false;
+                                speculation_slot.invalidate();
+                                break;
+                            }
+                        }
+                    }
+                    // A borderline window pass that sounds more like the
+                    // impostor just rejected (phone/TV voice the echo
+                    // canceller cannot see) counts as a mismatch: the
+                    // accumulated whole-utterance score decides instead.
+                    let cohort_veto = !speaker_checked
+                        && job.kind == GateJobKind::Window
+                        && score.is_some_and(|s| {
+                            s >= gate.threshold
+                                && crate::always::speaker_trim::cohort_vetoes_pass(
+                                    s,
+                                    job.cohort(),
+                                    gate.threshold,
+                                )
+                        });
+                    if cohort_veto {
+                        tracing::info!(
+                            score = ?score,
+                            cohort = ?job.cohort(),
+                            "speaker_gate_cohort_veto"
+                        );
+                    }
                     if speaker_checked {
                         // VERIFIED phase: trailing-window tail monitor.
                         if job.kind == GateJobKind::Window {
@@ -1302,7 +1414,7 @@ fn record_with_local_vad(
                                 }
                             }
                         }
-                    } else if speaker_gate_allows_score(score, gate.threshold)
+                    } else if !cohort_veto && speaker_gate_allows_score(score, gate.threshold)
                         && job.kind == GateJobKind::Window
                         && job.straddles_aec_engage()
                     {
@@ -1310,12 +1422,37 @@ fn record_with_local_vad(
                         // not yet cancelled: no verdict either way; the
                         // next (cancelled) window decides.
                         tracing::info!(score = ?score, "speaker_gate_refused_aec_edge");
-                    } else if speaker_gate_allows_score(score, gate.threshold) && !job.straddles_aec_engage() {
+                    } else if !cohort_veto
+                        && speaker_gate_allows_score(score, gate.threshold)
+                        && !job.straddles_aec_engage()
+                    {
                         let score = score.expect("accepted speaker score must be present");
                         speaker_checked = true;
                         confirmed_user_len = job.len_at_submit;
                         tail_fail_streak = 0;
                         tracing::info!(score, via = ?job.kind, "speaker_gate_verified");
+                        // Foreign speech BEFORE the user's first words (a
+                        // phone reel still talking when he started) never
+                        // reaches STT: nothing is transcribed before
+                        // verification, so the lead-in is dropped right
+                        // here. Later windows cannot move this edge — it
+                        // only depends on windows up to the first one that
+                        // is not foreign.
+                        let lead = speaker_timeline
+                            .plan(committed_samples, speech_samples.len())
+                            .lead
+                            .min(job.len_at_submit.saturating_sub(job.scored_len));
+                        if lead > 0 {
+                            speech_samples.drain(..lead);
+                            speaker_timeline.drain_front(lead);
+                            confirmed_user_len = confirmed_user_len.saturating_sub(lead);
+                            speaker_trimmed = true;
+                            tracing::info!(
+                                trimmed_secs = lead as f64 / 16_000.0,
+                                kept_secs = speech_samples.len() as f64 / 16_000.0,
+                                "speaker_gate_lead_trimmed"
+                            );
+                        }
                         announce_voice_activity!();
                         // The USER resumed speaking (verified) — the gated
                         // equivalent of the countdown cancel on voice onset.
@@ -1373,6 +1510,7 @@ fn record_with_local_vad(
                                             "speaker_gate_tentative_reject"
                                         );
                                     }
+                                    speaker_gate_remember_foreign(job.embedding(), score);
                                     crate::always::rejected::stash_audio(&speech_samples, score);
                                     event::global_broadcaster().voice_activity_ended();
                                     flip_to_listening!();
@@ -2114,7 +2252,10 @@ fn record_with_local_vad(
                 let captured_gen = speculation_slot.current_generation();
                 // Overlay → Transcribing when speculative STT starts.
                 flip_to_transcribing!();
-                let audio_snapshot = speech_samples.clone();
+                // Same edges the final paste will use (see
+                // `speaker_trim`): foreign lead-in/tail never transcribed.
+                spec_trim = speaker_timeline.plan(committed_samples, speech_samples.len());
+                let audio_snapshot = spec_trim.applied(&speech_samples);
                 let transcriber_for_spec = Arc::clone(transcriber);
                 let slot = Arc::clone(&speculation_slot);
                 // For the speculative grammar warm below: the post-processor
@@ -2477,24 +2618,37 @@ fn record_with_local_vad(
                     wait_ms = waited.elapsed().as_millis() as u64,
                     "speaker_gate_final_awaited"
                 );
-                verdict.map(|score| (job.kind, score, job.audio_started_at))
+                verdict.map(|score| {
+                    (job.kind, score, job.audio_started_at, job.embedding().cloned(), job.cohort())
+                })
             });
         let whole_started_at = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs_f64(
                 speaker_gate_whole_window(&speech_samples).len() as f64 / 16_000.0,
             ))
             .unwrap_or_else(std::time::Instant::now);
-        let (score, scored_from) = match landed {
-            Some((_, score, from)) if speaker_gate_allows_score(score, threshold) => (score, from),
-            Some((GateJobKind::Tentative | GateJobKind::Decisive, score, from)) => (score, from),
-            _ => (
-                speaker_gate.as_ref().and_then(|gate| {
+        // A landed window pass vetoed by the impostor cohort (see the
+        // ladder) does not verify here either: the whole utterance decides.
+        let landed = landed.filter(|(kind, score, _, _, cohort)| {
+            !(*kind == GateJobKind::Window
+                && score.is_some_and(|s| {
+                    s >= threshold && crate::always::speaker_trim::cohort_vetoes_pass(s, *cohort, threshold)
+                }))
+        });
+        let (score, scored_from, scored_embedding) = match landed {
+            Some((_, score, from, e, _)) if speaker_gate_allows_score(score, threshold) => (score, from, e),
+            Some((GateJobKind::Tentative | GateJobKind::Decisive, score, from, e, _)) => (score, from, e),
+            _ => {
+                let scored = speaker_gate.as_ref().and_then(|gate| {
                     (voiced_samples >= crate::always::speaker_embed::MIN_EMBED_SAMPLES)
-                        .then(|| speaker_gate_score(gate, speaker_gate_whole_window(&speech_samples)))
+                        .then(|| speaker_gate_embed_score(gate, speaker_gate_whole_window(&speech_samples)))
                         .flatten()
-                }),
-                whole_started_at,
-            ),
+                });
+                match scored {
+                    Some((s, e)) => (Some(s), whole_started_at, Some(e)),
+                    None => (None, whole_started_at, None),
+                }
+            }
         };
         // A pass on audio that straddles a playback-start edge is not
         // trusted (see `gate_audio_straddles_aec_engage`): the utterance
@@ -2516,6 +2670,9 @@ fn record_with_local_vad(
             } else {
                 tracing::info!(score = ?score, threshold, "speaker_gate_final_reject");
             }
+            if let Some(s) = score {
+                speaker_gate_remember_foreign(scored_embedding.as_ref(), s);
+            }
             crate::always::rejected::stash_audio(&speech_samples, score.unwrap_or(-1.0));
             event::global_broadcaster().voice_activity_ended();
             flip_to_listening!();
@@ -2523,6 +2680,37 @@ fn record_with_local_vad(
                 score: score.unwrap_or(-1.0),
             });
         }
+    }
+    // Segment-level "My Voice": the utterance is the user's, but foreign
+    // speech around his words (a phone reel talking before he started /
+    // after he stopped) is cut before STT — see `speaker_trim`. Nothing
+    // is cut without a recent impostor on record, and every window that
+    // is not clearly that impostor is kept whole.
+    let final_trim = if speaker_gate_requested {
+        speaker_timeline.plan(committed_samples, speech_samples.len())
+    } else {
+        crate::always::speaker_trim::TrimPlan::default()
+    };
+    if speaker_gate_requested && !speaker_timeline.is_empty() {
+        tracing::info!(windows = %speaker_timeline.summary(), "speaker_gate_timeline");
+    }
+    if !final_trim.is_empty() {
+        let (lead, trail) = final_trim.apply(&mut speech_samples);
+        speaker_trimmed = true;
+        tracing::info!(
+            lead_secs = lead as f64 / 16_000.0,
+            trail_secs = trail as f64 / 16_000.0,
+            kept_secs = speech_samples.len() as f64 / 16_000.0,
+            "speaker_gate_edges_trimmed"
+        );
+    }
+    // The speculative pass transcribed the snapshot trimmed by the plan
+    // known at kickoff; if a verdict landed since and moved an edge, its
+    // text no longer matches the audio — transcribe afresh.
+    if speculation_pending && final_trim != spec_trim {
+        speculation_pending = false;
+        speculation_slot.invalidate();
+        tracing::info!("speculation_dropped_trim_changed");
     }
     // Accepted own-voice utterance: feed the adaptive pool (off-thread,
     // enrolled-only drift guard inside).
@@ -2610,6 +2798,13 @@ fn record_with_local_vad(
     if has_chunks && let Some(session) = stream_session.take() {
         drop(session);
         tracing::info!("streaming_final_skipped_chunked");
+    }
+    // The live session heard the foreign audio the speaker trim removed:
+    // its text would paste it back. Speculation / a fresh pass over the
+    // trimmed buffer supplies the text instead.
+    if speaker_trimmed && let Some(session) = stream_session.take() {
+        drop(session);
+        tracing::info!("streaming_final_skipped_speaker_trimmed");
     }
     let mut live_stream = crate::stt::LiveStreamOutcome::NotRun;
     let streaming_final = match stream_session.take() {
@@ -3504,6 +3699,8 @@ mod tests {
                 committed_at_submit: committed,
                 voiced_at_submit: len,
                 audio_started_at: std::time::Instant::now(),
+                scored_len: len.min(super::SPEAKER_TAIL_WINDOW_SAMPLES),
+                extra: std::sync::Arc::new(std::sync::OnceLock::new()),
             },
             tx,
         )
@@ -3515,6 +3712,23 @@ mod tests {
         assert_eq!(job.poll(), None, "in flight must not block or decide");
         tx.send(Some(0.61)).unwrap();
         assert_eq!(job.poll(), Some(Some(0.61)));
+    }
+
+    #[test]
+    fn gate_job_window_verdict_carries_span_and_cohort() {
+        let (job, _tx) = gate_job_with(super::GateJobKind::Window, 40_000, 0);
+        assert_eq!(job.cohort(), None, "no worker result yet: no cohort");
+        job.extra.set((vec![0.0; 4], Some(0.71))).unwrap();
+        let w = job.window_verdict(0.12);
+        assert_eq!((w.start, w.end), (40_000 - super::SPEAKER_TAIL_WINDOW_SAMPLES, 40_000));
+        assert_eq!(w.cohort, Some(0.71));
+        assert!(w.is_foreign());
+        assert_eq!(job.embedding().map(Vec::len), Some(4));
+        assert_eq!(
+            super::SPEAKER_TAIL_WINDOW_SAMPLES,
+            crate::always::speaker_trim::WINDOW_SAMPLES,
+            "the timeline judges exactly the ladder's window"
+        );
     }
 
     #[test]
