@@ -59,19 +59,58 @@ pub struct Mods {
 }
 
 impl Mods {
-    pub const NONE: Mods = Mods { cmd: false, shift: false, alt: false, ctrl: false };
-    pub const CMD: Mods = Mods { cmd: true, shift: false, alt: false, ctrl: false };
-    pub const SHIFT: Mods = Mods { cmd: false, shift: true, alt: false, ctrl: false };
-    pub const ALT: Mods = Mods { cmd: false, shift: false, alt: true, ctrl: false };
-    pub const CTRL: Mods = Mods { cmd: false, shift: false, alt: false, ctrl: true };
-    pub const CMD_SHIFT: Mods = Mods { cmd: true, shift: true, alt: false, ctrl: false };
-    pub const ALT_SHIFT: Mods = Mods { cmd: false, shift: true, alt: true, ctrl: false };
+    pub const NONE: Mods = Mods {
+        cmd: false,
+        shift: false,
+        alt: false,
+        ctrl: false,
+    };
+    pub const CMD: Mods = Mods {
+        cmd: true,
+        shift: false,
+        alt: false,
+        ctrl: false,
+    };
+    pub const SHIFT: Mods = Mods {
+        cmd: false,
+        shift: true,
+        alt: false,
+        ctrl: false,
+    };
+    pub const ALT: Mods = Mods {
+        cmd: false,
+        shift: false,
+        alt: true,
+        ctrl: false,
+    };
+    pub const CTRL: Mods = Mods {
+        cmd: false,
+        shift: false,
+        alt: false,
+        ctrl: true,
+    };
+    pub const CMD_SHIFT: Mods = Mods {
+        cmd: true,
+        shift: true,
+        alt: false,
+        ctrl: false,
+    };
+    pub const ALT_SHIFT: Mods = Mods {
+        cmd: false,
+        shift: true,
+        alt: true,
+        ctrl: false,
+    };
 }
 
 /// One keystroke step of a fallback plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stroke {
-    Key { code: u16, mods: Mods, repeat: usize },
+    Key {
+        code: u16,
+        mods: Mods,
+        repeat: usize,
+    },
     Text(String),
 }
 
@@ -97,7 +136,8 @@ mod mac {
     unsafe extern "C" {
         fn AXUIElementCreateSystemWide() -> CFTypeRef;
         fn AXUIElementCreateApplication(pid: i32) -> CFTypeRef;
-        fn AXUIElementCopyAttributeValue(e: CFTypeRef, attr: CFTypeRef, out: *mut CFTypeRef) -> i32;
+        fn AXUIElementCopyAttributeValue(e: CFTypeRef, attr: CFTypeRef, out: *mut CFTypeRef)
+        -> i32;
         fn AXUIElementSetAttributeValue(e: CFTypeRef, attr: CFTypeRef, value: CFTypeRef) -> i32;
         fn AXUIElementIsAttributeSettable(e: CFTypeRef, attr: CFTypeRef, out: *mut u8) -> i32;
         fn AXUIElementGetPid(e: CFTypeRef, out: *mut i32) -> i32;
@@ -113,7 +153,11 @@ mod mac {
         fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> u8;
         fn CFGetTypeID(cf: CFTypeRef) -> usize;
         fn CFStringGetTypeID() -> usize;
-        fn CFStringCreateWithCharacters(alloc: *const c_void, chars: *const u16, n: CFIndex) -> CFTypeRef;
+        fn CFStringCreateWithCharacters(
+            alloc: *const c_void,
+            chars: *const u16,
+            n: CFIndex,
+        ) -> CFTypeRef;
         fn CFStringGetLength(s: CFTypeRef) -> CFIndex;
         fn CFStringGetCharacters(s: CFTypeRef, range: CFRange, buf: *mut u16);
     }
@@ -130,7 +174,9 @@ mod mac {
 
     fn cfstr(s: &str) -> Cf {
         let u: Vec<u16> = s.encode_utf16().collect();
-        Cf(unsafe { CFStringCreateWithCharacters(std::ptr::null(), u.as_ptr(), u.len() as CFIndex) })
+        Cf(unsafe {
+            CFStringCreateWithCharacters(std::ptr::null(), u.as_ptr(), u.len() as CFIndex)
+        })
     }
 
     fn string_of(cf: CFTypeRef) -> Option<String> {
@@ -139,7 +185,16 @@ mod mac {
         }
         let n = unsafe { CFStringGetLength(cf) };
         let mut buf = vec![0u16; n as usize];
-        unsafe { CFStringGetCharacters(cf, CFRange { location: 0, length: n }, buf.as_mut_ptr()) };
+        unsafe {
+            CFStringGetCharacters(
+                cf,
+                CFRange {
+                    location: 0,
+                    length: n,
+                },
+                buf.as_mut_ptr(),
+            )
+        };
         Some(String::from_utf16_lossy(&buf))
     }
 
@@ -232,7 +287,11 @@ mod mac {
             let v = copy_attr(self.0, "AXSelectedTextRange")?;
             let mut r = CFRange::default();
             let ok = unsafe {
-                AXValueGetValue(v.0, K_AX_VALUE_CFRANGE_TYPE, (&mut r as *mut CFRange).cast())
+                AXValueGetValue(
+                    v.0,
+                    K_AX_VALUE_CFRANGE_TYPE,
+                    (&mut r as *mut CFRange).cast(),
+                )
             };
             (ok != 0 && r.location >= 0 && r.length >= 0)
                 .then_some((r.location as usize, r.length as usize))
@@ -240,10 +299,15 @@ mod mac {
         pub fn settable(&self, attr: &str) -> bool {
             let a = cfstr(attr);
             let mut out: u8 = 0;
-            unsafe { AXUIElementIsAttributeSettable(self.0, a.0, &mut out) == AX_SUCCESS && out != 0 }
+            unsafe {
+                AXUIElementIsAttributeSettable(self.0, a.0, &mut out) == AX_SUCCESS && out != 0
+            }
         }
         pub fn set_selected_range(&self, loc: usize, len: usize) -> bool {
-            let r = CFRange { location: loc as CFIndex, length: len as CFIndex };
+            let r = CFRange {
+                location: loc as CFIndex,
+                length: len as CFIndex,
+            };
             let v = Cf(unsafe {
                 AXValueCreate(K_AX_VALUE_CFRANGE_TYPE, (&r as *const CFRange).cast())
             });
@@ -344,20 +408,46 @@ mod stub {
     #[derive(Debug, Clone)]
     pub struct AxElem;
     impl AxElem {
-        pub fn same_as(&self, _: &AxElem) -> bool { false }
-        pub fn pid(&self) -> Option<i32> { None }
-        pub fn role(&self) -> Option<String> { None }
-        pub fn is_secure(&self) -> bool { false }
-        pub fn value(&self) -> Option<String> { None }
-        pub fn window_title(&self) -> Option<String> { None }
-        pub fn selected_text(&self) -> Option<String> { None }
-        pub fn selected_range(&self) -> Option<(usize, usize)> { None }
-        pub fn settable(&self, _: &str) -> bool { false }
-        pub fn set_selected_range(&self, _: usize, _: usize) -> bool { false }
-        pub fn set_selected_text(&self, _: &str) -> bool { false }
+        pub fn same_as(&self, _: &AxElem) -> bool {
+            false
+        }
+        pub fn pid(&self) -> Option<i32> {
+            None
+        }
+        pub fn role(&self) -> Option<String> {
+            None
+        }
+        pub fn is_secure(&self) -> bool {
+            false
+        }
+        pub fn value(&self) -> Option<String> {
+            None
+        }
+        pub fn window_title(&self) -> Option<String> {
+            None
+        }
+        pub fn selected_text(&self) -> Option<String> {
+            None
+        }
+        pub fn selected_range(&self) -> Option<(usize, usize)> {
+            None
+        }
+        pub fn settable(&self, _: &str) -> bool {
+            false
+        }
+        pub fn set_selected_range(&self, _: usize, _: usize) -> bool {
+            false
+        }
+        pub fn set_selected_text(&self, _: &str) -> bool {
+            false
+        }
     }
-    pub fn focused_element() -> Option<AxElem> { None }
-    pub fn focused_element_of(_: i32) -> Option<AxElem> { None }
+    pub fn focused_element() -> Option<AxElem> {
+        None
+    }
+    pub fn focused_element_of(_: i32) -> Option<AxElem> {
+        None
+    }
     pub fn post_strokes(_: KeyTarget, _: &[Stroke]) -> anyhow::Result<()> {
         anyhow::bail!("keystrokes not implemented on this platform")
     }

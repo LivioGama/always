@@ -44,7 +44,8 @@ impl LevelMeter {
         }
         self.count += samples.len();
         let take = samples.len().min(N);
-        self.window.extend_from_slice(&samples[samples.len() - take..]);
+        self.window
+            .extend_from_slice(&samples[samples.len() - take..]);
         if self.window.len() > N {
             let excess = self.window.len() - N;
             self.window.drain(..excess);
@@ -131,7 +132,10 @@ mod tests {
 
     fn tone(hz: f32, amp: f32, n: usize) -> Vec<i16> {
         (0..n)
-            .map(|i| ((2.0 * std::f32::consts::PI * hz * i as f32 / 16_000.0).sin() * amp * 32767.0) as i16)
+            .map(|i| {
+                ((2.0 * std::f32::consts::PI * hz * i as f32 / 16_000.0).sin() * amp * 32767.0)
+                    as i16
+            })
             .collect()
     }
 
@@ -151,7 +155,11 @@ mod tests {
         let t0 = Instant::now();
         let frame = tone(440.0, 0.5, 480);
         let first = m.push(&frame, t0).expect("first frame ticks");
-        assert!((first.0 - 0.5 / 2f64.sqrt()).abs() < 0.01, "rms {}", first.0);
+        assert!(
+            (first.0 - 0.5 / 2f64.sqrt()).abs() < 0.01,
+            "rms {}",
+            first.0
+        );
         assert!(m.push(&frame, t0 + Duration::from_millis(30)).is_none());
         assert!(m.push(&frame, t0 + Duration::from_millis(60)).is_some());
     }

@@ -102,11 +102,20 @@ pub fn process_text_with_system_prompt(
 
 /// Latency-harness variant with explicit mode bits (see the Swift side).
 #[cfg(test)]
-pub fn process_with_mode(system_prompt: &str, user_content: &str, mode: i32) -> Result<String, String> {
+pub fn process_with_mode(
+    system_prompt: &str,
+    user_content: &str,
+    mode: i32,
+) -> Result<String, String> {
     let system_cstr = CString::new(system_prompt).map_err(|e| e.to_string())?;
     let user_cstr = CString::new(user_content).map_err(|e| e.to_string())?;
     let ptr = unsafe {
-        process_text_with_system_prompt_apple_mode(system_cstr.as_ptr(), user_cstr.as_ptr(), 500, mode)
+        process_text_with_system_prompt_apple_mode(
+            system_cstr.as_ptr(),
+            user_cstr.as_ptr(),
+            500,
+            mode,
+        )
     };
     if ptr.is_null() {
         return Err("null".into());

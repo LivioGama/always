@@ -50,7 +50,11 @@ pub fn check_availability() -> bool {
 ///
 /// Returns the raw transcribed text on success, or a human-readable error
 /// string on failure.
-pub fn transcribe_wav(path: &Path, lang: Option<&str>, phrases: &[String]) -> Result<String, String> {
+pub fn transcribe_wav(
+    path: &Path,
+    lang: Option<&str>,
+    phrases: &[String],
+) -> Result<String, String> {
     transcribe_wav_scored(path, lang, phrases).map(|t| t.text)
 }
 
@@ -174,13 +178,20 @@ impl StreamSession {
     /// Push every new partial into `preview` from the recognizer's own
     /// callback (no per-frame polling). Call at most once, right after
     /// `start`.
-    pub fn set_partial_sink(&mut self, preview: std::sync::Arc<crate::always::live_preview::LivePreview>) {
+    pub fn set_partial_sink(
+        &mut self,
+        preview: std::sync::Arc<crate::always::live_preview::LivePreview>,
+    ) {
         if !self.sink.is_null() {
             return;
         }
         self.sink = Box::into_raw(Box::new(preview));
         unsafe {
-            apple_stt_stream_set_callback(self.handle, Some(partial_trampoline), self.sink as *mut c_void);
+            apple_stt_stream_set_callback(
+                self.handle,
+                Some(partial_trampoline),
+                self.sink as *mut c_void,
+            );
         }
     }
 
@@ -238,11 +249,7 @@ impl StreamSession {
         }
         let text = unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() };
         unsafe { free_apple_stt_string(ptr) };
-        if text.is_empty() {
-            None
-        } else {
-            Some(text)
-        }
+        if text.is_empty() { None } else { Some(text) }
     }
 }
 

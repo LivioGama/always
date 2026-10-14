@@ -137,14 +137,16 @@ pub(crate) static TEST_SERIAL: Mutex<()> = Mutex::new(());
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::TEST_SERIAL as SERIAL;
+    use super::*;
 
     #[test]
     fn ring_keeps_last_n_and_take_removes() {
         let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
         lock(&RING).clear();
-        let ids: Vec<u64> = (0..RING_MAX + 3).map(|i| push(&format!("t{i}"), 0.1)).collect();
+        let ids: Vec<u64> = (0..RING_MAX + 3)
+            .map(|i| push(&format!("t{i}"), 0.1))
+            .collect();
         let l = list();
         assert_eq!(l.len(), RING_MAX);
         assert_eq!(l.last().unwrap().text, format!("t{}", RING_MAX + 2));

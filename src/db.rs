@@ -644,9 +644,10 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
                 .context("transcriber_backend must be 'groq' or 'local:<model_id>'")?;
         }
         "postprocess_mode" => {
-            let _: crate::always::postprocess::PostprocessMode = value
-                .parse()
-                .map_err(|e: String| anyhow::anyhow!("postprocess_mode must be fast, apple, groq or off: {e}"))?;
+            let _: crate::always::postprocess::PostprocessMode =
+                value.parse().map_err(|e: String| {
+                    anyhow::anyhow!("postprocess_mode must be fast, apple, groq or off: {e}")
+                })?;
         }
         "postprocess_provider" => {
             let parsed: Result<crate::always::config::PostprocessProvider, _> = value.parse();
@@ -844,15 +845,24 @@ mod foreign_speech_confidence_enforce_tests {
     fn defaults_unset_and_round_trips_bool() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
-        assert_eq!(get_preferences(&conn).unwrap().foreign_speech_confidence_enforce, None);
+        assert_eq!(
+            get_preferences(&conn)
+                .unwrap()
+                .foreign_speech_confidence_enforce,
+            None
+        );
         set_preference(&conn, "foreign_speech_confidence_enforce", "true").unwrap();
         assert_eq!(
-            get_preferences(&conn).unwrap().foreign_speech_confidence_enforce,
+            get_preferences(&conn)
+                .unwrap()
+                .foreign_speech_confidence_enforce,
             Some(true)
         );
         set_preference(&conn, "foreign_speech_confidence_enforce", "0").unwrap();
         assert_eq!(
-            get_preferences(&conn).unwrap().foreign_speech_confidence_enforce,
+            get_preferences(&conn)
+                .unwrap()
+                .foreign_speech_confidence_enforce,
             Some(false)
         );
         assert!(set_preference(&conn, "foreign_speech_confidence_enforce", "maybe").is_err());

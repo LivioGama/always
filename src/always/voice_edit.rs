@@ -197,7 +197,9 @@ pub fn note_rewriter_alive() {
 }
 
 pub fn rewriter_alive() -> bool {
-    REWRITER_ALIVE.lock().is_some_and(|t| t.elapsed() <= REWRITER_TTL)
+    REWRITER_ALIVE
+        .lock()
+        .is_some_and(|t| t.elapsed() <= REWRITER_TTL)
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +219,9 @@ pub struct GateInput<'a> {
 /// Whether a parsed command may claim the utterance. Pure: the replay test
 /// runs this exact function over the user's real logs.
 pub fn gate_verdict(g: &GateInput<'_>) -> Result<(), &'static str> {
-    let Some(anchor) = g.anchor else { return Err("no_recent_paste") };
+    let Some(anchor) = g.anchor else {
+        return Err("no_recent_paste");
+    };
     if anchor.at.elapsed() > EDIT_WINDOW {
         return Err("window_expired");
     }
@@ -324,7 +328,9 @@ pub fn replace_in(
     cmd: &EditCommand,
     utterance: Option<&str>,
 ) -> Option<(String, (usize, usize), String, String)> {
-    let EditCommand::Replace { from, to } = cmd else { return None };
+    let EditCommand::Replace { from, to } = cmd else {
+        return None;
+    };
     let mut cands = vec![(from.clone(), to.clone())];
     if let Some(u) = utterance {
         let core_norm = normalize(u);
@@ -442,13 +448,24 @@ pub fn locate_anchor(value: &str, caret_u16: usize, payload: &str) -> Option<(us
     }
     // Trailing whitespace between payload and caret: ours only if the
     // payload had trailing whitespace.
-    let end_b = if payload.ends_with(char::is_whitespace) { caret_b } else { b_trim.len() };
-    Some((ax_edit::byte_to_u16(value, start), ax_edit::byte_to_u16(value, end_b)))
+    let end_b = if payload.ends_with(char::is_whitespace) {
+        caret_b
+    } else {
+        b_trim.len()
+    };
+    Some((
+        ax_edit::byte_to_u16(value, start),
+        ax_edit::byte_to_u16(value, end_b),
+    ))
 }
 
 /// Range (UTF-16) of the last word before the caret plus the whitespace
 /// after it up to the caret. `with_trailing=false` → the word only.
-pub fn last_word_range(value: &str, caret_u16: usize, with_trailing: bool) -> Option<(usize, usize)> {
+pub fn last_word_range(
+    value: &str,
+    caret_u16: usize,
+    with_trailing: bool,
+) -> Option<(usize, usize)> {
     let caret_b = u16_to_byte(value, caret_u16);
     let before = &value[..caret_b];
     let trimmed = before.trim_end();
@@ -461,13 +478,24 @@ pub fn last_word_range(value: &str, caret_u16: usize, with_trailing: bool) -> Op
         .find(|(_, c)| c.is_whitespace())
         .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(0);
-    let end = if with_trailing { caret_b } else { trimmed.len() };
-    Some((ax_edit::byte_to_u16(value, start), ax_edit::byte_to_u16(value, end)))
+    let end = if with_trailing {
+        caret_b
+    } else {
+        trimmed.len()
+    };
+    Some((
+        ax_edit::byte_to_u16(value, start),
+        ax_edit::byte_to_u16(value, end),
+    ))
 }
 
 /// Range (UTF-16) of the last sentence before the caret. Sentence ends are
 /// `.`, `!`, `?` or a newline; the sentence's own terminator is included.
-pub fn last_sentence_range(value: &str, caret_u16: usize, with_trailing: bool) -> Option<(usize, usize)> {
+pub fn last_sentence_range(
+    value: &str,
+    caret_u16: usize,
+    with_trailing: bool,
+) -> Option<(usize, usize)> {
     let caret_b = u16_to_byte(value, caret_u16);
     let before = &value[..caret_b];
     let trimmed = before.trim_end();
@@ -483,8 +511,15 @@ pub fn last_sentence_range(value: &str, caret_u16: usize, with_trailing: bool) -
         .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(0);
     let start = start + (trimmed[start..].len() - trimmed[start..].trim_start().len());
-    let end = if with_trailing { caret_b } else { trimmed.len() };
-    Some((ax_edit::byte_to_u16(value, start), ax_edit::byte_to_u16(value, end)))
+    let end = if with_trailing {
+        caret_b
+    } else {
+        trimmed.len()
+    };
+    Some((
+        ax_edit::byte_to_u16(value, start),
+        ax_edit::byte_to_u16(value, end),
+    ))
 }
 
 fn utf16_slice(value: &str, loc: usize, len: usize) -> &str {
@@ -519,13 +554,23 @@ impl Field {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
     /// Replace UTF-16 range with `text`, then put the caret at `caret`.
-    Replace { loc: usize, len: usize, text: String, caret: usize },
-    Select { loc: usize, len: usize },
+    Replace {
+        loc: usize,
+        len: usize,
+        text: String,
+        caret: usize,
+    },
+    Select {
+        loc: usize,
+        len: usize,
+    },
     Caret(usize),
     Keys(Vec<Stroke>),
     /// Rewrite: Iris does it (on-device model) through the
     /// `VoiceEditGetTarget` / `VoiceEditReplaceTarget` primitives.
-    Handoff { style: String },
+    Handoff {
+        style: String,
+    },
 }
 
 /// A word the user corrected that looks like a recognition error.
@@ -564,10 +609,14 @@ fn learn_from(orig: &str, rep: &str) -> Option<Learn> {
     if o.is_empty() || r.is_empty() || o.eq_ignore_ascii_case(r) {
         return None;
     }
-    let sounds_alike = crate::always::text_match::soundex(o) == crate::always::text_match::soundex(r);
+    let sounds_alike =
+        crate::always::text_match::soundex(o) == crate::always::text_match::soundex(r);
     (crate::always::correction::looks_like_correction(&o.to_lowercase(), &r.to_lowercase())
         || sounds_alike)
-        .then(|| Learn { wrong: o.to_string(), right: r.to_string() })
+        .then(|| Learn {
+            wrong: o.to_string(),
+            right: r.to_string(),
+        })
 }
 
 /// Decide how to execute `cmd`. `anchor` = the payload of the last paste
@@ -587,18 +636,28 @@ pub fn plan(
     // Anchor range in the field (AX mode). A readable, writable field
     // whose text no longer ends with our paste means the user edited it.
     let anchor_range = match (ax, anchor) {
-        (Some((v, (loc, len))), Some(a)) if len == 0 => locate_anchor(v, loc, a),
+        (Some((v, (loc, 0))), Some(a)) => locate_anchor(v, loc, a),
         _ => None,
     };
     let caret_only = |p: Plan, effect: AnchorEffect, method| {
-        Ok(Planned { plan: p, learn: None, effect, method })
+        Ok(Planned {
+            plan: p,
+            learn: None,
+            effect,
+            method,
+        })
     };
     match cmd {
         EditCommand::ScratchThat | EditCommand::Delete(Unit::That) => {
             let a = anchor.ok_or("no_anchor")?;
             if let Some((s, e)) = anchor_range {
                 return caret_only(
-                    Plan::Replace { loc: s, len: e - s, text: String::new(), caret: s },
+                    Plan::Replace {
+                        loc: s,
+                        len: e - s,
+                        text: String::new(),
+                        caret: s,
+                    },
                     AnchorEffect::Pop,
                     "ax",
                 );
@@ -621,7 +680,12 @@ pub fn plan(
                 if let Some((new_region, _, orig, rep)) = replace_in(region, cmd, Some(utterance)) {
                     let caret = s + len_u16(&new_region);
                     return Ok(Planned {
-                        plan: Plan::Replace { loc: s, len: e - s, text: new_region.clone(), caret },
+                        plan: Plan::Replace {
+                            loc: s,
+                            len: e - s,
+                            text: new_region.clone(),
+                            caret,
+                        },
                         learn: learn_from(&orig, &rep),
                         effect: AnchorEffect::Rewrite(new_region),
                         method: "ax",
@@ -631,12 +695,19 @@ pub fn plan(
             if forced && let Some((v, (loc, len))) = ax {
                 // Iris-addressed: last occurrence before the caret.
                 let caret_b = u16_to_byte(v, loc + len);
-                if let Some((_, (bs, be), orig, rep)) = replace_in(&v[..caret_b], cmd, Some(utterance)) {
+                if let Some((_, (bs, be), orig, rep)) =
+                    replace_in(&v[..caret_b], cmd, Some(utterance))
+                {
                     let s = ax_edit::byte_to_u16(v, bs);
                     let e = ax_edit::byte_to_u16(v, be);
                     let caret = (loc + len) - (e - s) + len_u16(&rep);
                     return Ok(Planned {
-                        plan: Plan::Replace { loc: s, len: e - s, text: rep.clone(), caret },
+                        plan: Plan::Replace {
+                            loc: s,
+                            len: e - s,
+                            text: rep.clone(),
+                            caret,
+                        },
                         learn: learn_from(&orig, &rep),
                         effect: AnchorEffect::Untracked,
                         method: "ax",
@@ -657,7 +728,10 @@ pub fn plan(
             let erase = a[bs..].chars().count();
             let tail = new_text[bs..].to_string();
             Ok(Planned {
-                plan: Plan::Keys(vec![key(keys::DELETE, Mods::NONE, erase), Stroke::Text(tail)]),
+                plan: Plan::Keys(vec![
+                    key(keys::DELETE, Mods::NONE, erase),
+                    Stroke::Text(tail),
+                ]),
                 learn: learn_from(&orig, &rep),
                 effect: AnchorEffect::Rewrite(new_text),
                 method: "keys",
@@ -683,7 +757,12 @@ pub fn plan(
                 let new_region = transform(utf16_slice(v, s, e - s));
                 let caret = s + len_u16(&new_region);
                 return caret_only(
-                    Plan::Replace { loc: s, len: e - s, text: new_region.clone(), caret },
+                    Plan::Replace {
+                        loc: s,
+                        len: e - s,
+                        text: new_region.clone(),
+                        caret,
+                    },
                     AnchorEffect::Rewrite(new_region),
                     "ax",
                 );
@@ -705,10 +784,19 @@ pub fn plan(
             )
         }
         EditCommand::NewLine | EditCommand::NewParagraph => {
-            let nl = if matches!(cmd, EditCommand::NewLine) { "\n" } else { "\n\n" };
+            let nl = if matches!(cmd, EditCommand::NewLine) {
+                "\n"
+            } else {
+                "\n\n"
+            };
             if let Some((_, (loc, len))) = ax {
                 return caret_only(
-                    Plan::Replace { loc, len, text: nl.into(), caret: loc + nl.len() },
+                    Plan::Replace {
+                        loc,
+                        len,
+                        text: nl.into(),
+                        caret: loc + nl.len(),
+                    },
                     AnchorEffect::Untracked,
                     "ax",
                 );
@@ -738,7 +826,11 @@ pub fn plan(
         ),
         EditCommand::Select(Unit::That) => {
             if let Some((s, e)) = anchor_range {
-                return caret_only(Plan::Select { loc: s, len: e - s }, AnchorEffect::None, "ax");
+                return caret_only(
+                    Plan::Select { loc: s, len: e - s },
+                    AnchorEffect::None,
+                    "ax",
+                );
             }
             if ax.is_some() {
                 return Err("anchor_not_in_field");
@@ -762,7 +854,11 @@ pub fn plan(
                     last_sentence_range(v, caret, false)
                 };
                 let (s, e) = r.ok_or("nothing_before_caret")?;
-                return caret_only(Plan::Select { loc: s, len: e - s }, AnchorEffect::None, "ax");
+                return caret_only(
+                    Plan::Select { loc: s, len: e - s },
+                    AnchorEffect::None,
+                    "ax",
+                );
             }
             if *unit == Unit::LastWord && !field.terminal {
                 return caret_only(
@@ -783,7 +879,12 @@ pub fn plan(
                 };
                 let (s, e) = r.ok_or("nothing_before_caret")?;
                 return caret_only(
-                    Plan::Replace { loc: s, len: e - s, text: String::new(), caret: s },
+                    Plan::Replace {
+                        loc: s,
+                        len: e - s,
+                        text: String::new(),
+                        caret: s,
+                    },
                     AnchorEffect::Untracked,
                     "ax",
                 );
@@ -804,9 +905,19 @@ pub fn plan(
             // still sitting where we left it.
             let has_selection = ax.is_some_and(|(_, (_, len))| len > 0);
             if !has_selection && anchor_range.is_none() {
-                return Err(if ax.is_some() { "anchor_not_in_field" } else { "needs_ax" });
+                return Err(if ax.is_some() {
+                    "anchor_not_in_field"
+                } else {
+                    "needs_ax"
+                });
             }
-            caret_only(Plan::Handoff { style: style.clone() }, AnchorEffect::None, "iris")
+            caret_only(
+                Plan::Handoff {
+                    style: style.clone(),
+                },
+                AnchorEffect::None,
+                "iris",
+            )
         }
         EditCommand::GoTo(place) => {
             if let Some((v, _)) = ax {
@@ -846,7 +957,10 @@ pub fn is_terminal(bundle: Option<&str>) -> bool {
 /// Snapshot the focused field for planning.
 pub fn snapshot(elem: Option<&AxElem>, terminal: bool) -> Field {
     let Some(e) = elem else {
-        return Field { terminal, ..Field::default() };
+        return Field {
+            terminal,
+            ..Field::default()
+        };
     };
     Field {
         value: e.value(),
@@ -874,26 +988,37 @@ pub fn execute(
             if !rewriter_alive() {
                 return Err("rewriter_offline");
             }
-            crate::always::event::global_broadcaster().send(crate::always::event::DaemonEvent::VoiceEdit {
-                req: String::new(),
-                op: "rewrite_request".into(),
-                ok: "true".into(),
-                method: "iris".into(),
-                ms: String::new(),
-                detail: style.clone(),
-                text: String::new(),
-            });
+            crate::always::event::global_broadcaster().send(
+                crate::always::event::DaemonEvent::VoiceEdit {
+                    req: String::new(),
+                    op: "rewrite_request".into(),
+                    ok: "true".into(),
+                    method: "iris".into(),
+                    ms: String::new(),
+                    detail: style.clone(),
+                    text: String::new(),
+                },
+            );
             Ok("iris")
         }
         Plan::Select { loc, len } => {
             let e = elem.ok_or("no_element")?;
-            e.set_selected_range(*loc, *len).then_some("ax").ok_or("ax_select_failed")
+            e.set_selected_range(*loc, *len)
+                .then_some("ax")
+                .ok_or("ax_select_failed")
         }
         Plan::Caret(at) => {
             let e = elem.ok_or("no_element")?;
-            e.set_selected_range(*at, 0).then_some("ax").ok_or("ax_caret_failed")
+            e.set_selected_range(*at, 0)
+                .then_some("ax")
+                .ok_or("ax_caret_failed")
         }
-        Plan::Replace { loc, len, text, caret } => {
+        Plan::Replace {
+            loc,
+            len,
+            text,
+            caret,
+        } => {
             let e = elem.ok_or("no_element")?;
             let before_sel = e.selected_range();
             let before_val = e.value().unwrap_or_default();
@@ -990,14 +1115,21 @@ fn shadow_log(utterance: &str, source: &str, out: &Outcome, app: Option<&str>) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{row}");
     }
 }
 
 fn learn_async(l: Learn) {
     std::thread::spawn(move || {
-        let pair = crate::always::correction::CorrectionPair { wrong: l.wrong, right: l.right };
+        let pair = crate::always::correction::CorrectionPair {
+            wrong: l.wrong,
+            right: l.right,
+        };
         let auto = crate::db::open()
             .ok()
             .and_then(|c| crate::db::get_preferences(&c).ok())
@@ -1008,11 +1140,16 @@ fn learn_async(l: Learn) {
                 std::slice::from_ref(&pair),
                 crate::always::correction::Provenance::Manual,
             ) {
-                Ok(n) => tracing::info!(wrong = %pair.wrong, right = %pair.right, applied = n, "voice_edit_correction_learned"),
+                Ok(n) => {
+                    tracing::info!(wrong = %pair.wrong, right = %pair.right, applied = n, "voice_edit_correction_learned")
+                }
                 Err(e) => tracing::warn!(error = %e, "voice_edit_correction_learn_failed"),
             }
         } else if let Ok(q) = crate::always::correction_queue::global_queue() {
-            let _ = q.add(pair.clone(), crate::always::correction_queue::CorrectionSource::Hotkey);
+            let _ = q.add(
+                pair.clone(),
+                crate::always::correction_queue::CorrectionSource::Hotkey,
+            );
             tracing::info!(wrong = %pair.wrong, right = %pair.right, "voice_edit_correction_queued");
         }
         crate::always::event::global_broadcaster().correction_logged(&pair.wrong, &pair.right);
@@ -1061,7 +1198,13 @@ pub fn run(
     pid: Option<i32>,
 ) -> Outcome {
     let Some((cmd, addressed)) = grammar::parse_addressed(utterance) else {
-        return Outcome { claimed: false, op: "none", method: "", reason: "not_a_command", ms: 0.0 };
+        return Outcome {
+            claimed: false,
+            op: "none",
+            method: "",
+            reason: "not_a_command",
+            ms: 0.0,
+        };
     };
     // "Iris, scratch that": addressed by name, so the paste-window gate
     // does not apply (verification and secure-field refusal still do).
@@ -1069,14 +1212,25 @@ pub fn run(
     let original = utterance;
     // Replace candidates are re-derived from the text without the address.
     let utterance_core = if addressed {
-        utterance.split_whitespace().skip_while(|w| normalize(w) != "iris").skip(1).collect::<Vec<_>>().join(" ")
+        utterance
+            .split_whitespace()
+            .skip_while(|w| normalize(w) != "iris")
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join(" ")
     } else {
         utterance.to_string()
     };
     let utterance = utterance_core.as_str();
     let t0 = Instant::now();
     let app = crate::always::pause::current_app();
-    let mut out = Outcome { claimed: false, op: cmd.name(), method: "", reason: "", ms: 0.0 };
+    let mut out = Outcome {
+        claimed: false,
+        op: cmd.name(),
+        method: "",
+        reason: "",
+        ms: 0.0,
+    };
     let result = run_inner(&cmd, utterance, forced, target, pid, app.as_deref());
     out.ms = t0.elapsed().as_secs_f64() * 1000.0;
     match result {
@@ -1128,7 +1282,12 @@ fn run_inner(
             (Some(a), Some(t)) => t > a.at,
             _ => false,
         };
-        (a.clone(), since(st.committed_at), since(st.user_input_at), since(st.untracked_at))
+        (
+            a.clone(),
+            since(st.committed_at),
+            since(st.user_input_at),
+            since(st.untracked_at),
+        )
     };
     let elem = match pid {
         Some(p) => ax_edit::focused_element_of(p),
@@ -1160,7 +1319,14 @@ fn run_inner(
         .map(|a| a.text.clone());
     let field = snapshot(elem.as_ref(), is_terminal(app));
     let keys_exact = !committed && !user_input && !untracked && anchor_text.is_some();
-    let planned = plan(cmd, utterance, anchor_text.as_deref(), &field, keys_exact, forced)?;
+    let planned = plan(
+        cmd,
+        utterance,
+        anchor_text.as_deref(),
+        &field,
+        keys_exact,
+        forced,
+    )?;
     // Serialise with the paste path: never edit while a paste is landing.
     if !crate::always::pause::try_begin_paste() {
         return Err("paste_in_flight");
@@ -1204,12 +1370,24 @@ pub fn current_target(pid: Option<i32>) -> Target {
         Some(p) => ax_edit::focused_element_of(p),
         None => ax_edit::focused_element(),
     };
-    let Some(e) = elem else { return Target { source: "none", ..Target::default() } };
+    let Some(e) = elem else {
+        return Target {
+            source: "none",
+            ..Target::default()
+        };
+    };
     if e.is_secure() {
-        return Target { source: "none", secure: true, ..Target::default() };
+        return Target {
+            source: "none",
+            secure: true,
+            ..Target::default()
+        };
     }
     let (Some(v), Some((loc, len))) = (e.value(), e.selected_range()) else {
-        return Target { source: "none", ..Target::default() };
+        return Target {
+            source: "none",
+            ..Target::default()
+        };
     };
     if len > 0 {
         return Target {
@@ -1228,15 +1406,29 @@ pub fn current_target(pid: Option<i32>) -> Target {
         // Rewrite the words, not the padding around them.
         let lead = len_u16(&raw[..raw.len() - raw.trim_start().len()]);
         let core = raw.trim();
-        return Target { text: core.to_string(), source: "last_paste", secure: false, loc: s + lead, len: len_u16(core) };
+        return Target {
+            text: core.to_string(),
+            source: "last_paste",
+            secure: false,
+            loc: s + lead,
+            len: len_u16(core),
+        };
     }
-    Target { source: "none", ..Target::default() }
+    Target {
+        source: "none",
+        ..Target::default()
+    }
 }
 
 /// Replace the current target with `text` as ONE undoable edit (⌘Z
 /// restores the original). Refuses when the target changed since Iris read
 /// it (`expect` must equal the target text) or the field is secure.
-pub fn replace_target(expect: &str, text: &str, pid: Option<i32>, target: KeyTarget) -> Result<(&'static str, f64), &'static str> {
+pub fn replace_target(
+    expect: &str,
+    text: &str,
+    pid: Option<i32>,
+    target: KeyTarget,
+) -> Result<(&'static str, f64), &'static str> {
     let t0 = Instant::now();
     let t = current_target(pid);
     if t.secure {
@@ -1253,9 +1445,18 @@ pub fn replace_target(expect: &str, text: &str, pid: Option<i32>, target: KeyTar
         None => ax_edit::focused_element(),
     };
     let planned = Planned {
-        plan: Plan::Replace { loc: t.loc, len: t.len, text: text.to_string(), caret: t.loc + len_u16(text) },
+        plan: Plan::Replace {
+            loc: t.loc,
+            len: t.len,
+            text: text.to_string(),
+            caret: t.loc + len_u16(text),
+        },
         learn: None,
-        effect: if t.source == "last_paste" { AnchorEffect::Rewrite(text.to_string()) } else { AnchorEffect::Untracked },
+        effect: if t.source == "last_paste" {
+            AnchorEffect::Rewrite(text.to_string())
+        } else {
+            AnchorEffect::Untracked
+        },
         method: "ax",
     };
     if !crate::always::pause::try_begin_paste() {
@@ -1282,7 +1483,12 @@ mod tests {
     use super::*;
 
     fn field(v: &str) -> Field {
-        Field { value: Some(v.into()), sel: Some((len_u16(v), 0)), writable: true, terminal: false }
+        Field {
+            value: Some(v.into()),
+            sel: Some((len_u16(v), 0)),
+            writable: true,
+            terminal: false,
+        }
     }
 
     fn cmd(u: &str) -> EditCommand {
@@ -1302,18 +1508,54 @@ mod tests {
             user_input_since_paste: false,
         };
         assert_eq!(gate_verdict(&base), Ok(()));
-        assert_eq!(gate_verdict(&GateInput { anchor: None, ..base }), Err("no_recent_paste"));
-        let old = Anchor::for_replay("Hello world.", 31_000);
-        assert_eq!(gate_verdict(&GateInput { anchor: Some(&old), ..base }), Err("window_expired"));
-        assert_eq!(gate_verdict(&GateInput { same_app: false, ..base }), Err("app_changed"));
-        assert_eq!(gate_verdict(&GateInput { same_field: Some(false), ..base }), Err("field_changed"));
-        assert_eq!(gate_verdict(&GateInput { committed_since_paste: true, ..base }), Err("committed"));
         assert_eq!(
-            gate_verdict(&GateInput { user_input_since_paste: true, ..base }),
+            gate_verdict(&GateInput {
+                anchor: None,
+                ..base
+            }),
+            Err("no_recent_paste")
+        );
+        let old = Anchor::for_replay("Hello world.", 31_000);
+        assert_eq!(
+            gate_verdict(&GateInput {
+                anchor: Some(&old),
+                ..base
+            }),
+            Err("window_expired")
+        );
+        assert_eq!(
+            gate_verdict(&GateInput {
+                same_app: false,
+                ..base
+            }),
+            Err("app_changed")
+        );
+        assert_eq!(
+            gate_verdict(&GateInput {
+                same_field: Some(false),
+                ..base
+            }),
+            Err("field_changed")
+        );
+        assert_eq!(
+            gate_verdict(&GateInput {
+                committed_since_paste: true,
+                ..base
+            }),
+            Err("committed")
+        );
+        assert_eq!(
+            gate_verdict(&GateInput {
+                user_input_since_paste: true,
+                ..base
+            }),
             Err("user_input_since_paste")
         );
         let r = cmd("change dog to cat");
-        assert_eq!(gate_verdict(&GateInput { cmd: &r, ..base }), Err("replace_target_absent"));
+        assert_eq!(
+            gate_verdict(&GateInput { cmd: &r, ..base }),
+            Err("replace_target_absent")
+        );
         let r = cmd("change world to there");
         assert_eq!(gate_verdict(&GateInput { cmd: &r, ..base }), Ok(()));
     }
@@ -1321,24 +1563,66 @@ mod tests {
     #[test]
     fn scratch_plans_exact_ax_range() {
         let v = "Intro. Hello world. ";
-        let p = plan(&cmd("scratch that"), "scratch that", Some("Hello world. "), &field(v), true, false).unwrap();
-        assert_eq!(p.plan, Plan::Replace { loc: 7, len: 13, text: String::new(), caret: 7 });
+        let p = plan(
+            &cmd("scratch that"),
+            "scratch that",
+            Some("Hello world. "),
+            &field(v),
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            p.plan,
+            Plan::Replace {
+                loc: 7,
+                len: 13,
+                text: String::new(),
+                caret: 7
+            }
+        );
         // Merge delta with a leading space.
         let v = "Hello world and more";
-        let p = plan(&cmd("scratch that"), "", Some(" and more"), &field(v), true, false).unwrap();
-        assert_eq!(p.plan, Plan::Replace { loc: 11, len: 9, text: String::new(), caret: 11 });
+        let p = plan(
+            &cmd("scratch that"),
+            "",
+            Some(" and more"),
+            &field(v),
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            p.plan,
+            Plan::Replace {
+                loc: 11,
+                len: 9,
+                text: String::new(),
+                caret: 11
+            }
+        );
     }
 
     #[test]
     fn scratch_declines_when_user_edited_the_paste() {
         let v = "Hello wurld. ";
-        let e = plan(&cmd("scratch that"), "", Some("Hello world. "), &field(v), true, false);
+        let e = plan(
+            &cmd("scratch that"),
+            "",
+            Some("Hello world. "),
+            &field(v),
+            true,
+            false,
+        );
         assert_eq!(e.err(), Some("anchor_not_in_field"));
     }
 
     #[test]
     fn scratch_keys_fallback_only_when_exact() {
-        let f = Field { terminal: true, ..Field::default() };
+        let f = Field {
+            terminal: true,
+            ..Field::default()
+        };
         let p = plan(&cmd("scratch that"), "", Some("ls -la "), &f, true, false).unwrap();
         assert_eq!(p.plan, Plan::Keys(vec![key(keys::DELETE, Mods::NONE, 7)]));
         assert!(plan(&cmd("scratch that"), "", Some("ls -la "), &f, false, false).is_err());
@@ -1349,16 +1633,26 @@ mod tests {
         let v = "I use cloud code daily. ";
         let u = "Change cloud code to Claude Code.";
         let p = plan(&cmd(u), u, Some(v), &field(v), true, false).unwrap();
-        let Plan::Replace { loc, len, text, .. } = &p.plan else { panic!() };
+        let Plan::Replace { loc, len, text, .. } = &p.plan else {
+            panic!()
+        };
         assert_eq!((*loc, *len), (0, len_u16(v)));
         assert_eq!(text, "I use Claude Code daily. ");
-        assert_eq!(p.learn, Some(Learn { wrong: "cloud code".into(), right: "Claude Code".into() }));
+        assert_eq!(
+            p.learn,
+            Some(Learn {
+                wrong: "cloud code".into(),
+                right: "Claude Code".into()
+            })
+        );
         // Capitalised original → capitalised replacement; unrelated word
         // swap is not learned as a recognition error.
         let v = "Meet on Tuesday. ";
         let u = "replace tuesday with friday";
         let p = plan(&cmd(u), u, Some(v), &field(v), true, false).unwrap();
-        let Plan::Replace { text, .. } = &p.plan else { panic!() };
+        let Plan::Replace { text, .. } = &p.plan else {
+            panic!()
+        };
         assert_eq!(text, "Meet on Friday. ");
         assert_eq!(p.learn, None);
     }
@@ -1368,14 +1662,22 @@ mod tests {
         let v = "I need to go. ";
         let u = "change to to two";
         let p = plan(&cmd(u), u, Some(v), &field(v), true, false).unwrap();
-        let Plan::Replace { text, .. } = &p.plan else { panic!() };
+        let Plan::Replace { text, .. } = &p.plan else {
+            panic!()
+        };
         assert_eq!(text, "I need two go. ");
     }
 
     #[test]
     fn case_list_and_ranges() {
-        assert_eq!(transform_case("the quick fox", &CaseKind::Capitalize), "The Quick Fox");
-        assert_eq!(make_list("Buy milk. Call mom. Ship it."), "- Buy milk\n- Call mom\n- Ship it");
+        assert_eq!(
+            transform_case("the quick fox", &CaseKind::Capitalize),
+            "The Quick Fox"
+        );
+        assert_eq!(
+            make_list("Buy milk. Call mom. Ship it."),
+            "- Buy milk\n- Call mom\n- Ship it"
+        );
         assert_eq!(make_list("eggs, milk and bread"), "- Eggs\n- Milk\n- Bread");
         let v = "One. Two three. ";
         assert_eq!(last_sentence_range(v, len_u16(v), false), Some((5, 15)));
@@ -1387,8 +1689,24 @@ mod tests {
     #[test]
     fn newline_prefers_ax_and_falls_back_to_shift_return() {
         let p = plan(&cmd("new line"), "", Some("x "), &field("x "), true, false).unwrap();
-        assert_eq!(p.plan, Plan::Replace { loc: 2, len: 0, text: "\n".into(), caret: 3 });
-        let p = plan(&cmd("new paragraph"), "", Some("x "), &Field::default(), true, false).unwrap();
+        assert_eq!(
+            p.plan,
+            Plan::Replace {
+                loc: 2,
+                len: 0,
+                text: "\n".into(),
+                caret: 3
+            }
+        );
+        let p = plan(
+            &cmd("new paragraph"),
+            "",
+            Some("x "),
+            &Field::default(),
+            true,
+            false,
+        )
+        .unwrap();
         assert_eq!(p.plan, Plan::Keys(vec![key(keys::RETURN, Mods::SHIFT, 2)]));
     }
 }

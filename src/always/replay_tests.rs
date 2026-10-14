@@ -15,6 +15,7 @@
 //! `RecordResult`; latency/WER are computed from it outside the test.
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)] // env-driven replay knobs
 mod tests {
     use std::io::{BufRead, Write};
     use std::sync::Arc;
@@ -25,7 +26,6 @@ mod tests {
     use crate::always::log::Logger;
     use crate::always::vad::{self, RecordResult};
     use crate::stt::Transcriber;
-
 
     /// Whole-file transcription through the Parakeet preview helper
     /// (`B`/`A`/`E` frames, `final` JSON line). Replay-only.
@@ -57,7 +57,9 @@ mod tests {
                 line.clear();
             }
             std::mem::forget(child);
-            Self { io: parking_lot::Mutex::new((stdin, out, 0)) }
+            Self {
+                io: parking_lot::Mutex::new((stdin, out, 0)),
+            }
         }
     }
 
@@ -99,8 +101,14 @@ mod tests {
                 };
                 if v["ev"] == "final" && v["seq"] == seq {
                     let text = v["text"].as_str().unwrap_or_default().to_string();
-                    eprintln!("parakeet_file_final secs={:.2} text={text:?}", pcm.len() as f64 / 32_000.0);
-                    return Ok(crate::stt::TranscriptionResult { text, ..Default::default() });
+                    eprintln!(
+                        "parakeet_file_final secs={:.2} text={text:?}",
+                        pcm.len() as f64 / 32_000.0
+                    );
+                    return Ok(crate::stt::TranscriptionResult {
+                        text,
+                        ..Default::default()
+                    });
                 }
             }
         }
@@ -111,19 +119,30 @@ mod tests {
         ) -> std::pin::Pin<
             Box<
                 dyn futures::Stream<
-                        Item = Result<crate::stt::StreamingTranscriptionResult, crate::stt::SttError>,
+                        Item = Result<
+                            crate::stt::StreamingTranscriptionResult,
+                            crate::stt::SttError,
+                        >,
                     > + Send,
             >,
         > {
             let r = self.transcribe_from_bytes(audio).map(|r| {
-                crate::stt::StreamingTranscriptionResult { text: r.text, is_final: true, is_interim: false }
+                crate::stt::StreamingTranscriptionResult {
+                    text: r.text,
+                    is_final: true,
+                    is_interim: false,
+                }
             });
             Box::pin(futures::stream::once(async move { r }))
         }
     }
 
     fn wall_ms() -> f64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+            * 1000.0
     }
 
     /// A/B of the vocabulary bias on the real Swift file recognizer:
@@ -134,16 +153,29 @@ mod tests {
     #[test]
     #[ignore = "needs BIAS_WAVS + Apple STT; run explicitly"]
     fn bias_ab() {
-        let Ok(wavs) = std::env::var("BIAS_WAVS") else { return };
+        let Ok(wavs) = std::env::var("BIAS_WAVS") else {
+            return;
+        };
         let with = crate::always::stt_apple::context_phrases();
-        let without: Vec<String> = with.iter().filter(|p| !p.contains("Iris")).cloned().collect();
-        assert!(with.iter().any(|p| p == "Iris"), "Iris missing from context_phrases");
+        let without: Vec<String> = with
+            .iter()
+            .filter(|p| !p.contains("Iris"))
+            .cloned()
+            .collect();
+        assert!(
+            with.iter().any(|p| p == "Iris"),
+            "Iris missing from context_phrases"
+        );
         for wav in wavs.split(',').filter(|s| !s.is_empty()) {
             let path = std::path::Path::new(wav);
             let a = crate::always::apple_stt::transcribe_wav(path, Some("en"), &without);
             let b = crate::always::apple_stt::transcribe_wav(path, Some("en"), &with);
-            let norm = b.as_deref().map(crate::always::det_correct::normalize_leading_wake);
-            eprintln!("bias_ab {wav}\n  without Iris: {a:?}\n  with Iris:    {b:?}\n  normalised:   {norm:?}");
+            let norm = b
+                .as_deref()
+                .map(crate::always::det_correct::normalize_leading_wake);
+            eprintln!(
+                "bias_ab {wav}\n  without Iris: {a:?}\n  with Iris:    {b:?}\n  normalised:   {norm:?}"
+            );
         }
     }
 
@@ -154,7 +186,11 @@ mod tests {
             eprintln!("REPLAY_OUT not set; skipping");
             return;
         };
-        let n_files = std::env::var("REPLAY_WAVS").unwrap_or_default().split(',').filter(|s| !s.is_empty()).count();
+        let n_files = std::env::var("REPLAY_WAVS")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .count();
         let _ = tracing_subscriber::fmt()
             .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
             .with_writer(std::io::stderr)
@@ -164,9 +200,11 @@ mod tests {
         cfg.transcriber_backend = crate::stt_dispatch::TranscriberBackendChoice::Apple;
         cfg.lang = std::env::var("REPLAY_LANG").unwrap_or_else(|_| "en".into());
         cfg.speaker_gate_enabled = std::env::var("REPLAY_GATE").as_deref() == Ok("1");
-        cfg.silence_secs = std::env::var("REPLAY_SILENCE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        cfg.silence_secs = std::env::var("REPLAY_SILENCE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.0);
         cfg.timeout_secs = 4;
-
 
         // Warm the preview helper exactly as the daemon does at boot.
         crate::always::preview_asr::prewarm(&cfg.lang, true);
@@ -197,17 +235,16 @@ mod tests {
         // Apple STT, for hosts where this test binary has no Speech
         // Recognition grant (TCC aborts it). No Apple live session runs
         // then, so every chunk / tail text comes from the file path.
-        let transcriber: Arc<dyn Transcriber> = if std::env::var("REPLAY_STT").as_deref()
-            == Ok("parakeet")
-        {
-            cfg.transcriber_backend = crate::stt_dispatch::TranscriberBackendChoice::Groq;
-            Arc::new(ParakeetFileTranscriber::spawn())
-        } else {
-            Arc::new(
-                crate::always::stt_apple::AppleTranscriber::new(Some(cfg.lang.clone()))
-                    .expect("Apple STT available"),
-            )
-        };
+        let transcriber: Arc<dyn Transcriber> =
+            if std::env::var("REPLAY_STT").as_deref() == Ok("parakeet") {
+                cfg.transcriber_backend = crate::stt_dispatch::TranscriberBackendChoice::Groq;
+                Arc::new(ParakeetFileTranscriber::spawn())
+            } else {
+                Arc::new(
+                    crate::always::stt_apple::AppleTranscriber::new(Some(cfg.lang.clone()))
+                        .expect("Apple STT available"),
+                )
+            };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut log = Logger;
         let mut results = Vec::new();
@@ -218,12 +255,16 @@ mod tests {
             let ended = wall_ms();
             let (kind, text, score) = match &r {
                 Ok(RecordResult::Speech { text, .. }) => ("speech", text.clone(), None),
-                Ok(RecordResult::DroppedSpeaker { score }) => ("dropped_speaker", String::new(), Some(*score)),
+                Ok(RecordResult::DroppedSpeaker { score }) => {
+                    ("dropped_speaker", String::new(), Some(*score))
+                }
                 Ok(RecordResult::Silence) => ("silence", String::new(), None),
                 Ok(RecordResult::Timeout) => ("timeout", String::new(), None),
                 Ok(RecordResult::DroppedLowEnergy { .. }) => ("low_energy", String::new(), None),
                 Ok(RecordResult::DroppedNoise { raw }) => ("noise", raw.clone(), None),
-                Ok(RecordResult::PreemptedByMicConflict { text }) => ("preempted", text.clone(), None),
+                Ok(RecordResult::PreemptedByMicConflict { text }) => {
+                    ("preempted", text.clone(), None)
+                }
                 Err(e) => ("error", format!("{e:#}"), None),
             };
             eprintln!("replay result: {kind} {text:?} score={score:?}");
@@ -242,7 +283,10 @@ mod tests {
             if kind == "dropped_speaker"
                 && let Some(stash) = crate::always::rejected::take_stashed()
             {
-                eprintln!("  (rejected audio stashed: {:.2}s)", stash.samples.len() as f64 / 16_000.0);
+                eprintln!(
+                    "  (rejected audio stashed: {:.2}s)",
+                    stash.samples.len() as f64 / 16_000.0
+                );
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -296,9 +340,13 @@ while True:
         ) -> Result<crate::stt::TranscriptionResult, crate::stt::SttError> {
             let secs = audio.len().saturating_sub(44) as f64 / 32_000.0;
             if self.speech_done.exists() {
-                self.failed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.failed
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 std::thread::sleep(self.fail_after);
-                eprintln!("mock_stt: FAIL (tail) secs={secs:.2} after {:?}", self.fail_after);
+                eprintln!(
+                    "mock_stt: FAIL (tail) secs={secs:.2} after {:?}",
+                    self.fail_after
+                );
                 return Err(crate::stt::SttError::Other(anyhow::anyhow!(
                     "Apple STT failed: speech recognition timed out"
                 )));
@@ -307,7 +355,10 @@ while True:
             let text = format!("committed chunk number {}", texts.len() + 1);
             eprintln!("mock_stt: ok secs={secs:.2} -> {text:?}");
             texts.push(text.clone());
-            Ok(crate::stt::TranscriptionResult { text, ..Default::default() })
+            Ok(crate::stt::TranscriptionResult {
+                text,
+                ..Default::default()
+            })
         }
 
         fn transcribe_streaming(
@@ -316,12 +367,19 @@ while True:
         ) -> std::pin::Pin<
             Box<
                 dyn futures::Stream<
-                        Item = Result<crate::stt::StreamingTranscriptionResult, crate::stt::SttError>,
+                        Item = Result<
+                            crate::stt::StreamingTranscriptionResult,
+                            crate::stt::SttError,
+                        >,
                     > + Send,
             >,
         > {
             let r = self.transcribe_from_bytes(audio).map(|r| {
-                crate::stt::StreamingTranscriptionResult { text: r.text, is_final: true, is_interim: false }
+                crate::stt::StreamingTranscriptionResult {
+                    text: r.text,
+                    is_final: true,
+                    is_interim: false,
+                }
             });
             Box::pin(futures::stream::once(async move { r }))
         }
@@ -366,10 +424,18 @@ while True:
         let capture = dir.join("capture.sh");
         std::fs::write(
             &capture,
-            format!("#!/bin/sh\nexec /usr/bin/python3 -I '{}' '{}'\n", pacer.display(), wav.display()),
+            format!(
+                "#!/bin/sh\nexec /usr/bin/python3 -I '{}' '{}'\n",
+                pacer.display(),
+                wav.display()
+            ),
         )
         .unwrap();
-        std::fs::set_permissions(&capture, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(
+            &capture,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
         // SAFETY: set before the recorder is spawned; this test is the only
         // reader and is run on its own (`--ignored`, by name).
         let rescue = std::env::var("LASTCHUNK_RESCUE").as_deref() == Ok("1");
@@ -394,7 +460,10 @@ while True:
             {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            assert!(crate::always::preview_asr::global().is_some_and(|a| a.is_ready()), "helper warm");
+            assert!(
+                crate::always::preview_asr::global().is_some_and(|a| a.is_ready()),
+                "helper warm"
+            );
         }
         cfg.lang = "en".into();
         cfg.speaker_gate_enabled = false;
@@ -411,7 +480,9 @@ while True:
         });
         let transcriber: Arc<dyn Transcriber> = mock.clone();
         let spill_dir = std::env::temp_dir().join("always-test-failed-chunks");
-        let spilled_before = std::fs::read_dir(&spill_dir).map(|d| d.count()).unwrap_or(0);
+        let spilled_before = std::fs::read_dir(&spill_dir)
+            .map(|d| d.count())
+            .unwrap_or(0);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut log = Logger;
@@ -435,14 +506,22 @@ while True:
         let committed = mock.ok_texts.lock().clone();
         let failed = mock.failed.load(std::sync::atomic::Ordering::SeqCst);
         eprintln!("committed={committed:?} failed_calls={failed}");
-        assert!(!committed.is_empty(), "the dictation must have been chunked");
-        assert!(failed >= 1, "the tail transcription must have been attempted and failed");
+        assert!(
+            !committed.is_empty(),
+            "the dictation must have been chunked"
+        );
+        assert!(
+            failed >= 1,
+            "the tail transcription must have been attempted and failed"
+        );
 
         let text = match outcome {
             Ok(RecordResult::Speech { text, .. }) => text,
             other => panic!(
                 "committed chunks {committed:?} were lost: {:?}",
-                other.map(|_| "non-speech result").map_err(|e| format!("{e:#}"))
+                other
+                    .map(|_| "non-speech result")
+                    .map_err(|e| format!("{e:#}"))
             ),
         };
         eprintln!("pasted: {text:?}");
@@ -453,16 +532,27 @@ while True:
         if rescue {
             // The tail is the end of the sentence ("…nasty crash on startup").
             let lower = text.to_lowercase();
-            assert!(!text.contains("[audio saved"), "Parakeet rescue not used: {text:?}");
-            assert!(lower.contains("crash") || lower.contains("startup"), "tail words missing: {text:?}");
+            assert!(
+                !text.contains("[audio saved"),
+                "Parakeet rescue not used: {text:?}"
+            );
+            assert!(
+                lower.contains("crash") || lower.contains("startup"),
+                "tail words missing: {text:?}"
+            );
         } else {
             assert!(
                 text.ends_with("]") && text.contains("[audio saved: chunk "),
                 "tail placeholder missing: {text:?}"
             );
         }
-        let spilled_after = std::fs::read_dir(&spill_dir).map(|d| d.count()).unwrap_or(0);
-        assert!(spilled_after > spilled_before, "tail audio was not saved for recovery");
+        let spilled_after = std::fs::read_dir(&spill_dir)
+            .map(|d| d.count())
+            .unwrap_or(0);
+        assert!(
+            spilled_after > spilled_before,
+            "tail audio was not saved for recovery"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -423,7 +423,10 @@ fn sanitize_corrected_text(input: &str, output: &str) -> Option<String> {
     }
 
     if drops_spoken_content(input, cleaned) {
-        tracing::warn!(stage = "grammar_correction", "rejected correction that drops spoken words");
+        tracing::warn!(
+            stage = "grammar_correction",
+            "rejected correction that drops spoken words"
+        );
         return None;
     }
 
@@ -809,8 +812,13 @@ mod apple_latency_harness {
         if !crate::always::apple_intelligence::check_availability() {
             return;
         }
-        let n: usize = std::env::var("ALWAYS_HARNESS_N").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
-        let lines = std::fs::read_to_string(dirs::home_dir().unwrap().join(".always/transcripts.jsonl")).unwrap();
+        let n: usize = std::env::var("ALWAYS_HARNESS_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(12);
+        let lines =
+            std::fs::read_to_string(dirs::home_dir().unwrap().join(".always/transcripts.jsonl"))
+                .unwrap();
         let texts: Vec<String> = lines
             .lines()
             .rev()
@@ -820,26 +828,42 @@ mod apple_latency_harness {
             .take(n)
             .collect();
         let full = crate::glossary::postprocess_system_prompt();
-        let compact = match (full.find("# Domain vocabulary"), full.find("# Domain vocabulary").and_then(|i| full[i + 2..].find("\n# ").map(|j| i + 2 + j + 1))) {
+        let compact = match (
+            full.find("# Domain vocabulary"),
+            full.find("# Domain vocabulary")
+                .and_then(|i| full[i + 2..].find("\n# ").map(|j| i + 2 + j + 1)),
+        ) {
             (Some(a), Some(b)) => format!("{}{}", &full[..a], &full[b..]),
             _ => full.clone(),
         };
-        println!("prompt chars full={} compact={}", full.chars().count(), compact.chars().count());
+        println!(
+            "prompt chars full={} compact={}",
+            full.chars().count(),
+            compact.chars().count()
+        );
         let pct = |v: &mut Vec<u128>, p: f64| {
             v.sort_unstable();
             v[((v.len() as f64 - 1.0) * p).round() as usize]
         };
-        let mut run = |prompt: &str, label: &str| {
+        let run = |prompt: &str, label: &str| {
             crate::always::apple_intelligence::prewarm(prompt);
             std::thread::sleep(std::time::Duration::from_millis(2000));
             let (mut a, mut b) = (Vec::new(), Vec::new());
             for t in &texts {
                 let req = crate::always::correction_request::build(&super::local_cleanup(t), true);
                 let s = std::time::Instant::now();
-                let _ = crate::always::apple_intelligence::process_with_mode(&full, &req.user_message, 2);
+                let _ = crate::always::apple_intelligence::process_with_mode(
+                    &full,
+                    &req.user_message,
+                    2,
+                );
                 a.push(s.elapsed().as_millis());
                 let s = std::time::Instant::now();
-                let _ = crate::always::apple_intelligence::process_with_mode(prompt, &req.user_message, 1);
+                let _ = crate::always::apple_intelligence::process_with_mode(
+                    prompt,
+                    &req.user_message,
+                    1,
+                );
                 b.push(s.elapsed().as_millis());
             }
             println!(
@@ -941,25 +965,48 @@ mod mode_tests {
 
     #[test]
     fn explicit_mode_wins_and_parses() {
-        assert_eq!(resolve_mode(Some("off"), Some(true), Some("apple")), PostprocessMode::Off);
-        assert_eq!(resolve_mode(Some("FAST"), None, None), PostprocessMode::Fast);
+        assert_eq!(
+            resolve_mode(Some("off"), Some(true), Some("apple")),
+            PostprocessMode::Off
+        );
+        assert_eq!(
+            resolve_mode(Some("FAST"), None, None),
+            PostprocessMode::Fast
+        );
         assert!("bogus".parse::<PostprocessMode>().is_err());
     }
 
     #[test]
     fn legacy_prefs_migrate_without_changing_kind() {
         // The user's prefs today: Smart Postprocess on + Apple provider.
-        assert_eq!(resolve_mode(None, Some(true), Some("apple")), PostprocessMode::Apple);
-        assert_eq!(resolve_mode(None, Some(true), Some("groq")), PostprocessMode::Groq);
+        assert_eq!(
+            resolve_mode(None, Some(true), Some("apple")),
+            PostprocessMode::Apple
+        );
+        assert_eq!(
+            resolve_mode(None, Some(true), Some("groq")),
+            PostprocessMode::Groq
+        );
         assert_eq!(resolve_mode(None, None, None), PostprocessMode::Groq);
-        assert_eq!(resolve_mode(None, Some(false), Some("apple")), PostprocessMode::Fast);
+        assert_eq!(
+            resolve_mode(None, Some(false), Some("apple")),
+            PostprocessMode::Fast
+        );
         // An unparseable stored mode falls back to the legacy mapping.
-        assert_eq!(resolve_mode(Some("x"), Some(false), None), PostprocessMode::Fast);
+        assert_eq!(
+            resolve_mode(Some("x"), Some(false), None),
+            PostprocessMode::Fast
+        );
     }
 
     #[test]
     fn mode_global_round_trips() {
-        for m in [PostprocessMode::Off, PostprocessMode::Apple, PostprocessMode::Groq, PostprocessMode::Fast] {
+        for m in [
+            PostprocessMode::Off,
+            PostprocessMode::Apple,
+            PostprocessMode::Groq,
+            PostprocessMode::Fast,
+        ] {
             set_mode(m);
             assert_eq!(mode(), m);
             assert_eq!(m.as_str().parse::<PostprocessMode>().unwrap(), m);
@@ -1051,7 +1098,11 @@ mod tests {
         let lossy = "Well, for anything I say, she should not ask at all, right? Generally \
                      asking this is not a very nice approach at all.";
         assert!(drops_spoken_content(input, lossy));
-        assert_eq!(sanitize_corrected_text(input, lossy), None, "falls back to raw");
+        assert_eq!(
+            sanitize_corrected_text(input, lossy),
+            None,
+            "falls back to raw"
+        );
     }
 
     #[test]

@@ -1,5 +1,7 @@
 //! always — Voice activation daemon with Groq STT.
-#![warn(clippy::print_stdout, clippy::print_stderr)]
+// Production code must log through `tracing`; tests may print measurements
+// (visible only with `--nocapture`).
+#![cfg_attr(not(test), warn(clippy::print_stdout, clippy::print_stderr))]
 // Many modules contain macOS-specific code that becomes dead code on
 // linux/windows builds; allow dead code and unused imports for non-macOS targets.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]

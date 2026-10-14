@@ -224,7 +224,11 @@ mod tests {
     #[test]
     fn mic_failing_probe_never_strands_a_pause() {
         let mut s = MicConflictState::default();
-        assert_eq!(s.on_poll(None), MicAction::None, "error while listening: no pause");
+        assert_eq!(
+            s.on_poll(None),
+            MicAction::None,
+            "error while listening: no pause"
+        );
         assert_eq!(s.on_poll(Some(true)), MicAction::Pause);
         let resumed = (0..RESUME_FREE_POLLS).any(|_| s.on_poll(None) == MicAction::Resume);
         assert!(resumed, "a probe that keeps failing must still resume");
@@ -234,7 +238,9 @@ mod tests {
     fn mic_tap_only_helper_never_pauses() {
         // End to end through the real classifier: an Iris process tap's
         // aggregate is not a microphone, so the poll reports "free".
-        use crate::always::mic_monitor::{InputDeviceFacts, TRANSPORT_AGGREGATE, process_counts_as_mic};
+        use crate::always::mic_monitor::{
+            InputDeviceFacts, TRANSPORT_AGGREGATE, process_counts_as_mic,
+        };
         let tap = InputDeviceFacts {
             transport: Some(TRANSPORT_AGGREGATE),
             input_streams: Some(1),

@@ -46,7 +46,9 @@ mod tests {
         });
         let prefix =
             std::env::var("VOICE_EDIT_REPLAY_PREFIX").unwrap_or_else(|_| "always.2026-10-1".into());
-        let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
         let mut files: Vec<_> = entries
             .flatten()
             .map(|e| e.path())
@@ -59,19 +61,31 @@ mod tests {
         files.sort();
         let mut rows = Vec::new();
         for f in files {
-            let Ok(body) = std::fs::read_to_string(&f) else { continue };
+            let Ok(body) = std::fs::read_to_string(&f) else {
+                continue;
+            };
             for line in body.lines() {
                 // Format conversion only: JSON log line → (ts, stage, text).
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                    continue;
+                };
                 let fields = &v["fields"];
                 let (kind, text) = match fields["stage"].as_str() {
                     Some("whisper_raw") => ("utterance", fields["transcript"].as_str()),
                     Some("final_result") => ("paste", fields["text"].as_str()),
                     _ => continue,
                 };
-                let (Some(text), Some(ts)) = (text, v["timestamp"].as_str()) else { continue };
-                let Some(ts_ms) = parse_ts_ms(ts) else { continue };
-                rows.push(Row { ts_ms, kind, text: text.to_string() });
+                let (Some(text), Some(ts)) = (text, v["timestamp"].as_str()) else {
+                    continue;
+                };
+                let Some(ts_ms) = parse_ts_ms(ts) else {
+                    continue;
+                };
+                rows.push(Row {
+                    ts_ms,
+                    kind,
+                    text: text.to_string(),
+                });
             }
         }
         rows.sort_by_key(|r| r.ts_ms);
@@ -93,7 +107,9 @@ mod tests {
             // What the daemon parses: post local cleanup + wake normalisation.
             let cleaned = crate::always::postprocess::local_cleanup(&r.text);
             let cleaned = crate::always::det_correct::normalize_leading_wake(&cleaned);
-            let Some((cmd, addressed)) = parse_addressed(&cleaned) else { continue };
+            let Some((cmd, addressed)) = parse_addressed(&cleaned) else {
+                continue;
+            };
             grammar_hits.push((r.text.clone(), cmd.name()));
             if addressed {
                 // Addressed to Iris by name: no paste-window gate.
@@ -110,7 +126,11 @@ mod tests {
                 user_input_since_paste: false,
             });
             if verdict.is_ok() {
-                claims.push((r.text.clone(), cmd.name(), last_paste.map(|p| p.text.clone())));
+                claims.push((
+                    r.text.clone(),
+                    cmd.name(),
+                    last_paste.map(|p| p.text.clone()),
+                ));
             }
         }
         eprintln!(
@@ -142,17 +162,35 @@ mod tests {
     fn load_transcripts() -> Vec<Row> {
         let path = std::env::var("VOICE_EDIT_REPLAY_TRANSCRIPTS").unwrap_or_else(|_| {
             dirs::home_dir()
-                .map(|h| h.join(".always/transcripts.jsonl").to_string_lossy().into_owned())
+                .map(|h| {
+                    h.join(".always/transcripts.jsonl")
+                        .to_string_lossy()
+                        .into_owned()
+                })
                 .unwrap_or_default()
         });
-        let Ok(body) = std::fs::read_to_string(path) else { return Vec::new() };
+        let Ok(body) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
         let mut rows = Vec::new();
         for line in body.lines() {
             // Format conversion only: JSON line → (ts, text).
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-            let (Some(text), Some(ts)) = (v["text"].as_str(), v["ts"].as_i64()) else { continue };
-            rows.push(Row { ts_ms: ts, kind: "utterance", text: text.to_string() });
-            rows.push(Row { ts_ms: ts, kind: "paste", text: text.to_string() });
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let (Some(text), Some(ts)) = (v["text"].as_str(), v["ts"].as_i64()) else {
+                continue;
+            };
+            rows.push(Row {
+                ts_ms: ts,
+                kind: "utterance",
+                text: text.to_string(),
+            });
+            rows.push(Row {
+                ts_ms: ts,
+                kind: "paste",
+                text: text.to_string(),
+            });
         }
         rows.sort_by_key(|r| r.ts_ms);
         rows

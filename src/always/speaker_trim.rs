@@ -73,7 +73,9 @@ pub struct WindowVerdict {
 impl WindowVerdict {
     pub fn is_foreign(&self) -> bool {
         self.cohort.is_some_and(|c| {
-            self.score < FOREIGN_MAX_SCORE && c >= FOREIGN_MIN_COHORT && c - self.score >= FOREIGN_MARGIN
+            self.score < FOREIGN_MAX_SCORE
+                && c >= FOREIGN_MIN_COHORT
+                && c - self.score >= FOREIGN_MARGIN
         })
     }
 }
@@ -123,7 +125,11 @@ fn judged(windows: &[WindowVerdict], len: usize) -> Vec<&WindowVerdict> {
 /// Foreign windows after the last non-foreign one (all of them when
 /// none is non-foreign).
 pub fn trailing_foreign(windows: &[WindowVerdict], len: usize) -> usize {
-    judged(windows, len).iter().rev().take_while(|w| w.is_foreign()).count()
+    judged(windows, len)
+        .iter()
+        .rev()
+        .take_while(|w| w.is_foreign())
+        .count()
 }
 
 /// Plan the edge trim of a `len`-sample buffer from its scored windows.
@@ -330,11 +336,21 @@ mod tests {
     const STEP: usize = 8_000;
 
     fn win(end: usize, score: f32, cohort: Option<f32>) -> WindowVerdict {
-        WindowVerdict { start: end - W, end, score, cohort }
+        WindowVerdict {
+            start: end - W,
+            end,
+            score,
+            cohort,
+        }
     }
     /// Windows every 0.5 s; `kind(i)` → (score, cohort).
     fn windows(n: usize, kind: impl Fn(usize) -> (f32, Option<f32>)) -> Vec<WindowVerdict> {
-        (0..n).map(|i| { let (s, c) = kind(i); win(W + i * STEP, s, c) }).collect()
+        (0..n)
+            .map(|i| {
+                let (s, c) = kind(i);
+                win(W + i * STEP, s, c)
+            })
+            .collect()
     }
     const REEL: (f32, Option<f32>) = (0.08, Some(0.72));
     const USER: (f32, Option<f32>) = (0.55, Some(0.05));
@@ -343,7 +359,10 @@ mod tests {
     fn foreign_needs_low_score_high_cohort_and_margin() {
         assert!(win(W, 0.08, Some(0.72)).is_foreign());
         assert!(!win(W, 0.08, None).is_foreign(), "no cohort: never foreign");
-        assert!(!win(W, 0.31, Some(0.95)).is_foreign(), "user-ish score is kept");
+        assert!(
+            !win(W, 0.31, Some(0.95)).is_foreign(),
+            "user-ish score is kept"
+        );
         assert!(!win(W, 0.10, Some(0.59)).is_foreign(), "cohort too weak");
         assert!(!win(W, 0.29, Some(0.58)).is_foreign(), "margin too small");
         // Mostly-user window that scored low against the profile (seen
@@ -364,14 +383,23 @@ mod tests {
         // Every window that is not foreign is kept whole.
         let keep = p.keep(len);
         for w in ws.iter().filter(|w| !w.is_foreign()) {
-            assert!(keep.start <= w.start && w.end <= keep.end, "{w:?} cut by {keep:?}");
+            assert!(
+                keep.start <= w.start && w.end <= keep.end,
+                "{w:?} cut by {keep:?}"
+            );
         }
     }
 
     #[test]
     fn nothing_is_cut_without_a_cohort() {
         // The same audio scored with no recent impostor on record.
-        let ws = windows(20, |i| if (6..14).contains(&i) { USER } else { (0.08, None) });
+        let ws = windows(20, |i| {
+            if (6..14).contains(&i) {
+                USER
+            } else {
+                (0.08, None)
+            }
+        });
         assert!(plan(&ws, ws.last().unwrap().end, false).is_empty());
     }
 
@@ -441,7 +469,12 @@ mod tests {
         let mut ws = windows(10, |i| if (4..10).contains(&i) { USER } else { REEL });
         // A short early window that looks foreign does not count, and a
         // window ending past the buffer (truncated by a tail cut) neither.
-        ws.push(WindowVerdict { start: 0, end: 8_000, score: 0.0, cohort: Some(0.9) });
+        ws.push(WindowVerdict {
+            start: 0,
+            end: 8_000,
+            score: 0.0,
+            cohort: Some(0.9),
+        });
         let len = ws[9].end;
         ws.push(win(len + 8_000, 0.0, Some(0.9)));
         let p = plan(&ws, len, false);
@@ -452,7 +485,10 @@ mod tests {
     #[test]
     fn apply_removes_exactly_the_planned_edges() {
         let mut buf: Vec<i16> = (0..100).collect();
-        let p = TrimPlan { lead: 10, trail_from: Some(90) };
+        let p = TrimPlan {
+            lead: 10,
+            trail_from: Some(90),
+        };
         assert_eq!(p.applied(&buf), (10..90).collect::<Vec<i16>>());
         assert_eq!(p.apply(&mut buf), (10, 10));
         assert_eq!(buf, (10..90).collect::<Vec<i16>>());
@@ -467,7 +503,10 @@ mod tests {
         t.push(0, win(W, 0.1, Some(0.8)));
         t.push(0, win(W + STEP, 0.1, Some(0.8)));
         assert_eq!(t.len(), 2);
-        assert!(t.plan(96_000, 50_000).is_empty(), "stale generation plans nothing");
+        assert!(
+            t.plan(96_000, 50_000).is_empty(),
+            "stale generation plans nothing"
+        );
         t.drain_front(STEP);
         assert_eq!(t.len(), 1);
         assert_eq!(t.windows[0].start, W + STEP - W - STEP);
@@ -477,7 +516,9 @@ mod tests {
     }
 
     fn unit(seed: f32) -> Vec<f32> {
-        let mut v: Vec<f32> = (0..EMBEDDING_DIM).map(|i| ((i as f32) * seed).sin()).collect();
+        let mut v: Vec<f32> = (0..EMBEDDING_DIM)
+            .map(|i| ((i as f32) * seed).sin())
+            .collect();
         let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         v.iter_mut().for_each(|x| *x /= n);
         v
@@ -488,14 +529,29 @@ mod tests {
         let mut c = VecDeque::new();
         let t0 = Instant::now();
         let reel = unit(0.37);
-        assert!(!admit(&mut c, t0, reel.clone(), 0.45, &[]), "borderline rejects stay out");
-        assert!(!admit(&mut c, t0, vec![0.0; 3], 0.1, &[]), "wrong dimension");
+        assert!(
+            !admit(&mut c, t0, reel.clone(), 0.45, &[]),
+            "borderline rejects stay out"
+        );
+        assert!(
+            !admit(&mut c, t0, vec![0.0; 3], 0.1, &[]),
+            "wrong dimension"
+        );
         // Poisoning guard: a 'reject' that matches the user's own recent
         // audio is never an impostor.
-        assert!(!admit(&mut c, t0, reel.clone(), 0.1, &[reel.clone()]));
+        assert!(!admit(
+            &mut c,
+            t0,
+            reel.clone(),
+            0.1,
+            std::slice::from_ref(&reel)
+        ));
         assert!(admit(&mut c, t0, reel.clone(), 0.1, &[unit(1.91)]));
         assert!(similarity(&mut c, t0, &reel).unwrap() > 0.99);
-        assert_eq!(similarity(&mut c, t0 + COHORT_TTL + Duration::from_secs(1), &reel), None);
+        assert_eq!(
+            similarity(&mut c, t0 + COHORT_TTL + Duration::from_secs(1), &reel),
+            None
+        );
         for i in 0..(COHORT_MAX + 3) {
             admit(&mut c, t0, unit(0.1 + i as f32), 0.1, &[]);
         }
@@ -507,7 +563,13 @@ mod tests {
         // 2026-10-14 14:57:20Z shape: 0.559 pass while a reel was being rejected.
         assert!(cohort_vetoes_pass(0.559, Some(0.70), 0.5));
         assert!(!cohort_vetoes_pass(0.559, None, 0.5), "no cohort: no veto");
-        assert!(!cohort_vetoes_pass(0.559, Some(0.45), 0.5), "user-like window passes");
-        assert!(!cohort_vetoes_pass(0.65, Some(0.80), 0.5), "clear pass is never vetoed");
+        assert!(
+            !cohort_vetoes_pass(0.559, Some(0.45), 0.5),
+            "user-like window passes"
+        );
+        assert!(
+            !cohort_vetoes_pass(0.65, Some(0.80), 0.5),
+            "clear pass is never vetoed"
+        );
     }
 }

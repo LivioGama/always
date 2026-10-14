@@ -757,7 +757,9 @@ mod tests {
     fn no_evidence_means_no_change() {
         // Groq / local backends report no evidence: never judged here.
         for text in ["And a baggy?", "Rings of Nanjani, Baina.", "No"] {
-            assert!(foreign_speech(&heard(text, None, LiveStreamOutcome::NotRun, None), true).is_none());
+            assert!(
+                foreign_speech(&heard(text, None, LiveStreamOutcome::NotRun, None), true).is_none()
+            );
         }
         // Failed / timed-out live sessions say nothing about the audio.
         for outcome in [LiveStreamOutcome::Failed, LiveStreamOutcome::Unknown] {
@@ -765,41 +767,78 @@ mod tests {
         }
         // Live session heard words, no confidence: accept.
         assert!(
-            foreign_speech(&heard("Whatever", None, LiveStreamOutcome::Heard, None), true).is_none()
+            foreign_speech(
+                &heard("Whatever", None, LiveStreamOutcome::Heard, None),
+                true
+            )
+            .is_none()
         );
         // Empty text is the empty-guard's job, not this layer's.
-        assert!(foreign_speech(&heard("  ", Some(0.0), LiveStreamOutcome::NoWords, None), true).is_none());
+        assert!(
+            foreign_speech(
+                &heard("  ", Some(0.0), LiveStreamOutcome::NoWords, None),
+                true
+            )
+            .is_none()
+        );
     }
 
     /// Mean SpeechTranscriber (en_GB) word confidence MEASURED 2026-10-14
     /// on real audio: the user's own saved dictation clips
     /// (~/.always/failed-chunks) and synthetic `say` clips. Text shortened.
     const MEASURED_ENGLISH: &[(&str, f32)] = &[
-        ("Can you go through all the failing tests and test out? …", 0.957),
+        (
+            "Can you go through all the failing tests and test out? …",
+            0.957,
+        ),
         ("without you touching them, commit only those, …", 0.867),
         ("Patience along with it as you go.", 0.765),
-        ("Uh, uh, and all that at 1st and after that only, uh, we uh, …", 0.596),
-        ("Will the everyone not on? I want to see which is accurate.", 0.609),
+        (
+            "Uh, uh, and all that at 1st and after that only, uh, we uh, …",
+            0.596,
+        ),
+        (
+            "Will the everyone not on? I want to see which is accurate.",
+            0.609,
+        ),
         ("but we cannot follow without bailing. No, I mean, …", 0.592),
         ("Okay, I am speaking now. Can you hear me, Iris?", 0.666),
-        ("Uh, it does not look like uh, they are streaming in.", 0.730),
+        (
+            "Uh, it does not look like uh, they are streaming in.",
+            0.730,
+        ),
         ("Okay, commit push all those changes then.", 0.875),
         ("Please, I need good code.", 0.875),
         ("You cannot do anything otherwise.", 0.862),
         ("Oh, it's not that slow. It's pretty fast actually.", 0.781),
-        ("Stops always transcribing other people videos in calls.", 0.892),
+        (
+            "Stops always transcribing other people videos in calls.",
+            0.892,
+        ),
         // synthetic (macOS say, en_GB / en_IN voices)
         ("Yes.", 0.860),
         ("Whatever.", 0.886),
         ("Commit and push it.", 0.953),
-        ("Why is this preview not showing in WhatsApp when I'm speaking?", 0.911),
+        (
+            "Why is this preview not showing in WhatsApp when I'm speaking?",
+            0.911,
+        ),
     ];
     const MEASURED_FOREIGN: &[(&str, f32)] = &[
         // the user's own saved Nepali speech
-        ("Whisperway, Ma, Nepali, Ma, Boli, Rathu, Tunde, Buzna, …", 0.095),
+        (
+            "Whisperway, Ma, Nepali, Ma, Boli, Rathu, Tunde, Buzna, …",
+            0.095,
+        ),
         ("Chaku, the Malay, Mangali.", 0.198),
-        ("Go to Ludonia, or 10, I need below. See, see, see, …", 0.209),
-        ("So they go on there, they pick up any underwear, so...", 0.269),
+        (
+            "Go to Ludonia, or 10, I need below. See, see, see, …",
+            0.209,
+        ),
+        (
+            "So they go on there, they pick up any underwear, so...",
+            0.269,
+        ),
         // synthetic Nepali / Hindi (macOS say -v Lekha)
         ("Amma, kana, kanugyu, makali, hilo, ai, chuhe.", 0.152),
         ("Hajul Thik Chak, Bholi Bihan phone got to...", 0.341),

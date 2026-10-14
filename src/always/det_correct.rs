@@ -67,15 +67,16 @@ fn keep_filler_punctuation(text: &str) -> String {
         let core = w.trim_end_matches(['.', '?', '!', ',']);
         let tail = &w[core.len()..];
         let is_filler = FILLERS.contains(&core.to_ascii_lowercase().as_str());
-        if is_filler && tail.contains(['.', '?', '!']) {
-            if let Some(prev) = out.last_mut() {
-                let prev_core_len = prev.trim_end_matches([',', ';', ':']).len();
-                prev.truncate(prev_core_len);
-                if !prev.ends_with(['.', '?', '!']) {
-                    prev.push_str(tail.trim_start_matches(','));
-                }
-                continue;
+        if is_filler
+            && tail.contains(['.', '?', '!'])
+            && let Some(prev) = out.last_mut()
+        {
+            let prev_core_len = prev.trim_end_matches([',', ';', ':']).len();
+            prev.truncate(prev_core_len);
+            if !prev.ends_with(['.', '?', '!']) {
+                prev.push_str(tail.trim_start_matches(','));
             }
+            continue;
         }
         out.push(w.to_string());
     }
@@ -107,7 +108,10 @@ fn fingerprint(s: &str) -> ([u8; 37], usize) {
 /// terms) Levenshtein + Soundex work with a 37-bucket count per window
 /// (the matcher costs ~3 ms per utterance in the debug build the daemon
 /// ships as; this check ~50 µs).
-fn glossary_may_match(text: &str, entries: &[crate::always::text_match::GlossaryMatchEntry]) -> bool {
+fn glossary_may_match(
+    text: &str,
+    entries: &[crate::always::text_match::GlossaryMatchEntry],
+) -> bool {
     if entries.is_empty() {
         return false;
     }
@@ -115,14 +119,17 @@ fn glossary_may_match(text: &str, entries: &[crate::always::text_match::Glossary
         .iter()
         .flat_map(|e| {
             e.mistranscriptions.iter().map(|m| {
-                m.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect::<String>()
+                m.to_lowercase()
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect::<String>()
             })
         })
         .filter(|m| !m.is_empty())
         .collect();
-    let (exact_min, exact_max) = exact
-        .iter()
-        .fold((usize::MAX, 0), |(lo, hi), m| (lo.min(m.len()), hi.max(m.len())));
+    let (exact_min, exact_max) = exact.iter().fold((usize::MAX, 0), |(lo, hi), m| {
+        (lo.min(m.len()), hi.max(m.len()))
+    });
     struct Term {
         /// Non-zero buckets of the fingerprint: (bucket, count).
         nz: Vec<(usize, u8)>,
@@ -137,7 +144,13 @@ fn glossary_may_match(text: &str, entries: &[crate::always::text_match::Glossary
             let nospace = e.term.to_lowercase().replace(' ', "");
             let (fp, chars) = fingerprint(&nospace);
             let nz = (0..37).filter(|&b| fp[b] > 0).map(|b| (b, fp[b])).collect();
-            Term { nz, chars, bytes: nospace.len(), soundex: crate::always::text_match::soundex(&nospace), nospace }
+            Term {
+                nz,
+                chars,
+                bytes: nospace.len(),
+                soundex: crate::always::text_match::soundex(&nospace),
+                nospace,
+            }
         })
         .collect();
     struct Word {
@@ -150,7 +163,9 @@ fn glossary_may_match(text: &str, entries: &[crate::always::text_match::Glossary
     let words: Vec<Word> = text
         .split_whitespace()
         .map(|w| {
-            let core = w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+            let core = w
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase();
             let buckets: Vec<u8> = core.chars().map(bucket).collect();
             let chars = buckets.len();
             let alnum = if core.chars().all(char::is_alphanumeric) {
@@ -158,7 +173,12 @@ fn glossary_may_match(text: &str, entries: &[crate::always::text_match::Glossary
             } else {
                 core.chars().filter(|c| c.is_alphanumeric()).collect()
             };
-            Word { core, alnum, buckets, chars }
+            Word {
+                core,
+                alnum,
+                buckets,
+                chars,
+            }
         })
         .collect();
     let mut buf = String::with_capacity(64);
@@ -175,7 +195,12 @@ fn glossary_may_match(text: &str, entries: &[crate::always::text_match::Glossary
             chars += w.chars;
             bytes += w.core.len();
             alnum_len += w.alnum.len();
-            let ngram = || words[i..=i + n].iter().map(|w| w.core.as_str()).collect::<String>();
+            let ngram = || {
+                words[i..=i + n]
+                    .iter()
+                    .map(|w| w.core.as_str())
+                    .collect::<String>()
+            };
             if !exact.is_empty() && (exact_min..=exact_max).contains(&alnum_len) {
                 buf.clear();
                 for w in &words[i..=i + n] {
@@ -320,7 +345,9 @@ fn fix_recognizer_artifacts(text: &str) -> String {
         }
         // Clause-initial "and," / "but," / "or," (first word, or right
         // after a sentence terminator) followed by more words.
-        let clause_start = out.last().is_none_or(|p: &String| p.ends_with(['.', '?', '!']));
+        let clause_start = out
+            .last()
+            .is_none_or(|p: &String| p.ends_with(['.', '?', '!']));
         if i + 1 < n && clause_start {
             let lw = w.to_ascii_lowercase();
             if matches!(lw.as_str(), "and," | "but," | "or,") {
@@ -351,7 +378,10 @@ fn is_lower_i(word: &str) -> bool {
     let core: String = word
         .trim_end_matches(|c: char| !c.is_alphanumeric())
         .to_string();
-    matches!(core.as_str(), "i" | "i'm" | "i've" | "i'll" | "i'd" | "i’m" | "i’ve" | "i’ll" | "i’d")
+    matches!(
+        core.as_str(),
+        "i" | "i'm" | "i've" | "i'll" | "i'd" | "i’m" | "i’ve" | "i’ll" | "i’d"
+    )
 }
 
 /// Common lowercase abbreviations whose period does not end a sentence.
@@ -379,7 +409,13 @@ fn capitalize_first(word: &str) -> String {
 fn strip_leading_junk(text: &str) -> &str {
     let start = text
         .char_indices()
-        .find(|&(_, c)| c.is_alphanumeric() || matches!(c, '"' | '\'' | '(' | '[' | '`' | '$' | '#' | '@' | '+' | '~' | '/' | '“' | '‘'))
+        .find(|&(_, c)| {
+            c.is_alphanumeric()
+                || matches!(
+                    c,
+                    '"' | '\'' | '(' | '[' | '`' | '$' | '#' | '@' | '+' | '~' | '/' | '“' | '‘'
+                )
+        })
         .map(|(i, _)| i)
         .unwrap_or(text.len());
     text[start..].trim_start()
@@ -402,9 +438,9 @@ const WAKE_VARIANTS: &[&str] = &[
 const WAKE_OPENERS: &[&str] = &[
     "what", "what's", "whats", "who", "who's", "where", "when", "why", "how", "which", "open",
     "close", "quit", "pause", "play", "resume", "stop", "skip", "next", "previous", "mute",
-    "unmute", "turn", "set", "make", "take", "start", "show", "tell", "read", "find", "search", "go",
-    "switch", "launch", "remind", "call", "send", "reply", "give", "put", "move", "scroll", "click",
-    "press", "type", "check", "look", "please",
+    "unmute", "turn", "set", "make", "take", "start", "show", "tell", "read", "find", "search",
+    "go", "switch", "launch", "remind", "call", "send", "reply", "give", "put", "move", "scroll",
+    "click", "press", "type", "check", "look", "please",
 ];
 
 /// Auxiliaries open a request only as a question: followed by a subject
@@ -461,7 +497,9 @@ pub fn normalize_leading_wake(text: &str) -> String {
     {
         at = 1;
     }
-    let Some(wake) = tok(at) else { return text.to_string() };
+    let Some(wake) = tok(at) else {
+        return text.to_string();
+    };
     if !is_variant(wake) {
         return text.to_string();
     }
@@ -470,7 +508,9 @@ pub fn normalize_leading_wake(text: &str) -> String {
     if wake.ends_with(['.', '!', '?']) && !wake_key(wake).contains('.') {
         return text.to_string();
     }
-    let Some(next) = tok(at + 1) else { return text.to_string() };
+    let Some(next) = tok(at + 1) else {
+        return text.to_string();
+    };
     let next_key = wake_key(next);
     let opens = WAKE_OPENERS.contains(&next_key.as_str())
         || (WAKE_AUXILIARIES.contains(&next_key.as_str())
@@ -543,15 +583,24 @@ mod tests {
 
     #[test]
     fn fixes_spacing_and_doubled_commas() {
-        assert_eq!(normalize("yes , I think so ."), "Yes, I think so.".replacen('Y', "y", 1));
+        assert_eq!(
+            normalize("yes , I think so ."),
+            "Yes, I think so.".replacen('Y', "y", 1)
+        );
         assert_eq!(normalize("one,, two"), "one, two");
         assert_eq!(normalize("a  b"), "a b");
     }
 
     #[test]
     fn capitalises_i_and_sentence_starts_but_never_the_first_word() {
-        assert_eq!(normalize("and i think so. then i'm done"), "and I think so. Then I'm done");
-        assert_eq!(normalize("ok. is it fine? yes! sure"), "ok. Is it fine? Yes! Sure");
+        assert_eq!(
+            normalize("and i think so. then i'm done"),
+            "and I think so. Then I'm done"
+        );
+        assert_eq!(
+            normalize("ok. is it fine? yes! sure"),
+            "ok. Is it fine? Yes! Sure"
+        );
         assert_eq!(normalize("version 3.5. next"), "version 3.5. next");
         assert_eq!(normalize("use e.g. this"), "use e.g. this");
         assert_eq!(normalize("done. ./run.sh now"), "done. ./run.sh now");
@@ -559,13 +608,28 @@ mod tests {
 
     #[test]
     fn removes_measured_recognizer_artifacts() {
-        assert_eq!(normalize("you.. Can you turn the lights off, please?"), "Can you turn the lights off, please?");
-        assert_eq!(normalize("you... Orion browser is fast"), "Orion browser is fast");
+        assert_eq!(
+            normalize("you.. Can you turn the lights off, please?"),
+            "Can you turn the lights off, please?"
+        );
+        assert_eq!(
+            normalize("you... Orion browser is fast"),
+            "Orion browser is fast"
+        );
         assert_eq!(normalize("how.. hard would it be"), "how hard would it be");
-        assert_eq!(normalize("and... going for dinner now"), "and going for dinner now");
+        assert_eq!(
+            normalize("and... going for dinner now"),
+            "and going for dinner now"
+        );
         assert_eq!(normalize("You go to..."), "You go to...");
-        assert_eq!(normalize("in... Actually, I'll log in"), "in... Actually, I'll log in");
-        assert_eq!(normalize("like that or, orang data"), "like that or, orang data");
+        assert_eq!(
+            normalize("in... Actually, I'll log in"),
+            "in... Actually, I'll log in"
+        );
+        assert_eq!(
+            normalize("like that or, orang data"),
+            "like that or, orang data"
+        );
         assert_eq!(normalize("what it?'s called"), "what it's called");
         assert_eq!(normalize("and, later, still not"), "and later, still not");
         assert_eq!(normalize("in terms of, , GPU"), "in terms of, GPU");
@@ -579,9 +643,18 @@ mod tests {
     fn prefilter_never_skips_a_real_glossary_hit() {
         use crate::always::text_match::GlossaryMatchEntry;
         let entries = vec![
-            GlossaryMatchEntry { term: "Claude".into(), mistranscriptions: vec!["cloud".into()] },
-            GlossaryMatchEntry { term: "winnow".into(), mistranscriptions: vec!["Vino".into()] },
-            GlossaryMatchEntry { term: "Kubernetes".into(), mistranscriptions: vec!["cuber netties".into()] },
+            GlossaryMatchEntry {
+                term: "Claude".into(),
+                mistranscriptions: vec!["cloud".into()],
+            },
+            GlossaryMatchEntry {
+                term: "winnow".into(),
+                mistranscriptions: vec!["Vino".into()],
+            },
+            GlossaryMatchEntry {
+                term: "Kubernetes".into(),
+                mistranscriptions: vec!["cuber netties".into()],
+            },
         ];
         let samples = [
             "ask cloud to fix it",
@@ -597,8 +670,14 @@ mod tests {
             let full = apply_glossary_tiered(t, &entries, DEFAULT_THRESHOLD, FuzzyMode::NoLlm);
             let skipped = !glossary_may_match(t, &entries);
             if skipped {
-                assert_eq!(full.0, t, "prefilter skipped a text the matcher changes: {t}");
-                assert!(full.1.is_empty(), "prefilter skipped a text with substitutions: {t}");
+                assert_eq!(
+                    full.0, t,
+                    "prefilter skipped a text the matcher changes: {t}"
+                );
+                assert!(
+                    full.1.is_empty(),
+                    "prefilter skipped a text with substitutions: {t}"
+                );
             }
         }
         assert!(!glossary_may_match("nothing related here at all", &entries));
@@ -620,7 +699,9 @@ mod tests {
     #[test]
     #[ignore]
     fn det_correct_eval() {
-        let Ok(path) = std::env::var("ALWAYS_DET_PAIRS") else { return };
+        let Ok(path) = std::env::var("ALWAYS_DET_PAIRS") else {
+            return;
+        };
         let data = std::fs::read_to_string(path).unwrap();
         let (mut same_llm, mut det_changed, mut llm_changed, mut n) = (0, 0, 0, 0);
         let mut times: Vec<u128> = Vec::new();
@@ -656,7 +737,10 @@ mod tests {
         // average 40-180 (other agents' builds), so wall-clock p99 here
         // measures the scheduler, not this code. Wall p99 is printed too.
         fn cpu_us() -> u128 {
-            let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            let mut ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
             unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
             ts.tv_sec as u128 * 1_000_000 + ts.tv_nsec as u128 / 1_000
         }
@@ -672,7 +756,11 @@ mod tests {
             })
             .collect();
         wall.sort_unstable();
-        println!("det_correct wall p50={}us p99={}us", wall[wall.len() / 2], wall[wall.len() * 99 / 100]);
+        println!(
+            "det_correct wall p50={}us p99={}us",
+            wall[wall.len() / 2],
+            wall[wall.len() * 99 / 100]
+        );
         us.sort_unstable();
         // Stage split (diagnostics).
         let stage = |f: &dyn Fn()| {
@@ -689,10 +777,23 @@ mod tests {
         let ents = crate::glossary::glossary_match_entries();
         println!(
             "stages p50/p99 us: local_cleanup={:?} entries={:?} glossary={:?} normalize={:?}",
-            stage(&|| { std::hint::black_box(crate::always::postprocess::local_cleanup(sample)); }),
-            stage(&|| { std::hint::black_box(crate::glossary::glossary_match_entries()); }),
-            stage(&|| { std::hint::black_box(apply_glossary_tiered(sample, &ents, DEFAULT_THRESHOLD, FuzzyMode::NoLlm)); }),
-            stage(&|| { std::hint::black_box(normalize(sample)); }),
+            stage(&|| {
+                std::hint::black_box(crate::always::postprocess::local_cleanup(sample));
+            }),
+            stage(&|| {
+                std::hint::black_box(crate::glossary::glossary_match_entries());
+            }),
+            stage(&|| {
+                std::hint::black_box(apply_glossary_tiered(
+                    sample,
+                    &ents,
+                    DEFAULT_THRESHOLD,
+                    FuzzyMode::NoLlm,
+                ));
+            }),
+            stage(&|| {
+                std::hint::black_box(normalize(sample));
+            }),
         );
         let filtered: Vec<_> = ents
             .iter()
@@ -701,7 +802,9 @@ mod tests {
             .collect();
         println!(
             "prefilter={:?} may_match={} terms={:?} min_total={}",
-            stage(&|| { std::hint::black_box(glossary_may_match(sample, &filtered)); }),
+            stage(&|| {
+                std::hint::black_box(glossary_may_match(sample, &filtered));
+            }),
             glossary_may_match(sample, &filtered),
             filtered.iter().map(|e| e.term.as_str()).collect::<Vec<_>>(),
             us[0]

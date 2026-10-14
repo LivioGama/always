@@ -932,7 +932,11 @@ impl EventBroadcaster {
 
     /// Live capture level tick (see `DaemonEvent::VoiceLevel`).
     pub fn voice_level(&self, energy: f64, voiced: bool, bands: [f32; 5]) {
-        let energy_db = if energy > 1e-5 { 20.0 * energy.log10() } else { -100.0 };
+        let energy_db = if energy > 1e-5 {
+            20.0 * energy.log10()
+        } else {
+            -100.0
+        };
         self.send(DaemonEvent::VoiceLevel {
             energy,
             energy_db: (energy_db * 10.0).round() / 10.0,
@@ -1268,9 +1272,13 @@ mod tests {
         let r = DaemonCommand::from_json_line(r#"{"type":"ReleaseHeld","data":{"id":"7"}}"#)
             .expect("release must parse");
         assert!(matches!(r, DaemonCommand::ReleaseHeld { ref id, text: None } if id == "7"));
-        let d = DaemonCommand::from_json_line(r#"{"type":"DiscardHeld","data":{"text":"open terminal"}}"#)
-            .expect("discard by text must parse");
-        assert!(matches!(d, DaemonCommand::DiscardHeld { ref id, text: Some(ref t) } if id.is_empty() && t == "open terminal"));
+        let d = DaemonCommand::from_json_line(
+            r#"{"type":"DiscardHeld","data":{"text":"open terminal"}}"#,
+        )
+        .expect("discard by text must parse");
+        assert!(
+            matches!(d, DaemonCommand::DiscardHeld { ref id, text: Some(ref t) } if id.is_empty() && t == "open terminal")
+        );
     }
 
     #[test]
@@ -1302,16 +1310,27 @@ mod tests {
             serde_json::to_string(&ev).unwrap(),
             r#"{"type":"TranscriptRejected","data":{"id":"2","text":"x","score":"0.120","reason":"foreign_speech","prompt":"Didn't sound like English — paste anyway?"}}"#
         );
-        assert_eq!(RejectReason::Speaker.prompt(), "Not sure that was you — paste anyway?");
-        let c = DaemonCommand::from_json_line(r#"{"type":"PasteRejected","data":{"id":"2"}}"#).unwrap();
+        assert_eq!(
+            RejectReason::Speaker.prompt(),
+            "Not sure that was you — paste anyway?"
+        );
+        let c =
+            DaemonCommand::from_json_line(r#"{"type":"PasteRejected","data":{"id":"2"}}"#).unwrap();
         assert!(matches!(c, DaemonCommand::PasteRejected { ref id } if id == "2"));
     }
 
     #[test]
     fn transcript_held_serializes_as_strings() {
-        let ev = DaemonEvent::TranscriptHeld { id: "3".into(), text: "hi".into(), at_us: "1".into() };
+        let ev = DaemonEvent::TranscriptHeld {
+            id: "3".into(),
+            text: "hi".into(),
+            at_us: "1".into(),
+        };
         let json = serde_json::to_string(&ev).unwrap();
-        assert_eq!(json, r#"{"type":"TranscriptHeld","data":{"id":"3","text":"hi","at_us":"1"}}"#);
+        assert_eq!(
+            json,
+            r#"{"type":"TranscriptHeld","data":{"id":"3","text":"hi","at_us":"1"}}"#
+        );
     }
 
     fn drain(rx: &mut broadcast::Receiver<DaemonEvent>) -> Vec<DaemonEvent> {

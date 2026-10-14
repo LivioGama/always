@@ -104,7 +104,11 @@ fn load() -> Option<Vec<Utterance>> {
                             label: label(&ts),
                             ts,
                             text,
-                            live: if chunked { LiveStreamOutcome::NotRun } else { live },
+                            live: if chunked {
+                                LiveStreamOutcome::NotRun
+                            } else {
+                                live
+                            },
                         });
                     }
                     live = LiveStreamOutcome::NotRun;
@@ -156,10 +160,24 @@ fn replay_real_logs_through_foreign_speech_gate() {
         rej(Label::Misfire),
         misfire_live_empty
     );
-    eprintln!("suspects  rejected {}/{}", rej(Label::Suspect), count(Label::Suspect));
-    eprintln!("ambiguous rejected {}/{}", rej(Label::Ambiguous), count(Label::Ambiguous));
-    for u in utts.iter().filter(|u| u.label != Label::Misfire && rejected(u)) {
-        eprintln!("  rejected non-misfire: {} {:?} {:?}", u.ts, u.label, u.text);
+    eprintln!(
+        "suspects  rejected {}/{}",
+        rej(Label::Suspect),
+        count(Label::Suspect)
+    );
+    eprintln!(
+        "ambiguous rejected {}/{}",
+        rej(Label::Ambiguous),
+        count(Label::Ambiguous)
+    );
+    for u in utts
+        .iter()
+        .filter(|u| u.label != Label::Misfire && rejected(u))
+    {
+        eprintln!(
+            "  rejected non-misfire: {} {:?} {:?}",
+            u.ts, u.label, u.text
+        );
     }
 
     // Zero regressions on genuine dictation.
@@ -195,9 +213,14 @@ fn e2e_apple_confidence_rows_classify_correctly() {
         return;
     };
     let body = std::fs::read_to_string(path).expect("read tsv");
-    let mut cfg = always::always::config::AlwaysConfig::default();
-    cfg.transcriber_backend = always::stt_dispatch::TranscriberBackendChoice::Apple;
-    assert!(!cfg.foreign_speech_confidence_enforce, "rule 1 ships log-only");
+    let cfg = always::always::config::AlwaysConfig {
+        transcriber_backend: always::stt_dispatch::TranscriberBackendChoice::Apple,
+        ..Default::default()
+    };
+    assert!(
+        !cfg.foreign_speech_confidence_enforce,
+        "rule 1 ships log-only"
+    );
     let mut enforced = cfg.clone();
     enforced.foreign_speech_confidence_enforce = true;
     let now = std::time::Instant::now();
@@ -220,11 +243,19 @@ fn e2e_apple_confidence_rows_classify_correctly() {
         let would = foreign_speech_low_confidence(&r).is_some();
         // Pref on: rule 1 enforced.
         let enforced_action = classify_transcription(&enforced, text, &r, now, last);
-        eprintln!("{name}\t{conf:.3}\tdefault={action:?} would_reject={would}\tenforced={enforced_action:?}");
-        assert!(matches!(action, SpeechAction::Paste { .. }), "{name}: {action:?}");
+        eprintln!(
+            "{name}\t{conf:.3}\tdefault={action:?} would_reject={would}\tenforced={enforced_action:?}"
+        );
+        assert!(
+            matches!(action, SpeechAction::Paste { .. }),
+            "{name}: {action:?}"
+        );
         if name.starts_with("en") {
             assert!(!would, "{name}");
-            assert!(matches!(enforced_action, SpeechAction::Paste { .. }), "{name}");
+            assert!(
+                matches!(enforced_action, SpeechAction::Paste { .. }),
+                "{name}"
+            );
         } else if name.starts_with("hi") || name.starts_with("ne") {
             assert!(would, "{name}");
             assert!(

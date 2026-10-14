@@ -481,7 +481,9 @@ impl AlwaysConfig {
             silence_secs: resolve_silence_secs(silence_secs, &prefs),
             adaptive_silence_enabled: prefs.stt_adaptive_silence.unwrap_or(true),
             hesitation_silence_secs: resolve_hesitation_silence_secs(
-                std::env::var("ALWAYS_HESITATION_SILENCE_SECS").ok().as_deref(),
+                std::env::var("ALWAYS_HESITATION_SILENCE_SECS")
+                    .ok()
+                    .as_deref(),
             ),
             speaker_gate_enabled: prefs.speaker_gate_enabled.unwrap_or(false),
             speaker_gate_threshold: prefs
@@ -915,7 +917,10 @@ mod tests {
 
     #[test]
     fn hesitation_silence_resolves_env_with_clamp_and_default() {
-        assert_eq!(resolve_hesitation_silence_secs(None), DEFAULT_HESITATION_SILENCE_SECS);
+        assert_eq!(
+            resolve_hesitation_silence_secs(None),
+            DEFAULT_HESITATION_SILENCE_SECS
+        );
         assert_eq!(resolve_hesitation_silence_secs(Some("1.5")), 1.5);
         assert_eq!(resolve_hesitation_silence_secs(Some("99")), 10.0);
         assert_eq!(resolve_hesitation_silence_secs(Some("-1")), 0.0);

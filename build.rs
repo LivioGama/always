@@ -389,7 +389,9 @@ fn build_status_sound_bridge() {
         .args([
             "-static",
             "-o",
-            static_lib_path.to_str().expect("Failed to convert static lib path"),
+            static_lib_path
+                .to_str()
+                .expect("Failed to convert static lib path"),
             object_path.to_str().expect("Failed to convert object path"),
         ])
         .status()

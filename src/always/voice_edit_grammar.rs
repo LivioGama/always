@@ -46,7 +46,10 @@ pub enum EditCommand {
     ScratchThat,
     /// Replace `from` with `to` in the last paste (or, failing that, the
     /// text before the caret in the focused field).
-    Replace { from: String, to: String },
+    Replace {
+        from: String,
+        to: String,
+    },
     Case(CaseKind),
     MakeList,
     NewLine,
@@ -60,7 +63,9 @@ pub enum EditCommand {
     /// `style` is "shorter", "formal", "casual", "grammar" or
     /// "translate:<language>". Always only hands this off — see
     /// `voice_edit.rs` (`rewrite_request`).
-    Rewrite { style: String },
+    Rewrite {
+        style: String,
+    },
 }
 
 impl EditCommand {
@@ -149,18 +154,33 @@ fn strip_polite(mut s: &str) -> &str {
 fn exact(s: &str) -> Option<EditCommand> {
     use EditCommand as E;
     Some(match s {
-        "scratch that" | "delete that" | "remove that" | "erase that" | "strike that"
-        | "scratch that last bit" | "scratch the last bit" => E::ScratchThat,
+        "scratch that"
+        | "delete that"
+        | "remove that"
+        | "erase that"
+        | "strike that"
+        | "scratch that last bit"
+        | "scratch the last bit" => E::ScratchThat,
         "capitalise that" | "capitalize that" | "capitalise it" | "capitalize it"
         | "title case that" => E::Case(CaseKind::Capitalize),
-        "uppercase that" | "upper case that" | "all caps that" | "make that uppercase"
-        | "make that upper case" | "make that all caps" | "caps that" => E::Case(CaseKind::Upper),
+        "uppercase that"
+        | "upper case that"
+        | "all caps that"
+        | "make that uppercase"
+        | "make that upper case"
+        | "make that all caps"
+        | "caps that" => E::Case(CaseKind::Upper),
         "lowercase that" | "lower case that" | "make that lowercase" | "make that lower case" => {
             E::Case(CaseKind::Lower)
         }
-        "make that a list" | "make it a list" | "make that a bulleted list"
-        | "make that a bullet list" | "make that a bullet point list" | "turn that into a list"
-        | "make that into a list" | "make this a list" => E::MakeList,
+        "make that a list"
+        | "make it a list"
+        | "make that a bulleted list"
+        | "make that a bullet list"
+        | "make that a bullet point list"
+        | "turn that into a list"
+        | "make that into a list"
+        | "make this a list" => E::MakeList,
         "new line" | "newline" | "next line" => E::NewLine,
         "new paragraph" | "next paragraph" => E::NewParagraph,
         "undo" | "undo that" => E::Undo,
@@ -175,10 +195,17 @@ fn exact(s: &str) -> Option<EditCommand> {
         "delete the last sentence" | "delete last sentence" | "remove the last sentence" => {
             E::Delete(Unit::LastSentence)
         }
-        "go to the end" | "go to end" | "jump to the end" | "move to the end"
+        "go to the end"
+        | "go to end"
+        | "jump to the end"
+        | "move to the end"
         | "go to the end of the text" => E::GoTo(Place::End),
-        "go to the start" | "go to the beginning" | "go to start" | "jump to the start"
-        | "jump to the beginning" | "move to the start" => E::GoTo(Place::Start),
+        "go to the start"
+        | "go to the beginning"
+        | "go to start"
+        | "jump to the start"
+        | "jump to the beginning"
+        | "move to the start" => E::GoTo(Place::Start),
         _ => return None,
     })
 }
@@ -196,7 +223,11 @@ pub fn replace_candidates(norm: &str) -> Vec<(String, String)> {
 pub fn replace_candidates_cased(norm: &str, cased: &str) -> Vec<(String, String)> {
     let words: Vec<&str> = norm.split(' ').collect();
     let cased_words: Vec<&str> = cased.split(' ').collect();
-    let cased_words = if cased_words.len() == words.len() { cased_words } else { words.clone() };
+    let cased_words = if cased_words.len() == words.len() {
+        cased_words
+    } else {
+        words.clone()
+    };
     if words.len() < 4 {
         return Vec::new();
     }
@@ -235,13 +266,27 @@ pub fn replace_candidates_cased(norm: &str, cased: &str) -> Vec<(String, String)
 /// everyday agent prompts and are NOT here.
 fn rewrite(s: &str) -> Option<String> {
     let style = match s {
-        "make that shorter" | "make it shorter" | "make this shorter" | "shorten that"
-        | "make that more concise" | "make it more concise" => "shorter",
-        "make that more formal" | "make it more formal" | "make this more formal"
-        | "make that formal" | "make that sound more formal" => "formal",
-        "make that more casual" | "make it more casual" | "make that friendlier"
-        | "make it friendlier" | "make that more friendly" | "make that sound friendlier" => "casual",
-        "fix the grammar" | "fix grammar" | "fix the grammar in that" | "fix the grammar of that"
+        "make that shorter"
+        | "make it shorter"
+        | "make this shorter"
+        | "shorten that"
+        | "make that more concise"
+        | "make it more concise" => "shorter",
+        "make that more formal"
+        | "make it more formal"
+        | "make this more formal"
+        | "make that formal"
+        | "make that sound more formal" => "formal",
+        "make that more casual"
+        | "make it more casual"
+        | "make that friendlier"
+        | "make it friendlier"
+        | "make that more friendly"
+        | "make that sound friendlier" => "casual",
+        "fix the grammar"
+        | "fix grammar"
+        | "fix the grammar in that"
+        | "fix the grammar of that"
         | "correct the grammar" => "grammar",
         _ => {
             for p in [
@@ -305,8 +350,16 @@ pub fn parse(utterance: &str) -> Option<EditCommand> {
     // Polite affixes are stripped by position, so trim the cased form to
     // the same word window.
     let skip = norm.split(' ').count() - core.split(' ').count();
-    let lead = if norm.starts_with(core) { 0 } else { skip.min(1) };
-    let cased_core: Vec<&str> = cased.split(' ').skip(lead).take(core.split(' ').count()).collect();
+    let lead = if norm.starts_with(core) {
+        0
+    } else {
+        skip.min(1)
+    };
+    let cased_core: Vec<&str> = cased
+        .split(' ')
+        .skip(lead)
+        .take(core.split(' ').count())
+        .collect();
     let cands = replace_candidates_cased(core, &cased_core.join(" "));
     cands
         .into_iter()
@@ -326,10 +379,19 @@ mod tests {
         assert_eq!(parse("New paragraph"), Some(EditCommand::NewParagraph));
         assert_eq!(parse("Undo."), Some(EditCommand::Undo));
         assert_eq!(parse("Redo that"), Some(EditCommand::Redo));
-        assert_eq!(parse("Capitalise that."), Some(EditCommand::Case(CaseKind::Capitalize)));
+        assert_eq!(
+            parse("Capitalise that."),
+            Some(EditCommand::Case(CaseKind::Capitalize))
+        );
         assert_eq!(parse("Make that a list."), Some(EditCommand::MakeList));
-        assert_eq!(parse("Select the last sentence."), Some(EditCommand::Select(Unit::LastSentence)));
-        assert_eq!(parse("Delete the last word"), Some(EditCommand::Delete(Unit::LastWord)));
+        assert_eq!(
+            parse("Select the last sentence."),
+            Some(EditCommand::Select(Unit::LastSentence))
+        );
+        assert_eq!(
+            parse("Delete the last word"),
+            Some(EditCommand::Delete(Unit::LastWord))
+        );
         assert_eq!(parse("Go to the end."), Some(EditCommand::GoTo(Place::End)));
         assert_eq!(parse("Please scratch that"), Some(EditCommand::ScratchThat));
         assert_eq!(parse("Okay, undo."), Some(EditCommand::Undo));
@@ -339,15 +401,24 @@ mod tests {
     fn replace_parses_both_verbs() {
         assert_eq!(
             parse("Change cat to dog."),
-            Some(EditCommand::Replace { from: "cat".into(), to: "dog".into() })
+            Some(EditCommand::Replace {
+                from: "cat".into(),
+                to: "dog".into()
+            })
         );
         assert_eq!(
             parse("Replace Tuesday with Wednesday"),
-            Some(EditCommand::Replace { from: "tuesday".into(), to: "Wednesday".into() })
+            Some(EditCommand::Replace {
+                from: "tuesday".into(),
+                to: "Wednesday".into()
+            })
         );
         assert_eq!(
             parse("Please change cloud code to Claude Code."),
-            Some(EditCommand::Replace { from: "cloud code".into(), to: "Claude Code".into() })
+            Some(EditCommand::Replace {
+                from: "cloud code".into(),
+                to: "Claude Code".into()
+            })
         );
         // Ambiguous split: both offered, executor chooses by presence.
         let c = replace_candidates("change to to two");
@@ -374,26 +445,47 @@ mod tests {
 
     #[test]
     fn rewrite_and_addressed() {
-        assert_eq!(parse("Make that shorter."), Some(EditCommand::Rewrite { style: "shorter".into() }));
+        assert_eq!(
+            parse("Make that shorter."),
+            Some(EditCommand::Rewrite {
+                style: "shorter".into()
+            })
+        );
         assert_eq!(
             parse("Translate that to Nepali."),
-            Some(EditCommand::Rewrite { style: "translate:nepali".into() })
+            Some(EditCommand::Rewrite {
+                style: "translate:nepali".into()
+            })
         );
         assert_eq!(parse("Fix that."), None);
         assert_eq!(parse("Make it shorter and add a summary at the top"), None);
-        assert_eq!(parse_addressed("Iris, scratch that."), Some((EditCommand::ScratchThat, true)));
+        assert_eq!(
+            parse_addressed("Iris, scratch that."),
+            Some((EditCommand::ScratchThat, true))
+        );
         assert_eq!(
             parse_addressed("Hey Iris, make that more formal"),
-            Some((EditCommand::Rewrite { style: "formal".into() }, true))
+            Some((
+                EditCommand::Rewrite {
+                    style: "formal".into()
+                },
+                true
+            ))
         );
-        assert_eq!(parse_addressed("scratch that"), Some((EditCommand::ScratchThat, false)));
+        assert_eq!(
+            parse_addressed("scratch that"),
+            Some((EditCommand::ScratchThat, false))
+        );
         assert_eq!(parse_addressed("Iris, what time is it?"), None);
     }
 
     #[test]
     fn normalize_strips_punctuation_and_case() {
         assert_eq!(normalize("  Scratch   THAT!! "), "scratch that");
-        assert_eq!(normalize("Change \u{201C}cat\u{201D}, to dog."), "change cat to dog");
+        assert_eq!(
+            normalize("Change \u{201C}cat\u{201D}, to dog."),
+            "change cat to dog"
+        );
         assert_eq!(normalize("don\u{2019}t"), "don't");
     }
 }

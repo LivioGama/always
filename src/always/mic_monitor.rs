@@ -188,9 +188,10 @@ pub(crate) fn is_ignored_captor(
         return true;
     }
     if let Some(path) = path
-        && IRIS_HELPER_PATH_MARKERS
-            .iter()
-            .any(|(a, b)| path.find(a).is_some_and(|i| path[i + a.len()..].contains(b)))
+        && IRIS_HELPER_PATH_MARKERS.iter().any(|(a, b)| {
+            path.find(a)
+                .is_some_and(|i| path[i + a.len()..].contains(b))
+        })
     {
         return true;
     }
@@ -386,7 +387,6 @@ mod coreaudio_probe {
     /// the stream open, which would permanently pause Always if treated as
     /// a real conflict.
     const METERING_ONLY_BUNDLES: &[&str] = &["com.apple.Sound-Settings.extension"];
-
 
     fn addr(selector: u32) -> AudioObjectPropertyAddress {
         AudioObjectPropertyAddress {
@@ -952,7 +952,9 @@ impl MicrophoneMonitor {
             let command_lower = command.to_lowercase();
             // lsof truncates COMMAND to 9 chars ("always-ca"), so all of
             // Always's own helpers are matched by prefix.
-            if HELPER_COMMANDS.contains(&command_lower.as_str()) || command_lower.starts_with("always") {
+            if HELPER_COMMANDS.contains(&command_lower.as_str())
+                || command_lower.starts_with("always")
+            {
                 continue;
             }
 
@@ -1148,17 +1150,47 @@ mod tests {
         let root = Some("/Applications/Always.app/");
         let own = 500;
         // by parent pid
-        assert!(super::is_self_captor(own, root, 600, Some(own), Some("/x/always-capture"), Some("always-capture")));
+        assert!(super::is_self_captor(
+            own,
+            root,
+            600,
+            Some(own),
+            Some("/x/always-capture"),
+            Some("always-capture")
+        ));
         // by bundle path even when reparented / renamed
-        assert!(super::is_self_captor(own, root, 601, Some(1), Some("/Applications/Always.app/Contents/MacOS/whatever"), Some("whatever")));
+        assert!(super::is_self_captor(
+            own,
+            root,
+            601,
+            Some(1),
+            Some("/Applications/Always.app/Contents/MacOS/whatever"),
+            Some("whatever")
+        ));
         // by name
-        for name in ["always-capture", "always-preview-asr", "always-daemon", "rec"] {
-            assert!(super::is_self_captor(own, None, 602, Some(1), None, Some(name)), "{name}");
+        for name in [
+            "always-capture",
+            "always-preview-asr",
+            "always-daemon",
+            "rec",
+        ] {
+            assert!(
+                super::is_self_captor(own, None, 602, Some(1), None, Some(name)),
+                "{name}"
+            );
         }
         // a real app is not self
-        assert!(!super::is_self_captor(own, root, 603, Some(1), Some("/Applications/zoom.us.app/Contents/MacOS/zoom.us"), Some("zoom.us")));
+        assert!(!super::is_self_captor(
+            own,
+            root,
+            603,
+            Some(1),
+            Some("/Applications/zoom.us.app/Contents/MacOS/zoom.us"),
+            Some("zoom.us")
+        ));
         assert_eq!(
-            super::bundle_root_of("/Applications/Always.app/Contents/MacOS/always-daemon").as_deref(),
+            super::bundle_root_of("/Applications/Always.app/Contents/MacOS/always-daemon")
+                .as_deref(),
             Some("/Applications/Always.app/")
         );
         assert!(super::label_is_self("Always") && super::label_is_self("always-capture"));
@@ -1177,7 +1209,9 @@ mod tests {
             sub_input_streams: vec![],
         };
         assert!(!super::device_counts_as_mic(&tap));
-        assert!(!super::process_counts_as_mic(Some(&[tap.clone()])));
+        assert!(!super::process_counts_as_mic(Some(std::slice::from_ref(
+            &tap
+        ))));
         // Built-in mic (measured: transport 'bltn', 1 input stream).
         let mic = super::InputDeviceFacts {
             transport: Some(u32::from_be_bytes(*b"bltn")),
@@ -1203,13 +1237,24 @@ mod tests {
         // Unknown → keep counting (never weakens detection of real calls).
         assert!(super::process_counts_as_mic(None));
         assert!(super::process_counts_as_mic(Some(&[])));
-        assert!(super::device_counts_as_mic(&super::InputDeviceFacts::default()));
+        assert!(super::device_counts_as_mic(
+            &super::InputDeviceFacts::default()
+        ));
     }
 
     #[test]
     fn mic_iris_helpers_are_ignored() {
-        for name in ["music-tap", "caption-tap", "sense-probe", "focused-editable", "pcm-play"] {
-            assert!(super::is_ignored_captor(Some(name), None, None, &[]), "{name}");
+        for name in [
+            "music-tap",
+            "caption-tap",
+            "sense-probe",
+            "focused-editable",
+            "pcm-play",
+        ] {
+            assert!(
+                super::is_ignored_captor(Some(name), None, None, &[]),
+                "{name}"
+            );
         }
         assert!(super::is_ignored_captor(
             Some("new-thing"),
@@ -1242,10 +1287,30 @@ mod tests {
             "my-recorder".to_string(),
             "/opt/tools/".to_string(),
         ];
-        assert!(super::is_ignored_captor(None, None, Some("PL.maketheweb.cleanshotx"), &extra));
-        assert!(super::is_ignored_captor(Some("my-recorder"), None, None, &extra));
-        assert!(super::is_ignored_captor(Some("x"), Some("/opt/tools/x"), None, &extra));
-        assert!(!super::is_ignored_captor(Some("x"), Some("/opt/other/x"), None, &extra));
+        assert!(super::is_ignored_captor(
+            None,
+            None,
+            Some("PL.maketheweb.cleanshotx"),
+            &extra
+        ));
+        assert!(super::is_ignored_captor(
+            Some("my-recorder"),
+            None,
+            None,
+            &extra
+        ));
+        assert!(super::is_ignored_captor(
+            Some("x"),
+            Some("/opt/tools/x"),
+            None,
+            &extra
+        ));
+        assert!(!super::is_ignored_captor(
+            Some("x"),
+            Some("/opt/other/x"),
+            None,
+            &extra
+        ));
     }
 
     use super::MicrophoneMonitor;

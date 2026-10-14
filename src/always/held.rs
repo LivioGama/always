@@ -57,7 +57,11 @@ fn purge(q: &mut VecDeque<Held>, now: Instant) {
                 -1.0,
                 crate::always::event::RejectReason::Expired,
             );
-            tracing::info!(id = dropped.id, recoverable_id = rid, "held_final_expired_recoverable");
+            tracing::info!(
+                id = dropped.id,
+                recoverable_id = rid,
+                "held_final_expired_recoverable"
+            );
         } else {
             break;
         }
@@ -80,10 +84,12 @@ pub fn park(text: &str, job: PasteJob) -> u64 {
     // Expiry must happen even if nothing else touches the queue, or an
     // unanswered final would vanish silently instead of becoming
     // recoverable.
-    let _ = std::thread::Builder::new().name("held-expiry".into()).spawn(|| {
-        std::thread::sleep(HELD_TTL + Duration::from_millis(200));
-        purge(&mut lock(), Instant::now());
-    });
+    let _ = std::thread::Builder::new()
+        .name("held-expiry".into())
+        .spawn(|| {
+            std::thread::sleep(HELD_TTL + Duration::from_millis(200));
+            purge(&mut lock(), Instant::now());
+        });
     id
 }
 
@@ -156,7 +162,10 @@ mod tests {
         purge(&mut q, now);
         assert!(q.is_empty());
         let rec = crate::always::rejected::list();
-        assert!(rec.iter().any(|r| r.text == "parked and forgotten"), "must land in the recoverable ring");
+        assert!(
+            rec.iter().any(|r| r.text == "parked and forgotten"),
+            "must land in the recoverable ring"
+        );
     }
 
     #[test]
@@ -164,7 +173,10 @@ mod tests {
         let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
         let ran = Arc::new(AtomicBool::new(false));
         let r = Arc::clone(&ran);
-        let id = park("hello there", Box::new(move |_| r.store(true, Ordering::SeqCst)));
+        let id = park(
+            "hello there",
+            Box::new(move |_| r.store(true, Ordering::SeqCst)),
+        );
         assert!(release(id, None));
         for _ in 0..200 {
             if ran.load(Ordering::SeqCst) {
@@ -181,7 +193,10 @@ mod tests {
         let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
         let ran = Arc::new(AtomicBool::new(false));
         let r = Arc::clone(&ran);
-        park("by text only", Box::new(move |_| r.store(true, Ordering::SeqCst)));
+        park(
+            "by text only",
+            Box::new(move |_| r.store(true, Ordering::SeqCst)),
+        );
         assert!(release(0, Some("by text only")));
         for _ in 0..200 {
             if ran.load(Ordering::SeqCst) {
@@ -197,7 +212,10 @@ mod tests {
         let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
         let ran = Arc::new(AtomicBool::new(false));
         let r = Arc::clone(&ran);
-        let id = park("open terminal", Box::new(move |_| r.store(true, Ordering::SeqCst)));
+        let id = park(
+            "open terminal",
+            Box::new(move |_| r.store(true, Ordering::SeqCst)),
+        );
         assert!(discard(id, None));
         assert!(!release(id, None));
         std::thread::sleep(Duration::from_millis(20));

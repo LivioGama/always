@@ -225,7 +225,11 @@ pub fn join_chunk_parts(parts: &[(String, bool)]) -> String {
     let n = parts.len();
     let mut out = String::new();
     for (i, (part, overlaps_prev)) in parts.iter().enumerate() {
-        let mut piece = if i + 1 < n { strip_cut_ellipsis(part) } else { part.as_str() };
+        let mut piece = if i + 1 < n {
+            strip_cut_ellipsis(part)
+        } else {
+            part.as_str()
+        };
         if *overlaps_prev && !out.is_empty() {
             let dup = seam_duplicate_words(&out, piece);
             if dup > 0 {
@@ -714,7 +718,10 @@ mod tests {
             "but the UX…".to_string(),
             "and the end...".to_string(),
         ];
-        assert_eq!(join_chunk_texts(&parts), "For the but the UX and the end...");
+        assert_eq!(
+            join_chunk_texts(&parts),
+            "For the but the UX and the end..."
+        );
     }
 
     /// Synthetic "speech": loud tone with a short inter-word gap.
@@ -788,14 +795,20 @@ mod tests {
         // weird" — the repeat goes, nothing else does.
         let parts = vec![
             ("any action which is very weird".to_string(), false),
-            ("very weird and annoying and must be fixed".to_string(), true),
+            (
+                "very weird and annoying and must be fixed".to_string(),
+                true,
+            ),
         ];
         assert_eq!(
             join_chunk_parts(&parts),
             "any action which is very weird and annoying and must be fixed"
         );
         // Punctuation / case differences are still a repeat.
-        assert_eq!(seam_duplicate_words("she should never,", "Never ask, but for"), 1);
+        assert_eq!(
+            seam_duplicate_words("she should never,", "Never ask, but for"),
+            1
+        );
         // No repeat (context words not recognised): nothing removed.
         let parts = vec![
             ("she should never".to_string(), false),
@@ -806,7 +819,10 @@ mod tests {
             "she should never ask but for irreversible actions"
         );
         // A non-overlapping part is never deduplicated.
-        let parts = vec![("go to the".to_string(), false), ("the store".to_string(), false)];
+        let parts = vec![
+            ("go to the".to_string(), false),
+            ("the store".to_string(), false),
+        ];
         assert_eq!(join_chunk_parts(&parts), "go to the the store");
         // Bounded: a long coincidental match beyond the context is kept.
         assert_eq!(seam_duplicate_words("a b c d e f", "a b c d e f g"), 0);
@@ -815,19 +831,37 @@ mod tests {
     #[test]
     fn flush_with_context_marks_the_seam_and_join_dedupes() {
         let rt = rt();
-        let t = mock(vec!["which is very weird", "very weird and annoying"], vec![]);
+        let t = mock(
+            vec!["which is very weird", "very weird and annoying"],
+            vec![],
+        );
         let mut acc = ChunkAccumulator::new();
         acc.flush(vec![0i16; 16_000], &t, None, rt.handle());
         std::thread::sleep(Duration::from_millis(50));
-        acc.flush_with_context(vec![0i16; SEAM_CONTEXT_SAMPLES], vec![0i16; 16_000], &t, None, rt.handle());
+        acc.flush_with_context(
+            vec![0i16; SEAM_CONTEXT_SAMPLES],
+            vec![0i16; 16_000],
+            &t,
+            None,
+            rt.handle(),
+        );
         let joined = acc.finalize(&t);
         assert_eq!(joined.text, "which is very weird and annoying");
         // current_join reproduces finalize's text byte-for-byte.
         let mut acc2 = ChunkAccumulator::new();
-        let t2 = mock(vec!["which is very weird", "very weird and annoying"], vec![]);
+        let t2 = mock(
+            vec!["which is very weird", "very weird and annoying"],
+            vec![],
+        );
         acc2.flush(vec![0i16; 16_000], &t2, None, rt.handle());
         std::thread::sleep(Duration::from_millis(50));
-        acc2.flush_with_context(vec![0i16; SEAM_CONTEXT_SAMPLES], vec![0i16; 16_000], &t2, None, rt.handle());
+        acc2.flush_with_context(
+            vec![0i16; SEAM_CONTEXT_SAMPLES],
+            vec![0i16; 16_000],
+            &t2,
+            None,
+            rt.handle(),
+        );
         let handle = acc2.join_handle();
         let started = Instant::now();
         let settled = loop {
@@ -975,7 +1009,10 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let last = acc.last_raw().expect("chunk transcribed");
-        assert!(last == "and then, uh," || last == "first part,", "got {last}");
+        assert!(
+            last == "and then, uh," || last == "first part,",
+            "got {last}"
+        );
     }
 
     #[test]

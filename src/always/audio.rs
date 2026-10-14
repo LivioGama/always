@@ -424,7 +424,10 @@ static AEC_PREF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 /// helper's own voice-processing output while it runs (see
 /// `capture_cue_send`), so its ducking of other audio cannot silence them.
 pub fn set_aec_pref(enabled: Option<bool>) {
-    AEC_PREF.store(enabled.unwrap_or(true), std::sync::atomic::Ordering::Relaxed);
+    AEC_PREF.store(
+        enabled.unwrap_or(true),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// Acoustic echo cancellation against the Mac's own output (default ON,
@@ -575,7 +578,10 @@ impl RecChild {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .with_context(|| format!("failed to run '{}'", path.display()))?;
-        let stdout = child.stdout.take().context("capture helper stdout missing")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("capture helper stdout missing")?;
         let cue_stdin = child.stdin.take();
         if let Some(stderr) = child.stderr.take() {
             std::thread::spawn(move || {
@@ -915,8 +921,15 @@ static CAPTURE_CUE_SINK: Mutex<Option<(u32, std::process::ChildStdin)>> = Mutex:
 pub fn capture_cue_send(line: &str) -> bool {
     use std::io::Write as _;
     let mut sink = CAPTURE_CUE_SINK.lock();
-    let Some((_, stdin)) = sink.as_mut() else { return false };
-    if stdin.write_all(line.as_bytes()).and_then(|_| stdin.write_all(b"\n")).and_then(|_| stdin.flush()).is_err() {
+    let Some((_, stdin)) = sink.as_mut() else {
+        return false;
+    };
+    if stdin
+        .write_all(line.as_bytes())
+        .and_then(|_| stdin.write_all(b"\n"))
+        .and_then(|_| stdin.flush())
+        .is_err()
+    {
         *sink = None;
         return false;
     }
@@ -944,7 +957,7 @@ fn capture_heartbeat(buf: &[u8]) {
     // 30 ms frame equivalents.
     FRAMES.fetch_add(buf.len() as u64, Ordering::Relaxed);
     let mut acc = SUM_SQ.lock();
-    for c in buf.chunks_exact(2) {
+    for c in buf.as_chunks::<2>().0.iter() {
         let v = i16::from_le_bytes([c[0], c[1]]) as f64 / 32768.0;
         acc.0 += v * v;
         acc.1 += 1;
@@ -991,7 +1004,10 @@ impl Drop for RecChild {
     fn drop(&mut self) {
         {
             let mut sink = CAPTURE_CUE_SINK.lock();
-            if sink.as_ref().is_some_and(|(pid, _)| *pid == self.child.id()) {
+            if sink
+                .as_ref()
+                .is_some_and(|(pid, _)| *pid == self.child.id())
+            {
                 *sink = None;
             }
         }
@@ -1348,7 +1364,10 @@ mod tests {
         let started = std::time::Instant::now();
         let r = super::RecChild::spawn_capture_helper(std::path::Path::new("/usr/bin/false"));
         assert!(r.is_err(), "an exiting helper must not become the recorder");
-        assert!(started.elapsed().as_millis() < 2_000, "EOF must not wait out the timeout");
+        assert!(
+            started.elapsed().as_millis() < 2_000,
+            "EOF must not wait out the timeout"
+        );
     }
 
     /// A helper that streams bytes is accepted and its frames are readable
@@ -1534,7 +1553,9 @@ mod aec_edge_tracking_tests {
         note("always-capture: aec bypassed (no other output) tap=7ch@44100");
         assert_eq!(aec_output_engaged_at(), before);
         let t = std::time::Instant::now();
-        note("always-capture: aec engaged (output pids [\"1252:com.apple.WebKit.GPU\"]) tap=7ch@44100");
+        note(
+            "always-capture: aec engaged (output pids [\"1252:com.apple.WebKit.GPU\"]) tap=7ch@44100",
+        );
         let got = aec_output_engaged_at().expect("edge recorded");
         assert!(got + std::time::Duration::from_millis(5) >= t && got <= std::time::Instant::now());
     }

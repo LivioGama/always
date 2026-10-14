@@ -536,8 +536,13 @@ mod tests {
         let mut tr = empty_transcription("And a baggy?");
         tr.evidence.live_stream = crate::stt::LiveStreamOutcome::NoWords;
         let now = Instant::now();
-        let action =
-            classify_transcription(&cfg, "And a baggy?", &tr, now, now - Duration::from_secs(10));
+        let action = classify_transcription(
+            &cfg,
+            "And a baggy?",
+            &tr,
+            now,
+            now - Duration::from_secs(10),
+        );
         assert!(
             matches!(action, SpeechAction::ForeignSpeech { .. }),
             "got {action:?}"
@@ -554,15 +559,26 @@ mod tests {
             now,
             now - Duration::from_secs(10),
         );
-        assert!(matches!(action, SpeechAction::Paste { .. }), "got {action:?}");
+        assert!(
+            matches!(action, SpeechAction::Paste { .. }),
+            "got {action:?}"
+        );
 
         // Cooldown still wins first; filter_enabled=false disables the gate.
         let action = classify_transcription(&cfg, "And a baggy?", &tr, now, now);
         assert_eq!(action, SpeechAction::InCooldown);
         cfg.filter_enabled = false;
-        let action =
-            classify_transcription(&cfg, "And a baggy?", &tr, now, now - Duration::from_secs(10));
-        assert!(matches!(action, SpeechAction::Paste { .. }), "got {action:?}");
+        let action = classify_transcription(
+            &cfg,
+            "And a baggy?",
+            &tr,
+            now,
+            now - Duration::from_secs(10),
+        );
+        assert!(
+            matches!(action, SpeechAction::Paste { .. }),
+            "got {action:?}"
+        );
     }
 
     /// Rule 1 (low confidence) is log-only by default: still pasted.
@@ -579,10 +595,16 @@ mod tests {
         let last = now - Duration::from_secs(10);
         assert!(!cfg.foreign_speech_confidence_enforce);
         let action = classify_transcription(&cfg, text, &tr, now, last);
-        assert!(matches!(action, SpeechAction::Paste { .. }), "got {action:?}");
+        assert!(
+            matches!(action, SpeechAction::Paste { .. }),
+            "got {action:?}"
+        );
         cfg.foreign_speech_confidence_enforce = true;
         let action = classify_transcription(&cfg, text, &tr, now, last);
-        assert!(matches!(action, SpeechAction::ForeignSpeech { .. }), "got {action:?}");
+        assert!(
+            matches!(action, SpeechAction::ForeignSpeech { .. }),
+            "got {action:?}"
+        );
     }
 
     /// Local backend stays raw verbatim for real speech: the foreign gate
@@ -600,7 +622,10 @@ mod tests {
             now,
             now - Duration::from_secs(10),
         );
-        assert!(matches!(action, SpeechAction::Paste { .. }), "got {action:?}");
+        assert!(
+            matches!(action, SpeechAction::Paste { .. }),
+            "got {action:?}"
+        );
     }
 
     #[test]

@@ -158,7 +158,10 @@ fn no_paste_env() -> bool {
 
 pub fn copy_to_clipboard(text: String) -> Result<()> {
     if no_paste_env() {
-        tracing::info!(chars = text.chars().count(), "clipboard_write_suppressed_no_paste_env");
+        tracing::info!(
+            chars = text.chars().count(),
+            "clipboard_write_suppressed_no_paste_env"
+        );
         return Ok(());
     }
     // Native first: an in-process NSPasteboard write. `pbcopy` costs a
@@ -215,7 +218,10 @@ fn native_pasteboard_write(text: &str) -> bool {
             if pb_class.is_null() || str_class.is_null() {
                 return false;
             }
-            let general = send0(pb_class, sel_registerName(c"generalPasteboard".as_ptr().cast()));
+            let general = send0(
+                pb_class,
+                sel_registerName(c"generalPasteboard".as_ptr().cast()),
+            );
             if general.is_null() {
                 return false;
             }
@@ -1127,7 +1133,10 @@ mod tests {
         let back = super::read_clipboard_text().unwrap_or_default();
         let _ = super::copy_to_clipboard(prior);
         ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        println!("native write ms p50={:.3} p95={:.3} max={:.3}", ms[10], ms[18], ms[19]);
+        println!(
+            "native write ms p50={:.3} p95={:.3} max={:.3}",
+            ms[10], ms[18], ms[19]
+        );
         assert_eq!(back, sample);
     }
 

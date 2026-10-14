@@ -881,10 +881,16 @@ mod tests {
         let dev = "/Applications/Always Dev.app/Contents/MacOS/always-daemon run";
         let smoke_exe = "/tmp/x/AlwaysSmoke.app/Contents/MacOS/always-daemon";
         let smoke = format!("{smoke_exe} run --lang auto");
-        assert!(!same_instance_for("smoke", smoke_exe, prod), "sandbox must not reap prod");
+        assert!(
+            !same_instance_for("smoke", smoke_exe, prod),
+            "sandbox must not reap prod"
+        );
         assert!(!same_instance_for("smoke", smoke_exe, dev));
         assert!(same_instance_for("smoke", smoke_exe, &smoke));
-        assert!(!same_instance_for("prod", "", &smoke), "prod must not reap a sandbox");
+        assert!(
+            !same_instance_for("prod", "", &smoke),
+            "prod must not reap a sandbox"
+        );
         assert!(same_instance_for("prod", "", prod));
         assert!(same_instance_for("dev", "", dev) && !same_instance_for("dev", "", prod));
     }

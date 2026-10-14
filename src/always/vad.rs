@@ -323,8 +323,12 @@ fn gate_audio_straddles_aec_engage(
     verdict_at: std::time::Instant,
     engaged_at: Option<std::time::Instant>,
 ) -> bool {
-    let Some(engaged) = engaged_at else { return false };
-    let from = audio_started_at.checked_sub(AEC_EDGE_GUARD).unwrap_or(audio_started_at);
+    let Some(engaged) = engaged_at else {
+        return false;
+    };
+    let from = audio_started_at
+        .checked_sub(AEC_EDGE_GUARD)
+        .unwrap_or(audio_started_at);
     engaged > from && engaged <= verdict_at
 }
 
@@ -389,7 +393,9 @@ impl GateJob {
         let voiceprint = Arc::clone(&gate.voiceprint);
         let threshold = gate.threshold;
         let audio_started_at = std::time::Instant::now()
-            .checked_sub(std::time::Duration::from_secs_f64(samples.len() as f64 / 16_000.0))
+            .checked_sub(std::time::Duration::from_secs_f64(
+                samples.len() as f64 / 16_000.0,
+            ))
             .unwrap_or_else(std::time::Instant::now);
         let scored_len = samples.len();
         let extra = Arc::new(std::sync::OnceLock::new());
@@ -994,7 +1000,11 @@ impl UtterancePreview {
         self.prebuffer_fed = true;
         let preroll: Vec<i16> = self.preroll.drain(..).flatten().collect();
         if let Some(p) = self.parakeet.as_mut() {
-            p.feed(if preroll.len() > samples.len() { &preroll } else { samples });
+            p.feed(if preroll.len() > samples.len() {
+                &preroll
+            } else {
+                samples
+            });
         }
     }
 
@@ -1012,7 +1022,9 @@ impl UtterancePreview {
         if !(voiced && verified) {
             return;
         }
-        let meter = self.level.get_or_insert_with(crate::always::level_meter::LevelMeter::new);
+        let meter = self
+            .level
+            .get_or_insert_with(crate::always::level_meter::LevelMeter::new);
         if let Some((energy, bands)) = meter.push(samples, std::time::Instant::now()) {
             event::global_broadcaster().voice_level(energy, true, bands);
         }
@@ -1913,7 +1925,9 @@ fn record_with_local_vad(
                 // listening. Dropping here made the app deaf to its own
                 // user whenever the embedder was down — the exact opposite
                 // of "only me".
-                if speaker_gate_requested && speaker_gate.is_none() && voiced_samples >= SPEAKER_GATE_EARLY_SAMPLES
+                if speaker_gate_requested
+                    && speaker_gate.is_none()
+                    && voiced_samples >= SPEAKER_GATE_EARLY_SAMPLES
                 {
                     tracing::warn!(voiced_samples, "speaker_gate_unavailable_fail_open");
                     speaker_gate_requested = false;
@@ -2100,7 +2114,9 @@ fn record_with_local_vad(
                     let head = std::mem::replace(&mut speech_samples, carry);
                     let context = std::mem::replace(
                         &mut seam_context,
-                        head[head.len().saturating_sub(crate::always::chunker::SEAM_CONTEXT_SAMPLES)..]
+                        head[head
+                            .len()
+                            .saturating_sub(crate::always::chunker::SEAM_CONTEXT_SAMPLES)..]
                             .to_vec(),
                     );
                     chunker.flush_with_context(context, head, transcriber, grammar, rt);
@@ -2612,14 +2628,21 @@ fn record_with_local_vad(
             .filter(|job| !job.is_stale(speech_samples.len(), committed_samples))
             .and_then(|job| {
                 let waited = std::time::Instant::now();
-                let verdict = job.wait(std::time::Duration::from_millis(SPEAKER_GATE_FINAL_WAIT_MS));
+                let verdict =
+                    job.wait(std::time::Duration::from_millis(SPEAKER_GATE_FINAL_WAIT_MS));
                 tracing::debug!(
                     kind = ?job.kind,
                     wait_ms = waited.elapsed().as_millis() as u64,
                     "speaker_gate_final_awaited"
                 );
                 verdict.map(|score| {
-                    (job.kind, score, job.audio_started_at, job.embedding().cloned(), job.cohort())
+                    (
+                        job.kind,
+                        score,
+                        job.audio_started_at,
+                        job.embedding().cloned(),
+                        job.cohort(),
+                    )
                 })
             });
         let whole_started_at = std::time::Instant::now()
@@ -2632,16 +2655,26 @@ fn record_with_local_vad(
         let landed = landed.filter(|(kind, score, _, _, cohort)| {
             !(*kind == GateJobKind::Window
                 && score.is_some_and(|s| {
-                    s >= threshold && crate::always::speaker_trim::cohort_vetoes_pass(s, *cohort, threshold)
+                    s >= threshold
+                        && crate::always::speaker_trim::cohort_vetoes_pass(s, *cohort, threshold)
                 }))
         });
         let (score, scored_from, scored_embedding) = match landed {
-            Some((_, score, from, e, _)) if speaker_gate_allows_score(score, threshold) => (score, from, e),
-            Some((GateJobKind::Tentative | GateJobKind::Decisive, score, from, e, _)) => (score, from, e),
+            Some((_, score, from, e, _)) if speaker_gate_allows_score(score, threshold) => {
+                (score, from, e)
+            }
+            Some((GateJobKind::Tentative | GateJobKind::Decisive, score, from, e, _)) => {
+                (score, from, e)
+            }
             _ => {
                 let scored = speaker_gate.as_ref().and_then(|gate| {
                     (voiced_samples >= crate::always::speaker_embed::MIN_EMBED_SAMPLES)
-                        .then(|| speaker_gate_embed_score(gate, speaker_gate_whole_window(&speech_samples)))
+                        .then(|| {
+                            speaker_gate_embed_score(
+                                gate,
+                                speaker_gate_whole_window(&speech_samples),
+                            )
+                        })
                         .flatten()
                 });
                 match scored {
@@ -2662,7 +2695,9 @@ fn record_with_local_vad(
         if aec_edge {
             tracing::info!(score = ?score, "speaker_gate_refused_aec_edge_final");
         }
-        if SPEAKER_GATE_ENFORCE_DROP && (aec_edge || !speaker_gate_allows_transcription(true, score, threshold)) {
+        if SPEAKER_GATE_ENFORCE_DROP
+            && (aec_edge || !speaker_gate_allows_transcription(true, score, threshold))
+        {
             if speaker_gate.is_none() {
                 tracing::warn!("speaker_gate_unavailable_reject");
             } else if voiced_samples < crate::always::speaker_embed::MIN_EMBED_SAMPLES {
@@ -2842,88 +2877,88 @@ fn record_with_local_vad(
         )
     } else {
         match speculation {
-        Some(Ok(r)) => (r, true),
-        _ => {
-            // No speculation, speculation errored, or timeout — do a fresh
-            // transcription with the full audio (including any trailing silence).
-            let wav_data = match audio::create_wav_bytes_i16_mono_16k(&speech_samples) {
-                Ok(data) => data,
-                Err(err) => {
-                    event::global_broadcaster().transcribing_stopped();
-                    return Err(err).context("failed to create WAV data in memory");
-                }
-            };
-            // The blocking transcription below can run tens of seconds
-            // for long audio — heartbeat from a helper thread so the
-            // GUI's transcribing lease can't expire mid-call.
-            //
-            // CRITICAL LATENCY FIX: the heartbeat must poll the stop flag
-            // frequently. The previous version slept a full `from_secs(2)`
-            // as its FIRST action, so `join()` below blocked until that 2s
-            // sleep expired even though local parakeet finishes in
-            // ~100-300ms — injecting a flat ~2000ms tax on EVERY
-            // non-speculative utterance (measured: a 33-char clip logged
-            // stt_wait_ms=2005, identical to a 936-char one — proof it was
-            // the timer, not compute). We keep the 2s heartbeat CADENCE but
-            // tick the sleep in 50ms slices so `join()` returns within ~50ms
-            // of transcription completing.
-            let heartbeat_stop = Arc::new(AtomicBool::new(false));
-            let heartbeat_handle = {
-                let stop = Arc::clone(&heartbeat_stop);
-                std::thread::spawn(move || {
-                    const TICK: std::time::Duration = std::time::Duration::from_millis(50);
-                    const BEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
-                    let mut since_beat = std::time::Duration::ZERO;
-                    while !stop.load(Ordering::Relaxed) {
-                        std::thread::sleep(TICK);
-                        since_beat += TICK;
-                        if since_beat >= BEAT_EVERY {
-                            since_beat = std::time::Duration::ZERO;
-                            if stop.load(Ordering::Relaxed) {
-                                break;
+            Some(Ok(r)) => (r, true),
+            _ => {
+                // No speculation, speculation errored, or timeout — do a fresh
+                // transcription with the full audio (including any trailing silence).
+                let wav_data = match audio::create_wav_bytes_i16_mono_16k(&speech_samples) {
+                    Ok(data) => data,
+                    Err(err) => {
+                        event::global_broadcaster().transcribing_stopped();
+                        return Err(err).context("failed to create WAV data in memory");
+                    }
+                };
+                // The blocking transcription below can run tens of seconds
+                // for long audio — heartbeat from a helper thread so the
+                // GUI's transcribing lease can't expire mid-call.
+                //
+                // CRITICAL LATENCY FIX: the heartbeat must poll the stop flag
+                // frequently. The previous version slept a full `from_secs(2)`
+                // as its FIRST action, so `join()` below blocked until that 2s
+                // sleep expired even though local parakeet finishes in
+                // ~100-300ms — injecting a flat ~2000ms tax on EVERY
+                // non-speculative utterance (measured: a 33-char clip logged
+                // stt_wait_ms=2005, identical to a 936-char one — proof it was
+                // the timer, not compute). We keep the 2s heartbeat CADENCE but
+                // tick the sleep in 50ms slices so `join()` returns within ~50ms
+                // of transcription completing.
+                let heartbeat_stop = Arc::new(AtomicBool::new(false));
+                let heartbeat_handle = {
+                    let stop = Arc::clone(&heartbeat_stop);
+                    std::thread::spawn(move || {
+                        const TICK: std::time::Duration = std::time::Duration::from_millis(50);
+                        const BEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+                        let mut since_beat = std::time::Duration::ZERO;
+                        while !stop.load(Ordering::Relaxed) {
+                            std::thread::sleep(TICK);
+                            since_beat += TICK;
+                            if since_beat >= BEAT_EVERY {
+                                since_beat = std::time::Duration::ZERO;
+                                if stop.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                event::global_broadcaster().transcribing_started();
                             }
-                            event::global_broadcaster().transcribing_started();
                         }
+                    })
+                };
+                // Chunked tail: a Parakeet rescue starts only if this call
+                // runs abnormally long, so a recognizer timeout still has the
+                // tail's words ready without adding wait (see `TailRescue`).
+                let tail_rescue = has_chunks.then(|| TailRescue::arm(cfg, &speech_samples));
+                let transcribed = transcriber.transcribe_from_bytes(wav_data);
+                heartbeat_stop.store(true, Ordering::Relaxed);
+                let _ = heartbeat_handle.join();
+                match transcribed {
+                    Ok(result) => {
+                        if let Some(rescue) = tail_rescue {
+                            rescue.cancel();
+                        }
+                        (result, false)
                     }
-                })
-            };
-            // Chunked tail: a Parakeet rescue starts only if this call
-            // runs abnormally long, so a recognizer timeout still has the
-            // tail's words ready without adding wait (see `TailRescue`).
-            let tail_rescue = has_chunks.then(|| TailRescue::arm(cfg, &speech_samples));
-            let transcribed = transcriber.transcribe_from_bytes(wav_data);
-            heartbeat_stop.store(true, Ordering::Relaxed);
-            let _ = heartbeat_handle.join();
-            match transcribed {
-                Ok(result) => {
-                    if let Some(rescue) = tail_rescue {
-                        rescue.cancel();
+                    Err(err) if !has_chunks => {
+                        event::global_broadcaster().transcribing_stopped();
+                        return Err(err).context("failed to transcribe utterance");
                     }
-                    (result, false)
-                }
-                Err(err) if !has_chunks => {
-                    event::global_broadcaster().transcribing_stopped();
-                    return Err(err).context("failed to transcribe utterance");
-                }
-                // The tail of a chunked utterance failed: the committed
-                // chunks are already transcribed and must still be pasted.
-                Err(err) => {
-                    let text = recover_failed_chunked_tail(
-                        &speech_samples,
-                        &anyhow::Error::from(err),
-                        chunker.chunk_count(),
-                        |_| tail_rescue.and_then(TailRescue::finish),
-                    );
-                    (
-                        crate::stt::TranscriptionResult {
-                            text,
-                            ..Default::default()
-                        },
-                        false,
-                    )
+                    // The tail of a chunked utterance failed: the committed
+                    // chunks are already transcribed and must still be pasted.
+                    Err(err) => {
+                        let text = recover_failed_chunked_tail(
+                            &speech_samples,
+                            &anyhow::Error::from(err),
+                            chunker.chunk_count(),
+                            |_| tail_rescue.and_then(TailRescue::finish),
+                        );
+                        (
+                            crate::stt::TranscriptionResult {
+                                text,
+                                ..Default::default()
+                            },
+                            false,
+                        )
+                    }
                 }
             }
-        }
         }
     };
     let stt_done_at = std::time::Instant::now();
@@ -3105,7 +3140,10 @@ impl TailRescue {
             }
             let started = std::time::Instant::now();
             let words = crate::always::preview_asr::global().and_then(|asr| {
-                asr.transcribe_span(&tail, std::time::Duration::from_millis(TAIL_RESCUE_DECODE_MS))
+                asr.transcribe_span(
+                    &tail,
+                    std::time::Duration::from_millis(TAIL_RESCUE_DECODE_MS),
+                )
             });
             tracing::info!(
                 tail_secs = tail.len() as f64 / 16_000.0,
@@ -3302,6 +3340,9 @@ fn extended_silence_frames(final_silence_frames: usize) -> usize {
 ///   clauses, so the trailing word overrides it.
 ///
 /// False negatives are benign (current behavior: window unchanged).
+/// Endpointing now calls [`classify_pause_text`] directly; this boolean
+/// view is kept for its truth-table test.
+#[cfg(test)]
 fn looks_mid_sentence(loc: &crate::always::localization::Localization, text: &str) -> bool {
     classify_pause_text(loc, text) != PauseText::Complete
 }
@@ -3421,8 +3462,8 @@ fn final_silence_cut_frames(
 mod tests {
     use super::{
         CHUNKED_TAIL_MIN_VOICED_SAMPLES, SHORT_SPEECH_MS, chunk_target_secs,
-        chunked_tail_has_voice, early_voice_frame_ok, extended_silence_frames,
-        fast_energy_check, fast_normalized_energy, is_short_utterance_so_far, looks_mid_sentence,
+        chunked_tail_has_voice, early_voice_frame_ok, extended_silence_frames, fast_energy_check,
+        fast_normalized_energy, is_short_utterance_so_far, looks_mid_sentence,
         normal_silence_frames, normalized_energy, speaker_gate_allows_score,
         speaker_gate_allows_stt, speaker_gate_allows_transcription,
         speaker_gate_dependencies_ready, voice_activity_energy_threshold,
@@ -3449,7 +3490,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn failed_chunked_tail_uses_fallback_text_and_saves_audio() {
-        let tail: Vec<i16> = (0..16_000).map(|i| ((i as f32 * 0.05).sin() * 3000.0) as i16).collect();
+        let tail: Vec<i16> = (0..16_000)
+            .map(|i| ((i as f32 * 0.05).sin() * 3000.0) as i16)
+            .collect();
         let err = anyhow::anyhow!("Apple STT failed: speech recognition timed out");
         let before = spilled_tails("41-tail").len();
         let mut fed = 0;
@@ -3461,8 +3504,14 @@ mod tests {
         assert_eq!(fed, tail.len(), "the fallback gets the whole failed span");
         let saved = spilled_tails("41-tail");
         assert_eq!(saved.len(), before + 1, "tail audio saved");
-        let newest = saved.iter().max_by_key(|p| std::fs::metadata(p).unwrap().modified().unwrap()).unwrap();
-        assert_eq!(std::fs::metadata(newest).unwrap().len(), 44 + 2 * tail.len() as u64);
+        let newest = saved
+            .iter()
+            .max_by_key(|p| std::fs::metadata(p).unwrap().modified().unwrap())
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(newest).unwrap().len(),
+            44 + 2 * tail.len() as u64
+        );
     }
 
     /// No fallback text (helper absent, cold, timed out, or heard nothing):
@@ -3497,7 +3546,10 @@ mod tests {
             .collect();
         tail.extend(std::iter::repeat_n(0i16, 33_600)); // 2.1 s final silence
         let energy = normalized_energy(&tail);
-        assert!(energy < threshold, "fixture must be under the old gate: {energy}");
+        assert!(
+            energy < threshold,
+            "fixture must be under the old gate: {energy}"
+        );
         // Old rule (energy only) dropped it; the new one keeps it.
         assert!(chunked_tail_has_voice(energy, threshold, voiced));
     }
@@ -3509,7 +3561,11 @@ mod tests {
         assert!(!chunked_tail_has_voice(0.001, 0.012, 0));
         // An isolated noise frame or two is not a word.
         assert!(!chunked_tail_has_voice(0.001, 0.012, 960));
-        assert!(!chunked_tail_has_voice(0.001, 0.012, CHUNKED_TAIL_MIN_VOICED_SAMPLES - 1));
+        assert!(!chunked_tail_has_voice(
+            0.001,
+            0.012,
+            CHUNKED_TAIL_MIN_VOICED_SAMPLES - 1
+        ));
         // Loud tails keep the old behaviour.
         assert!(chunked_tail_has_voice(0.02, 0.012, 0));
     }
@@ -3861,12 +3917,14 @@ mod tests {
     #[test]
     fn speaker_gate_media_extends_reject_budget_not_threshold() {
         use super::{
-            SPEAKER_GATE_EARLY_SAMPLES, SPEAKER_GATE_EARLY_SAMPLES_MEDIA,
-            speaker_gate_reject_from,
+            SPEAKER_GATE_EARLY_SAMPLES, SPEAKER_GATE_EARLY_SAMPLES_MEDIA, speaker_gate_reject_from,
         };
         assert_eq!(speaker_gate_reject_from(false), SPEAKER_GATE_EARLY_SAMPLES);
-        assert_eq!(speaker_gate_reject_from(true), SPEAKER_GATE_EARLY_SAMPLES_MEDIA);
-        assert!(SPEAKER_GATE_EARLY_SAMPLES_MEDIA > SPEAKER_GATE_EARLY_SAMPLES);
+        assert_eq!(
+            speaker_gate_reject_from(true),
+            SPEAKER_GATE_EARLY_SAMPLES_MEDIA
+        );
+        const { assert!(SPEAKER_GATE_EARLY_SAMPLES_MEDIA > SPEAKER_GATE_EARLY_SAMPLES) };
         // The pass bar itself never moves with media.
         assert!(!speaker_gate_allows_score(Some(0.49), 0.50));
     }
@@ -3906,7 +3964,10 @@ mod tests {
         assert_eq!(job.cohort(), None, "no worker result yet: no cohort");
         job.extra.set((vec![0.0; 4], Some(0.71))).unwrap();
         let w = job.window_verdict(0.12);
-        assert_eq!((w.start, w.end), (40_000 - super::SPEAKER_TAIL_WINDOW_SAMPLES, 40_000));
+        assert_eq!(
+            (w.start, w.end),
+            (40_000 - super::SPEAKER_TAIL_WINDOW_SAMPLES, 40_000)
+        );
         assert_eq!(w.cohort, Some(0.71));
         assert!(w.is_foreign());
         assert_eq!(job.embedding().map(Vec::len), Some(4));
@@ -3922,7 +3983,10 @@ mod tests {
         let (job, tx) = gate_job_with(super::GateJobKind::Tentative, 10, 0);
         drop(tx);
         assert_eq!(job.poll(), Some(None));
-        assert!(!speaker_gate_allows_score(None, 0.5), "unverifiable never passes");
+        assert!(
+            !speaker_gate_allows_score(None, 0.5),
+            "unverifiable never passes"
+        );
     }
 
     #[test]
@@ -3937,16 +4001,25 @@ mod tests {
     fn gate_job_verdict_is_stale_after_flush_or_truncation() {
         let (job, _tx) = gate_job_with(super::GateJobKind::Window, 24_000, 0);
         assert!(!job.is_stale(24_000, 0));
-        assert!(!job.is_stale(30_000, 0), "buffer grew: verdict still describes it");
+        assert!(
+            !job.is_stale(30_000, 0),
+            "buffer grew: verdict still describes it"
+        );
         assert!(job.is_stale(30_000, 96_000), "chunk flushed in between");
-        assert!(job.is_stale(10_000, 0), "buffer truncated below the boundary");
+        assert!(
+            job.is_stale(10_000, 0),
+            "buffer truncated below the boundary"
+        );
     }
 
     #[test]
     fn whole_window_caps_decisive_scoring_cost() {
         use super::{SPEAKER_GATE_WHOLE_MAX_SAMPLES, speaker_gate_whole_window};
         let long = vec![1i16; SPEAKER_GATE_WHOLE_MAX_SAMPLES + 5];
-        assert_eq!(speaker_gate_whole_window(&long).len(), SPEAKER_GATE_WHOLE_MAX_SAMPLES);
+        assert_eq!(
+            speaker_gate_whole_window(&long).len(),
+            SPEAKER_GATE_WHOLE_MAX_SAMPLES
+        );
         let short = vec![1i16; 100];
         assert_eq!(speaker_gate_whole_window(&short).len(), 100);
     }

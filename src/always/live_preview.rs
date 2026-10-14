@@ -221,7 +221,11 @@ impl LivePreview {
         let mut st = self.state.lock();
         let tail = merge(&st.apple, &st.parakeet);
         if !tail.is_empty() {
-            st.prefix = if st.prefix.is_empty() { tail } else { format!("{} {}", st.prefix, tail) };
+            st.prefix = if st.prefix.is_empty() {
+                tail
+            } else {
+                format!("{} {}", st.prefix, tail)
+            };
         }
         st.apple.clear();
         st.parakeet.clear();
@@ -237,7 +241,9 @@ impl LivePreview {
 mod tests {
     use super::*;
 
-    fn recorder() -> (Emit, Arc<Mutex<Vec<(String, bool)>>>) {
+    type Log = Arc<Mutex<Vec<(String, bool)>>>;
+
+    fn recorder() -> (Emit, Log) {
         let log = Arc::new(Mutex::new(Vec::new()));
         let l = Arc::clone(&log);
         (
@@ -256,14 +262,20 @@ mod tests {
             "Hello, world, this is a test"
         );
         // Apple ahead of Parakeet: Apple alone.
-        assert_eq!(merge("Open the notch settings", "open the"), "Open the notch settings");
+        assert_eq!(
+            merge("Open the notch settings", "open the"),
+            "Open the notch settings"
+        );
         // Substitution inside Apple's span is overridden by Apple.
         assert_eq!(
             merge("show every word", "show everywhere while i"),
             "show every word while i"
         );
         // Repeated word: anchor on the two-word match, not the first hit.
-        assert_eq!(merge("the cat and the", "the cat and the dog ran"), "the cat and the dog ran");
+        assert_eq!(
+            merge("the cat and the", "the cat and the dog ran"),
+            "the cat and the dog ran"
+        );
     }
 
     #[test]
@@ -294,7 +306,14 @@ mod tests {
         p.on_parakeet("second");
         p.on_apple("Second part");
         let got: Vec<String> = log.lock().iter().map(|(t, _)| t.clone()).collect();
-        assert_eq!(got, vec!["First part.", "First part. second", "First part. Second part"]);
+        assert_eq!(
+            got,
+            vec![
+                "First part.",
+                "First part. second",
+                "First part. Second part"
+            ]
+        );
     }
 
     #[test]

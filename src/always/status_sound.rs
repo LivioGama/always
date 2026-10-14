@@ -67,7 +67,9 @@ impl StatusSound {
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|s| s.name().eq_ignore_ascii_case(name.trim()))
+        Self::ALL
+            .into_iter()
+            .find(|s| s.name().eq_ignore_ascii_case(name.trim()))
     }
 }
 
@@ -217,7 +219,9 @@ pub fn aiff_with_gain(aiff: &[u8], gain: f32) -> Option<Vec<u8>> {
         }
         match id {
             b"COMM" if size >= 8 => {
-                bits = Some(u16::from_be_bytes(aiff[body + 6..body + 8].try_into().ok()?));
+                bits = Some(u16::from_be_bytes(
+                    aiff[body + 6..body + 8].try_into().ok()?,
+                ));
             }
             b"SSND" if size >= 8 => {
                 let offset = u32::from_be_bytes(aiff[body..body + 4].try_into().ok()?) as usize;
@@ -236,7 +240,7 @@ pub fn aiff_with_gain(aiff: &[u8], gain: f32) -> Option<Vec<u8>> {
     let (start, end) = ssnd?;
     match bits {
         16 => {
-            for s in out[start..end].chunks_exact_mut(2) {
+            for s in out[start..end].as_chunks_mut::<2>().0.iter_mut() {
                 let v = i16::from_be_bytes([s[0], s[1]]) as f32 * gain;
                 let v = v.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
                 s.copy_from_slice(&v.to_be_bytes());
@@ -245,7 +249,7 @@ pub fn aiff_with_gain(aiff: &[u8], gain: f32) -> Option<Vec<u8>> {
         24 => {
             const MAX: f32 = 8_388_607.0;
             const MIN: f32 = -8_388_608.0;
-            for s in out[start..end].chunks_exact_mut(3) {
+            for s in out[start..end].as_chunks_mut::<3>().0.iter_mut() {
                 let raw = ((s[0] as i32) << 24 | (s[1] as i32) << 16 | (s[2] as i32) << 8) >> 8;
                 let v = (raw as f32 * gain).round().clamp(MIN, MAX) as i32;
                 s[0] = (v >> 16) as u8;
@@ -316,7 +320,10 @@ fn worker(rx: mpsc::Receiver<Msg>) {
                 if s.is_enabled() {
                     for sound in StatusSound::ALL {
                         if let Some(path) = cue_file(sound, s) {
-                            crate::always::audio::capture_cue_send(&format!("load {}", path.display()));
+                            crate::always::audio::capture_cue_send(&format!(
+                                "load {}",
+                                path.display()
+                            ));
                         }
                     }
                     tracing::info!(level = s.as_str(), "status_sound_capture_route_preloaded");
@@ -362,9 +369,18 @@ fn worker(rx: mpsc::Receiver<Msg>) {
                 // Local route dry run: the players loaded (load_all above);
                 // starting one would be audible, so stop here.
                 if loaded.is_some() {
-                    tracing::info!(cue = sound.name(), level = want.as_str(), route = "local-dry", "status_sound_played");
+                    tracing::info!(
+                        cue = sound.name(),
+                        level = want.as_str(),
+                        route = "local-dry",
+                        "status_sound_played"
+                    );
                 } else {
-                    tracing::error!(cue = sound.name(), error = "players not loaded", "status_sound_failed");
+                    tracing::error!(
+                        cue = sound.name(),
+                        error = "players not loaded",
+                        "status_sound_failed"
+                    );
                 }
                 continue;
             }
@@ -379,7 +395,11 @@ fn worker(rx: mpsc::Receiver<Msg>) {
             } else {
                 tracing::error!(
                     cue = sound.name(),
-                    error = if loaded.is_none() { "players not loaded" } else { "player refused to start" },
+                    error = if loaded.is_none() {
+                        "players not loaded"
+                    } else {
+                        "player refused to start"
+                    },
                     "status_sound_failed"
                 );
             }
@@ -476,10 +496,22 @@ mod tests {
 
     #[test]
     fn parses_sound_levels() {
-        assert_eq!("off".parse::<StatusSoundSetting>().unwrap(), StatusSoundSetting::Off);
-        assert_eq!("low".parse::<StatusSoundSetting>().unwrap(), StatusSoundSetting::Low);
-        assert_eq!("normal".parse::<StatusSoundSetting>().unwrap(), StatusSoundSetting::Medium);
-        assert_eq!("loud".parse::<StatusSoundSetting>().unwrap(), StatusSoundSetting::High);
+        assert_eq!(
+            "off".parse::<StatusSoundSetting>().unwrap(),
+            StatusSoundSetting::Off
+        );
+        assert_eq!(
+            "low".parse::<StatusSoundSetting>().unwrap(),
+            StatusSoundSetting::Low
+        );
+        assert_eq!(
+            "normal".parse::<StatusSoundSetting>().unwrap(),
+            StatusSoundSetting::Medium
+        );
+        assert_eq!(
+            "loud".parse::<StatusSoundSetting>().unwrap(),
+            StatusSoundSetting::High
+        );
         assert!("silent".parse::<StatusSoundSetting>().is_err());
     }
 
@@ -509,7 +541,9 @@ mod tests {
         let size = u32::from_be_bytes(aiff[p + 4..p + 8].try_into().unwrap()) as usize;
         let off = u32::from_be_bytes(aiff[p + 8..p + 12].try_into().unwrap()) as usize;
         aiff[p + 16 + off..p + 8 + size]
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|s| ((s[0] as i32) << 24 | (s[1] as i32) << 16 | (s[2] as i32) << 8) >> 8)
             .collect()
     }
@@ -568,7 +602,10 @@ mod tests {
             // device; the idle check below is only meaningful when not.
             let idle_before = backend::output_running() == 0;
             let t = std::time::Instant::now();
-            assert!(backend::load_all(StatusSoundSetting::Low), "pools must load");
+            assert!(
+                backend::load_all(StatusSoundSetting::Low),
+                "pools must load"
+            );
             let load_ms = t.elapsed().as_secs_f64() * 1000.0;
 
             let mut start_us = Vec::new();
@@ -586,7 +623,11 @@ mod tests {
                 .filter(|s| backend::playing_count(**s) > 0)
                 .count();
             assert!(overlapping >= 2, "cues must overlap, {overlapping} playing");
-            assert_eq!(backend::output_running(), 1, "output device runs while cues sound");
+            assert_eq!(
+                backend::output_running(),
+                1,
+                "output device runs while cues sound"
+            );
             // Retrigger while still sounding → second player, nothing dropped.
             assert!(backend::play(StatusSound::Success));
             assert_eq!(backend::playing_count(StatusSound::Success), 2);
@@ -594,11 +635,19 @@ mod tests {
             // The caller-side cost of the public path: `cue()` is a gate
             // check plus this post to the worker. (Posted directly so the
             // test never flips the process-global setting other tests read.)
-            post(Msg::Play(StatusSound::Command, StatusSoundSetting::Low, std::time::Instant::now())); // spawns worker
+            post(Msg::Play(
+                StatusSound::Command,
+                StatusSoundSetting::Low,
+                std::time::Instant::now(),
+            )); // spawns worker
             let mut cue_us = 0u128;
             for _ in 0..5 {
                 let t = std::time::Instant::now();
-                post(Msg::Play(StatusSound::Command, StatusSoundSetting::Low, std::time::Instant::now()));
+                post(Msg::Play(
+                    StatusSound::Command,
+                    StatusSoundSetting::Low,
+                    std::time::Instant::now(),
+                ));
                 cue_us = cue_us.max(t.elapsed().as_micros());
             }
 

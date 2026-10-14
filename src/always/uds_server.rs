@@ -710,7 +710,12 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                 None => tracing::warn!(cue = %cue, "uds_play_status_cue_unknown"),
             }
         }
-        DaemonCommand::SetActStatus { task, goal, text, action } => {
+        DaemonCommand::SetActStatus {
+            task,
+            goal,
+            text,
+            action,
+        } => {
             tracing::debug!(task = %task, goal_chars = goal.len(), text_chars = text.len(), action = %action, "uds_act_status_ignored");
         }
         DaemonCommand::PasteRejected { id } => {
@@ -914,7 +919,11 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                 }
             }
         }
-        DaemonCommand::VoiceEdit { req, command, force } => {
+        DaemonCommand::VoiceEdit {
+            req,
+            command,
+            force,
+        } => {
             std::thread::spawn(move || {
                 let o = crate::always::voice_edit::run(
                     &command,

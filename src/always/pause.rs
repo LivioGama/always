@@ -1034,12 +1034,19 @@ mod tests {
         let id = crate::always::rejected::keep_withheld(text, &active_pause_sources())
             .expect("non-empty text is kept");
         assert!(
-            crate::always::rejected::list().iter().any(|r| r.id == id && r.text == text),
+            crate::always::rejected::list()
+                .iter()
+                .any(|r| r.id == id && r.text == text),
             "withheld utterance must be in the recoverable ring"
         );
         let mut announced = false;
         while let Ok(ev) = rx.try_recv() {
-            if let crate::always::event::DaemonEvent::TranscriptRejected { id: eid, text: t, score, .. } = ev
+            if let crate::always::event::DaemonEvent::TranscriptRejected {
+                id: eid,
+                text: t,
+                score,
+                ..
+            } = ev
                 && t == text
             {
                 assert_eq!(eid, id.to_string());
@@ -1047,7 +1054,10 @@ mod tests {
                 announced = true;
             }
         }
-        assert!(announced, "TranscriptRejected must be broadcast for {expect_sources}");
+        assert!(
+            announced,
+            "TranscriptRejected must be broadcast for {expect_sources}"
+        );
         let taken = crate::always::rejected::take(id).expect("recoverable by id");
         assert_eq!(taken.text, text);
     }
@@ -1068,7 +1078,9 @@ mod tests {
     #[test]
     fn master_pause_mid_utterance_focus_moved_is_recoverable() {
         let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
-        let _ring = crate::always::rejected::TEST_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        let _ring = crate::always::rejected::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         begin_utterance();
         set_paused(true);
         assert_eq!(
@@ -1076,14 +1088,19 @@ mod tests {
             PausedUtterance::KeepRecoverable
         );
         // Unknown origin fails closed — still recoverable, never lost.
-        assert_eq!(paused_utterance_verdict(None, Some(ORIGIN)), PausedUtterance::KeepRecoverable);
+        assert_eq!(
+            paused_utterance_verdict(None, Some(ORIGIN)),
+            PausedUtterance::KeepRecoverable
+        );
         assert_kept_recoverable("master pause then focus moved", "master");
     }
 
     #[test]
     fn per_app_pause_mid_utterance_is_recoverable_not_pasted() {
         let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
-        let _ring = crate::always::rejected::TEST_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        let _ring = crate::always::rejected::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         begin_utterance();
         // Focus moves to an excluded app (not on the allowlist) mid-utterance.
         let (effective, _) = set_current_app_and_recompute(Some("com.apple.Notes".into()));
@@ -1099,7 +1116,9 @@ mod tests {
     #[test]
     fn mic_conflict_pause_mid_utterance_is_recoverable_not_pasted() {
         let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
-        let _ring = crate::always::rejected::TEST_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        let _ring = crate::always::rejected::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         begin_utterance();
         set_mic_conflict_paused(true);
         // Even with focus unchanged: I7 forbids the paste.
@@ -1113,7 +1132,9 @@ mod tests {
     #[test]
     fn audio_output_idle_and_no_gui_pause_mid_utterance_are_recoverable() {
         let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
-        let _ring = crate::always::rejected::TEST_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        let _ring = crate::always::rejected::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         type Source = fn();
         let cases: [(&str, Source); 3] = [
             ("audio_output", || {
@@ -1142,7 +1163,9 @@ mod tests {
     #[test]
     fn master_plus_watchdog_mid_utterance_is_recoverable() {
         let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
-        let _ring = crate::always::rejected::TEST_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        let _ring = crate::always::rejected::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         begin_utterance();
         set_paused(true);
         set_mic_conflict_paused(true);
@@ -1155,7 +1178,9 @@ mod tests {
 
     #[test]
     fn keep_withheld_ignores_blank_text() {
-        let _ring = crate::always::rejected::TEST_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        let _ring = crate::always::rejected::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         assert!(crate::always::rejected::keep_withheld("   ", "per_app").is_none());
     }
 }

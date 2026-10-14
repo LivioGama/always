@@ -3,6 +3,7 @@
 
 pub mod audio;
 pub mod auto_enter_countdown;
+pub mod ax_edit;
 pub mod chunker;
 pub mod clipboard_watcher;
 pub mod common_words;
@@ -28,8 +29,8 @@ pub mod hud;
 pub mod idle_watcher;
 pub mod keyboard;
 pub mod keyring;
-pub mod live_preview;
 pub mod level_meter;
+pub mod live_preview;
 pub mod localization;
 pub mod log;
 pub mod mic_monitor;
@@ -57,12 +58,11 @@ pub mod uds_server;
 pub mod vad;
 pub mod vad_silero;
 pub mod vocab;
-pub mod voiceprint;
 pub mod voice_edit;
 pub mod voice_edit_grammar;
-mod voice_edit_replay;
 mod voice_edit_live;
-pub mod ax_edit;
+mod voice_edit_replay;
+pub mod voiceprint;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod apple_intelligence;

@@ -195,7 +195,9 @@ impl PreviewAsr {
 
     fn send(&self, frame: Frame) -> bool {
         let guard = self.proc_.lock();
-        let Some(p) = guard.as_ref() else { return false };
+        let Some(p) = guard.as_ref() else {
+            return false;
+        };
         match p.tx.try_send(frame) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
@@ -259,7 +261,11 @@ impl PreviewAsr {
         queued &= self.send(Frame::End(utt.seq));
         let seq = utt.seq;
         std::mem::forget(utt);
-        let text = if queued { rx.recv_timeout(timeout).ok() } else { None };
+        let text = if queued {
+            rx.recv_timeout(timeout).ok()
+        } else {
+            None
+        };
         let mut cur = self.current.lock();
         if cur.as_ref().is_some_and(|(s, _)| *s == seq) {
             *cur = None;
@@ -310,7 +316,11 @@ pub(crate) struct LevelNormalizer {
 
 impl LevelNormalizer {
     pub(crate) fn new() -> Self {
-        Self { env: 0.0, gain: 1.0, peak_env: 0.0 }
+        Self {
+            env: 0.0,
+            gain: 1.0,
+            peak_env: 0.0,
+        }
     }
 
     /// Gain currently applied (linear).
@@ -328,7 +338,9 @@ impl LevelNormalizer {
             return samples.to_vec();
         }
         let frame_rms = |frame: &[i16]| {
-            (frame.iter().map(|&s| (s as f32) * (s as f32)).sum::<f32>() / frame.len().max(1) as f32).sqrt()
+            (frame.iter().map(|&s| (s as f32) * (s as f32)).sum::<f32>()
+                / frame.len().max(1) as f32)
+                .sqrt()
         };
         // Look-ahead over the whole block. The utterance opens with the
         // daemon's pre-roll (~480 ms handed over in one call): its
@@ -337,7 +349,10 @@ impl LevelNormalizer {
         // loud syllable — which then clipped (measured −2.7 dBFS frames)
         // and Parakeet lost the first word. Seeding the envelope with the
         // block's loudest voiced frame sizes the gain on the word itself.
-        let block_peak = samples.chunks(PREVIEW_GAIN_FRAME).map(frame_rms).fold(0.0f32, f32::max);
+        let block_peak = samples
+            .chunks(PREVIEW_GAIN_FRAME)
+            .map(frame_rms)
+            .fold(0.0f32, f32::max);
         if block_peak >= PREVIEW_VOICE_GATE && block_peak > self.env {
             self.env = block_peak;
         }
@@ -345,7 +360,11 @@ impl LevelNormalizer {
         for frame in samples.chunks(PREVIEW_GAIN_FRAME) {
             let rms = frame_rms(frame);
             self.peak_env = self.peak_env.max(rms);
-            self.env = if rms >= self.env { rms } else { (self.env * PREVIEW_ENV_RELEASE).max(rms) };
+            self.env = if rms >= self.env {
+                rms
+            } else {
+                (self.env * PREVIEW_ENV_RELEASE).max(rms)
+            };
             // Only plausible voice moves the gain: room tone holds it, so
             // a word onset after a pause is never hit by a gain that
             // drifted up on silence.
@@ -355,18 +374,30 @@ impl LevelNormalizer {
                 self.gain
             };
             // Never clip: the frame's own peak bounds the gain (−0.3 dBFS).
-            let peak = frame.iter().map(|&s| (s as i32).unsigned_abs()).max().unwrap_or(0) as f32;
+            let peak = frame
+                .iter()
+                .map(|&s| (s as i32).unsigned_abs())
+                .max()
+                .unwrap_or(0) as f32;
             if peak > 0.0 {
                 target = target.min((32_000.0 / peak).max(1.0));
             }
             // Cuts apply to the whole frame at once (the frame is known
             // before it is scaled, so this is look-ahead, not a click);
             // raises ramp across the frame.
-            let g0 = if target < self.gain { target } else { self.gain };
+            let g0 = if target < self.gain {
+                target
+            } else {
+                self.gain
+            };
             let n = frame.len() as f32;
             for (i, &s) in frame.iter().enumerate() {
                 let g = g0 + (target - g0) * ((i + 1) as f32 / n);
-                out.push((s as f32 * g).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16);
+                out.push(
+                    (s as f32 * g)
+                        .round()
+                        .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+                );
             }
             self.gain = target;
         }
@@ -414,7 +445,13 @@ impl Drop for PreviewUtterance {
         self.asr.send(Frame::End(self.seq));
         // Info, once per utterance: the input level and the boost applied
         // are what tell a quiet-mic miss from a helper fault in the log.
-        let db = |v: f32| if v > 0.0 { (20.0 * (v / 32768.0).log10() * 10.0).round() / 10.0 } else { -120.0 };
+        let db = |v: f32| {
+            if v > 0.0 {
+                (20.0 * (v / 32768.0).log10() * 10.0).round() / 10.0
+            } else {
+                -120.0
+            }
+        };
         tracing::info!(
             seq = self.seq,
             audio_secs = self.samples as f64 / 16_000.0,
@@ -435,7 +472,10 @@ pub fn locate_helper() -> Option<std::path::PathBuf> {
         let p = std::path::PathBuf::from(p);
         return p.is_file().then_some(p);
     }
-    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf())) {
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.to_path_buf()))
+    {
         let p = dir.join(HELPER_NAME);
         if p.is_file() {
             return Some(p);
@@ -468,7 +508,11 @@ fn system_locale_is_english() -> bool {
             .output()
             .ok()
             .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_ascii_lowercase());
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .to_ascii_lowercase()
+            });
         match out {
             Some(l) => l.starts_with("en"),
             None => std::env::var("LANG").is_ok_and(|l| l.to_ascii_lowercase().starts_with("en")),
@@ -514,7 +558,10 @@ mod tests {
     fn frames_encode_little_endian_with_byte_length() {
         let b = encode(&Frame::Audio(7, vec![1, -2]));
         assert_eq!(b, vec![b'A', 7, 0, 0, 0, 4, 0, 0, 0, 1, 0, 0xFE, 0xFF]);
-        assert_eq!(encode(&Frame::Begin(258)), vec![b'B', 2, 1, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            encode(&Frame::Begin(258)),
+            vec![b'B', 2, 1, 0, 0, 0, 0, 0, 0]
+        );
         assert_eq!(encode(&Frame::End(1))[0], b'E');
     }
 
@@ -533,7 +580,9 @@ mod tests {
     }
 
     fn tone(amp: f32, n: usize) -> Vec<i16> {
-        (0..n).map(|i| (amp * (i as f32 * 0.11).sin()) as i16).collect()
+        (0..n)
+            .map(|i| (amp * (i as f32 * 0.11).sin()) as i16)
+            .collect()
     }
 
     fn rms(s: &[i16]) -> f32 {
@@ -555,9 +604,16 @@ mod tests {
         let y = n.process(&x);
         let tail = &y[960..];
         let got = rms(tail);
-        assert!((got - PREVIEW_TARGET_RMS).abs() / PREVIEW_TARGET_RMS < 0.05, "rms {got}");
+        assert!(
+            (got - PREVIEW_TARGET_RMS).abs() / PREVIEW_TARGET_RMS < 0.05,
+            "rms {got}"
+        );
         // Same waveform, only scaled.
-        assert!(y.iter().zip(&x).all(|(a, b)| (*a >= 0) == (*b >= 0) || *b == 0));
+        assert!(
+            y.iter()
+                .zip(&x)
+                .all(|(a, b)| (*a >= 0) == (*b >= 0) || *b == 0)
+        );
     }
 
     #[test]
@@ -597,7 +653,10 @@ mod tests {
         block.extend(tone(300.0, 480 * 2)); // ≈ −44 dBFS
         block.extend(tone(6000.0, 480 * 6)); // the word: ≈ −18 dBFS
         let y = n.process(&block);
-        assert!(y.iter().all(|&v| v != i16::MAX && v != i16::MIN), "no clipping");
+        assert!(
+            y.iter().all(|&v| v != i16::MAX && v != i16::MIN),
+            "no clipping"
+        );
         // Loud part ≈ unchanged (gain ≈ 1), quiet rise not boosted 24 dB.
         let tail = &y[480 * 7..];
         assert!((rms(tail) / rms(&block[480 * 7..]) - 1.0).abs() < 0.05);
@@ -623,7 +682,12 @@ mod tests {
         assert!(ok);
         let bytes = std::fs::read(&wav).unwrap();
         let data = bytes.windows(4).position(|w| w == b"data").unwrap() + 8;
-        let speech: Vec<i16> = bytes[data..].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+        let speech: Vec<i16> = bytes[data..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
         let bin = locate_helper().expect("helper binary");
         for (gain, label) in [(0.5f32, "-6 dB"), (0.1, "-20 dB"), (0.03, "-30 dB")] {
             let asr = PreviewAsr::new(bin.clone());
@@ -675,9 +739,14 @@ mod tests {
             drop(utt);
             std::thread::sleep(Duration::from_millis(300));
             let got = first.lock().clone();
-            eprintln!("live_quiet_speech_preview {label} (utterance rms {rms_dbfs:.1} dBFS): first partial {got:?}");
+            eprintln!(
+                "live_quiet_speech_preview {label} (utterance rms {rms_dbfs:.1} dBFS): first partial {got:?}"
+            );
             let (lat, _) = got.unwrap_or_else(|| panic!("no Parakeet partial at {label}"));
-            assert!(lat < Duration::from_millis(700), "{label}: first partial {lat:?}");
+            assert!(
+                lat < Duration::from_millis(700),
+                "{label}: first partial {lat:?}"
+            );
             if let Some(mut p) = asr.proc_.lock().take() {
                 let _ = p.child.kill();
                 let _ = p.child.wait();
@@ -721,7 +790,7 @@ mod tests {
             let bytes = std::fs::read(&wav).unwrap();
             let data = bytes.windows(4).position(|w| w == b"data").unwrap() + 8;
             let speech: Vec<i16> =
-                bytes[data..].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+                bytes[data..].as_chunks::<2>().0.iter().map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
             let t0 = Instant::now();
             let text = asr.transcribe_span(&speech, Duration::from_secs(15));
             let took = t0.elapsed();
