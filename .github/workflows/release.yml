@@ -24,7 +24,11 @@ concurrency:
 jobs:
   build-mac:
     name: Build + sign + notarize macOS bundle
-    runs-on: macos-14
+    # macOS 26 runner = Xcode 26 SDK. The Apple STT (SpeechAnalyzer) and
+    # Apple Intelligence (FoundationModels) bridges need it; on macos-14's
+    # Xcode 15 SDK build.rs silently compiles their stubs and the shipped
+    # app reports "Apple STT not available in this build".
+    runs-on: macos-26
     outputs:
       version: ${{ steps.version.outputs.value }}
       release_sha: ${{ steps.release-ref.outputs.sha }}
@@ -59,7 +63,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin
 
       - name: Cache cargo build
         uses: actions/cache@v4
@@ -71,26 +75,15 @@ jobs:
         run: |
           cargo build --release --locked --target aarch64-apple-darwin
           file target/aarch64-apple-darwin/release/always
+          # Never ship the SDK stubs (see runs-on above).
+          if grep -aq 'SDK requirement not met' target/aarch64-apple-darwin/release/always; then
+            echo "::error::daemon was built with the Apple STT / Apple Intelligence stubs (SDK too old)"
+            exit 1
+          fi
 
-      - name: Build daemon (macOS x86_64)
-        run: |
-          cargo build --release --locked --target x86_64-apple-darwin
-          file target/x86_64-apple-darwin/release/always
-
-      - name: Code sign daemon binaries
-        run: |
-          codesign --force --sign "${MAC_CERT_IDENTITY}" \
-            target/aarch64-apple-darwin/release/always
-          codesign --force --sign "${MAC_CERT_IDENTITY}" \
-            target/x86_64-apple-darwin/release/always
-
-      - name: Upload daemon binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: daemon-binaries
-          path: |
-            target/aarch64-apple-darwin/release/always
-            target/x86_64-apple-darwin/release/always
+      # No x86_64 macOS daemon: ort-sys ships no prebuilt ONNX Runtime for
+      # x86_64-apple-darwin, so that build always failed, and the app
+      # bundle only ever embedded the arm64 daemon.
 
       - name: Import signing certificate
         id: cert
@@ -116,9 +109,29 @@ jobs:
           done < <(security list-keychains -d user | tr -d '"')
           security list-keychains -d user -s "$KEYCHAIN_PATH" "${USER_KEYCHAINS[@]}"
           rm "$RUNNER_TEMP/cert.p12"
-          # Extract the identity for signing daemon binaries
-          MAC_CERT_IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -oP '"[^"]+" \(' | head -1 | tr -d ' "')
+          # SHA-1 of the first valid codesigning identity (column 2 of
+          # `  1) <SHA1> "Developer ID Application: …"`). BSD grep on macOS
+          # has no -P, which left this empty before.
+          MAC_CERT_IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk '/\)/ {print $2; exit}')
+          if [ -z "$MAC_CERT_IDENTITY" ]; then
+            echo "::error::no codesigning identity in the imported certificate"
+            exit 1
+          fi
           echo "MAC_CERT_IDENTITY=$MAC_CERT_IDENTITY" >> "$GITHUB_OUTPUT"
+
+      - name: Code sign daemon binaries
+        env:
+          MAC_CERT_IDENTITY: ${{ steps.cert.outputs.MAC_CERT_IDENTITY }}
+        run: |
+          codesign --force --sign "${MAC_CERT_IDENTITY}" \
+            target/aarch64-apple-darwin/release/always
+
+      - name: Upload daemon binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: daemon-binaries
+          path: |
+            target/aarch64-apple-darwin/release/always
 
       - name: Build + codesign + notarize Swift app
         env:
