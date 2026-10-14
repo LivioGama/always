@@ -108,6 +108,11 @@ impl Transcriber for AppleTranscriber {
 /// include. Capped at 100 phrases (Apple's documented budget).
 pub fn context_phrases() -> Vec<String> {
     const DEFAULTS: &[&str] = &[
+        // The assistant's name: the recognizer hears "Irish" / "IRS" for it
+        // at the start of an utterance. Defaults, not glossary: the glossary's
+        // fuzzy matcher would rewrite "Irish" mid-sentence too.
+        "Iris",
+        "Hey Iris",
         "Claude Code",
         "Claude",
         "Codex",

@@ -29,6 +29,27 @@ mod tests {
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0
     }
 
+    /// A/B of the vocabulary bias on the real Swift file recognizer:
+    /// each WAV in `BIAS_WAVS` is transcribed with the production
+    /// `context_phrases()` and with the same list minus the "Iris"
+    /// phrases, then passed through `normalize_leading_wake`.
+    /// `BIAS_WAVS=a.wav,b.wav cargo test --lib bias_ab -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs BIAS_WAVS + Apple STT; run explicitly"]
+    fn bias_ab() {
+        let Ok(wavs) = std::env::var("BIAS_WAVS") else { return };
+        let with = crate::always::stt_apple::context_phrases();
+        let without: Vec<String> = with.iter().filter(|p| !p.contains("Iris")).cloned().collect();
+        assert!(with.iter().any(|p| p == "Iris"), "Iris missing from context_phrases");
+        for wav in wavs.split(',').filter(|s| !s.is_empty()) {
+            let path = std::path::Path::new(wav);
+            let a = crate::always::apple_stt::transcribe_wav(path, Some("en"), &without);
+            let b = crate::always::apple_stt::transcribe_wav(path, Some("en"), &with);
+            let norm = b.as_deref().map(crate::always::det_correct::normalize_leading_wake);
+            eprintln!("bias_ab {wav}\n  without Iris: {a:?}\n  with Iris:    {b:?}\n  normalised:   {norm:?}");
+        }
+    }
+
     #[test]
     #[ignore = "needs REPLAY_* env + a fake capture helper; run explicitly"]
     fn replay_pipeline() {

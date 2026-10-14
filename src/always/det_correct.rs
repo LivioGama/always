@@ -385,9 +385,153 @@ fn strip_leading_junk(text: &str) -> &str {
     text[start..].trim_start()
 }
 
+/// Greetings that may precede the assistant's name at the start of an
+/// utterance ("hey Iris, …"). `you` is how the recognizer hears a clipped
+/// "yo" / breath before the name ("You IRS what time is it", 2026-10-14).
+const WAKE_GREETINGS: &[&str] = &["hey", "hi", "hello", "ok", "okay", "yo", "you"];
+
+/// Leading tokens the recognizer produces for the name "Iris" (measured in
+/// the user's logs: Irish, IRS; the rest are the same sounds spelled other
+/// ways). Compared lowercase with trailing punctuation stripped.
+const WAKE_VARIANTS: &[&str] = &[
+    "iris", "irish", "irs", "i.r.s", "ires", "iras", "ira's", "iras'", "iris's", "iris'", "eris",
+];
+
+/// Words that open a request on their own: question words and imperative
+/// verbs. "Irish coffee is great" / "IRS forms are due" never qualify.
+const WAKE_OPENERS: &[&str] = &[
+    "what", "what's", "whats", "who", "who's", "where", "when", "why", "how", "which", "open",
+    "close", "quit", "pause", "play", "resume", "stop", "skip", "next", "previous", "mute",
+    "unmute", "turn", "set", "make", "take", "start", "show", "tell", "read", "find", "search", "go",
+    "switch", "launch", "remind", "call", "send", "reply", "give", "put", "move", "scroll", "click",
+    "press", "type", "check", "look", "please",
+];
+
+/// Auxiliaries open a request only as a question: followed by a subject
+/// ("is it", "can you", "do we") or in a sentence that ends with `?`.
+/// "Irish is a language." stays prose.
+const WAKE_AUXILIARIES: &[&str] = &[
+    "is", "are", "am", "can", "could", "would", "will", "should", "do", "does", "did",
+];
+const WAKE_AUX_SUBJECTS: &[&str] = &[
+    "you", "it", "there", "this", "that", "i", "we", "my", "your", "he", "she", "they",
+];
+
+fn wake_key(token: &str) -> String {
+    token
+        .replace('\u{2019}', "'")
+        .to_lowercase()
+        .trim_end_matches([',', '.', ';', ':', '!', '?'])
+        .to_string()
+}
+
+/// Normalise a misheard leading wake word to "Iris" — the assistant's
+/// name — so the pasted / handed-over text starts with the word the user
+/// actually said. Applies ONLY to the first token (or the token right
+/// after one greeting), and ONLY when the next word opens a request;
+/// anything else is returned unchanged. Mirrors the Iris-side fuzzy wake
+/// matcher (`iris-attention`), which makes the routing decision; this only
+/// fixes the text.
+pub fn normalize_leading_wake(text: &str) -> String {
+    // Byte spans of the first four whitespace-separated tokens.
+    let mut spans: Vec<(usize, usize)> = Vec::with_capacity(4);
+    let mut start: Option<usize> = None;
+    for (i, c) in text.char_indices() {
+        if c.is_whitespace() {
+            if let Some(s) = start.take() {
+                spans.push((s, i));
+                if spans.len() == 4 {
+                    break;
+                }
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(s) = start
+        && spans.len() < 4
+    {
+        spans.push((s, text.len()));
+    }
+    let tok = |k: usize| spans.get(k).map(|&(a, b)| &text[a..b]);
+    let is_variant = |t: &str| WAKE_VARIANTS.contains(&wake_key(t).as_str());
+    let mut at = 0;
+    if tok(0).is_some_and(|t| WAKE_GREETINGS.contains(&wake_key(t).as_str()))
+        && tok(1).is_some_and(is_variant)
+    {
+        at = 1;
+    }
+    let Some(wake) = tok(at) else { return text.to_string() };
+    if !is_variant(wake) {
+        return text.to_string();
+    }
+    // A wake word that closes its own sentence ("Irish.") is not followed
+    // by a request in the same breath. "I.R.S." is an abbreviation, not a stop.
+    if wake.ends_with(['.', '!', '?']) && !wake_key(wake).contains('.') {
+        return text.to_string();
+    }
+    let Some(next) = tok(at + 1) else { return text.to_string() };
+    let next_key = wake_key(next);
+    let opens = WAKE_OPENERS.contains(&next_key.as_str())
+        || (WAKE_AUXILIARIES.contains(&next_key.as_str())
+            && (tok(at + 2).is_some_and(|t| WAKE_AUX_SUBJECTS.contains(&wake_key(t).as_str()))
+                || text.trim_end().ends_with('?')));
+    if !opens {
+        return text.to_string();
+    }
+    let (a, b) = spans[at];
+    let comma = if wake.ends_with(',') { "," } else { "" };
+    format!("{}Iris{}{}", &text[..a], comma, &text[b..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leading_wake_variants_normalise_to_iris() {
+        for (input, want) in [
+            ("Irish what time is it", "Iris what time is it"),
+            ("IRS what time is it", "Iris what time is it"),
+            ("You IRS what time is it", "You Iris what time is it"),
+            ("Hey Irish, open Calculator", "Hey Iris, open Calculator"),
+            ("hello eris pause the music", "hello Iris pause the music"),
+            ("Ira's, what's playing?", "Iris, what's playing?"),
+            ("Ira\u{2019}s, what's playing?", "Iris, what's playing?"),
+            ("Iris's open Spotify", "Iris open Spotify"),
+            ("I.R.S. tell me the time", "Iris tell me the time"),
+            ("Ires can you mute it", "Iris can you mute it"),
+            ("Irish is it raining?", "Iris is it raining?"),
+            ("Irish, are we there yet?", "Iris, are we there yet?"),
+            ("IRS is the music playing?", "Iris is the music playing?"),
+            ("iris what time is it", "Iris what time is it"),
+            ("Iris, open Calculator", "Iris, open Calculator"),
+        ] {
+            assert_eq!(normalize_leading_wake(input), want, "{input}");
+        }
+    }
+
+    #[test]
+    fn leading_wake_leaves_prose_untouched() {
+        for t in [
+            "Irish coffee is great",
+            "IRS forms are due next week",
+            "Irish is a language.",
+            "IRS is the worst",
+            "I told Irish to pause the music",
+            "the Irish transcript is wrong",
+            "Irish. What time is it",
+            "Irish",
+            "Hey there Irish what time",
+            "Irises open in spring",
+            "Hello always what time is it",
+            "",
+            "   ",
+            "So look at the logs, Irish what time is it",
+        ] {
+            assert_eq!(normalize_leading_wake(t), t, "{t}");
+        }
+    }
 
     #[test]
     fn strips_recognizer_leading_junk() {
