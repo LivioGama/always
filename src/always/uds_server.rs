@@ -694,6 +694,30 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             }
             tracing::info!(enabled, "uds_set_consume_mode");
         }
+        DaemonCommand::ReleaseHeld { id, text } => {
+            let id_num = id.parse::<u64>().unwrap_or(0);
+            let ok = crate::always::held::release(id_num, text.as_deref());
+            tracing::info!(id = %id, ok, "uds_release_held");
+        }
+        DaemonCommand::DiscardHeld { id, text } => {
+            let id_num = id.parse::<u64>().unwrap_or(0);
+            let ok = crate::always::held::discard(id_num, text.as_deref());
+            tracing::info!(id = %id, ok, "uds_discard_held");
+        }
+        DaemonCommand::PlayStatusCue { cue } => {
+            match crate::always::status_sound::StatusSound::from_name(&cue) {
+                Some(sound) => crate::always::status_sound::cue(sound),
+                None => tracing::warn!(cue = %cue, "uds_play_status_cue_unknown"),
+            }
+        }
+        DaemonCommand::SetActStatus { task, goal, text, action } => {
+            tracing::debug!(task = %task, goal_chars = goal.len(), text_chars = text.len(), action = %action, "uds_act_status_ignored");
+        }
+        DaemonCommand::PasteRejected { id } => {
+            let id_num = id.parse::<u64>().unwrap_or(0);
+            let ok = crate::always::event_loop::paste_rejected(id_num);
+            tracing::info!(id = %id, ok, "uds_paste_rejected");
+        }
         DaemonCommand::ApplyRuntimePreferences {
             auto_enter_delay_ms,
             energy_threshold,
@@ -801,6 +825,9 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             tracing::info!(bundle = ?bundle_id, effective, "uds_focused_app_changed");
         }
         DaemonCommand::NotifySystemAudioState { playing } => {
+            // Media playing → the My Voice gate is more patient before an
+            // early reject (own voice over a video scores lower).
+            crate::always::vad::set_media_playing(playing);
             // "My Voice" gate active → the daemon already ignores every
             // voice but the enrolled user's, so media playback is no
             // reason to stop listening. Skip the auto-pause entirely

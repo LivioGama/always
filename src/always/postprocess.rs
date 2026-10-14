@@ -101,6 +101,25 @@ impl PostProcessor {
         self.process_keyed(&user_message, text, context).await
     }
 
+    #[cfg(test)]
+    pub fn insert_cached_for_test(&self, key: &str, value: &str) {
+        self.insert_cached(key.to_string(), value.to_string());
+    }
+
+    /// Non-blocking cache lookup for a prepared request: `Some` only when
+    /// an earlier (speculative) LLM pass for exactly this request has
+    /// already finished. The paste path uses this and nothing else — it
+    /// never waits for the LLM.
+    pub fn peek_cached(
+        &self,
+        req: &crate::always::correction_request::CorrectionRequest,
+    ) -> Option<String> {
+        if !self.config.grammar_correction_enabled {
+            return None;
+        }
+        self.cache.lock().get(&req.user_message).cloned()
+    }
+
     /// Request-based entry point — the warm path and the paste path both
     /// arrive here through `correction_request::build`, so the cache /
     /// single-flight key (the user message itself) is identical by
@@ -459,6 +478,101 @@ fn grammar_request_body(model: &str, system_prompt: &str, user_message: &str) ->
     body
 }
 
+/// The single user-facing postprocess setting (Settings → Postprocessing).
+///
+/// - `Fast` — the deterministic corrector (`det_correct.rs`) inline before
+///   every paste, ≤ 2 ms. No model, no network.
+/// - `Apple` / `Groq` — `Fast` first (so the glossary is always honoured),
+///   plus the LLM pass run SPECULATIVELY during speech; its result is used
+///   only if it is already cached when the paste happens. The paste never
+///   waits for it.
+/// - `Off` — raw transcript + the minimal `local_cleanup` (fillers, repeats).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostprocessMode {
+    Fast,
+    Apple,
+    Groq,
+    Off,
+}
+
+impl PostprocessMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Apple => "apple",
+            Self::Groq => "groq",
+            Self::Off => "off",
+        }
+    }
+    pub fn uses_llm(self) -> bool {
+        matches!(self, Self::Apple | Self::Groq)
+    }
+}
+
+impl std::fmt::Display for PostprocessMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for PostprocessMode {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "fast" => Ok(Self::Fast),
+            "apple" => Ok(Self::Apple),
+            "groq" => Ok(Self::Groq),
+            "off" => Ok(Self::Off),
+            other => Err(format!("unknown postprocess mode: {other}")),
+        }
+    }
+}
+
+/// Resolve the effective mode. An explicit `postprocess_mode` wins;
+/// otherwise migrate the legacy pair WITHOUT a silent behaviour change in
+/// kind: Smart Postprocess on → that LLM provider's mode (Apple / Groq,
+/// default provider Groq as before); Smart Postprocess off → Fast (the
+/// deterministic corrector replaces the old bare local cleanup).
+pub fn resolve_mode(
+    mode: Option<&str>,
+    legacy_enabled: Option<bool>,
+    legacy_provider: Option<&str>,
+) -> PostprocessMode {
+    if let Some(m) = mode.and_then(|m| m.parse().ok()) {
+        return m;
+    }
+    if !legacy_enabled.unwrap_or(true) {
+        return PostprocessMode::Fast;
+    }
+    match legacy_provider.map(|p| p.trim().to_ascii_lowercase()) {
+        Some(p) if p == "apple" => PostprocessMode::Apple,
+        _ => PostprocessMode::Groq,
+    }
+}
+
+static MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Publish the resolved mode (called when the config is loaded).
+pub fn set_mode(mode: PostprocessMode) {
+    let v = match mode {
+        PostprocessMode::Fast => 0,
+        PostprocessMode::Apple => 1,
+        PostprocessMode::Groq => 2,
+        PostprocessMode::Off => 3,
+    };
+    MODE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The mode the paste path applies. Defaults to `Fast`.
+pub fn mode() -> PostprocessMode {
+    match MODE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => PostprocessMode::Apple,
+        2 => PostprocessMode::Groq,
+        3 => PostprocessMode::Off,
+        _ => PostprocessMode::Fast,
+    }
+}
+
 /// Strip everything except alphanumeric characters and lowercase the result.
 /// Used to compare word cores so "Hello," and "hello" match.
 fn alnum_core(w: &str) -> String {
@@ -606,6 +720,182 @@ fn word_count(text: &str) -> usize {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|part| !part.is_empty())
         .count()
+}
+
+/// Offline latency harness for the Apple Intelligence grammar call: the
+/// REAL bridge, the REAL glossary system prompt and the REAL request
+/// builder, over the user's most recent transcripts. Run with
+/// `cargo test --features local-stt --lib apple_grammar_latency_harness -- --ignored --nocapture`.
+/// `ALWAYS_HARNESS_N` sets the sample size (default 24).
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+mod apple_latency_harness {
+    /// A/B variants interleaved per sentence so machine-load drift hits
+    /// both arms equally. A = old (fresh session + guided), B = new (pooled
+    /// prewarmed session + plain), C = B with the compact prompt (no
+    /// "Domain vocabulary" section).
+    /// `cargo test --features local-stt --lib apple_grammar_ab -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn apple_grammar_ab() {
+        if !crate::always::apple_intelligence::check_availability() {
+            return;
+        }
+        let n: usize = std::env::var("ALWAYS_HARNESS_N").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
+        let lines = std::fs::read_to_string(dirs::home_dir().unwrap().join(".always/transcripts.jsonl")).unwrap();
+        let texts: Vec<String> = lines
+            .lines()
+            .rev()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| v.get("text").and_then(|t| t.as_str()).map(str::to_string))
+            .filter(|t| !crate::always::event_loop::is_short_utterance(t) && t.len() < 400)
+            .take(n)
+            .collect();
+        let full = crate::glossary::postprocess_system_prompt();
+        let compact = match (full.find("# Domain vocabulary"), full.find("# Domain vocabulary").and_then(|i| full[i + 2..].find("\n# ").map(|j| i + 2 + j + 1))) {
+            (Some(a), Some(b)) => format!("{}{}", &full[..a], &full[b..]),
+            _ => full.clone(),
+        };
+        println!("prompt chars full={} compact={}", full.chars().count(), compact.chars().count());
+        let pct = |v: &mut Vec<u128>, p: f64| {
+            v.sort_unstable();
+            v[((v.len() as f64 - 1.0) * p).round() as usize]
+        };
+        let mut run = |prompt: &str, label: &str| {
+            crate::always::apple_intelligence::prewarm(prompt);
+            std::thread::sleep(std::time::Duration::from_millis(2000));
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            for t in &texts {
+                let req = crate::always::correction_request::build(&super::local_cleanup(t), true);
+                let s = std::time::Instant::now();
+                let _ = crate::always::apple_intelligence::process_with_mode(&full, &req.user_message, 2);
+                a.push(s.elapsed().as_millis());
+                let s = std::time::Instant::now();
+                let _ = crate::always::apple_intelligence::process_with_mode(prompt, &req.user_message, 1);
+                b.push(s.elapsed().as_millis());
+            }
+            println!(
+                "AB {label}: old p50={} p95={} | new p50={} p95={} (n={})",
+                pct(&mut a.clone(), 0.5),
+                pct(&mut a, 0.95),
+                pct(&mut b.clone(), 0.5),
+                pct(&mut b, 0.95),
+                texts.len()
+            );
+        };
+        run(&full, "B pool+plain, full prompt");
+        run(&compact, "C pool+plain, compact prompt");
+    }
+
+    #[test]
+    #[ignore]
+    fn apple_grammar_latency_harness() {
+        if !crate::always::apple_intelligence::check_availability() {
+            println!("apple intelligence unavailable — skipped");
+            return;
+        }
+        let n: usize = std::env::var("ALWAYS_HARNESS_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(24);
+        let path = dirs::home_dir().unwrap().join(".always/transcripts.jsonl");
+        let lines = std::fs::read_to_string(path).expect("transcripts.jsonl");
+        let mut texts: Vec<String> = lines
+            .lines()
+            .rev()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| v.get("text").and_then(|t| t.as_str()).map(str::to_string))
+            .filter(|t| !crate::always::event_loop::is_short_utterance(t) && t.len() < 400)
+            .take(n)
+            .collect();
+        texts.reverse();
+        let system_prompt = crate::glossary::postprocess_system_prompt();
+        println!(
+            "system_prompt chars={} words={}",
+            system_prompt.chars().count(),
+            system_prompt.split_whitespace().count()
+        );
+        let warm = std::time::Instant::now();
+        crate::always::apple_intelligence::prewarm(&system_prompt);
+        println!("prewarm_ms={}", warm.elapsed().as_millis());
+        // Prewarm is asynchronous (daemon start in production): let it land.
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        let mut ms: Vec<u128> = Vec::new();
+        let mut dump = std::env::var("ALWAYS_HARNESS_OUT")
+            .ok()
+            .and_then(|p| std::fs::File::create(p).ok());
+        for (i, t) in texts.iter().enumerate() {
+            // Same shape as the paste path: local cleanup first, then the
+            // request builder; local cleanup again on the LLM output.
+            let t = &super::local_cleanup(t);
+            let req = crate::always::correction_request::build(t, true);
+            let started = std::time::Instant::now();
+            let out = crate::always::apple_intelligence::process_text_with_system_prompt(
+                &system_prompt,
+                &req.user_message,
+                500,
+            );
+            let e = started.elapsed().as_millis();
+            ms.push(e);
+            if let (Some(f), Ok(out)) = (dump.as_mut(), out.as_ref()) {
+                use std::io::Write;
+                let cleaned = super::sanitize_corrected_text(&req.acoustic_text, out)
+                    .map(|c| super::local_cleanup(&c))
+                    .unwrap_or_else(|| req.acoustic_text.clone());
+                let _ = writeln!(
+                    f,
+                    "{}",
+                    serde_json::json!({"input": req.acoustic_text, "llm": cleaned, "ms": e as u64})
+                );
+            }
+            println!(
+                "#{i:02} {e:>6} ms in_chars={} ok={} changed={}",
+                req.user_message.chars().count(),
+                out.is_ok(),
+                out.as_ref().map(|o| o.trim() != t.trim()).unwrap_or(false)
+            );
+        }
+        ms.sort_unstable();
+        let pct = |p: f64| ms[((ms.len() as f64 - 1.0) * p).round() as usize];
+        println!(
+            "APPLE_GRAMMAR n={} p50={} ms p95={} ms max={} ms",
+            ms.len(),
+            pct(0.5),
+            pct(0.95),
+            ms.last().unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_mode_wins_and_parses() {
+        assert_eq!(resolve_mode(Some("off"), Some(true), Some("apple")), PostprocessMode::Off);
+        assert_eq!(resolve_mode(Some("FAST"), None, None), PostprocessMode::Fast);
+        assert!("bogus".parse::<PostprocessMode>().is_err());
+    }
+
+    #[test]
+    fn legacy_prefs_migrate_without_changing_kind() {
+        // The user's prefs today: Smart Postprocess on + Apple provider.
+        assert_eq!(resolve_mode(None, Some(true), Some("apple")), PostprocessMode::Apple);
+        assert_eq!(resolve_mode(None, Some(true), Some("groq")), PostprocessMode::Groq);
+        assert_eq!(resolve_mode(None, None, None), PostprocessMode::Groq);
+        assert_eq!(resolve_mode(None, Some(false), Some("apple")), PostprocessMode::Fast);
+        // An unparseable stored mode falls back to the legacy mapping.
+        assert_eq!(resolve_mode(Some("x"), Some(false), None), PostprocessMode::Fast);
+    }
+
+    #[test]
+    fn mode_global_round_trips() {
+        for m in [PostprocessMode::Off, PostprocessMode::Apple, PostprocessMode::Groq, PostprocessMode::Fast] {
+            set_mode(m);
+            assert_eq!(mode(), m);
+            assert_eq!(m.as_str().parse::<PostprocessMode>().unwrap(), m);
+        }
+    }
 }
 
 #[cfg(test)]

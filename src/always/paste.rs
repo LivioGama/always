@@ -150,7 +150,120 @@ impl ClipboardProvider for LinuxClipboard {
     }
 }
 
+/// Sandbox guard (launch smoke test, `ALWAYS_NO_PASTE=1`): a sandboxed
+/// daemon must never touch the user's clipboard or type into their apps.
+fn no_paste_env() -> bool {
+    std::env::var("ALWAYS_NO_PASTE").as_deref() == Ok("1")
+}
+
 pub fn copy_to_clipboard(text: String) -> Result<()> {
+    if no_paste_env() {
+        tracing::info!(chars = text.chars().count(), "clipboard_write_suppressed_no_paste_env");
+        return Ok(());
+    }
+    // Native first: an in-process NSPasteboard write. `pbcopy` costs a
+    // fork+exec per paste — measured p50 17.4 ms / p95 22.0 ms (20 runs,
+    // 2026-10-13), which was essentially all of `paste_ms`. The subprocess
+    // stays as the fallback if the runtime path refuses the write.
+    #[cfg(target_os = "macos")]
+    if native_pasteboard_write(&text) {
+        return Ok(());
+    }
+    copy_via_subprocess(text)
+}
+
+/// `[NSPasteboard.generalPasteboard clearContents]` +
+/// `setString:forType:"public.utf8-plain-text"` through raw objc-runtime
+/// calls (same approach as [`pasteboard_change_count`], no AppKit crate).
+/// Returns false when any lookup fails or the pasteboard refuses the write.
+#[cfg(target_os = "macos")]
+fn native_pasteboard_write(text: &str) -> bool {
+    use std::ffi::c_void;
+
+    #[link(name = "AppKit", kind = "framework")]
+    unsafe extern "C" {}
+    unsafe extern "C" {
+        fn objc_getClass(name: *const u8) -> *mut c_void;
+        fn sel_registerName(name: *const u8) -> *mut c_void;
+        fn objc_msgSend();
+        fn objc_autoreleasePoolPush() -> *mut c_void;
+        fn objc_autoreleasePoolPop(pool: *mut c_void);
+    }
+    const NS_UTF8_STRING_ENCODING: usize = 4;
+
+    unsafe {
+        let pool = objc_autoreleasePoolPush();
+        let ok = (|| {
+            let send0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let send_bytes: unsafe extern "C" fn(
+                *mut c_void,
+                *mut c_void,
+                *const u8,
+                usize,
+                usize,
+            ) -> *mut c_void = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let send_set: unsafe extern "C" fn(
+                *mut c_void,
+                *mut c_void,
+                *mut c_void,
+                *mut c_void,
+            ) -> bool = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+
+            let pb_class = objc_getClass(c"NSPasteboard".as_ptr().cast());
+            let str_class = objc_getClass(c"NSString".as_ptr().cast());
+            if pb_class.is_null() || str_class.is_null() {
+                return false;
+            }
+            let general = send0(pb_class, sel_registerName(c"generalPasteboard".as_ptr().cast()));
+            if general.is_null() {
+                return false;
+            }
+            let new_string = |bytes: &[u8]| -> *mut c_void {
+                let raw = send0(str_class, sel_registerName(c"alloc".as_ptr().cast()));
+                if raw.is_null() {
+                    return raw;
+                }
+                send_bytes(
+                    raw,
+                    sel_registerName(c"initWithBytes:length:encoding:".as_ptr().cast()),
+                    bytes.as_ptr(),
+                    bytes.len(),
+                    NS_UTF8_STRING_ENCODING,
+                )
+            };
+            let value = new_string(text.as_bytes());
+            let kind = new_string(b"public.utf8-plain-text");
+            let release = |obj: *mut c_void| {
+                if !obj.is_null() {
+                    send0(obj, sel_registerName(c"release".as_ptr().cast()));
+                }
+            };
+            if value.is_null() || kind.is_null() {
+                release(value);
+                release(kind);
+                return false;
+            }
+            send0(general, sel_registerName(c"clearContents".as_ptr().cast()));
+            let written = send_set(
+                general,
+                sel_registerName(c"setString:forType:".as_ptr().cast()),
+                value,
+                kind,
+            );
+            release(value);
+            release(kind);
+            written
+        })();
+        objc_autoreleasePoolPop(pool);
+        if !ok {
+            tracing::warn!("native_pasteboard_write_failed_falling_back_to_pbcopy");
+        }
+        ok
+    }
+}
+
+fn copy_via_subprocess(text: String) -> Result<()> {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
 
@@ -218,6 +331,9 @@ fn post_cmd_key(
 /// Undo the most recent paste in the focused app (Cmd+Z).
 #[cfg(target_os = "macos")]
 pub fn undo_last_paste() -> Result<()> {
+    if no_paste_env() {
+        return Ok(());
+    }
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
@@ -239,6 +355,9 @@ pub fn replace_via_undo(text: &str) -> Result<()> {
 
 #[cfg(not(target_os = "macos"))]
 pub fn undo_last_paste() -> Result<()> {
+    if no_paste_env() {
+        return Ok(());
+    }
     anyhow::bail!("undo_last_paste not implemented without the macos feature")
 }
 
@@ -251,6 +370,9 @@ pub fn replace_via_undo(_text: &str) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 pub fn paste_text(auto_enter: bool) -> Result<()> {
+    if no_paste_env() {
+        return Ok(());
+    }
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
@@ -297,6 +419,9 @@ pub fn paste_text(auto_enter: bool) -> Result<()> {
 /// Simulate Ctrl+V (and optionally Return) via SendInput.
 #[cfg(target_os = "windows")]
 pub fn paste_text(auto_enter: bool) -> Result<()> {
+    if no_paste_env() {
+        return Ok(());
+    }
     use win32_keyboard::paste_via_sendinput as paste_via_sendinput_inner;
     paste_via_sendinput_inner(auto_enter)
 }
@@ -306,6 +431,9 @@ pub fn paste_text(auto_enter: bool) -> Result<()> {
 /// Paste on Linux: detect Wayland (ydotool first, xdotool fallback) or X11.
 #[cfg(target_os = "linux")]
 pub fn paste_text(auto_enter: bool) -> Result<()> {
+    if no_paste_env() {
+        return Ok(());
+    }
     // Detect Wayland: try ydotool first, fall back to xdotool.
     if is_wayland_session() {
         paste_wayland(auto_enter)?;
@@ -476,6 +604,9 @@ pub fn restore_clipboard_if_unchanged(
 /// configured binding, not a newline.
 #[cfg(target_os = "macos")]
 pub fn press_return() -> Result<()> {
+    if no_paste_env() {
+        return Ok(());
+    }
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
@@ -495,6 +626,9 @@ pub fn press_return() -> Result<()> {
 
 #[cfg(target_os = "windows")]
 pub fn press_return() -> Result<()> {
+    if no_paste_env() {
+        return Ok(());
+    }
     use std::ptr;
 
     // Return down
@@ -528,6 +662,9 @@ pub fn press_return() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 pub fn press_return() -> Result<()> {
+    if no_paste_env() {
+        return Ok(());
+    }
     post_xdotool_key(["key", "--clearmodifiers", "Return"])
 }
 
@@ -972,6 +1109,28 @@ pub fn pasteboard_change_count() -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    /// Touches the real general pasteboard, so ignored by default. Restores
+    /// the prior text afterwards. Run: `cargo test --features local-stt
+    /// --lib native_pasteboard_roundtrip -- --ignored --nocapture`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn native_pasteboard_roundtrip() {
+        let prior = super::read_clipboard_text().unwrap_or_default();
+        let sample = "Hand-back test — ünïcødé … 🎙️ done ".to_string();
+        let mut ms = Vec::new();
+        for _ in 0..20 {
+            let t = std::time::Instant::now();
+            assert!(super::native_pasteboard_write(&sample));
+            ms.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        let back = super::read_clipboard_text().unwrap_or_default();
+        let _ = super::copy_to_clipboard(prior);
+        ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!("native write ms p50={:.3} p95={:.3} max={:.3}", ms[10], ms[18], ms[19]);
+        assert_eq!(back, sample);
+    }
+
     use super::*;
     use mock::MockClipboardProvider;
 

@@ -93,6 +93,41 @@ The GUI spawns the daemon and talks to it over a Unix domain socket at
 `~/Library/Caches/always/always.sock`. Messages are newline-delimited JSON; the
 daemon broadcasts events, the GUI sends commands.
 
+**Echo-cancelled capture (2026-10-14, user request: "When a YouTube video is
+playing she does not hear me at all — I should never have to pause a video to
+dictate").** When the bundled `always-capture` helper is present, it is the
+recorder instead of `rec`: same contract (16 kHz mono s16le on stdout, one
+process, spawned by the daemon), but captured through Apple's voice-processing
+I/O, which subtracts the Mac's own audio output from the microphone before the
+daemon's VAD, speaker gate and recognizers see it. Other apps' audio is not
+ducked (`duckingLevel = .min`) and VPIO's AGC is off, so energy thresholds stay
+calibrated to the raw mic. **Default ON** (the user confirmed dictation over a playing video works
+with it, 2026-10-14). Kill switch: `always config set capture_aec false`
+(applied at the next daemon start); env `ALWAYS_AEC=0/1` overrides.
+**Ducking.** A voice-processing unit ducks *other* audio on the Mac. The
+helper requests the minimum (`enableAdvancedDucking: false`,
+`duckingLevel: .min`), re-applied once the engine runs and read back in its
+log (`ducking advanced=false level=10`). Even so, status cues played from
+the daemon process were inaudible in production while the helper ran, so
+**while the helper runs, status cues are rendered through the helper's own
+voice-processing output** (`play <file>` on its stdin) — the unit never
+ducks its own output, and it is the echo reference, so cues never reach the
+mic. With plain `rec` (or if the helper's cue channel fails) cues play
+in-process as before. ❓ Residual ducking of other apps' audio at `.min`
+could not be measured here: while any voice-processing unit runs, even
+another process's raw `rec` capture of the speakers is strongly attenuated
+(measured: an `afplay` cue at volume 45 raised the raw mic from 0.0009 to
+0.0020 RMS), so the speaker→mic path cannot separate ducking from
+cancellation. If the helper is missing,
+exits, or delivers no audio within 4 s of spawn, it is killed and reaped and
+`rec` is spawned instead (I4 holds); the daemon then stays on `rec` until the
+default input device changes. Measured on a MacBook Air (built-in mic +
+speakers, music + TTS speech played at `afplay -v 0.3`, system volume 100):
+playback raised the raw-mic RMS from 0.0375 to 0.1354 (100 % of 30 ms frames
+above the 0.012 speech-energy floor); through the helper it was 0.0012 (0 % of
+frames above the floor). ❓ How much the user's own voice is attenuated by
+VPIO's noise suppression was not measurable on a single-speaker machine.
+
 **Socket rules:**
 - A client falling behind must be told it missed events, never disconnected.
   Dropping the connection makes the GUI reconnect and re-read the entire initial
@@ -129,7 +164,50 @@ daemon broadcasts events, the GUI sends commands.
    clipboard — no paste, no auto-Enter — so a wrong filter verdict costs a
    manual ⌘V instead of the whole utterance.
 9. **Paste** — text is typed into the focused application. If auto-Enter is on,
-   Return follows after `auto_enter_delay_ms`.
+   Return follows after `auto_enter_delay_ms`. With a 0 ms delay, Return is
+   posted 50 ms after Cmd+V (the Cmd-flag guard in `auto_enter_countdown`);
+   the 100 ms post-paste settle that holds the paste-in-flight lock runs
+   *after* Return, not before it (2026-10-13, user request: "make it insanely
+   fast" — previously Return landed ~155 ms after the paste). The clipboard is
+   written in-process through `NSPasteboard` (p50 0.84 ms) rather than a
+   `pbcopy` subprocess (p50 17.4 ms), which remains the fallback.
+
+**Long utterances (chunks).** A chunk committed by the hard flush
+(`CHUNK_HARD_MAX_SECS`) ends at our cut, not at a pause the speaker made, so a
+trailing "..." / "…" on any chunk followed by more text is dropped at join time
+(`chunker::strip_cut_ellipsis`). For a chunked utterance the live streaming
+session's final is never used as the tail — it overlaps already-committed
+chunks and duplicated text (observed 2026-10-13); the tail is transcribed from
+its own samples instead.
+
+**Chunked dictation keeps its pauses (fixed 2026-10-14).** The 200 ms
+short-utterance cut applies only while the *whole* utterance (committed
+chunks + live buffer) is under `SHORT_SPEECH_MS`. It used to judge the live
+buffer alone, which is nearly empty right after a chunk flush, so any
+dictation past `CHUNK_TARGET_SECS` ended at its next pause and was pasted
+in pieces (replay: three sentences with ~1 s pauses became three pastes;
+after the fix, one).
+
+**Consume mode hand-back.** While a consumer holds a consume lease
+(`SetConsumeMode`), a final is not pasted. Its native paste job is parked
+(`held.rs`) and announced as `TranscriptHeld { id, text, at_us }` immediately
+*before* the usual `TranscriptFinal`. The consumer answers:
+- `ReleaseHeld { id }` — it was dictation: the parked job runs the same paste
+  path an unheld utterance takes (merge, dedupe, clipboard, Cmd+V,
+  auto-Enter). The consumer must not type it itself.
+- `DiscardHeld { id }` — claimed (a command / ambient speech): nothing is
+  inserted.
+An entry nobody answers is not pasted after 30 s (`HELD_TTL`) — a late
+paste into whatever has focus by then is worse than none — but it is never
+silently lost either: it moves to the recoverable ring (`rejected.rs`) and
+is announced as `TranscriptRejected { score: "-1.000" }`, pasteable with
+`PasteRejected` (2026-10-14: three held finals had vanished unanswered).
+A held final is an internal handoff and is SILENT: no cue at its
+`TranscriptFinal`, nor on `ReleaseHeld` / `DiscardHeld` (user request
+2026-10-14).
+`SetActStatus` (Iris action progress) is accepted and ignored; Iris renders
+action progress in its own notch. `text` may address an entry
+when `id` is missing.
 
 **Audio delivery must be real time.** Every timing above is counted in
 30 ms frames, so it is only as prompt as the frames' arrival. SoX's
@@ -223,6 +301,50 @@ The latency budget is attacked at the check schedule (earlier first attempt,
 tighter retry cadence), never by weakening the threshold — a noisy short window
 that cannot clear the full bar simply falls through to the next check.
 
+**Unverified preview, shown dimmed (product-owner decision 2026-10-14).**
+Under My Voice the *badge* still waits for verification (table above), but
+the live preview *text* no longer does: it appears immediately, rendered
+dimmed (`TranscriptionInterimPending`, GUI-only; the overlay shows it with
+the text at 40 % opacity and no Listening badge). The words are still never
+pasted and never routed to any consumer (Iris) until the speaker is
+verified — `TranscriptionInterimPending` is a distinct event type that no
+consumer subscribes to. On verification the current preview is re-sent at
+once as `TranscriptionInterim` (normal rendering, routable). If the gate
+rejects the utterance the daemon ends voice activity and the GUI drops the
+dimmed text; a dimmed preview with no update for 2.5 s also expires.
+Measured (offline replay, `src/always/replay_tests.rs`): stranger/TTS
+voices produced only pending previews and zero `TranscriptionInterim`;
+the user's recordings went pending → verified in p50 254 ms (n=3, max
+1761 ms; utterances verified before any text existed skip the dimmed
+stage).
+
+**Instant preview engine (2026-10-14).** With the Apple backend, two
+recognizers run per utterance and both PUSH partials from their own
+callbacks (no per-frame polling) into one merger (`live_preview.rs`):
+- **Parakeet EOU 120M, 160 ms chunks** (FluidAudio 0.17.7, Core ML on
+  `.cpuAndNeuralEngine`) in a resident helper process
+  `always-preview-asr` (source `preview-asr/`, protocol in
+  `preview_asr.rs`). Spawned and warmed at daemon start, fed the 200 ms
+  pre-buffer at onset plus every in-utterance frame. **English only**
+  (`lang` `en*`, or `auto` with an English system locale); other languages
+  keep the Apple partials alone. **Its text is never pasted** and never
+  used as a final.
+- **The Apple streaming recognizer** — the source of the PASTED final, as
+  before. Wherever Apple already has words, Apple's words replace
+  Parakeet's; Parakeet supplies only the words past Apple's last one
+  (anchored on Apple's last word, or by spoken length when Parakeet
+  substituted it).
+Measured on replayed audio through the real pipeline (machine load
+average 60–80 during the runs): first preview text p50 430 ms / p95 605
+ms after the first loud sample (n=5 TTS sentences; includes the 60 ms
+onset debounce and the first word's own duration); every word was on
+screen before the speech ended in 5/5. Helper: model load 0.35–0.9 s warm
+(83 s the very first time Core ML compiles for the ANE), RSS ~55 MB
+steady, CPU ≈8 % of one core while decoding, ≈0 idle. If the helper is
+missing, not yet warm, or dies, the utterance simply has Apple partials
+only (respawn is retried at most every 30 s); audio is handed to it
+through a bounded queue, so a stalled helper can never block capture.
+
 **Live transcript text** is shown whenever the daemon produces a provisional
 preview — the GUI renders any non-empty partial it receives, during the
 transcribing wait *and* while the user is still talking. The daemon, not the
@@ -295,7 +417,40 @@ The cost is up to ~2 s of verify wait at the start of each utterance under the
 gate (§5); the benefit is that the badge and the mic only ever engage for the
 enrolled user.
 
-**Threshold** is a preference (currently 0.40). Measured on the owner's profile:
+**Verification runs off the capture thread (2026-10-14).** A 1.5 s
+embedding costs 146–330 ms (measured), not the 30–50 ms once assumed; run
+inline every 0.25 s of voice it stalled the capture loop behind real time,
+which is what produced the 2–6 s "Listening" cluster (prod: 163 of 618
+utterances, `listening_overlay_shown` p95 4219 ms). Scores now run on a
+worker (one job in flight); the loop never waits on a model call, and the
+final check reuses the verdict already in flight. A failing streak of
+windows only triggers a whole-utterance re-score (capped at 6 s of
+audio); only a failing re-score drops the utterance.
+
+**Own voice over media.** While system audio plays
+(`NotifySystemAudioState`), the early-reject streak starts at 4.25 s of
+voice instead of 2 s; the threshold itself never moves. Scores are also
+taken against an in-memory pool of the last 8 accepted own-voice
+embeddings (never persisted; an embedding is only admitted if it passed
+against the enrolled profile alone, so the pool cannot drift toward a
+stranger; cleared on re-enrollment). Offline replay (25 own clips, 16
+strangers incl. 6 TTS voices, 12 music-only): own voice over music at 5 dB
+0.80 → 0.88 pass, over speech at 5 dB 0.36 → 0.76, verify p95 4891 → 4021
+ms overall; false accepts stayed 0.
+
+**Rejected words are recoverable (2026-10-14, user lost a dictation to a
+false reject under music).** A rejected utterance is still never pasted,
+but its audio is transcribed in the background and kept in memory
+(`rejected.rs`, last 8, 10 min, never written to disk) and announced as
+`TranscriptRejected { id, text, score }`. A consumer may offer "paste
+anyway?"; `PasteRejected { id }` (empty id = most recent) runs the normal
+paste path. Nothing is pasted without that explicit command.
+❓ This explicit "paste anyway" is a user override of I3 (requested
+2026-10-14 via the coordinator); I3's wording has not been changed — the
+product owner should confirm or amend it.
+
+**Threshold** is a preference (code default 0.50; this file previously
+said 0.40). Measured on the owner's profile:
 their own voice scores 0.50–0.67, other audio scores below 0.30 in the vast
 majority of cases. ❓ The value should be re-derived if the voiceprint is
 re-recorded.
@@ -336,10 +491,21 @@ and swaps the live keyboard listener's combo set without a restart.
   aborted mid-capture (only a mic conflict does that, §7.1). It finishes
   recording and is transcribed in full; the pause decides only whether the
   result is pasted.
-- **A pause that arrives mid-utterance normally drops the paste**, so a
+- **A pause that arrives mid-utterance normally withholds the paste**, so a
   transcript cannot leak into a window the user has since moved to. The text
-  is not lost — it is held in the single-slot filtered buffer and the overlay
-  offers "press ⌃⌥V to paste anyway".
+  is **never lost** (changed 2026-10-14 after a dictation vanished as
+  "Skipped paste: app paused mid-utterance" when focus moved to an excluded
+  app): it is kept in the recoverable ring (`rejected.rs`) and announced as
+  `TranscriptRejected { score: "-1.000" }`, pasteable with `PasteRejected`;
+  it is also held in the single-slot filtered buffer and the overlay offers
+  "press ⌃⌥V to paste anyway". Logged at info as
+  `paused_mid_utterance_withheld_recoverable` with the active pause sources
+  (`master`, `per_app`, `mic_conflict`, `audio_output`, `idle`, `no_gui`).
+  ❓ A per-app pause that begins while a capture cycle is still waiting for
+  voice does not end that cycle, so speech spoken after the pause can still
+  be captured and transcribed (seen in the 2026-10-13 incident); it is now
+  recoverable rather than dropped, but whether such a cycle should be
+  abandoned instead (I6) needs a product decision.
 - **Exception — master pause with unchanged focus (changed 2026-08-31, at the
   product owner's request):** when Master is the *only* active source and the
   focused app is still the one the utterance began in, the transcript **is
@@ -347,9 +513,11 @@ and swaps the live keyboard listener's combo set without a restart.
   what I already said", and with focus unchanged there is no other window to
   leak into. The originating bundle id is captured before the first frame is
   recorded (`pause::set_dictation_origin_app`) and compared at paste time; an
-  unknown origin fails closed to the drop. Every other source — per-app, idle,
-  mic conflict, audio output, no-GUI — keeps the drop unchanged, because those
-  genuinely mean "this window must not receive dictation".
+  unknown origin fails closed to the withhold (recoverable, not pasted).
+  Logged at info as `paused_mid_utterance_pasted`. Every other source — per-app, idle,
+  mic conflict, audio output, no-GUI — keeps the withhold (recoverable, never
+  typed automatically), because those genuinely mean "this window must not
+  receive dictation".
 - Focus-driven pause/resume must be silent — switching windows must not flash
   badges.
 
@@ -360,6 +528,9 @@ Another application taking the microphone is detected within about a second.
 - Capture stops **immediately**, mid-utterance, not at the next loop boundary.
 - Words captured before the cut are still transcribed and recorded in the log,
   but **never pasted** — the other app is about to paste its own version.
+  They are kept recoverable (ring + `TranscriptRejected`, logged
+  `mic_conflict_preempted_kept_recoverable`); only an explicit
+  `PasteRejected` types them (2026-10-14, "dictation must never be lost").
 - Listening resumes only after the microphone has been continuously free for
   about 3 s. Dictation apps release the mic between phrases; resuming on the
   first free moment means Always starts listening to speech still aimed at the
@@ -379,7 +550,35 @@ Coexisting apps (default: ScreenFlow `net.telestream.screenflow10`, CleanShotX
 `pl.maketheweb.cleanshotx`) hold the mic for the duration of a recording;
 excluding them lets the user voice-type while recording. The list is
 user-configurable via `always config set mic_conflict_exclusion_bundles
-'["bundle.id"]'`.
+'["bundle.id"]'`. Each entry matches a bundle id, an executable basename, or
+(when it contains `/`) an executable path prefix.
+
+**Process taps are not microphone use** (2026-10-14, after Iris's
+`music-tap` paused Always for 25 min and pre-empted a dictation). A Core
+Audio process tap of system *output* is consumed through a private aggregate
+device, so coreaudiod reports the tapping process as "running input". A
+process only counts as a mic user if at least one device it runs input on
+has input streams and is not an aggregate made solely of taps (transport
+`grup`, non-empty tap list, no active input sub-device). When the device
+facts cannot be read, the process still counts. Iris's helpers are also
+ignored by name/path regardless: `music-tap`, `caption-tap`, `hud-tap`,
+`translate-tap`, `sense-probe`, `focused-editable`, `pcm-play`,
+`life-helper`, and any binary under `iris-mama/packages/*/native/` or
+`~/.iris/cache/`.
+
+**Always never conflicts with itself** (2026-10-14 regression: the new
+`always-capture` recorder, labelled "Always" by LaunchServices, paused the
+daemon for a conflict that could never clear). A capturing process is self
+when it is the daemon, a direct child of the daemon, any executable inside
+the daemon's own `.app` bundle, or named `always`, `always-daemon`,
+`always-capture`, `always-preview-asr`, `rec`, `sox` or `coreaudiod`. As a
+last line of defence, if every app the watcher would blame is labelled as
+Always itself, it refuses to pause — or, if already paused, resumes on the
+next poll — and logs `mic_conflict_self_only_ignored` as an error.
+
+**Every mic-conflict auto-pause auto-resumes** once the mic has been free
+for 3 consecutive 1 s polls. A failing probe while paused counts as a free
+poll, so a broken probe can never strand Always paused.
 
 ### 7.2 Recorder health and respawn
 
@@ -412,6 +611,13 @@ from the device it opened at spawn time and the user would have to
 relaunch Always to switch microphones. The respawn follows the same
 I4 "drop old before spawn new" discipline as a health-driven respawn.
 
+The same rules apply when the recorder is the echo-cancelling `always-capture`
+helper (§3): one process, killed and reaped before any replacement. The helper
+also exits on its own when AVAudioEngine reports a configuration change (route
+or device change) or when the daemon goes away; the daemon sees EOF and
+respawns it through the normal path. It emits no CoreAudio overrun lines, so
+the overrun-rate respawn never fires for it. A `RespawnRecorder` (default
+input change) re-enables the helper after an earlier start-up failure.
 ### 7.3 Daemon memory ceiling and self-restart
 
 The daemon checks its own **physical footprint** every 30 s (same metric
@@ -590,7 +796,37 @@ Between transcription and the keyboard:
    conservative fillers ("um", "uh", "ah", "eh") without inventing content.
    It is the sole cleanup when the LLM pass is disabled, timed out, or
    failed, and a post-pass on the LLM's own output.
-6. **Grammar cleanup** — an LLM pass, on by default (`postprocess_enabled`).
+6. **Postprocess mode** — ONE setting (`postprocess_mode`, Settings → Models →
+   Postprocessing), changed 2026-10-14 at the user's request ("it must be
+   instant"; a "wait 250 ms then paste uncorrected" compromise was rejected).
+   **The paste never waits on a language model.** Before, the blocking LLM
+   pass (8 s timeout) was the 3–10 s insert delay: prod 2026-10-13, n=86,
+   `latency_breakdown` total p50 266 ms / p95 9228 ms, grammar p95 8026 ms,
+   0/86 speculative-cache hits; Apple Intelligence per call p50 5.5 s / p95
+   8.6 s (n=80, offline harness).
+   - **Always Fast** (`fast`) — the deterministic corrector
+     (`det_correct.rs`) inline before every paste: fillers and adjacent
+     repeats, glossary + learned corrections (exact wrong forms always;
+     phonetic/edit-distance only at high confidence, never for ambiguous
+     common words), recognizer artifacts (leading `-..`/`you..`, interior
+     hesitation `..`, `, ,`, `it?'s`, clause-initial `and,`, false-start
+     fragments like `your yourself`), `i` → `I`, capital after an internal
+     sentence end. Never touches the first word's case, never deletes
+     content words, never expands abbreviations. Budget ≤ 2 ms (measured
+     debug build, thread CPU: p50 ~0.9 ms, p99 ~1.8 ms).
+   - **Apple Intelligence** (`apple`) / **Groq** (`groq`) — Always Fast
+     first, so the glossary is always honoured; the LLM runs only as the
+     speculative warm at a pause, and its result is used if it is ALREADY
+     cached at paste time, otherwise skipped silently (no timeout wait).
+     With today's latencies this almost never lands in time — it is kept
+     as an option, not a dependency.
+   - **Off** (`off`) — raw transcript + `local_cleanup` only.
+   - **Migration** when `postprocess_mode` is unset (no silent change of
+     kind): Smart Postprocess on + provider Apple → `apple`; on + Groq
+     (or unset provider, the old default) → `groq`; Smart Postprocess off
+     → `fast` (the corrector supersedes the old bare local cleanup). The
+     stored legacy prefs are not rewritten. A mode change restarts the
+     daemon, like the provider switch it replaces.
    Its prompt enforces token preservation (never expand one word into a
    phrase or contract a phrase into one word) and a certainty bar for
    glossary substitutions. A bounded domain-vocabulary section lists the
@@ -598,8 +834,9 @@ Between transcription and the keyboard:
    (`kit rug trees` → `git worktrees`) only when strong phonetic similarity
    AND technical context both hold; a meta-speech rule keeps quoted wrong
    words literal (`puts cloud instead of Claude` keeps `cloud`).
-   The blocking call at paste time is pre-warmed in the background so it
-   usually lands as a cache hit (or joins the identical in-flight request):
+   The speculative warm builds the request through the same builder as the
+   paste path (`correction_request::build`), which keeps the cache keys
+   byte-identical:
    - **Un-chunked utterance:** the tentative-silence speculation warms the
      grammar key for its transcript as soon as speculative STT returns.
    - **Chunked utterance:** the paste-time call is keyed on the *join* of the
@@ -615,6 +852,9 @@ Between transcription and the keyboard:
    - The Groq request for gpt-oss models asks for `reasoning_effort: low`
      and no reasoning text in the response: the call is on the paste path,
      and hidden reasoning tokens are generated before the answer.
+   Transcript before/after text of a correction is only logged when
+   transcript logging is on (I9); the old unconditional "grammar
+   correction applied" log line leaked it in release builds.
 7. **Corrections** — the user can log a correction for a wrong transcription;
    passive capture of clipboard edits is available but off by default.
 
@@ -799,9 +1039,11 @@ Stored in the daemon's database, editable from Settings and the CLI
 | `speaker_gate_enabled` | true | My Voice |
 | `speaker_gate_threshold` | 0.40 | Identity cut-off |
 | `idle_pause_secs` | 0 (off) | Idle auto-pause |
-| `postprocess_enabled` | true | Grammar cleanup |
+| `postprocess_mode` | unset → migrated (§9 item 6) | `fast` · `apple` · `groq` · `off` |
+| `postprocess_enabled` | true | Legacy; only read to migrate `postprocess_mode` when unset |
 | `transcript_stream` | true | Append accepted utterances to `~/.always/transcripts.jsonl` |
-| `audible_status_sound` | off | Sound cues |
+| `capture_aec` | true | Echo-cancelled capture via `always-capture` (§3); false = plain `rec` |
+| `audible_status_sound` | off | Sound cues (off/low/medium/high; see §10.1) |
 | `per_app_settings_json` | — | Per-application pause rules |
 
 Shortcuts: pause `ctrl+alt+p` · master pause/mute `ctrl+alt+shift+p` ·
@@ -886,6 +1128,21 @@ user's choice wins.
   Kills production, rebuilds, deploys over `/Applications/Always.app`,
   relaunches, verifies. Agents must not run it.
 
+- `scripts/launch-smoke/run.sh <Always.app> [secs]` — pre-promote launch
+  smoke test (added 2026-10-14 after a promoted build paused itself on its
+  own capture helper). Runs the built bundle's daemon + helpers for 30 s as
+  an isolated sandbox instance (`ALWAYS_INSTANCE=smoke`: own socket, state
+  dir, logs; no peer handoff; `ALWAYS_SKIP_ORPHAN_KILL=1`; `ALWAYS_NO_PASTE=1`
+  so it can never type or touch the clipboard), with production
+  master-paused for the window and always resumed. Passes only if the UDS
+  client connects, capture runs at the real frame rate, there is no
+  self mic-conflict pause, pre-emption, or reaping, and every status cue
+  logs `status_sound_played` (with echo-cancelled capture: routed through
+  the helper and rendered with a non-zero peak). It never changes system
+  volume and never plays audibly: the sandbox sets `ALWAYS_CUE_DRY_RUN=1`,
+  which renders cues offline to a buffer. A sandbox instance
+  never pauses, resumes or reaps prod/dev daemons.
+
 **Nothing is "done" until the new build is running** (I10). "Built" and
 "deployed" are different claims, and only "running" is testable.
 
@@ -893,6 +1150,40 @@ user's choice wins.
 > hardware microphone — the mic-conflict monitor (§7) will pause one side.
 > Test the dev daemon with file/STT paths while production holds the mic,
 > or pause production manually first.
+
+---
+
+### 10.1 Sound cues
+
+Original "halo" set (`resources/sounds/halo/*.aiff`, generated by
+`resources/sounds/gen.py`, provenance in `resources/sounds/README.md`),
+embedded in the daemon binary. Played in-process through preloaded
+`AVAudioPlayer`s (pool of 3 per cue) — no `afplay` subprocess. A cue is
+never dropped because another is playing: different cues overlap, a
+retriggered cue takes another pooled player. Gain is baked into the PCM
+(low 0.45, medium 0.75, high 2.0). Measured: `cue()` costs ~0 µs on the
+caller, play start 11–21 ms. Every cue logs `status_sound_played {cue, level, latency_ms}` or
+`status_sound_failed {cue, error}` at info/error level; `PlayStatusCue
+{cue}` plays one through the normal path (launch smoke test).
+
+| Cue | File | When |
+|---|---|---|
+| Listening | start | listening badge raised (first VoiceActivityDetected) |
+| Transcribing | stop | first TranscribingStarted |
+| Success | done | final delivered (not for consume-mode held finals — silent handoff) |
+| Failure | error | transcription failed |
+| Cancel | cancel | transcription filtered |
+| Command | command | reserved; not played on `DiscardHeld` (handoffs are silent, user request 2026-10-14) |
+
+### 10.2 Voice level
+
+`VoiceLevel { energy, energy_db, voiced, bands[5] }` at ~20 Hz, only for
+voiced frames of a verified speaker (or with My Voice off) — never for
+room noise, pauses, or media the gate has not accepted — plus one
+`voiced: false` frame (energy 0) when the utterance ends. `energy` is the
+RMS of the captured (echo-cancelled, when §3 applies) mic since the last
+tick as a fraction of full scale; `energy_db` the same in dBFS;
+`bands` the RMS share of ≈80-250/250-500/500-1k/1k-2k/2k-4k Hz.
 
 ---
 

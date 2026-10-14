@@ -56,6 +56,8 @@ struct ChunkSlot {
 struct ChunkText {
     raw: String,
     corrected: Option<String>,
+    /// Engine acoustic confidence of `raw` (see `RecognitionEvidence`).
+    confidence: Option<f32>,
 }
 
 pub struct ChunkedTranscript {
@@ -64,6 +66,24 @@ pub struct ChunkedTranscript {
     pub text: String,
     pub chunk_count: usize,
     pub failed_chunks: usize,
+    /// Per committed chunk `(acoustic confidence, words)`, for
+    /// [`weighted_confidence`]. Chunks that recognized no words are left
+    /// out; a retried or failed chunk is `(None, 0)`, which makes the
+    /// utterance's confidence unknown — never a guess.
+    pub confidence_parts: Vec<(Option<f32>, usize)>,
+}
+
+/// Word-weighted mean of `(confidence, words)` parts; `None` when any part
+/// lacks a confidence or there are no words at all.
+pub fn weighted_confidence(parts: &[(Option<f32>, usize)]) -> Option<f32> {
+    let mut sum = 0.0f64;
+    let mut words = 0usize;
+    for (c, n) in parts {
+        let c = (*c)?;
+        sum += c as f64 * *n as f64;
+        words += n;
+    }
+    (words > 0).then(|| (sum / words as f64) as f32)
 }
 
 #[derive(Default)]
@@ -119,7 +139,46 @@ fn current_join(slots: &[Arc<ChunkSlot>]) -> Option<String> {
             _ => return None,
         }
     }
-    Some(parts.join(" "))
+    Some(join_chunk_texts(&parts))
+}
+
+/// Strip a trailing ellipsis ("..." or "…", plus any whitespace around it)
+/// left by the recognizer when the audio ended mid-phrase. Chunks end at a
+/// hard-flush cut (`CHUNK_HARD_MAX_SECS`), not at a pause the speaker made,
+/// so Apple's batch recognizer renders the cut-off phrase as "word..." —
+/// observed 2026-10-13: "For the... but the UX", "why I... told you", each
+/// exactly at a chunk boundary. The ellipsis is ours, not the speaker's.
+pub fn strip_cut_ellipsis(text: &str) -> &str {
+    let mut t = text.trim_end();
+    loop {
+        if let Some(rest) = t.strip_suffix("...") {
+            t = rest.trim_end();
+        } else if let Some(rest) = t.strip_suffix('…') {
+            t = rest.trim_end();
+        } else {
+            return t;
+        }
+    }
+}
+
+/// Join committed chunk texts in flush order. Every chunk but the last ends
+/// at a cut, so its trailing ellipsis is dropped (see `strip_cut_ellipsis`).
+/// The last one is left alone here — whether IT ends at a cut depends on
+/// whether a tail follows, which `vad::finalize_chunked` decides.
+pub fn join_chunk_texts(parts: &[String]) -> String {
+    let n = parts.len();
+    let mut out = String::new();
+    for (i, part) in parts.iter().enumerate() {
+        let piece = if i + 1 < n { strip_cut_ellipsis(part) } else { part.as_str() };
+        if piece.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(piece);
+    }
+    out
 }
 
 /// Start the joined-transcript grammar call in the background so the
@@ -224,6 +283,7 @@ impl ChunkAccumulator {
                     *slot.result.lock() = Some(Ok(ChunkText {
                         raw: raw.clone(),
                         corrected: None,
+                        confidence: result.evidence.confidence,
                     }));
                     // Success: the audio has served its purpose. Drop it only
                     // after a usable raw result is visible to finalize.
@@ -299,6 +359,7 @@ impl ChunkAccumulator {
     pub fn finalize(&self, transcriber: &Arc<dyn Transcriber>) -> ChunkedTranscript {
         let slots: Vec<Arc<ChunkSlot>> = self.slots.lock().clone();
         let mut parts: Vec<String> = Vec::with_capacity(slots.len());
+        let mut scored: Vec<(Option<f32>, usize)> = Vec::with_capacity(slots.len());
         let mut failed = 0usize;
         for slot in &slots {
             // Each chunk has had at least a full chunk-duration of head
@@ -331,6 +392,11 @@ impl ChunkAccumulator {
 
             match outcome {
                 Some(Ok(text)) => {
+                    // A chunk that recognized no words says nothing either way.
+                    let words = text.raw.split_whitespace().count();
+                    if words > 0 {
+                        scored.push((text.confidence, words));
+                    }
                     let chosen = text.corrected.unwrap_or(text.raw);
                     if !chosen.is_empty() {
                         parts.push(chosen);
@@ -338,6 +404,7 @@ impl ChunkAccumulator {
                 }
                 Some(Err(err)) => {
                     tracing::warn!(chunk = slot.index, error = %err, "chunk_retry_sync");
+                    scored.push((None, 0));
                     match self.retry_sync(slot, transcriber) {
                         Some(text) => parts.push(text),
                         None => {
@@ -352,6 +419,7 @@ impl ChunkAccumulator {
                     // spill so the audio is safe, and let the straggler
                     // finish into the abandoned slot harmlessly.
                     tracing::warn!(chunk = slot.index, "chunk_wait_timeout");
+                    scored.push((None, 0));
                     failed += 1;
                     parts.push(self.spill_placeholder(slot));
                 }
@@ -359,9 +427,10 @@ impl ChunkAccumulator {
         }
 
         ChunkedTranscript {
-            text: parts.join(" "),
+            text: join_chunk_texts(&parts),
             chunk_count: slots.len(),
             failed_chunks: failed,
+            confidence_parts: scored,
         }
     }
 
@@ -448,6 +517,24 @@ fn failed_chunks_dir() -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cut_ellipsis_is_stripped_between_chunks_only() {
+        let parts = vec![
+            "For the...".to_string(),
+            "but the UX…".to_string(),
+            "and the end...".to_string(),
+        ];
+        assert_eq!(join_chunk_texts(&parts), "For the but the UX and the end...");
+    }
+
+    #[test]
+    fn strip_cut_ellipsis_handles_spacing_and_repeats() {
+        assert_eq!(strip_cut_ellipsis("why I... "), "why I");
+        assert_eq!(strip_cut_ellipsis("so … ..."), "so");
+        assert_eq!(strip_cut_ellipsis("done."), "done.");
+        assert_eq!(strip_cut_ellipsis(""), "");
+    }
+
     use super::*;
     use crate::stt::{StreamingTranscriptionResult, SttError};
     use futures::Stream;
@@ -609,17 +696,27 @@ mod tests {
     }
 
     #[test]
+    fn weighted_confidence_is_word_weighted_and_unknown_if_any_part_is() {
+        assert_eq!(weighted_confidence(&[]), None);
+        let c = weighted_confidence(&[(Some(0.9), 30), (Some(0.1), 10)]).unwrap();
+        assert!((c - 0.7).abs() < 1e-6, "{c}");
+        assert_eq!(weighted_confidence(&[(Some(0.9), 30), (None, 0)]), None);
+    }
+
+    #[test]
     fn current_join_prefers_corrected_and_matches_finalize_choice() {
         let slots = vec![
             slot_with(Some(Ok(ChunkText {
                 raw: "furst part".into(),
                 corrected: Some("first part".into()),
+                confidence: None,
             }))),
             // Correction still in flight (or failed): raw, as finalize
             // would paste it right now.
             slot_with(Some(Ok(ChunkText {
                 raw: "second part".into(),
                 corrected: None,
+                confidence: None,
             }))),
         ];
         assert_eq!(
@@ -645,10 +742,12 @@ mod tests {
         acc.slots.lock().push(slot_with(Some(Ok(ChunkText {
             raw: "first part".into(),
             corrected: Some("First part.".into()),
+            confidence: None,
         }))));
         acc.slots.lock().push(slot_with(Some(Ok(ChunkText {
             raw: "second part".into(),
             corrected: None,
+            confidence: None,
         }))));
         let warmed = acc.join_handle().current_join().expect("determined");
         let t = mock(vec![], vec![]);

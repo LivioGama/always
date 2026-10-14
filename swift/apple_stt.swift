@@ -60,7 +60,7 @@ private func transcribeWithSpeechAnalyzer(
     fileURL: URL,
     langHint: String?,
     phrases: [String]
-) async throws -> String {
+) async throws -> (text: String, confidence: Float) {
     let hint = langHint?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     let wanted = hint.isEmpty ? Locale.current : Locale(identifier: hint)
 
@@ -129,11 +129,21 @@ private func transcribeWithSpeechAnalyzer(
         finishAfterFile: false
     )
 
-    let collectionTask = Task { () -> [String] in
+    // Per-word acoustic confidences of the settled (final) results — the
+    // `.transcriptionConfidence` attribute requested above. Their mean is
+    // the cheap "was this even the recognizer's language?" signal the
+    // daemon's foreign-speech gate reads (O(words), no extra inference).
+    let collectionTask = Task { () -> ([String], [Double]) in
         var parts: [String] = []
+        var confidences: [Double] = []
         do {
             for try await result in transcriber.results {
                 var text = String(result.text.characters)
+                if result.isFinal {
+                    for run in result.text.runs {
+                        if let c = run.transcriptionConfidence { confidences.append(c) }
+                    }
+                }
                 // Rescore: when the model's own alternative hypotheses contain a
                 // known domain phrase, prefer that hypothesis. This never invents
                 // words — it only picks among candidates the engine produced.
@@ -156,18 +166,21 @@ private func transcribeWithSpeechAnalyzer(
         } catch {
             appleLog("[apple-stt] results stream error: \(error.localizedDescription)")
         }
-        return parts
+        return (parts, confidences)
     }
 
     try await analyzer.finalizeAndFinishThroughEndOfInput()
-    let parts = await collectionTask.value
-    appleLog("[apple-stt] analyzer finished, \(parts.count) settled results")
+    let (parts, confidences) = await collectionTask.value
+    let confidence: Float = confidences.isEmpty
+        ? -1 : Float(confidences.reduce(0, +) / Double(confidences.count))
+    appleLog("[apple-stt] analyzer finished, \(parts.count) settled results, confidence=\(confidence)")
     // Join then collapse whitespace — segment texts can carry edge spaces,
     // which produced the observed double-spaced transcripts.
-    return parts.joined(separator: " ")
+    let joined = parts.joined(separator: " ")
         .components(separatedBy: .whitespaces)
         .filter { !$0.isEmpty }
         .joined(separator: " ")
+    return (joined, confidence)
 }
 
 /// Legacy SFSpeechRecognizer path for macOS < 26. Kept because the Apple
@@ -207,6 +220,7 @@ private func transcribeWithLegacyRecognizer(
     let semaphore = DispatchSemaphore(value: 0)
     final class ResultBox: @unchecked Sendable {
         var bestText: String?
+        var confidence: Float = -1
         var errorText: String?
         var noSpeech = false
         var done = false
@@ -226,6 +240,7 @@ private func transcribeWithLegacyRecognizer(
         }
         if let result = result, result.isFinal {
             box.bestText = result.bestTranscription.formattedString
+            box.confidence = meanSegmentConfidence(result.bestTranscription)
             box.done = true
             semaphore.signal()
         }
@@ -243,6 +258,7 @@ private func transcribeWithLegacyRecognizer(
 
     if let text = box.bestText {
         responsePtr.pointee.text = duplicateCString(text)
+        responsePtr.pointee.confidence = box.confidence
         responsePtr.pointee.success = 1
     } else if box.noSpeech {
         responsePtr.pointee.success = 1
@@ -259,7 +275,8 @@ public func transcribeWavWithAppleStt(
     _ phrases: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<AppleSttResponse> {
     let responsePtr = ResponsePointer.allocate(capacity: 1)
-    responsePtr.initialize(to: AppleSttResponse(text: nil, success: 0, error_message: nil))
+    responsePtr.initialize(
+        to: AppleSttResponse(text: nil, success: 0, error_message: nil, confidence: -1))
 
     let path = String(cString: wavPath)
     let fileURL = URL(fileURLWithPath: path)
@@ -291,17 +308,20 @@ public func transcribeWavWithAppleStt(
         let semaphore = DispatchSemaphore(value: 0)
         final class ResultBox: @unchecked Sendable {
             var text: String?
+            var confidence: Float = -1
             var errorText: String?
         }
         let box = ResultBox()
 
         Task {
             do {
-                box.text = try await transcribeWithSpeechAnalyzer(
+                let out = try await transcribeWithSpeechAnalyzer(
                     fileURL: fileURL,
                     langHint: langHint,
                     phrases: phraseList
                 )
+                box.text = out.text
+                box.confidence = out.confidence
             } catch {
                 appleLog("[apple-stt] analyzer error: \(error.localizedDescription)")
                 box.errorText = error.localizedDescription
@@ -330,6 +350,7 @@ public func transcribeWavWithAppleStt(
                 )
             } else {
                 responsePtr.pointee.text = duplicateCString(text)
+                responsePtr.pointee.confidence = box.confidence
                 responsePtr.pointee.success = 1
             }
         } else {
@@ -353,6 +374,14 @@ public func transcribeWavWithAppleStt(
 /// file scope.
 private enum LegacyStt {
     static let dispatchQueue = DispatchQueue(label: "com.always.apple-stt", qos: .userInitiated)
+}
+
+/// Mean per-segment confidence of a legacy SFSpeech transcription, or -1
+/// when the engine reported none (partials carry 0 for every segment).
+private func meanSegmentConfidence(_ t: SFTranscription) -> Float {
+    let values = t.segments.map { $0.confidence }.filter { $0 > 0 }
+    if values.isEmpty { return -1 }
+    return values.reduce(0, +) / Float(values.count)
 }
 
 private func isNoSpeechError(_ error: Error) -> Bool {
@@ -400,6 +429,18 @@ final class AppleSttStreamSession: @unchecked Sendable {
     private var failed = false
     /// Set by `finishHandle()` so late callbacks don't resurrect state.
     private var closed = false
+    /// Partial push target (see `apple_stt_stream_set_callback`). Invoked
+    /// under `lock`, so once `finish`/`abort` has taken the lock and set
+    /// `closed`, no callback is running or will run.
+    private var partialCallback: apple_stt_partial_cb?
+    private var partialContext: UnsafeMutableRawPointer?
+
+    func setCallback(_ cb: apple_stt_partial_cb?, _ ctx: UnsafeMutableRawPointer?) {
+        lock.lock()
+        partialCallback = cb
+        partialContext = ctx
+        lock.unlock()
+    }
 
     private init() {}
 
@@ -455,6 +496,10 @@ final class AppleSttStreamSession: @unchecked Sendable {
             defer { session.lock.unlock() }
             if let result {
                 let text = result.bestTranscription.formattedString
+                if !text.isEmpty && text != session.latestText && !session.closed,
+                   let cb = session.partialCallback {
+                    text.withCString { cb(session.partialContext, $0) }
+                }
                 if !text.isEmpty { session.latestText = text }
                 if result.isFinal {
                     session.finalText = session.latestText
@@ -512,6 +557,17 @@ final class AppleSttStreamSession: @unchecked Sendable {
         return latestText
     }
 
+    /// 0 unknown, 1 heard words, 2 finished with no words, 3 failed —
+    /// see `apple_stt_stream_outcome` in the bridge header.
+    func outcome() -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        if !latestText.isEmpty { return 1 }
+        if failed { return 3 }
+        if let t = finalText, t.isEmpty { return 2 }
+        return 0
+    }
+
     /// End audio and wait up to `timeoutMs` for the final result.
     /// Falls back to the latest partial when the task won't finalize in
     /// time — a slightly stale word beats re-transcribing from scratch.
@@ -562,6 +618,16 @@ public func appleSttStreamStart(
     return Unmanaged.passRetained(session).toOpaque()
 }
 
+@_cdecl("apple_stt_stream_set_callback")
+public func appleSttStreamSetCallback(
+    _ handle: UnsafeMutableRawPointer,
+    _ cb: apple_stt_partial_cb?,
+    _ ctx: UnsafeMutableRawPointer?
+) {
+    let session = Unmanaged<AppleSttStreamSession>.fromOpaque(handle).takeUnretainedValue()
+    session.setCallback(cb, ctx)
+}
+
 @_cdecl("apple_stt_stream_feed")
 public func appleSttStreamFeed(
     _ handle: UnsafeMutableRawPointer,
@@ -596,6 +662,12 @@ public func appleSttStreamFinish(
     let session = Unmanaged<AppleSttStreamSession>.fromOpaque(handle).takeUnretainedValue()
     guard let text = session.finish(timeoutMs: timeoutMs), !text.isEmpty else { return nil }
     return duplicateCString(text)
+}
+
+@_cdecl("apple_stt_stream_outcome")
+public func appleSttStreamOutcome(_ handle: UnsafeMutableRawPointer) -> Int32 {
+    let session = Unmanaged<AppleSttStreamSession>.fromOpaque(handle).takeUnretainedValue()
+    return session.outcome()
 }
 
 @_cdecl("apple_stt_stream_free")

@@ -202,10 +202,23 @@ fn speaker_gate_score(gate: &SpeakerGate, samples: &[i16]) -> Option<f32> {
     let started = std::time::Instant::now();
     match gate.embedder.embed(samples) {
         Ok(e) => {
-            let (score, matched) = best_voiceprint_match(&e, &gate.voiceprint);
-            // Info, not debug: the embedding runs inline on the VAD thread
-            // and sits on the badge's critical path under "My Voice", so
-            // its cost must be visible in production logs.
+            let (enrolled, matched) = best_voiceprint_match(&e, &gate.voiceprint);
+            // Adaptive extension: the user's own recently accepted
+            // utterances (see voiceprint::remember_accepted). Max over
+            // targets never scores below the enrolled-only behaviour.
+            let recent = crate::always::voiceprint::recent_accepted()
+                .iter()
+                .filter(|r| r.len() == e.len())
+                .map(|r| crate::always::speaker_embed::cosine(&e, r))
+                .fold(f32::MIN, f32::max);
+            let (score, matched) = if recent > enrolled {
+                (recent, "recent")
+            } else {
+                (enrolled, matched)
+            };
+            // Info, not debug: the embedding sits on the badge's critical
+            // path under "My Voice", so its cost must be visible in
+            // production logs.
             tracing::info!(
                 score,
                 matched,
@@ -221,6 +234,166 @@ fn speaker_gate_score(gate: &SpeakerGate, samples: &[i16]) -> Option<f32> {
         }
     }
 }
+
+/// Feed an accepted utterance into the adaptive own-voice pool, off the
+/// capture thread. Admitted only when it clears the threshold against
+/// the ENROLLED profile alone (drift guard — the pool can never chain
+/// away from the enrolled voice) and carries >= 1.5 s of voice.
+fn speaker_gate_admit_accepted(gate: &SpeakerGate, samples: &[i16], voiced_samples: usize) {
+    if voiced_samples < SPEAKER_TAIL_WINDOW_SAMPLES {
+        return;
+    }
+    let samples = speaker_gate_whole_window(samples).to_vec();
+    let embedder = Arc::clone(&gate.embedder);
+    let voiceprint = Arc::clone(&gate.voiceprint);
+    let threshold = gate.threshold;
+    std::thread::spawn(move || {
+        let Ok(e) = embedder.embed(&samples) else {
+            return;
+        };
+        let (enrolled, _) = best_voiceprint_match(&e, &voiceprint);
+        if enrolled >= threshold {
+            crate::always::voiceprint::remember_accepted(e);
+            tracing::debug!(enrolled, "speaker_gate_pool_admitted");
+        }
+    });
+}
+
+/// System audio (music, video) is currently playing. Set by the UDS
+/// `NotifySystemAudioState` handler even when the My Voice gate makes it
+/// skip the audio-output pause. While media plays the user's own voice
+/// scores lower (it is mixed with the media), so the early drop waits
+/// for more evidence — see `speaker_gate_reject_from`.
+static MEDIA_PLAYING: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_media_playing(playing: bool) {
+    MEDIA_PLAYING.store(playing, Ordering::Relaxed);
+}
+
+/// Voiced audio after which failing unverified windows start building
+/// the reject streak. 2 s normally; 4.25 s while media plays, so the
+/// drop lands at ~5 s of voice instead of ~2.75 s. Measured on own
+/// voice over music/TTS speech: pass rate within the budget 0.72 → 0.84
+/// (0 dB music) and 0.60 → 0.76 (5 dB speech) with the adaptive pool;
+/// strangers stay at 0 accepts — the threshold is unchanged, only the
+/// time to decide grows. Cost: background media holds the (invisible,
+/// unverified) recording ~2 s longer before it is discarded.
+fn speaker_gate_reject_from(media_playing: bool) -> usize {
+    if media_playing {
+        SPEAKER_GATE_EARLY_SAMPLES_MEDIA
+    } else {
+        SPEAKER_GATE_EARLY_SAMPLES
+    }
+}
+
+const SPEAKER_GATE_EARLY_SAMPLES_MEDIA: usize = 68_000;
+
+/// What an in-flight speaker check was scoring, so its verdict is
+/// applied with the right semantics when it lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateJobKind {
+    /// Trailing ladder window (unverified ladder or verified tail monitor).
+    Window,
+    /// Whole-utterance re-score after a sustained window-mismatch streak:
+    /// the accumulated evidence decides, not the last noisy window.
+    Decisive,
+    /// Whole-utterance score at a tentative pause before speculation.
+    Tentative,
+}
+
+/// A speaker check running OFF the capture thread.
+///
+/// Embedding a 1.5 s window costs 146–330 ms on this model (measured
+/// offline, 2026-10-14) — not the ~30–50 ms the ladder was tuned for.
+/// Run inline, every unverified check stalled the frame loop for that
+/// long while audio queued in rec's pipe, so the loop fell further
+/// behind real time with each check: observed voice→early-reject wall
+/// time p50 3.79 s for a decision that needs 2.75 s of audio, and
+/// onset→verified p95 4.2 s. The loop now submits a snapshot and keeps
+/// reading frames; the verdict is applied on the first frame after it
+/// lands (at most one job in flight per utterance).
+struct GateJob {
+    kind: GateJobKind,
+    rx: std::sync::mpsc::Receiver<Option<f32>>,
+    /// `speech_samples.len()` when submitted — the boundary a passing
+    /// verdict confirms (tail-cut point).
+    len_at_submit: usize,
+    /// `committed_samples` when submitted. A chunk flush in between
+    /// drained the buffer the boundary points into → verdict is stale.
+    committed_at_submit: usize,
+    /// `voiced_samples` when submitted (early-streak eligibility).
+    voiced_at_submit: usize,
+}
+
+impl GateJob {
+    fn spawn(
+        gate: &SpeakerGate,
+        kind: GateJobKind,
+        samples: Vec<i16>,
+        len_at_submit: usize,
+        committed_at_submit: usize,
+        voiced_at_submit: usize,
+    ) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let embedder = Arc::clone(&gate.embedder);
+        let voiceprint = Arc::clone(&gate.voiceprint);
+        let threshold = gate.threshold;
+        std::thread::spawn(move || {
+            let local = SpeakerGate {
+                embedder,
+                voiceprint,
+                threshold,
+            };
+            let _ = tx.send(speaker_gate_score(&local, &samples));
+        });
+        Self {
+            kind,
+            rx,
+            len_at_submit,
+            committed_at_submit,
+            voiced_at_submit,
+        }
+    }
+
+    /// `Some(verdict)` once the score landed; `None` while in flight.
+    /// A dead worker (panic) reads as an unverifiable score.
+    fn poll(&self) -> Option<Option<f32>> {
+        match self.rx.try_recv() {
+            Ok(score) => Some(score),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(None),
+        }
+    }
+
+    /// Block for the verdict (post-loop only), bounded.
+    fn wait(&self, timeout: std::time::Duration) -> Option<Option<f32>> {
+        match self.rx.recv_timeout(timeout) {
+            Ok(score) => Some(score),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Some(None),
+        }
+    }
+
+    /// The buffer this verdict describes no longer exists (chunk flush,
+    /// tail truncation) — discard rather than apply it to other audio.
+    fn is_stale(&self, speech_len: usize, committed: usize) -> bool {
+        committed != self.committed_at_submit || speech_len < self.len_at_submit
+    }
+}
+
+/// Whole-utterance scoring input: the most recent
+/// `SPEAKER_GATE_WHOLE_MAX_SAMPLES` so a long media run can't make the
+/// decisive embed arbitrarily slow.
+fn speaker_gate_whole_window(samples: &[i16]) -> &[i16] {
+    &samples[samples.len() - samples.len().min(SPEAKER_GATE_WHOLE_MAX_SAMPLES)..]
+}
+
+/// Cap for whole-utterance (decisive / tentative / final) scoring: 6 s.
+const SPEAKER_GATE_WHOLE_MAX_SAMPLES: usize = 6 * 16_000;
+
+/// Bound on how long the post-loop final check waits for a verdict that
+/// is already in flight before it scores synchronously instead.
+const SPEAKER_GATE_FINAL_WAIT_MS: u64 = 1_000;
 
 /// Best cosine similarity between `embedding` and the enrolled profile,
 /// taken over the combined voiceprint AND each individual enrollment
@@ -627,6 +800,105 @@ fn append_streaming_preview(accumulated: &mut String, chunk: &str) -> bool {
     true
 }
 
+/// Per-utterance live preview plumbing: the two-engine merger, the
+/// Parakeet feed, and the voice-level meter. Dropping it ends all three:
+/// the preview closes (no late text), Parakeet's utterance ends, and a
+/// terminal zero level is sent.
+#[derive(Default)]
+struct UtterancePreview {
+    preview: Option<Arc<crate::always::live_preview::LivePreview>>,
+    parakeet: Option<crate::always::preview_asr::PreviewUtterance>,
+    prebuffer_fed: bool,
+    level: Option<crate::always::level_meter::LevelMeter>,
+}
+
+impl UtterancePreview {
+    /// Arm the preview for an Apple streaming session. Parakeet joins
+    /// when the dictation language is English and the helper is warm.
+    fn start(
+        &mut self,
+        session: &mut crate::always::apple_stt::StreamSession,
+        lang: &str,
+        verified: bool,
+    ) {
+        if self.preview.is_some() {
+            return;
+        }
+        let preview = crate::always::live_preview::LivePreview::new(
+            verified,
+            crate::always::live_preview::LivePreview::broadcaster(),
+        );
+        session.set_partial_sink(Arc::clone(&preview));
+        if crate::always::preview_asr::lang_is_english(lang)
+            && let Some(asr) = crate::always::preview_asr::global()
+        {
+            let p = Arc::clone(&preview);
+            self.parakeet = asr.begin(Arc::new(move |ev| {
+                if let crate::always::preview_asr::PreviewEvent::Partial(text) = ev {
+                    p.on_parakeet(&text);
+                }
+            }));
+            if self.parakeet.is_none() {
+                tracing::debug!("preview_asr_not_ready");
+            }
+        }
+        self.preview = Some(preview);
+    }
+
+    fn feed_prebuffer_once(&mut self, samples: &[i16]) {
+        if self.prebuffer_fed {
+            return;
+        }
+        self.prebuffer_fed = true;
+        if let Some(p) = self.parakeet.as_mut() {
+            p.feed(samples);
+        }
+    }
+
+    /// One in-utterance frame (voiced, or a pause inside the utterance).
+    /// The loudness meter only counts VOICED frames of a VERIFIED speaker
+    /// (or My Voice off): it is the user's speaking-level meter, so room
+    /// noise, pauses and not-yet-accepted media never move it.
+    fn frame(&mut self, samples: &[i16], voiced: bool, verified: bool) {
+        if let Some(p) = self.parakeet.as_mut() {
+            p.feed(samples);
+        }
+        if verified && let Some(preview) = &self.preview {
+            preview.set_verified();
+        }
+        if !(voiced && verified) {
+            return;
+        }
+        let meter = self.level.get_or_insert_with(crate::always::level_meter::LevelMeter::new);
+        if let Some((energy, bands)) = meter.push(samples, std::time::Instant::now()) {
+            event::global_broadcaster().voice_level(energy, true, bands);
+        }
+    }
+}
+
+impl UtterancePreview {
+    /// Parakeet's text for the utterance when the Parakeet preview engine
+    /// ran (`Some("")` = it ran and heard nothing), `None` when it did not.
+    fn parakeet_snapshot(&self) -> Option<String> {
+        match (&self.parakeet, &self.preview) {
+            (Some(_), Some(preview)) => Some(preview.parakeet_text()),
+            _ => None,
+        }
+    }
+}
+
+impl Drop for UtterancePreview {
+    fn drop(&mut self) {
+        if let Some(p) = &self.preview {
+            p.close();
+        }
+        self.parakeet = None;
+        if self.level.is_some() {
+            event::global_broadcaster().voice_level(0.0, false, [0.0; 5]);
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn record_with_local_vad(
     cfg: &AlwaysConfig,
@@ -877,12 +1149,133 @@ fn record_with_local_vad(
     // tail cut truncates here so foreign trailing audio (movie line
     // after the user's last word) is never sent to STT.
     let mut confirmed_user_len = 0usize;
+    // At most one speaker check in flight, scored off this thread (see
+    // `GateJob`). Its verdict is applied by `gate_apply_verdict!` on the
+    // first frame after it lands — voiced or silent.
+    let mut gate_job: Option<GateJob> = None;
+    macro_rules! gate_apply_verdict {
+        () => {{
+            if let Some(score) = gate_job.as_ref().and_then(GateJob::poll) {
+                let job = gate_job.take().expect("polled gate job present");
+                if let Some(gate) = &speaker_gate
+                    && !job.is_stale(speech_samples.len(), committed_samples)
+                {
+                    if speaker_checked {
+                        // VERIFIED phase: trailing-window tail monitor.
+                        if job.kind == GateJobKind::Window {
+                            let tail_threshold = gate.threshold * SPEAKER_TAIL_THRESHOLD_FACTOR;
+                            if speaker_gate_allows_score(score, tail_threshold) {
+                                tail_fail_streak = 0;
+                                confirmed_user_len = job.len_at_submit;
+                            } else {
+                                tail_fail_streak += 1;
+                                tracing::debug!(
+                                    score = ?score,
+                                    tail_threshold,
+                                    streak = tail_fail_streak,
+                                    "speaker_gate_tail_mismatch"
+                                );
+                                if SPEAKER_GATE_ENFORCE_DROP
+                                    && tail_fail_streak >= speaker_tail_fail_checks
+                                {
+                                    tracing::info!(
+                                        score = ?score,
+                                        kept_secs = confirmed_user_len as f64 / 16_000.0,
+                                        trimmed_secs = (speech_samples.len() - confirmed_user_len)
+                                            as f64
+                                            / 16_000.0,
+                                        "speaker_gate_tail_cut"
+                                    );
+                                    speech_samples.truncate(confirmed_user_len);
+                                    break;
+                                }
+                            }
+                        }
+                    } else if speaker_gate_allows_score(score, gate.threshold) {
+                        let score = score.expect("accepted speaker score must be present");
+                        speaker_checked = true;
+                        confirmed_user_len = job.len_at_submit;
+                        tail_fail_streak = 0;
+                        tracing::info!(score, via = ?job.kind, "speaker_gate_verified");
+                        announce_voice_activity!();
+                        // The USER resumed speaking (verified) — the gated
+                        // equivalent of the countdown cancel on voice onset.
+                        if pause::countdown_active() {
+                            pause::countdown_request_cancel();
+                            tracing::info!("countdown_cancel_on_verified_voice");
+                        }
+                    } else {
+                        match job.kind {
+                            GateJobKind::Window => {
+                                if job.voiced_at_submit
+                                    >= speaker_gate_reject_from(MEDIA_PLAYING.load(Ordering::Relaxed))
+                                {
+                                    gate_fail_streak += 1;
+                                    tracing::debug!(
+                                        score = ?score,
+                                        streak = gate_fail_streak,
+                                        "speaker_gate_unverified_mismatch"
+                                    );
+                                    // Sustained window mismatch: let the
+                                    // ACCUMULATED evidence (whole utterance)
+                                    // decide. Previously the drop fired here
+                                    // even when the whole-utterance score
+                                    // passed — 20 own-voice utterances in
+                                    // 3 days were dropped at 0.50–0.53
+                                    // (logged as early_reject score).
+                                    if SPEAKER_GATE_ENFORCE_DROP
+                                        && gate_fail_streak >= SPEAKER_GATE_REJECT_STREAK
+                                    {
+                                        gate_job = Some(GateJob::spawn(
+                                            gate,
+                                            GateJobKind::Decisive,
+                                            speaker_gate_whole_window(&speech_samples).to_vec(),
+                                            speech_samples.len(),
+                                            committed_samples,
+                                            voiced_samples,
+                                        ));
+                                    }
+                                }
+                            }
+                            GateJobKind::Decisive | GateJobKind::Tentative => {
+                                if SPEAKER_GATE_ENFORCE_DROP {
+                                    let score = score.unwrap_or(-1.0);
+                                    if job.kind == GateJobKind::Decisive {
+                                        tracing::info!(
+                                            score,
+                                            threshold = gate.threshold,
+                                            streak = gate_fail_streak,
+                                            "speaker_gate_early_reject"
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            score,
+                                            threshold = gate.threshold,
+                                            "speaker_gate_tentative_reject"
+                                        );
+                                    }
+                                    crate::always::rejected::stash_audio(&speech_samples, score);
+                                    event::global_broadcaster().voice_activity_ended();
+                                    flip_to_listening!();
+                                    return Ok(RecordResult::DroppedSpeaker { score });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }};
+    }
     // Live streaming recognition session (Apple backend only). Created at
     // speech onset, fed every frame; partials broadcast as interim
     // transcripts and the final result replaces the end-of-utterance WAV
     // round trip. `None` on other backends or when the engine is
     // unavailable — everything below degrades to the existing paths.
     let mut stream_session: Option<crate::always::apple_stt::StreamSession> = None;
+    // Live preview (both engines push into it) + Parakeet feed + voice
+    // level. Declared AFTER `stream_session` so it drops FIRST on every
+    // exit path: the preview closes before the Apple session is freed.
+    let mut utt_preview = UtterancePreview::default();
     let stream_session_lang = if cfg.lang == "auto" || cfg.lang.is_empty() {
         None
     } else {
@@ -1132,6 +1525,13 @@ fn record_with_local_vad(
                     if stream_session.is_none() {
                         tracing::debug!("apple_stream_session_unavailable");
                     }
+                    if let Some(session) = stream_session.as_mut() {
+                        utt_preview.start(
+                            session,
+                            &cfg.lang,
+                            !speaker_gate_requested || speaker_checked,
+                        );
+                    }
                 }
                 if !voice_logged {
                     // Fast energy check for very low thresholds to minimize latency
@@ -1211,6 +1611,10 @@ fn record_with_local_vad(
                 for buffered_samples in pre_buffer.drain(..) {
                     speech_samples.extend_from_slice(&buffered_samples);
                 }
+                // Parakeet gets the 200 ms pre-buffer too, so its first
+                // inference runs on the leading audio and the first word
+                // is neither cold nor clipped.
+                utt_preview.feed_prebuffer_once(&speech_samples);
             }
             if in_speech {
                 speech_samples.extend_from_slice(samples);
@@ -1220,14 +1624,13 @@ fn record_with_local_vad(
                 // partial. Interim text stays hidden until the speaker is
                 // verified — a stranger's words must never reach the
                 // overlay even as a preview.
+                // Partials are PUSHED by both engines into `utt_preview`;
+                // before verification they are shown dimmed only (never
+                // routed to consumers) — see live_preview.rs.
                 if let Some(session) = stream_session.as_mut() {
                     session.feed(samples);
-                    if speaker_checked
-                        && let Some(partial) = session.poll_partial()
-                    {
-                        event::global_broadcaster().transcription_interim(partial);
-                    }
                 }
+                utt_preview.frame(samples, true, !speaker_gate_requested || speaker_checked);
                 // Same anchor refresh for the case where we were already in
                 // speech (consecutive_speech overflows min_speech_frames
                 // immediately) — keep the watchdog clock pinned to "right
@@ -1247,21 +1650,20 @@ fn record_with_local_vad(
                 }
 
                 // "My Voice" ladder: one check per 0.25s of NEW voiced
-                // audio while unverified, 0.5s after verification. The
-                // inference stalls the read loop briefly; the recorder's
-                // reader thread keeps queueing meanwhile, so no audio is
-                // lost and the loop catches up within a few frames.
+                // audio while unverified, 0.5s after verification — scored
+                // OFF this thread (see `GateJob`), at most one in flight,
+                // so the frame loop never stalls behind an embedding.
                 //
                 // UNVERIFIED phase: a trailing-window match at the full
-                // threshold verifies the user (as early as ~0.3s of voice
-                // now that MIN_EMBED_SAMPLES is the floor) and only then
-                // raises the listening badge — non-user voices never flash
-                // it. From ~2s, CONSECUTIVE failing windows build a streak;
-                // at SPEAKER_GATE_REJECT_STREAK (~1s of continuously
-                // not-you audio) the utterance is dropped — background
-                // media dialogue must not hold the recorder hostage for
-                // an entire scene, but a single noisy window must not
-                // destroy the user's own speech either.
+                // threshold verifies the user and only then raises the
+                // listening badge — non-user voices never flash it. From
+                // `speaker_gate_reject_from` (2 s, 4.25 s while media
+                // plays), CONSECUTIVE failing windows build a streak; at
+                // SPEAKER_GATE_REJECT_STREAK the whole utterance is
+                // re-scored and only a failing whole-utterance score drops
+                // it — background media must not hold the recorder
+                // hostage, but noisy windows must not destroy the user's
+                // own speech either.
                 //
                 // VERIFIED phase: keep scoring the trailing window. The
                 // generic VAD can never end the utterance while media
@@ -1269,7 +1671,9 @@ fn record_with_local_vad(
                 // a mismatch streak is the real end-of-dictation signal:
                 // the user stopped, something else holds the mic. Cut at
                 // the last matching boundary and finalize what they said.
+                gate_apply_verdict!();
                 if let Some(gate) = &speaker_gate
+                    && gate_job.is_none()
                     && voiced_samples >= next_speaker_check
                 {
                     next_speaker_check = voiced_samples
@@ -1279,91 +1683,14 @@ fn record_with_local_vad(
                             SPEAKER_GATE_UNVERIFIED_CHECK_EVERY_SAMPLES
                         };
                     let tail_len = SPEAKER_TAIL_WINDOW_SAMPLES.min(speech_samples.len());
-                    let window = &speech_samples[speech_samples.len() - tail_len..];
-                    if !speaker_checked {
-                        let score = speaker_gate_score(gate, window);
-                        if speaker_gate_allows_score(score, gate.threshold) {
-                            let score = score.expect("accepted speaker score must be present");
-                            speaker_checked = true;
-                            confirmed_user_len = speech_samples.len();
-                            tail_fail_streak = 0;
-                            tracing::info!(score, "speaker_gate_verified");
-                            announce_voice_activity!();
-                            // The USER resumed speaking (verified) —
-                            // this is the gated equivalent of the
-                            // countdown cancel in the voice_logged
-                            // block above.
-                            if pause::countdown_active() {
-                                pause::countdown_request_cancel();
-                                tracing::info!("countdown_cancel_on_verified_voice");
-                            }
-                        } else if voiced_samples >= SPEAKER_GATE_EARLY_SAMPLES {
-                            gate_fail_streak += 1;
-                            // Sustained-mismatch drop: a foreign voice
-                            // (movie dialogue, YouTube) holds the recorder
-                            // hostage — but the cut fires only after
-                            // SPEAKER_GATE_REJECT_STREAK CONSECUTIVE failing
-                            // windows (~1s of continuously not-you audio),
-                            // never on one noisy window. Any earlier pass
-                            // would have verified the user, so reaching here
-                            // means NOTHING has ever matched: this is not
-                            // the user's utterance. One media-polluted
-                            // window at the 2s mark can no longer destroy a
-                            // sentence the user was mid-way through.
-                            if SPEAKER_GATE_ENFORCE_DROP
-                                && gate_fail_streak >= SPEAKER_GATE_REJECT_STREAK
-                            {
-                                let score = speaker_gate_score(gate, &speech_samples);
-                                tracing::info!(
-                                    score = ?score,
-                                    threshold = gate.threshold,
-                                    streak = gate_fail_streak,
-                                    "speaker_gate_early_reject"
-                                );
-                                event::global_broadcaster().voice_activity_ended();
-                                flip_to_listening!();
-                                return Ok(RecordResult::DroppedSpeaker {
-                                    score: score.unwrap_or(-1.0),
-                                });
-                            }
-                            // Not enough consecutive evidence yet — keep
-                            // listening. A later window can still verify
-                            // the user and rescue the utterance.
-                            tracing::debug!(
-                                streak = gate_fail_streak,
-                                "speaker_gate_unverified_mismatch"
-                            );
-                        }
-                    } else {
-                        let tail_threshold = gate.threshold * SPEAKER_TAIL_THRESHOLD_FACTOR;
-                        let score = speaker_gate_score(gate, window);
-                        if speaker_gate_allows_score(score, tail_threshold) {
-                            tail_fail_streak = 0;
-                            confirmed_user_len = speech_samples.len();
-                        } else {
-                            tail_fail_streak += 1;
-                            tracing::debug!(
-                                score = ?score,
-                                tail_threshold,
-                                streak = tail_fail_streak,
-                                "speaker_gate_tail_mismatch"
-                            );
-                            if SPEAKER_GATE_ENFORCE_DROP
-                                && tail_fail_streak >= speaker_tail_fail_checks
-                            {
-                                tracing::info!(
-                                    score = ?score,
-                                    kept_secs = confirmed_user_len as f64 / 16_000.0,
-                                    trimmed_secs = (speech_samples.len() - confirmed_user_len)
-                                        as f64
-                                        / 16_000.0,
-                                    "speaker_gate_tail_cut"
-                                );
-                                speech_samples.truncate(confirmed_user_len);
-                                break;
-                            }
-                        }
-                    }
+                    gate_job = Some(GateJob::spawn(
+                        gate,
+                        GateJobKind::Window,
+                        speech_samples[speech_samples.len() - tail_len..].to_vec(),
+                        speech_samples.len(),
+                        committed_samples,
+                        voiced_samples,
+                    ));
                 }
 
                 // LIVE preview: while the user is mid-sentence (this is the
@@ -1506,6 +1833,7 @@ fn record_with_local_vad(
                 }
             }
         } else if in_speech {
+            utt_preview.frame(samples, false, !speaker_gate_requested || speaker_checked);
             if keyboard::is_option_held() {
                 consecutive_silence = 0;
                 consecutive_speech = 0;
@@ -1577,34 +1905,31 @@ fn record_with_local_vad(
             }
 
             // "My Voice": verify the speaker BEFORE any speculative STT
-            // can leak a stranger's words into the overlay preview.
-            // Short utterances (< 1s of voice) can't be verified yet —
-            // they skip speculation and get re-checked at final.
+            // can leak a stranger's words into the overlay preview. Any
+            // ladder verdict that landed during this pause is applied
+            // first; then, still unverified at a tentative pause, the
+            // whole utterance is scored OFF this thread (`GateJob`) and
+            // its verdict applied on a later frame — speculation simply
+            // waits for `speaker_checked`. Utterances too short to embed
+            // are re-checked at final.
+            gate_apply_verdict!();
             if voice_logged
                 && voiced_since_flush
                 && !speculation_pending
                 && consecutive_silence >= eff_tentative_frames
                 && let Some(gate) = &speaker_gate
                 && !speaker_checked
+                && gate_job.is_none()
                 && voiced_samples >= crate::always::speaker_embed::MIN_EMBED_SAMPLES
             {
-                let score = speaker_gate_score(gate, &speech_samples);
-                if SPEAKER_GATE_ENFORCE_DROP && !speaker_gate_allows_score(score, gate.threshold) {
-                    let score = score.unwrap_or(-1.0);
-                    tracing::info!(
-                        score,
-                        threshold = gate.threshold,
-                        "speaker_gate_tentative_reject"
-                    );
-                    event::global_broadcaster().voice_activity_ended();
-                    flip_to_listening!();
-                    return Ok(RecordResult::DroppedSpeaker { score });
-                }
-                speaker_checked = true;
-                // Verified: arm the tail monitor in case speech resumes
-                // on top of media.
-                confirmed_user_len = speech_samples.len();
-                tail_fail_streak = 0;
+                gate_job = Some(GateJob::spawn(
+                    gate,
+                    GateJobKind::Tentative,
+                    speaker_gate_whole_window(&speech_samples).to_vec(),
+                    speech_samples.len(),
+                    committed_samples,
+                    voiced_samples,
+                ));
             }
             let speculation_speaker_ok =
                 speaker_gate_allows_stt(speaker_gate_requested, speaker_checked);
@@ -1856,6 +2181,10 @@ fn record_with_local_vad(
     // on which the final-silence cut fired — i.e. when the user's silence
     // window actually elapsed, not when the loop got around to it.
     let speech_end_at = frame_captured_at;
+    // Capture is over: end the live preview + Parakeet feed and send the
+    // terminal zero level now, not after transcription.
+    let preview_text = utt_preview.parakeet_snapshot();
+    drop(std::mem::take(&mut utt_preview));
 
     let has_chunks = !chunker.is_empty();
 
@@ -1917,11 +2246,34 @@ fn record_with_local_vad(
         let threshold = speaker_gate
             .as_ref()
             .map_or(cfg.speaker_gate_threshold as f32, |gate| gate.threshold);
-        let score = speaker_gate.as_ref().and_then(|gate| {
-            (voiced_samples >= crate::always::speaker_embed::MIN_EMBED_SAMPLES)
-                .then(|| speaker_gate_score(gate, &speech_samples))
-                .flatten()
-        });
+        // Accumulated evidence first: a verdict already in flight for
+        // THIS buffer (normally the tentative-pause whole-utterance score,
+        // submitted >= ~0.3 s before the final cut) is awaited instead of
+        // re-embedding from scratch, so the paste does not wait on a
+        // fresh model call. A passing window verdict also verifies. Only
+        // when nothing usable is in flight is the utterance scored here.
+        let landed = gate_job
+            .take()
+            .filter(|job| !job.is_stale(speech_samples.len(), committed_samples))
+            .and_then(|job| {
+                let waited = std::time::Instant::now();
+                let verdict = job.wait(std::time::Duration::from_millis(SPEAKER_GATE_FINAL_WAIT_MS));
+                tracing::debug!(
+                    kind = ?job.kind,
+                    wait_ms = waited.elapsed().as_millis() as u64,
+                    "speaker_gate_final_awaited"
+                );
+                verdict.map(|score| (job.kind, score))
+            });
+        let score = match landed {
+            Some((_, score)) if speaker_gate_allows_score(score, threshold) => score,
+            Some((GateJobKind::Tentative | GateJobKind::Decisive, score)) => score,
+            _ => speaker_gate.as_ref().and_then(|gate| {
+                (voiced_samples >= crate::always::speaker_embed::MIN_EMBED_SAMPLES)
+                    .then(|| speaker_gate_score(gate, speaker_gate_whole_window(&speech_samples)))
+                    .flatten()
+            }),
+        };
         if SPEAKER_GATE_ENFORCE_DROP && !speaker_gate_allows_transcription(true, score, threshold) {
             if speaker_gate.is_none() {
                 tracing::warn!("speaker_gate_unavailable_reject");
@@ -1930,12 +2282,18 @@ fn record_with_local_vad(
             } else {
                 tracing::info!(score = ?score, threshold, "speaker_gate_final_reject");
             }
+            crate::always::rejected::stash_audio(&speech_samples, score.unwrap_or(-1.0));
             event::global_broadcaster().voice_activity_ended();
             flip_to_listening!();
             return Ok(RecordResult::DroppedSpeaker {
                 score: score.unwrap_or(-1.0),
             });
         }
+    }
+    // Accepted own-voice utterance: feed the adaptive pool (off-thread,
+    // enrolled-only drift guard inside).
+    if speaker_gate_requested && let Some(gate) = &speaker_gate {
+        speaker_gate_admit_accepted(gate, &speech_samples, voiced_samples);
     }
 
     // Guarantee Transcribing overlay (speculation usually already flipped).
@@ -2007,23 +2365,45 @@ fn record_with_local_vad(
     // trip. This is the path that takes end-of-utterance paste latency
     // from ~1s down to ~0-300ms. Empty result (no speech recognized)
     // falls through to the established paths.
+    // A chunked utterance cannot use the streaming final as its tail. The
+    // live session runs from speech onset across every chunk flush, but what
+    // `finish` returns is not reliably either the whole utterance or just the
+    // open tail — logs on 2026-10-13 showed it overlapping committed chunks
+    // ("…when I was... When Iris I was not using Iris when I was…" and a
+    // whole utterance pasted twice), because `finalize_chunked` appends it
+    // after the chunk join. Drop it and let the tail be transcribed from
+    // its own samples (speculation or a fresh pass) like before streaming.
+    if has_chunks && let Some(session) = stream_session.take() {
+        drop(session);
+        tracing::info!("streaming_final_skipped_chunked");
+    }
+    let mut live_stream = crate::stt::LiveStreamOutcome::NotRun;
     let streaming_final = match stream_session.take() {
         Some(session) => {
-            let text = session.finish(APPLE_STREAM_FINISH_MS);
+            let (text, outcome) = session.finish_with_outcome(APPLE_STREAM_FINISH_MS);
+            live_stream = outcome;
             match &text {
                 Some(t) => {
                     tracing::info!(chars = t.chars().count(), "streaming_final_used");
                 }
                 None => {
-                    tracing::info!("streaming_final_empty");
+                    tracing::info!(outcome = ?outcome, "streaming_final_empty");
                 }
             }
             text.filter(|t| !t.trim().is_empty())
         }
         None => None,
     };
+    // The speculative file pass (already finished or awaited above — no
+    // extra wait) carries the engine's acoustic confidence for nearly the
+    // same audio; keep it for the foreign-speech gate even when the
+    // streaming final supplies the text.
+    let speculation_confidence = speculation
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .and_then(|r| r.evidence.confidence);
 
-    let (result, speculation_used) = if let Some(text) = streaming_final {
+    let (mut result, speculation_used) = if let Some(text) = streaming_final {
         (
             crate::stt::TranscriptionResult {
                 text,
@@ -2092,6 +2472,11 @@ fn record_with_local_vad(
         }
     };
     let stt_done_at = std::time::Instant::now();
+    if result.evidence.confidence.is_none() {
+        result.evidence.confidence = speculation_confidence;
+    }
+    result.evidence.live_stream = live_stream;
+    result.evidence.preview_text = preview_text;
 
     let raw = result.text.clone();
 
@@ -2206,6 +2591,9 @@ fn finalize_chunked(
     let tail = tail_text.trim();
     let mut full_text = assembled.text;
     if !tail.is_empty() {
+        // The last chunk ended at our hard-flush cut, not at the speaker's
+        // pause: its trailing "..." is a boundary artifact.
+        full_text = crate::always::chunker::strip_cut_ellipsis(&full_text).to_string();
         if full_text.is_empty() {
             full_text = tail.to_string();
         } else {
@@ -2228,11 +2616,24 @@ fn finalize_chunked(
     // utterances, and the only segment stats available here would describe
     // the tail — letting them judge a multi-minute joined transcript could
     // drop it wholesale.
+    // Acoustic confidence for the foreign-speech gate: word-weighted over
+    // every chunk plus the tail (unknown if any part is unknown). The live
+    // stream / preview signals describe only the open chunk, so they are
+    // deliberately not carried here.
+    let mut confidence_parts = assembled.confidence_parts;
+    let tail_words = tail.split_whitespace().count();
+    if tail_words > 0 {
+        confidence_parts.push((tail_result.evidence.confidence, tail_words));
+    }
     let transcription = crate::stt::TranscriptionResult {
         text: full_text.clone(),
         duration: total_samples as f64 / 16_000.0,
         language: tail_result.language.clone(),
         segments: Vec::new(),
+        evidence: crate::stt::RecognitionEvidence {
+            confidence: crate::always::chunker::weighted_confidence(&confidence_parts),
+            ..Default::default()
+        },
     };
     Ok(RecordResult::Speech {
         text: full_text,
@@ -2713,6 +3114,79 @@ mod tests {
         assert!(speaker_gate_allows_stt(false, false));
         assert!(speaker_gate_allows_stt(true, true));
         assert!(!speaker_gate_allows_stt(true, false));
+    }
+
+    #[test]
+    fn speaker_gate_media_extends_reject_budget_not_threshold() {
+        use super::{
+            SPEAKER_GATE_EARLY_SAMPLES, SPEAKER_GATE_EARLY_SAMPLES_MEDIA,
+            speaker_gate_reject_from,
+        };
+        assert_eq!(speaker_gate_reject_from(false), SPEAKER_GATE_EARLY_SAMPLES);
+        assert_eq!(speaker_gate_reject_from(true), SPEAKER_GATE_EARLY_SAMPLES_MEDIA);
+        assert!(SPEAKER_GATE_EARLY_SAMPLES_MEDIA > SPEAKER_GATE_EARLY_SAMPLES);
+        // The pass bar itself never moves with media.
+        assert!(!speaker_gate_allows_score(Some(0.49), 0.50));
+    }
+
+    fn gate_job_with(
+        kind: super::GateJobKind,
+        len: usize,
+        committed: usize,
+    ) -> (super::GateJob, std::sync::mpsc::Sender<Option<f32>>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (
+            super::GateJob {
+                kind,
+                rx,
+                len_at_submit: len,
+                committed_at_submit: committed,
+                voiced_at_submit: len,
+            },
+            tx,
+        )
+    }
+
+    #[test]
+    fn gate_job_poll_is_non_blocking_until_verdict_lands() {
+        let (job, tx) = gate_job_with(super::GateJobKind::Window, 10, 0);
+        assert_eq!(job.poll(), None, "in flight must not block or decide");
+        tx.send(Some(0.61)).unwrap();
+        assert_eq!(job.poll(), Some(Some(0.61)));
+    }
+
+    #[test]
+    fn gate_job_dead_worker_reads_as_unverifiable() {
+        let (job, tx) = gate_job_with(super::GateJobKind::Tentative, 10, 0);
+        drop(tx);
+        assert_eq!(job.poll(), Some(None));
+        assert!(!speaker_gate_allows_score(None, 0.5), "unverifiable never passes");
+    }
+
+    #[test]
+    fn gate_job_wait_is_bounded() {
+        let (job, _tx) = gate_job_with(super::GateJobKind::Decisive, 10, 0);
+        let t = std::time::Instant::now();
+        assert_eq!(job.wait(std::time::Duration::from_millis(30)), None);
+        assert!(t.elapsed() < std::time::Duration::from_millis(500));
+    }
+
+    #[test]
+    fn gate_job_verdict_is_stale_after_flush_or_truncation() {
+        let (job, _tx) = gate_job_with(super::GateJobKind::Window, 24_000, 0);
+        assert!(!job.is_stale(24_000, 0));
+        assert!(!job.is_stale(30_000, 0), "buffer grew: verdict still describes it");
+        assert!(job.is_stale(30_000, 96_000), "chunk flushed in between");
+        assert!(job.is_stale(10_000, 0), "buffer truncated below the boundary");
+    }
+
+    #[test]
+    fn whole_window_caps_decisive_scoring_cost() {
+        use super::{SPEAKER_GATE_WHOLE_MAX_SAMPLES, speaker_gate_whole_window};
+        let long = vec![1i16; SPEAKER_GATE_WHOLE_MAX_SAMPLES + 5];
+        assert_eq!(speaker_gate_whole_window(&long).len(), SPEAKER_GATE_WHOLE_MAX_SAMPLES);
+        let short = vec![1i16; 100];
+        assert_eq!(speaker_gate_whole_window(&short).len(), 100);
     }
 
     #[test]

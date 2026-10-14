@@ -306,6 +306,7 @@ impl Transcriber for LocalTranscriber {
             duration: audio_duration_secs,
             language: self.language.clone().unwrap_or_default(),
             segments: vec![],
+            ..Default::default()
         })
     }
 

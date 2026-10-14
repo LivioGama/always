@@ -45,6 +45,7 @@ fn main() {
     {
         build_apple_intelligence_bridge();
         build_apple_stt_bridge();
+        build_status_sound_bridge();
     }
 }
 
@@ -306,6 +307,103 @@ fn build_apple_stt_bridge() {
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=apple_stt");
     println!("cargo:rustc-link-lib=framework=Speech");
+}
+
+/// In-process status-cue playback (AVAudioPlayer pools). Replaces the
+/// `afplay` subprocess so cues start without a process launch and never
+/// drop each other. See `src/always/status_sound.rs`.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn build_status_sound_bridge() {
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let swift_dir = manifest_dir.join("swift");
+    let real_swift_path = swift_dir.join("status_sound.swift");
+    let stub_swift_path = swift_dir.join("status_sound_stub.swift");
+    let bridge_header_path = swift_dir.join("status_sound_bridge.h");
+    let bridge_header = bridge_header_path.to_str().unwrap();
+
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
+    let object_path = out_dir.join("status_sound.o");
+    let static_lib_path = out_dir.join("libstatus_sound.a");
+
+    let sdk_path = std::env::var("SDKROOT").unwrap_or_else(|_| {
+        String::from_utf8(
+            Command::new("xcrun")
+                .args(["--sdk", "macosx", "--show-sdk-path"])
+                .output()
+                .expect("Failed to locate macOS SDK")
+                .stdout,
+        )
+        .expect("SDK path is not valid UTF-8")
+        .trim()
+        .to_string()
+    });
+
+    let avfoundation =
+        Path::new(&sdk_path).join("System/Library/Frameworks/AVFoundation.framework");
+    let has_avfoundation = avfoundation.exists();
+    let source_file = if has_avfoundation {
+        real_swift_path.to_str().unwrap()
+    } else {
+        stub_swift_path.to_str().unwrap()
+    };
+
+    println!("cargo:rerun-if-changed={}", real_swift_path.display());
+    println!("cargo:rerun-if-changed={}", stub_swift_path.display());
+    println!("cargo:rerun-if-changed={bridge_header}");
+
+    let swiftc_path = std::env::var("SWIFTC").unwrap_or_else(|_| {
+        String::from_utf8(
+            Command::new("xcrun")
+                .args(["--find", "swiftc"])
+                .output()
+                .expect("Failed to locate swiftc")
+                .stdout,
+        )
+        .expect("swiftc path is not valid UTF-8")
+        .trim()
+        .to_string()
+    });
+
+    let status = Command::new(&swiftc_path)
+        .args([
+            "-parse-as-library",
+            "-target",
+            "arm64-apple-macosx11.0",
+            "-sdk",
+            &sdk_path,
+            "-O",
+            "-import-objc-header",
+            bridge_header,
+            "-c",
+            source_file,
+            "-o",
+            object_path.to_str().expect("Failed to convert object path"),
+        ])
+        .status()
+        .expect("Failed to invoke swiftc for status sound bridge");
+    if !status.success() {
+        panic!("swiftc failed to compile {source_file}");
+    }
+
+    let status = Command::new("libtool")
+        .args([
+            "-static",
+            "-o",
+            static_lib_path.to_str().expect("Failed to convert static lib path"),
+            object_path.to_str().expect("Failed to convert object path"),
+        ])
+        .status()
+        .expect("Failed to create static library for status sound bridge");
+    if !status.success() {
+        panic!("libtool failed for status sound bridge");
+    }
+
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
+    println!("cargo:rustc-link-lib=static=status_sound");
+    if has_avfoundation {
+        println!("cargo:rustc-link-lib=framework=AVFoundation");
+        println!("cargo:rustc-link-lib=framework=CoreAudio");
+    }
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

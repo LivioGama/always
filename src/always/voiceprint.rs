@@ -172,6 +172,7 @@ pub fn set_step(step: EnrollStep, embedding: Vec<f32>) -> Result<Arc<VoiceProfil
     persist(&profile)?;
     let arc = Arc::new(profile);
     *CACHE.write() = Some(Some(arc.clone()));
+    clear_recent_accepted();
     Ok(arc)
 }
 
@@ -184,7 +185,55 @@ pub fn clear() -> Result<()> {
         Err(e) => return Err(e).context("deleting voiceprint.json"),
     }
     *CACHE.write() = Some(None);
+    clear_recent_accepted();
     Ok(())
+}
+
+/// Recently ACCEPTED own-voice utterance embeddings — an in-memory
+/// adaptive extension of the enrolled profile (never persisted, never
+/// leaves the process; I9).
+///
+/// Enrollment is recorded in a quiet room; real dictation happens over
+/// music and video, where the mixture's embedding drifts away from the
+/// clean enrollment styles (measured 2026-10-14 on the owner's own
+/// recordings mixed with local music / TTS speech: own-voice utterance
+/// pass rate at 0 dB music 0.64, under 5 dB background speech 0.32).
+/// Scoring against "the best of enrolled styles + the user's own recent
+/// accepted utterances" raised those to 0.72 / 0.60 (0.84 / 0.76 with
+/// the media decision budget), with the max stranger / music-only /
+/// stranger-over-music window score unchanged at <= 0.30 vs the 0.50
+/// threshold.
+///
+/// Drift guard: an embedding is only admitted when it clears the
+/// threshold against the ENROLLED profile alone (see the caller), so the
+/// pool can never chain away from the enrolled voice.
+const RECENT_ACCEPTED_MAX: usize = 8;
+
+static RECENT_ACCEPTED: parking_lot::Mutex<std::collections::VecDeque<Vec<f32>>> =
+    parking_lot::Mutex::new(std::collections::VecDeque::new());
+
+/// Admit one accepted own-voice embedding (oldest evicted beyond
+/// `RECENT_ACCEPTED_MAX`). Wrong-dimension embeddings are ignored.
+pub fn remember_accepted(embedding: Vec<f32>) {
+    if embedding.len() != speaker_embed::EMBEDDING_DIM {
+        return;
+    }
+    let mut pool = RECENT_ACCEPTED.lock();
+    pool.push_back(embedding);
+    while pool.len() > RECENT_ACCEPTED_MAX {
+        pool.pop_front();
+    }
+}
+
+/// Snapshot of the adaptive pool (cheap: <= 8 x 256 floats).
+pub fn recent_accepted() -> Vec<Vec<f32>> {
+    RECENT_ACCEPTED.lock().iter().cloned().collect()
+}
+
+/// Forget the adaptive pool — on any (re-)enrollment or profile delete,
+/// so a new voiceprint never inherits the previous one's samples.
+pub fn clear_recent_accepted() {
+    RECENT_ACCEPTED.lock().clear();
 }
 
 #[cfg(test)]
@@ -217,6 +266,28 @@ mod tests {
             .collect();
         let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         v.into_iter().map(|x| x / norm).collect()
+    }
+
+    #[test]
+    fn recent_accepted_pool_is_bounded_and_reset_by_enrollment() {
+        with_temp_config(|| {
+            clear_recent_accepted();
+            remember_accepted(vec![0.0; 3]); // wrong dim: ignored
+            assert!(recent_accepted().is_empty());
+            for i in 0..(RECENT_ACCEPTED_MAX + 3) {
+                remember_accepted(fake_embedding(i as f32));
+            }
+            let pool = recent_accepted();
+            assert_eq!(pool.len(), RECENT_ACCEPTED_MAX);
+            // Oldest evicted first.
+            assert_eq!(pool[0], fake_embedding(3.0));
+            // A (re-)enrollment never inherits the previous pool.
+            set_step(EnrollStep::Normal, fake_embedding(9.0)).unwrap();
+            assert!(recent_accepted().is_empty());
+            remember_accepted(fake_embedding(1.0));
+            clear().unwrap();
+            assert!(recent_accepted().is_empty());
+        });
     }
 
     #[test]

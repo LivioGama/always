@@ -29,3 +29,12 @@ node_modules/
 .idea/
 
 .pixel/
+
+preview-asr/.build/
+preview-asr/.swiftpm/
+capture/always-capture
+
+scripts/launch-smoke/AlwaysSmoke.app/
+scripts/launch-smoke/events.jsonl
+scripts/launch-smoke/daemon.out
+scripts/launch-smoke/tts.aiff

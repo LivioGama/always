@@ -52,6 +52,40 @@ static LAST_LOW_MIC_OVERLAY: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(||
 /// `TranscriptFinal` remain for non-streaming chunk-based transcription.
 pub const PROTOCOL_VERSION: u32 = 12;
 
+/// Why a recoverable transcript was not pasted (`TranscriptRejected.reason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectReason {
+    /// The "My Voice" gate did not recognize the speaker.
+    Speaker,
+    /// Acoustic evidence: not the dictation language (Nepali to family…).
+    ForeignSpeech,
+    /// Always was paused (per-app, mic conflict, …) while it was spoken.
+    Paused,
+    /// A held final nobody answered for expired.
+    Expired,
+}
+
+impl RejectReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Speaker => "speaker",
+            Self::ForeignSpeech => "foreign_speech",
+            Self::Paused => "paused",
+            Self::Expired => "expired",
+        }
+    }
+
+    /// Recovery prompt copy for this reason.
+    pub fn prompt(self) -> &'static str {
+        match self {
+            Self::Speaker => "Not sure that was you — paste anyway?",
+            Self::ForeignSpeech => "Didn't sound like English — paste anyway?",
+            Self::Paused => "Heard while Always was paused — paste anyway?",
+            Self::Expired => "Not pasted in time — paste anyway?",
+        }
+    }
+}
+
 /// Event types for daemon-to-GUI communication
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -91,6 +125,18 @@ pub enum DaemonEvent {
     TranscriptFinal {
         text: String,
     },
+    /// Consume mode only: the final just broadcast as `TranscriptFinal` was
+    /// NOT pasted — its native paste job is parked under `id` until the
+    /// consumer answers `ReleaseHeld` (paste it, with auto-enter, exactly as
+    /// an unheld utterance) or `DiscardHeld` (it was claimed). Strings only,
+    /// so the GUI's loose `[String: String]` payload decode accepts it.
+    /// `at_us` is the daemon's wall clock (unix µs) at park time, for
+    /// cross-process latency measurement.
+    TranscriptHeld {
+        id: String,
+        text: String,
+        at_us: String,
+    },
     /// Interim transcription result from a streaming transcriber.
     /// This text is provisional and may change as more audio is processed.
     /// Used by streaming engines (e.g., MoonshineStreaming, streaming APIs)
@@ -98,6 +144,46 @@ pub enum DaemonEvent {
     /// Distinct from `TranscriptChunk` which is used for chunk-based previews.
     TranscriptionInterim {
         text: String,
+    },
+    /// Live preview text heard BEFORE the "My Voice" gate verified the
+    /// speaker (decision 2026-10-14: show immediately, dimmed). Only the
+    /// GUI renders it; it is deliberately a distinct event type so no other
+    /// consumer (Iris) ever routes unverified words. Once verified, the
+    /// same text is re-sent as `TranscriptionInterim`.
+    TranscriptionInterimPending {
+        text: String,
+    },
+    /// Speaking-loudness meter (~20 Hz). Sent ONLY for voiced frames of
+    /// the user's own speech: VAD says voice AND the speaker is verified
+    /// (or My Voice is off) — never for room noise, fans, or media that
+    /// the gate has not accepted. One terminal frame with `voiced: false`
+    /// (energy 0) when the voice ends.
+    /// - `energy`: RMS of the mic audio since the last tick, normalised to
+    ///   full scale (0..1).
+    /// - `energy_db`: the same RMS in dBFS (−100 floor for silence).
+    /// - `bands`: coarse 5-band spectrum (≈80-250, 250-500, 500-1k, 1k-2k,
+    ///   2k-4k Hz), each band's RMS share, summing to ≈1.
+    VoiceLevel {
+        energy: f64,
+        energy_db: f64,
+        voiced: bool,
+        bands: [f32; 5],
+    },
+    /// "My Voice" rejected an utterance — it was NOT pasted — but its
+    /// transcript is kept recoverable for a while (`rejected.rs`). A
+    /// consumer may offer "paste anyway?" and answer `PasteRejected`.
+    /// Strings only, like `TranscriptHeld`.
+    TranscriptRejected {
+        id: String,
+        text: String,
+        score: String,
+        /// Why it was not pasted — see [`RejectReason`]. Consumers pick
+        /// copy from this (or show `prompt` verbatim).
+        #[serde(default)]
+        reason: String,
+        /// Ready-to-show recovery copy for this reason.
+        #[serde(default)]
+        prompt: String,
     },
     /// Grammar correction was applied — carries before/after for overlay feedback
     GrammarCorrected {
@@ -390,9 +476,32 @@ impl DaemonEvent {
             DaemonEvent::TranscriptFinal { text } => {
                 cap_field(text).map(|text| DaemonEvent::TranscriptFinal { text })
             }
+            DaemonEvent::TranscriptHeld { id, text, at_us } => {
+                cap_field(text).map(|text| DaemonEvent::TranscriptHeld {
+                    id: id.clone(),
+                    text,
+                    at_us: at_us.clone(),
+                })
+            }
             DaemonEvent::TranscriptionInterim { text } => {
                 cap_field(text).map(|text| DaemonEvent::TranscriptionInterim { text })
             }
+            DaemonEvent::TranscriptionInterimPending { text } => {
+                cap_field(text).map(|text| DaemonEvent::TranscriptionInterimPending { text })
+            }
+            DaemonEvent::TranscriptRejected {
+                id,
+                text,
+                score,
+                reason,
+                prompt,
+            } => cap_field(text).map(|text| DaemonEvent::TranscriptRejected {
+                id: id.clone(),
+                text,
+                score: score.clone(),
+                reason: reason.clone(),
+                prompt: prompt.clone(),
+            }),
             DaemonEvent::GrammarCorrected { before, after } => {
                 let cb = cap_field(before);
                 let ca = cap_field(after);
@@ -462,6 +571,50 @@ pub enum DaemonCommand {
     /// last client disconnects so normal dictation resumes. Idempotent.
     SetConsumeMode {
         enabled: bool,
+    },
+    /// Hand a held final (see `DaemonEvent::TranscriptHeld`) back to the
+    /// native paste + auto-enter path. `id` is the decimal id from the
+    /// frame; when it is missing/unknown, `text` is matched exactly.
+    ReleaseHeld {
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        text: Option<String>,
+    },
+    /// Drop a held final: the consumer claimed it. Same addressing as
+    /// `ReleaseHeld`.
+    DiscardHeld {
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        text: Option<String>,
+    },
+    /// Play one status cue through the normal path (`cue()`: honours the
+    /// `audible_status_sound` setting, logs `status_sound_played`). Used by
+    /// the launch smoke test; harmless for anyone else. `cue` is one of
+    /// listening, transcribing, done, error, cancel, command.
+    PlayStatusCue {
+        cue: String,
+    },
+    /// Iris's action-progress status (task/goal/step text/action label).
+    /// Accepted so the frame is not an "unknown variant" error; the daemon
+    /// does not render it — Iris shows action progress in its own notch.
+    SetActStatus {
+        #[serde(default)]
+        task: String,
+        #[serde(default)]
+        goal: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        action: String,
+    },
+    /// Paste a transcript the "My Voice" gate rejected (see
+    /// `DaemonEvent::TranscriptRejected`) — the user confirmed it was
+    /// them. Empty / "0" id = the most recent one.
+    PasteRejected {
+        #[serde(default)]
+        id: String,
     },
     /// Hot-reload sensitivity + auto-enter delay without restart.
     ApplyRuntimePreferences {
@@ -694,10 +847,63 @@ impl EventBroadcaster {
         self.send(DaemonEvent::TranscriptChunk { text });
     }
 
+    /// Announce a consume-mode final whose paste is parked under `id`.
+    pub fn transcript_held(&self, id: u64, text: String) {
+        let at_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros())
+            .unwrap_or(0);
+        self.send(DaemonEvent::TranscriptHeld {
+            id: id.to_string(),
+            text,
+            at_us: at_us.to_string(),
+        });
+    }
+
     /// Send transcript final event
     pub fn transcript_final(&self, text: String) {
         crate::always::status_sound::cue(crate::always::status_sound::StatusSound::Success);
         self.send(DaemonEvent::TranscriptFinal { text });
+    }
+
+    /// `TranscriptFinal` without the Success cue: a consume-mode final that
+    /// was parked. Its cue plays on the verdict instead — Success when it is
+    /// released to paste, Command when the consumer claims it.
+    pub fn transcript_final_quiet(&self, text: String) {
+        self.send(DaemonEvent::TranscriptFinal { text });
+    }
+
+    /// Unverified live preview (rendered dimmed by the GUI only).
+    pub fn transcription_interim_pending(&self, text: String) {
+        self.send(DaemonEvent::TranscriptionInterimPending { text });
+    }
+
+    /// Live capture level tick (see `DaemonEvent::VoiceLevel`).
+    pub fn voice_level(&self, energy: f64, voiced: bool, bands: [f32; 5]) {
+        let energy_db = if energy > 1e-5 { 20.0 * energy.log10() } else { -100.0 };
+        self.send(DaemonEvent::VoiceLevel {
+            energy,
+            energy_db: (energy_db * 10.0).round() / 10.0,
+            voiced,
+            bands,
+        });
+    }
+
+    /// A "My Voice"-rejected utterance's transcript, recoverable by id.
+    pub fn transcript_rejected(&self, id: u64, text: String, score: f32) {
+        self.transcript_rejected_for(id, text, score, RejectReason::Speaker);
+    }
+
+    /// A not-pasted utterance's transcript, recoverable by id, with the
+    /// reason it was held back (drives the recovery prompt copy).
+    pub fn transcript_rejected_for(&self, id: u64, text: String, score: f32, reason: RejectReason) {
+        self.send(DaemonEvent::TranscriptRejected {
+            id: id.to_string(),
+            text,
+            score: format!("{score:.3}"),
+            reason: reason.as_str().to_string(),
+            prompt: reason.prompt().to_string(),
+        });
     }
 
     /// Send interim transcription result from a streaming transcriber.
@@ -771,6 +977,7 @@ impl EventBroadcaster {
 
     /// Send transcription-filtered event with the human-readable reason.
     pub fn transcription_filtered(&self, reason: impl Into<String>) {
+        crate::always::status_sound::cue(crate::always::status_sound::StatusSound::Cancel);
         self.send(DaemonEvent::TranscriptionFiltered {
             reason: reason.into(),
         });
@@ -993,6 +1200,66 @@ mod tests {
             off,
             DaemonCommand::SetConsumeMode { enabled: false }
         ));
+    }
+
+    #[test]
+    fn set_act_status_from_iris_is_accepted() {
+        let c = DaemonCommand::from_json_line(
+            r#"{"type":"SetActStatus","data":{"task":"movie","goal":"watch","text":"Opening","action":""}}"#,
+        )
+        .expect("SetActStatus must parse");
+        assert!(matches!(c, DaemonCommand::SetActStatus { ref task, .. } if task == "movie"));
+    }
+
+    #[test]
+    fn held_commands_parse_from_iris_wire_format() {
+        let r = DaemonCommand::from_json_line(r#"{"type":"ReleaseHeld","data":{"id":"7"}}"#)
+            .expect("release must parse");
+        assert!(matches!(r, DaemonCommand::ReleaseHeld { ref id, text: None } if id == "7"));
+        let d = DaemonCommand::from_json_line(r#"{"type":"DiscardHeld","data":{"text":"open terminal"}}"#)
+            .expect("discard by text must parse");
+        assert!(matches!(d, DaemonCommand::DiscardHeld { ref id, text: Some(ref t) } if id.is_empty() && t == "open terminal"));
+    }
+
+    #[test]
+    fn new_preview_level_and_rejected_events_serialize() {
+        let ev = DaemonEvent::VoiceLevel {
+            energy: 0.5,
+            energy_db: -6.0,
+            voiced: true,
+            bands: [0.1, 0.2, 0.3, 0.2, 0.2],
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(
+            json.starts_with(r#"{"type":"VoiceLevel","data":{"energy":0.5,"energy_db":-6.0,"voiced":true,"bands":[0.1,"#),
+            "{json}"
+        );
+        let ev = DaemonEvent::TranscriptionInterimPending { text: "hi".into() };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"type":"TranscriptionInterimPending","data":{"text":"hi"}}"#
+        );
+        let ev = DaemonEvent::TranscriptRejected {
+            id: "2".into(),
+            text: "x".into(),
+            score: "0.120".into(),
+            reason: RejectReason::ForeignSpeech.as_str().into(),
+            prompt: RejectReason::ForeignSpeech.prompt().into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"type":"TranscriptRejected","data":{"id":"2","text":"x","score":"0.120","reason":"foreign_speech","prompt":"Didn't sound like English — paste anyway?"}}"#
+        );
+        assert_eq!(RejectReason::Speaker.prompt(), "Not sure that was you — paste anyway?");
+        let c = DaemonCommand::from_json_line(r#"{"type":"PasteRejected","data":{"id":"2"}}"#).unwrap();
+        assert!(matches!(c, DaemonCommand::PasteRejected { ref id } if id == "2"));
+    }
+
+    #[test]
+    fn transcript_held_serializes_as_strings() {
+        let ev = DaemonEvent::TranscriptHeld { id: "3".into(), text: "hi".into(), at_us: "1".into() };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert_eq!(json, r#"{"type":"TranscriptHeld","data":{"id":"3","text":"hi","at_us":"1"}}"#);
     }
 
     fn drain(rx: &mut broadcast::Receiver<DaemonEvent>) -> Vec<DaemonEvent> {

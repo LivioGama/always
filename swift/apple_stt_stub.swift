@@ -17,7 +17,7 @@ public func transcribeWavWithAppleStt(
     _ phrases: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<AppleSttResponse> {
     let responsePtr = ResponsePointer.allocate(capacity: 1)
-    responsePtr.initialize(to: AppleSttResponse(text: nil, success: 0, error_message: nil))
+    responsePtr.initialize(to: AppleSttResponse(text: nil, success: 0, error_message: nil, confidence: -1))
 
     let msg = "Apple STT not available in this build (SDK requirement not met)."
     responsePtr.pointee.error_message = strdup(msg)

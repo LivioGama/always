@@ -9,6 +9,11 @@ typedef struct {
     char* text;
     int success; /* 0 for failure, 1 for success */
     char* error_message; /* Only valid when success = 0 */
+    /* Mean per-word acoustic confidence of the returned text in [0, 1],
+     * or -1 when the engine reported none. A transcript of speech in a
+     * language other than the recognizer's locale scores far lower
+     * (measured: English 0.6-0.96, Hindi/Nepali 0.05-0.38). */
+    float confidence;
 } AppleSttResponse;
 
 /* Check if on-device Apple Speech (SFSpeechRecognizer) is available */
@@ -31,6 +36,13 @@ void free_apple_stt_result(AppleSttResponse* response);
  * unavailable/unauthorized (caller falls back to the file path). */
 void* apple_stt_stream_start(const char* lang, const char* phrases);
 
+/* Push partials: `cb(ctx, text)` is invoked from the recognizer's queue
+ * each time the partial text changes, until the session is finished or
+ * freed (never after apple_stt_stream_free returns). `text` is only valid
+ * for the duration of the call. */
+typedef void (*apple_stt_partial_cb)(void* ctx, const char* text);
+void apple_stt_stream_set_callback(void* handle, apple_stt_partial_cb cb, void* ctx);
+
 /* Feed 16 kHz mono signed-LE i16 samples into the session. */
 void apple_stt_stream_feed(void* handle, const short* samples, int count);
 
@@ -42,6 +54,12 @@ char* apple_stt_stream_partial(void* handle, const char* seen);
  * Returns a freshly-allocated C string or NULL when nothing was
  * recognized. Falls back to the best partial on timeout. */
 char* apple_stt_stream_finish(void* handle, int timeout_ms);
+
+/* How the session ended, valid after apple_stt_stream_finish:
+ * 0 = unknown (timed out before any result), 1 = heard words,
+ * 2 = finished cleanly with NO words (no speech in the locale's language),
+ * 3 = recognition failed. */
+int apple_stt_stream_outcome(void* handle);
 
 /* Cancel a session and release it. */
 void apple_stt_stream_free(void* handle);
