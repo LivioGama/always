@@ -502,6 +502,41 @@ fn wait_readable(fd: i32, timeout_ms: i32) -> io::Result<bool> {
     }
 }
 
+/// When the capture helper last switched its echo canceller from bypass to
+/// engaged because ANOTHER process started output (not for one of our own
+/// cues). Microseconds on [`aec_clock`]; 0 = never.
+static AEC_OUTPUT_ENGAGED_US: AtomicU64 = AtomicU64::new(0);
+
+fn aec_clock() -> &'static std::time::Instant {
+    static BASE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    BASE.get_or_init(std::time::Instant::now)
+}
+
+/// Track the helper's echo-canceller transitions from its stderr. Only the
+/// bypass→engaged edge caused by other output matters: until it fires,
+/// newly started playback reaches the mic unfiltered (the helper reacts to
+/// the output starting; it cannot precede it).
+fn note_capture_helper_line(line: &str) {
+    if line.contains("aec engaged (output pids") {
+        let us = aec_clock().elapsed().as_micros() as u64;
+        AEC_OUTPUT_ENGAGED_US.store(us.max(1), Ordering::Relaxed);
+    }
+}
+
+/// Instant of the last bypass→engaged edge caused by other playback.
+pub(crate) fn aec_output_engaged_at() -> Option<std::time::Instant> {
+    match AEC_OUTPUT_ENGAGED_US.load(Ordering::Relaxed) {
+        0 => None,
+        us => Some(*aec_clock() + std::time::Duration::from_micros(us)),
+    }
+}
+
+/// Test hook: pretend the helper reported an output-triggered engage now.
+#[cfg(test)]
+pub(crate) fn note_capture_helper_line_for_test(line: &str) {
+    note_capture_helper_line(line);
+}
+
 #[cfg(target_os = "macos")]
 impl RecChild {
     /// Spawn the recorder: the echo-cancelling capture helper when AEC is
@@ -548,6 +583,7 @@ impl RecChild {
                 for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                     let trimmed = line.trim();
                     if !trimmed.is_empty() {
+                        note_capture_helper_line(trimmed);
                         tracing::info!(line = %trimmed, "capture_helper_stderr");
                     }
                 }
@@ -1485,5 +1521,21 @@ mod tests {
         assert_eq!(src.read_frame(&mut buf).unwrap(), FRAME_BYTES);
         assert_eq!(buf[0], 0xAB);
         assert_eq!(buf[1], 0xCD);
+    }
+}
+
+#[cfg(test)]
+mod aec_edge_tracking_tests {
+    #[test]
+    fn only_output_triggered_engage_lines_set_the_edge() {
+        use super::{aec_output_engaged_at, note_capture_helper_line_for_test as note};
+        let before = aec_output_engaged_at();
+        note("always-capture: aec engaged (cue) tap=7ch@44100");
+        note("always-capture: aec bypassed (no other output) tap=7ch@44100");
+        assert_eq!(aec_output_engaged_at(), before);
+        let t = std::time::Instant::now();
+        note("always-capture: aec engaged (output pids [\"1252:com.apple.WebKit.GPU\"]) tap=7ch@44100");
+        let got = aec_output_engaged_at().expect("edge recorded");
+        assert!(got + std::time::Duration::from_millis(5) >= t && got <= std::time::Instant::now());
     }
 }

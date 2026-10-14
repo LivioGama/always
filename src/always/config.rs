@@ -191,6 +191,17 @@ pub struct AlwaysConfig {
     /// mid-sentence (see `vad.rs::looks_mid_sentence`). Default on;
     /// DB pref `stt_adaptive_silence`.
     pub adaptive_silence_enabled: bool,
+    /// Silence (seconds) a pause must reach to end the utterance when the
+    /// words before it end on a hesitation — a filler ("uh", "um", "you
+    /// know"), a trailing connector ("and", "the", "to"), a trailing comma
+    /// or the recogniser's cut-off "...". A complete sentence still ends at
+    /// `silence_secs`; this only holds a cut the speaker is plainly not
+    /// done with (`vad.rs::classify_pause_text`). Default 2.5 s: on
+    /// 2026-10-14 the user resumed after a hesitation-ending fragment within
+    /// 1.21, 1.44, 1.63 and 2.43 s (log upper bounds); a 10.4 s gap was a
+    /// new thought and still ends at 2.5 s.
+    /// Env `ALWAYS_HESITATION_SILENCE_SECS` (0-10).
+    pub hesitation_silence_secs: f64,
     /// "My Voice" speaker-verification gate. Active only when BOTH
     /// this flag is on AND a complete voiceprint is enrolled — so the
     /// default experience is unchanged until the user opts in via
@@ -469,6 +480,9 @@ impl AlwaysConfig {
             // allowing absurdly tiny windows that split normal phrases.
             silence_secs: resolve_silence_secs(silence_secs, &prefs),
             adaptive_silence_enabled: prefs.stt_adaptive_silence.unwrap_or(true),
+            hesitation_silence_secs: resolve_hesitation_silence_secs(
+                std::env::var("ALWAYS_HESITATION_SILENCE_SECS").ok().as_deref(),
+            ),
             speaker_gate_enabled: prefs.speaker_gate_enabled.unwrap_or(false),
             speaker_gate_threshold: prefs
                 .speaker_gate_threshold
@@ -583,6 +597,7 @@ impl Default for AlwaysConfig {
             // (Pause tolerance picker).
             silence_secs: DEFAULT_SILENCE_SECS,
             adaptive_silence_enabled: true,
+            hesitation_silence_secs: DEFAULT_HESITATION_SILENCE_SECS,
             speaker_gate_enabled: false,
             speaker_gate_threshold: DEFAULT_SPEAKER_GATE_THRESHOLD,
             auto_enter: true,
@@ -631,6 +646,17 @@ fn resolve_stt_live_preview(prefs: &Preferences) -> bool {
             _ => None,
         })
         .unwrap_or(true)
+}
+
+/// Default hesitation hold — see `AlwaysConfig::hesitation_silence_secs`.
+pub const DEFAULT_HESITATION_SILENCE_SECS: f64 = 2.5;
+
+/// `ALWAYS_HESITATION_SILENCE_SECS` → clamped 0-10 s; unset/invalid → default.
+fn resolve_hesitation_silence_secs(env: Option<&str>) -> f64 {
+    env.and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite())
+        .map(|v| v.clamp(0.0, 10.0))
+        .unwrap_or(DEFAULT_HESITATION_SILENCE_SECS)
 }
 
 /// Resolve the foreign-speech low-confidence enforcement. Order: DB pref →
@@ -886,6 +912,19 @@ fn resolve_silence_secs(cli_silence_secs: Option<f64>, prefs: &Preferences) -> f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hesitation_silence_resolves_env_with_clamp_and_default() {
+        assert_eq!(resolve_hesitation_silence_secs(None), DEFAULT_HESITATION_SILENCE_SECS);
+        assert_eq!(resolve_hesitation_silence_secs(Some("1.5")), 1.5);
+        assert_eq!(resolve_hesitation_silence_secs(Some("99")), 10.0);
+        assert_eq!(resolve_hesitation_silence_secs(Some("-1")), 0.0);
+        assert_eq!(
+            resolve_hesitation_silence_secs(Some("nope")),
+            DEFAULT_HESITATION_SILENCE_SECS
+        );
+        assert_eq!(AlwaysConfig::default().hesitation_silence_secs, 2.5);
+    }
 
     #[test]
     fn explicit_cli_silence_overrides_saved_preference() {

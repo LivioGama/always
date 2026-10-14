@@ -364,6 +364,7 @@ mod tests {
             timeout_secs: 30,
             silence_secs: 2.0,
             adaptive_silence_enabled: true,
+            hesitation_silence_secs: crate::always::config::DEFAULT_HESITATION_SILENCE_SECS,
             speaker_gate_enabled: false,
             speaker_gate_threshold: crate::always::config::DEFAULT_SPEAKER_GATE_THRESHOLD,
             auto_enter: false,

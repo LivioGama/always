@@ -75,7 +75,7 @@ pub enum Stroke {
     Text(String),
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 mod mac {
     use super::*;
     use std::ffi::c_void;
@@ -335,10 +335,10 @@ mod mac {
     }
 }
 
-#[cfg(feature = "macos")]
+#[cfg(target_os = "macos")]
 pub use mac::{AxElem, focused_element, focused_element_of, post_strokes};
 
-#[cfg(not(feature = "macos"))]
+#[cfg(not(target_os = "macos"))]
 mod stub {
     use super::*;
     #[derive(Debug, Clone)]
@@ -362,7 +362,7 @@ mod stub {
         anyhow::bail!("keystrokes not implemented on this platform")
     }
 }
-#[cfg(not(feature = "macos"))]
+#[cfg(not(target_os = "macos"))]
 pub use stub::{AxElem, focused_element, focused_element_of, post_strokes};
 
 #[cfg(test)]

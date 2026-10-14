@@ -243,6 +243,22 @@ var aecWatched = Set<AudioObjectID>()
 /// Keep the canceller engaged this long after the last output stops: apps
 /// stop/start their output between tracks, and the room still rings briefly.
 let aecHangover = 2.0
+/// After MEDIA output stops (a video or music app, not our own TTS/cues),
+/// stay engaged much longer: paused media resumes, and the canceller can
+/// only engage in REACTION to output starting — so a resume after bypass
+/// put the first seconds of the video into the mic uncancelled, still
+/// converging. Measured 2026-10-14: a YouTube resume at 11:25:14Z ~71 s
+/// after its pause put the narrator's first 1.5 s through as the user
+/// (0.581) and it was pasted, while every narrator window under a converged
+/// canceller scored 0.15–0.21. That day's WebKit pause→resume gaps: 30 s,
+/// 88 s, 71 s — all inside 120 s. Cost: VPIO stays on (≈15 vs 3 CPU-s/min)
+/// for up to 2 min after media pauses. Override:
+/// ALWAYS_CAPTURE_MEDIA_HANGOVER (seconds).
+let aecMediaHangover = Double(ProcessInfo.processInfo.environment["ALWAYS_CAPTURE_MEDIA_HANGOVER"] ?? "") ?? 120.0
+/// Short-lived players whose output ends for good when they exit: the
+/// ordinary hangover suffices (Iris's speech player; system sound players).
+let aecShortOutputNames: Set<String> = ["pcm-play", "afplay", "always-daemon"]
+var aecLastOutputWasMedia = false
 
 func caAddr(_ sel: AudioObjectPropertySelector) -> AudioObjectPropertyAddress {
     AudioObjectPropertyAddress(mSelector: sel, mScope: kAudioObjectPropertyScopeGlobal,
@@ -316,6 +332,9 @@ func aecReevaluate() {
     let playing = otherOutputPids()
     let held = DispatchTime.now() < aecHoldUntil
     if !playing.isEmpty || held {
+        if !playing.isEmpty {
+            aecLastOutputWasMedia = playing.contains { !aecShortOutputNames.contains(procName($0)) }
+        }
         aecOffWork?.cancel(); aecOffWork = nil
         setAecEngaged(true, held && playing.isEmpty ? "cue" : "output pids \(playing.map { "\($0):\(procName($0))" })")
         if held && playing.isEmpty {
@@ -331,14 +350,16 @@ func aecReevaluate() {
         return
     }
     guard aecEngaged, aecOffWork == nil else { return }
+    let hangover = aecLastOutputWasMedia ? aecMediaHangover : aecHangover
     let w = DispatchWorkItem {
         aecOffWork = nil
         if #available(macOS 14.2, *), otherOutputPids().isEmpty, DispatchTime.now() >= aecHoldUntil {
-            setAecEngaged(false, "no other output")
+            aecLastOutputWasMedia = false
+            setAecEngaged(false, "no other output for \(Int(hangover))s")
         }
     }
     aecOffWork = w
-    DispatchQueue.main.asyncAfter(deadline: .now() + aecHangover, execute: w)
+    DispatchQueue.main.asyncAfter(deadline: .now() + hangover, execute: w)
 }
 
 /// Main queue only.
@@ -356,10 +377,22 @@ func aecWatchProcesses() {
     let procs = audioProcesses()
     aecWatched.formIntersection(procs)
     for obj in procs where !aecWatched.contains(obj) {
-        var addr = caAddr(kAudioProcessPropertyIsRunningOutput)
-        if AudioObjectAddPropertyListenerBlock(obj, &addr, .main, { _, _ in aecReevaluate() }) == noErr {
-            aecWatched.insert(obj)
+        // IsRunningOutput is READ to decide, but its change is NOT
+        // notified (measured 2026-10-14, macOS 27: an afplay object
+        // registers with out=0, flips to out=1 ~0.6 s later, and a
+        // listener on 'piro' never fires — only 'pir?' (IsRunning) and
+        // 'pdv#' (Devices) do). Engagement therefore waited for some
+        // unrelated process-list change: a YouTube resume was engaged
+        // 4.8 s late (11:25:10→14.9Z) and its narrator pasted as the user.
+        var ok = false
+        for sel in [kAudioProcessPropertyIsRunningOutput, kAudioProcessPropertyIsRunning,
+                    kAudioProcessPropertyDevices] {
+            var addr = caAddr(sel)
+            if AudioObjectAddPropertyListenerBlock(obj, &addr, .main, { _, _ in aecReevaluate() }) == noErr {
+                ok = true
+            }
         }
+        if ok { aecWatched.insert(obj) }
     }
 }
 

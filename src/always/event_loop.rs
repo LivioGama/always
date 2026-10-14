@@ -1273,6 +1273,9 @@ fn deliver_paste(
 
         let auto_enter_effective =
             per_app::effective_auto_enter(pause::is_auto_enter_enabled());
+        // Set when Return was pressed synchronously for THIS paste: the
+        // text is sent, so the dictation session must not be re-armed below.
+        let mut return_committed = false;
         if auto_enter_effective && should_auto_enter_for_text(&buffer_text) {
             // Hold the merged buffer so the NEXT utterance can
             // append again if it arrives before the countdown
@@ -1283,6 +1286,7 @@ fn deliver_paste(
             auto_enter_countdown::schedule(rt, delay);
             if delay == 0 {
                 // 0-delay presses Return synchronously inside schedule().
+                return_committed = true;
                 tracing::info!(
                     paste_to_enter_us = pasted_at.elapsed().as_micros() as u64,
                     "auto_enter_return_pressed"
@@ -1359,7 +1363,15 @@ fn deliver_paste(
         // — merging against a space-stripped buffer would add a
         // second space on every continuation. Merge pastes use the
         // joined text, whose spacing already chains correctly.
-        if merge_active {
+        //
+        // Not after a synchronous Return: that text is already SENT. Re-arming
+        // the session there made the next utterance "merge" into a message
+        // that no longer exists — pasted as a lowercase continuation into a
+        // fresh, empty input ("which is a bit unuseable…", "Is Paris what
+        // time is it"): all 48 merges logged on 2026-10-14 were of that kind.
+        if return_committed {
+            crate::always::dictation::clear();
+        } else if merge_active {
             crate::always::dictation::note_pasted(&buffer_text);
         } else {
             crate::always::dictation::note_pasted(&written_clipboard);

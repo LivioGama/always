@@ -288,6 +288,32 @@ fn speaker_gate_reject_from(media_playing: bool) -> usize {
 
 const SPEAKER_GATE_EARLY_SAMPLES_MEDIA: usize = 68_000;
 
+/// Capture-path slack added before the scored audio's start: the helper
+/// delivers in ~100 ms bursts behind the voice processor, and its stderr
+/// line about the engage edge is read asynchronously.
+const AEC_EDGE_GUARD: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Did the echo canceller switch from bypass to engaged (because another
+/// process started playing) while — or just before the end of — the audio
+/// a speaker verdict was computed on? Then that audio holds the first
+/// moments of the new playback UNCANCELLED (the helper engages in reaction
+/// to the output starting, and the canceller needs time to converge), and
+/// a voice in it may be the video's. Measured 2026-10-14 11:25:16Z: a
+/// YouTube narrator verified at 0.581 on exactly such a window, while every
+/// narrator window after convergence scored 0.15–0.21 and the user's own
+/// verified scores over the same video were 0.516–0.685 — a threshold
+/// cannot separate them, the transition can. Such a verdict is neither a
+/// pass nor a fail: later windows (cancelled audio) decide.
+fn gate_audio_straddles_aec_engage(
+    audio_started_at: std::time::Instant,
+    verdict_at: std::time::Instant,
+    engaged_at: Option<std::time::Instant>,
+) -> bool {
+    let Some(engaged) = engaged_at else { return false };
+    let from = audio_started_at.checked_sub(AEC_EDGE_GUARD).unwrap_or(audio_started_at);
+    engaged > from && engaged <= verdict_at
+}
+
 /// What an in-flight speaker check was scoring, so its verdict is
 /// applied with the right semantics when it lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +349,10 @@ struct GateJob {
     committed_at_submit: usize,
     /// `voiced_samples` when submitted (early-streak eligibility).
     voiced_at_submit: usize,
+    /// Wall time the scored audio began (submit time minus its length):
+    /// a verdict on audio that straddles an echo-canceller engage edge
+    /// is not trusted — see [`gate_audio_straddles_aec_engage`].
+    audio_started_at: std::time::Instant,
 }
 
 impl GateJob {
@@ -338,6 +368,9 @@ impl GateJob {
         let embedder = Arc::clone(&gate.embedder);
         let voiceprint = Arc::clone(&gate.voiceprint);
         let threshold = gate.threshold;
+        let audio_started_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs_f64(samples.len() as f64 / 16_000.0))
+            .unwrap_or_else(std::time::Instant::now);
         std::thread::spawn(move || {
             let local = SpeakerGate {
                 embedder,
@@ -352,7 +385,17 @@ impl GateJob {
             len_at_submit,
             committed_at_submit,
             voiced_at_submit,
+            audio_started_at,
         }
+    }
+
+    /// The scored audio straddles a bypass→engaged echo-canceller edge.
+    fn straddles_aec_engage(&self) -> bool {
+        gate_audio_straddles_aec_engage(
+            self.audio_started_at,
+            std::time::Instant::now(),
+            crate::always::audio::aec_output_engaged_at(),
+        )
     }
 
     /// `Some(verdict)` once the score landed; `None` while in flight.
@@ -810,7 +853,23 @@ struct UtterancePreview {
     parakeet: Option<crate::always::preview_asr::PreviewUtterance>,
     prebuffer_fed: bool,
     level: Option<crate::always::level_meter::LevelMeter>,
+    /// Pre-onset audio for Parakeet only (longer than the 200 ms STT
+    /// pre-buffer): see [`PREVIEW_PREROLL_FRAMES`].
+    preroll: VecDeque<Vec<i16>>,
 }
+
+/// Pre-onset audio handed to Parakeet when the utterance opens (16 × 30 ms
+/// = 480 ms). Parakeet EOU's first word needs leading context: measured
+/// 2026-10-14 (5 TTS sentences, helper fed 3× slower than real time so
+/// only the model decides), first-word emission after speech start with
+/// 0 / 50 / 200 / 600 ms of leading room tone: 630–1420 (first words
+/// dropped) / 370–510 / 260–600 / 280–590 ms. The shared 200 ms
+/// pre-buffer ends at VAD confirmation, which lands 130–250 ms into the
+/// speech (100 ms capture bursts), so Parakeet got −70…+50 ms of lead —
+/// the slow regime. 480 ms keeps ≥ 200 ms of lead at the slowest onset;
+/// the backlog costs ~6 helper steps (~27 ms each on the ANE), overlapped
+/// with the wait for the first word's audio.
+const PREVIEW_PREROLL_FRAMES: usize = 16;
 
 impl UtterancePreview {
     /// Arm the preview for an Apple streaming session. Parakeet joins
@@ -845,13 +904,24 @@ impl UtterancePreview {
         self.preview = Some(preview);
     }
 
+    /// Remember one pre-onset frame for Parakeet's pre-roll.
+    fn preroll_push(&mut self, samples: &[i16]) {
+        if self.preroll.len() >= PREVIEW_PREROLL_FRAMES {
+            self.preroll.pop_front();
+        }
+        self.preroll.push_back(samples.to_vec());
+    }
+
+    /// Open Parakeet's utterance with its own pre-roll (falls back to the
+    /// STT pre-buffer `samples` when none was collected).
     fn feed_prebuffer_once(&mut self, samples: &[i16]) {
         if self.prebuffer_fed {
             return;
         }
         self.prebuffer_fed = true;
+        let preroll: Vec<i16> = self.preroll.drain(..).flatten().collect();
         if let Some(p) = self.parakeet.as_mut() {
-            p.feed(samples);
+            p.feed(if preroll.len() > samples.len() { &preroll } else { samples });
         }
     }
 
@@ -877,6 +947,13 @@ impl UtterancePreview {
 }
 
 impl UtterancePreview {
+    /// The live merged partial for the open speech (`None` before the
+    /// preview started or when it is empty).
+    fn open_text(&self) -> Option<String> {
+        let text = self.preview.as_ref()?.open_text();
+        (!text.trim().is_empty()).then_some(text)
+    }
+
     /// Parakeet's text for the utterance when the Parakeet preview engine
     /// ran (`Some("")` = it ran and heard nothing), `None` when it did not.
     fn parakeet_snapshot(&self) -> Option<String> {
@@ -1085,12 +1162,17 @@ fn record_with_local_vad(
     // kickoff. Drives the slow cloud cadence's "enough NEW audio" check
     // so a tick never re-transcribes near-identical audio.
     let mut samples_at_last_preview: usize = 0;
-    // Adaptive mid-sentence extension: latched once per silence run when
-    // the speculative transcript looks unfinished; reset on speech resume.
-    // `decided` records that the speculative text was inspected (either
-    // verdict) so the decision grace stops holding the cut.
-    let mut midsentence_extended = false;
+    // Adaptive mid-sentence extension: `decided` records that the text
+    // deciding this silence run was inspected (either verdict) so the
+    // decision grace stops holding the cut; reset on speech resume.
     let mut midsentence_decided = false;
+    // The decided text verdict for this silence run (speculative STT, or
+    // the chunk flushed at this pause) and whether a live partial already
+    // ended on a hesitation ("uh", "and", "the", …). Both reset on speech
+    // resume and on a chunk flush. See `final_silence_cut_frames`.
+    let mut pause_text: Option<PauseText> = None;
+    let mut partial_hesitating = false;
+    let hesitation_frames = hesitation_silence_frames(cfg);
     // Rolling chunk transcription for long dictations (see chunker.rs).
     // `committed_samples` tracks audio already flushed out of the live
     // buffer so the long-recording warn/cap math still sees the total.
@@ -1191,7 +1273,15 @@ fn record_with_local_vad(
                                 }
                             }
                         }
-                    } else if speaker_gate_allows_score(score, gate.threshold) {
+                    } else if speaker_gate_allows_score(score, gate.threshold)
+                        && job.kind == GateJobKind::Window
+                        && job.straddles_aec_engage()
+                    {
+                        // Playback just started under this window and was
+                        // not yet cancelled: no verdict either way; the
+                        // next (cancelled) window decides.
+                        tracing::info!(score = ?score, "speaker_gate_refused_aec_edge");
+                    } else if speaker_gate_allows_score(score, gate.threshold) && !job.straddles_aec_engage() {
                         let score = score.expect("accepted speaker score must be present");
                         speaker_checked = true;
                         confirmed_user_len = job.len_at_submit;
@@ -1502,8 +1592,9 @@ fn record_with_local_vad(
                 // User resumed — flip back. (No-op if already listening.)
                 flip_to_listening!();
             }
-            midsentence_extended = false;
             midsentence_decided = false;
+            pause_text = None;
+            partial_hesitating = false;
             consecutive_speech += 1;
             consecutive_silence = 0;
             if consecutive_speech >= min_speech_frames {
@@ -1614,6 +1705,17 @@ fn record_with_local_vad(
                 // Parakeet gets the 200 ms pre-buffer too, so its first
                 // inference runs on the leading audio and the first word
                 // is neither cold nor clipped.
+                // The Apple live session opens on this same frame: give it
+                // the pre-buffer too — it used to start at the confirming
+                // frame, ~200 ms into the first word, and its final (the
+                // pasted text for unchunked utterances) could drop the
+                // first word ("Playing a real video, by the way." → pasted
+                // "Video by the way", 2026-10-14 11:25:06Z).
+                if !utt_preview.prebuffer_fed
+                    && let Some(session) = stream_session.as_mut()
+                {
+                    session.feed(&speech_samples);
+                }
                 utt_preview.feed_prebuffer_once(&speech_samples);
             }
             if in_speech {
@@ -1831,6 +1933,18 @@ fn record_with_local_vad(
                     tail_fail_streak = 0;
                     gate_fail_streak = 0;
                 }
+            } else {
+                // Speech-like frame before the onset is confirmed: it is
+                // the start of the first word. Keep it in the pre-buffer
+                // like any other pre-onset frame — it used to be dropped,
+                // so every utterance lost its first (min_speech_frames-1)
+                // × 30 ms and Parakeet saw a 30 ms jump into the word
+                // (measured on the replayed feed 2026-10-14).
+                pre_buffer.push_back(samples.to_vec());
+                utt_preview.preroll_push(samples);
+                if pre_buffer.len() > pre_buffer_frames {
+                    pre_buffer.pop_front();
+                }
             }
         } else if in_speech {
             utt_preview.frame(samples, false, !speaker_gate_requested || speaker_checked);
@@ -1895,9 +2009,10 @@ fn record_with_local_vad(
                 );
                 speculation_pending = false;
                 speculation_slot.invalidate();
-                midsentence_extended = false;
                 midsentence_decided = false;
                 voiced_since_flush = false;
+                pause_text = None;
+                partial_hesitating = false;
                 // The tail monitor's boundary points into the drained
                 // buffer — rebase to the fresh (empty) one.
                 confirmed_user_len = 0;
@@ -2070,38 +2185,76 @@ fn record_with_local_vad(
             // window when it ends mid-thought. Decided at most once per
             // silence run; both flags reset on speech resume.
             let adaptive_active = cfg.adaptive_silence_enabled && !is_short && speculation_pending;
-            if adaptive_active
+            // The pause a chunk was flushed in has no speculative STT of
+            // its own (the flush replaced it), and used to end the
+            // utterance at the bare base window with NO content check —
+            // 2026-10-14: 40 of 50 such pauses ended a dictation mid-
+            // thought ("…goes all the..." pasted and Entered while the user
+            // was still speaking). Decide it from the flushed chunk's raw
+            // text instead, exactly like the speculation path.
+            let post_flush_pause = cfg.adaptive_silence_enabled
+                && !is_short
+                && !speculation_pending
+                && !voiced_since_flush
+                && committed_samples > 0;
+            if (adaptive_active || post_flush_pause)
                 && !midsentence_decided
                 && consecutive_silence.is_multiple_of(2)
-                && speculation_slot.peek_ready()
             {
-                midsentence_decided = true;
-                if let Some(spec_text) = speculation_slot.peek_text()
-                    && looks_mid_sentence(&cfg.localization, &spec_text)
-                {
-                    midsentence_extended = true;
+                let decided_text = if adaptive_active {
+                    speculation_slot
+                        .peek_ready()
+                        .then(|| speculation_slot.peek_text().unwrap_or_default())
+                } else {
+                    chunker.last_raw()
+                };
+                if let Some(text) = decided_text {
+                    midsentence_decided = true;
+                    let verdict = classify_pause_text(&cfg.localization, &text);
+                    pause_text = Some(verdict);
+                    // One line either way so production logs show how often
+                    // the heuristic fires vs. passes.
+                    tracing::info!(
+                        extended = verdict != PauseText::Complete,
+                        verdict = ?verdict,
+                        source = if adaptive_active { "speculation" } else { "chunk" },
+                        decided_at_frame = consecutive_silence,
+                        base_frames = eff_silence_frames,
+                        extended_frames = extended_silence_frames(silence_frames),
+                        hesitation_frames,
+                        "midsentence_decision"
+                    );
                 }
-                // One line either way so production logs show how often
-                // the heuristic fires vs. passes.
+            }
+            // A live partial ending on "uh" / "and" / "the" is heard before
+            // any final text exists: hold the cut on it at once. Checked
+            // every 4th silence frame (a lock + short string merge).
+            if cfg.adaptive_silence_enabled
+                && !is_short
+                && !partial_hesitating
+                && consecutive_silence >= eff_tentative_frames
+                && consecutive_silence.is_multiple_of(4)
+                && let Some(partial) = utt_preview.open_text()
+                && partial_says_hesitating(&cfg.localization, &partial)
+            {
+                partial_hesitating = true;
                 tracing::info!(
-                    extended = midsentence_extended,
-                    decided_at_frame = consecutive_silence,
-                    base_frames = eff_silence_frames,
-                    extended_frames = extended_silence_frames(silence_frames),
-                    "midsentence_decision"
+                    at_frame = consecutive_silence,
+                    hesitation_frames,
+                    "hesitation_hold_from_partial"
                 );
             }
 
-            let eff_final_frames = if midsentence_extended {
-                extended_silence_frames(silence_frames)
-            } else if adaptive_active && !midsentence_decided {
-                // Speculative STT still in flight: hold the cut briefly so
-                // the decision above can happen. Costs ~no paste latency —
-                // the post-loop wait would block on the same result.
-                eff_silence_frames + MIDSENTENCE_DECISION_GRACE_FRAMES
-            } else {
-                eff_silence_frames
-            };
+            let eff_final_frames = final_silence_cut_frames(
+                eff_silence_frames,
+                silence_frames,
+                hesitation_frames,
+                PauseVerdict {
+                    text_pending: (adaptive_active || post_flush_pause) && !midsentence_decided,
+                    text: pause_text,
+                    partial_hesitating,
+                },
+            );
             if consecutive_silence >= eff_final_frames {
                 break;
             }
@@ -2144,6 +2297,7 @@ fn record_with_local_vad(
             }
             // Maintain pre-buffer: add new frame, drop oldest if full
             pre_buffer.push_back(samples.to_vec());
+            utt_preview.preroll_push(samples);
             if pre_buffer.len() > pre_buffer_frames {
                 pre_buffer.pop_front();
             }
@@ -2263,18 +2417,38 @@ fn record_with_local_vad(
                     wait_ms = waited.elapsed().as_millis() as u64,
                     "speaker_gate_final_awaited"
                 );
-                verdict.map(|score| (job.kind, score))
+                verdict.map(|score| (job.kind, score, job.audio_started_at))
             });
-        let score = match landed {
-            Some((_, score)) if speaker_gate_allows_score(score, threshold) => score,
-            Some((GateJobKind::Tentative | GateJobKind::Decisive, score)) => score,
-            _ => speaker_gate.as_ref().and_then(|gate| {
-                (voiced_samples >= crate::always::speaker_embed::MIN_EMBED_SAMPLES)
-                    .then(|| speaker_gate_score(gate, speaker_gate_whole_window(&speech_samples)))
-                    .flatten()
-            }),
+        let whole_started_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs_f64(
+                speaker_gate_whole_window(&speech_samples).len() as f64 / 16_000.0,
+            ))
+            .unwrap_or_else(std::time::Instant::now);
+        let (score, scored_from) = match landed {
+            Some((_, score, from)) if speaker_gate_allows_score(score, threshold) => (score, from),
+            Some((GateJobKind::Tentative | GateJobKind::Decisive, score, from)) => (score, from),
+            _ => (
+                speaker_gate.as_ref().and_then(|gate| {
+                    (voiced_samples >= crate::always::speaker_embed::MIN_EMBED_SAMPLES)
+                        .then(|| speaker_gate_score(gate, speaker_gate_whole_window(&speech_samples)))
+                        .flatten()
+                }),
+                whole_started_at,
+            ),
         };
-        if SPEAKER_GATE_ENFORCE_DROP && !speaker_gate_allows_transcription(true, score, threshold) {
+        // A pass on audio that straddles a playback-start edge is not
+        // trusted (see `gate_audio_straddles_aec_engage`): the utterance
+        // goes to the recoverable rejected list instead of being pasted.
+        let aec_edge = speaker_gate_allows_score(score, threshold)
+            && gate_audio_straddles_aec_engage(
+                scored_from,
+                std::time::Instant::now(),
+                crate::always::audio::aec_output_engaged_at(),
+            );
+        if aec_edge {
+            tracing::info!(score = ?score, "speaker_gate_refused_aec_edge_final");
+        }
+        if SPEAKER_GATE_ENFORCE_DROP && (aec_edge || !speaker_gate_allows_transcription(true, score, threshold)) {
             if speaker_gate.is_none() {
                 tracing::warn!("speaker_gate_unavailable_reject");
             } else if voiced_samples < crate::always::speaker_embed::MIN_EMBED_SAMPLES {
@@ -2740,23 +2914,118 @@ fn extended_silence_frames(final_silence_frames: usize) -> usize {
 ///
 /// False negatives are benign (current behavior: window unchanged).
 fn looks_mid_sentence(loc: &crate::always::localization::Localization, text: &str) -> bool {
+    classify_pause_text(loc, text) != PauseText::Complete
+}
+
+/// What the words before a pause say about whether the speaker is done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PauseText {
+    /// Ends on a sentence terminator after a complete clause: finish at
+    /// the normal (fast) window.
+    Complete,
+    /// No terminator, but nothing that positively says "more is coming".
+    MidSentence,
+    /// Positive evidence the speaker is still going: a trailing filler
+    /// ("uh", "um", "you know"), a trailing connector ("and", "the",
+    /// "to"), a trailing comma/colon/dash, or the recogniser's own
+    /// cut-off ellipsis ("all the..."). Held for the hesitation window.
+    Hesitating,
+}
+
+/// Trailing hesitation fillers. Lowercase, punctuation-stripped. "like"
+/// is here because at the END of a stretch of speech it is a filler
+/// ("it was, like"), never a sentence ending.
+const TRAILING_FILLERS: &[&str] = &[
+    "uh", "um", "uhm", "umm", "uhh", "er", "erm", "ah", "hmm", "hm", "mm", "like",
+];
+/// Two-word trailing fillers.
+const TRAILING_FILLER_PAIRS: &[&str] = &["you know", "i mean", "kind of", "sort of"];
+
+fn classify_pause_text(loc: &crate::always::localization::Localization, text: &str) -> PauseText {
     let trimmed = text.trim();
     let Some(last_char) = trimmed.chars().last() else {
-        return false;
+        return PauseText::Complete;
     };
+    // The recogniser's mark for audio that stopped mid-phrase.
+    if trimmed.ends_with("...") || last_char == '…' {
+        return PauseText::Hesitating;
+    }
     if matches!(last_char, ',' | ';' | ':' | '—' | '-') {
-        return true;
+        return PauseText::Hesitating;
     }
-    let last_word: String = trimmed
-        .trim_end_matches(|c: char| !c.is_alphanumeric())
-        .rsplit(char::is_whitespace)
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
-    if TRAILING_CONNECTORS.contains(&last_word.as_str()) {
-        return true;
+    let words: Vec<String> = trimmed
+        .split_whitespace()
+        .rev()
+        .take(2)
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'')
+                .to_lowercase()
+        })
+        .collect();
+    let last_word = words.first().map(String::as_str).unwrap_or("");
+    if TRAILING_FILLERS.contains(&last_word) || TRAILING_CONNECTORS.contains(&last_word) {
+        return PauseText::Hesitating;
     }
-    !loc.sentence_terminators.contains(&last_char)
+    if let [last, prev] = words.as_slice() {
+        let pair = format!("{prev} {last}");
+        if TRAILING_FILLER_PAIRS.contains(&pair.as_str()) {
+            return PauseText::Hesitating;
+        }
+    }
+    if loc.sentence_terminators.contains(&last_char) {
+        PauseText::Complete
+    } else {
+        PauseText::MidSentence
+    }
+}
+
+/// Live partials carry no reliable punctuation, so only POSITIVE
+/// hesitation evidence counts there: a missing terminator in a partial
+/// means nothing.
+fn partial_says_hesitating(loc: &crate::always::localization::Localization, partial: &str) -> bool {
+    classify_pause_text(loc, partial) == PauseText::Hesitating
+}
+
+/// Hesitation hold in frames (see `AlwaysConfig::hesitation_silence_secs`).
+fn hesitation_silence_frames(cfg: &AlwaysConfig) -> usize {
+    ((cfg.hesitation_silence_secs.max(0.0) * 1000.0) / FRAME_MS as f64).ceil() as usize
+}
+
+/// End-of-utterance state for the current silence run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PauseVerdict {
+    /// Text that decides this pause (speculative STT, or the chunk just
+    /// flushed) is still in flight.
+    text_pending: bool,
+    /// Decided text: `None` = undecided / no text.
+    text: Option<PauseText>,
+    /// A live partial already ended on a hesitation.
+    partial_hesitating: bool,
+}
+
+/// Frames of silence after which this pause ends the utterance.
+///
+/// - Hesitation (decided text or live partial): `max(extended, hesitation)`.
+/// - Mid-sentence text: the existing extended window.
+/// - Text still in flight: base + decision grace — the paste waits for that
+///   same text anyway, so holding the cut costs no paste latency.
+/// - Complete (or no text at all): the base window — no added delay.
+fn final_silence_cut_frames(
+    base_frames: usize,
+    normal_frames: usize,
+    hesitation_frames: usize,
+    v: PauseVerdict,
+) -> usize {
+    let extended = extended_silence_frames(normal_frames);
+    if v.partial_hesitating || v.text == Some(PauseText::Hesitating) {
+        return extended.max(hesitation_frames);
+    }
+    match v.text {
+        Some(PauseText::MidSentence) => extended,
+        Some(_) => base_frames,
+        None if v.text_pending => base_frames + MIDSENTENCE_DECISION_GRACE_FRAMES,
+        None => base_frames,
+    }
 }
 
 #[cfg(test)]
@@ -3142,6 +3411,7 @@ mod tests {
                 len_at_submit: len,
                 committed_at_submit: committed,
                 voiced_at_submit: len,
+                audio_started_at: std::time::Instant::now(),
             },
             tx,
         )
@@ -3288,5 +3558,43 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[path = "vad_endpoint_replay.rs"]
+mod endpoint_replay_tests;
+
+#[cfg(test)]
+mod aec_edge_tests {
+    use super::gate_audio_straddles_aec_engage as straddles;
+    use std::time::{Duration, Instant};
+
+    /// Replays the 2026-10-14 timings (seconds after an arbitrary base):
+    /// the narrator false accept, and the user's own verified windows over
+    /// the same video, which started long after the engage edge.
+    #[test]
+    fn verdicts_straddling_a_playback_engage_are_refused() {
+        let base = Instant::now();
+        let at = |s: f64| base + Duration::from_secs_f64(s);
+        // 11:25:14.941 engage; narrator window scored 11:25:16.369 on the
+        // trailing 1.5 s (audio from ~14.8): straddles.
+        let engaged = Some(at(14.941));
+        assert!(straddles(at(16.369 - 1.5 - 0.1), at(16.369), engaged));
+        // Whole-utterance score from voice onset 11:25:10.864: straddles.
+        assert!(straddles(at(10.864), at(18.2), engaged));
+        // User's verified windows over the same video: 11:25:26.874,
+        // 11:25:41.374, 11:26:22.871 … all well after the edge.
+        for v in [26.874, 41.374, 82.871, 130.772, 217.768] {
+            assert!(!straddles(at(v - 1.6), at(v), engaged), "{v}");
+        }
+        // Engage edge only seen after the verdict landed: not this one.
+        assert!(!straddles(at(10.0), at(12.0), Some(at(12.5))));
+        // Guard: an edge just before the window start still counts
+        // (capture latency), one well before does not.
+        assert!(straddles(at(15.3), at(16.8), engaged));
+        assert!(!straddles(at(15.6), at(17.1), engaged));
+        // No playback edge ever: never refused.
+        assert!(!straddles(at(0.0), at(5.0), None));
     }
 }

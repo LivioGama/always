@@ -216,6 +216,21 @@ impl ChunkAccumulator {
         self.slots.lock().len()
     }
 
+    /// Raw text of the most recently committed chunk once its background
+    /// transcription has landed (`None` while in flight, on failure, or
+    /// with no chunks). Non-consuming. The end-of-utterance decision reads
+    /// it at the pause a chunk was flushed in: that pause has no
+    /// speculative transcript of its own, so this is the only text that
+    /// can tell "finished" from "uh, ..." there.
+    pub fn last_raw(&self) -> Option<String> {
+        let last = self.slots.lock().last().cloned()?;
+        let guard = last.result.lock();
+        match guard.as_ref() {
+            Some(Ok(text)) => Some(text.raw.clone()),
+            _ => None,
+        }
+    }
+
     pub fn join_handle(&self) -> ChunkJoinHandle {
         ChunkJoinHandle {
             slots: Arc::clone(&self.slots),
@@ -647,6 +662,22 @@ mod tests {
         let joined = acc.finalize(&t);
         assert_eq!(joined.text, "recovered text");
         assert_eq!(joined.failed_chunks, 0);
+    }
+
+    #[test]
+    fn last_raw_is_the_newest_chunk_once_transcribed() {
+        let rt = rt();
+        let t = mock(vec!["first part,", "and then, uh,"], vec![]);
+        let mut acc = ChunkAccumulator::new();
+        assert_eq!(acc.last_raw(), None, "no chunks yet");
+        acc.flush(vec![0i16; 16_000], &t, None, rt.handle());
+        acc.flush(vec![0i16; 16_000], &t, None, rt.handle());
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while acc.last_raw().is_none() && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let last = acc.last_raw().expect("chunk transcribed");
+        assert!(last == "and then, uh," || last == "first part,", "got {last}");
     }
 
     #[test]

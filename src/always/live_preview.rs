@@ -205,6 +205,15 @@ impl LivePreview {
         self.state.lock().parakeet.clone()
     }
 
+    /// The merged live text right now (Apple words, extended by Parakeet),
+    /// without the committed-chunk prefix. Read by the end-of-utterance
+    /// decision to hear a trailing "uh" / "and" / "the" at a pause before
+    /// any final transcript exists.
+    pub fn open_text(&self) -> String {
+        let st = self.state.lock();
+        merge(&st.apple, &st.parakeet)
+    }
+
     /// A chunk was committed and both engines restart on the next audio:
     /// freeze what is shown as the prefix, so the new sessions' text is
     /// appended after it rather than replacing it.

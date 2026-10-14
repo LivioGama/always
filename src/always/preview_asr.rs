@@ -287,21 +287,46 @@ impl LevelNormalizer {
     }
 
     pub(crate) fn process(&mut self, samples: &[i16]) -> Vec<i16> {
+        if boost_disabled() {
+            return samples.to_vec();
+        }
+        let frame_rms = |frame: &[i16]| {
+            (frame.iter().map(|&s| (s as f32) * (s as f32)).sum::<f32>() / frame.len().max(1) as f32).sqrt()
+        };
+        // Look-ahead over the whole block. The utterance opens with the
+        // daemon's pre-roll (~480 ms handed over in one call): its
+        // first frames are the quiet rise of the first word, and sizing
+        // the gain on them alone pumped it to +24 dB right before the
+        // loud syllable — which then clipped (measured −2.7 dBFS frames)
+        // and Parakeet lost the first word. Seeding the envelope with the
+        // block's loudest voiced frame sizes the gain on the word itself.
+        let block_peak = samples.chunks(PREVIEW_GAIN_FRAME).map(frame_rms).fold(0.0f32, f32::max);
+        if block_peak >= PREVIEW_VOICE_GATE && block_peak > self.env {
+            self.env = block_peak;
+        }
         let mut out = Vec::with_capacity(samples.len());
         for frame in samples.chunks(PREVIEW_GAIN_FRAME) {
-            let rms = (frame.iter().map(|&s| (s as f32) * (s as f32)).sum::<f32>() / frame.len() as f32).sqrt();
+            let rms = frame_rms(frame);
             self.peak_env = self.peak_env.max(rms);
             self.env = if rms >= self.env { rms } else { (self.env * PREVIEW_ENV_RELEASE).max(rms) };
-            // Only plausible voice moves the gain: room tone and the
-            // pre-buffer hold it, so a word onset after a pause is never
-            // hit by a gain that drifted up on silence.
-            let target = if rms >= PREVIEW_VOICE_GATE {
+            // Only plausible voice moves the gain: room tone holds it, so
+            // a word onset after a pause is never hit by a gain that
+            // drifted up on silence.
+            let mut target = if rms >= PREVIEW_VOICE_GATE {
                 (PREVIEW_TARGET_RMS / self.env).clamp(1.0, PREVIEW_MAX_GAIN)
             } else {
                 self.gain
             };
-            // Ramp across the frame: no clicks when the gain moves.
-            let (g0, n) = (self.gain, frame.len() as f32);
+            // Never clip: the frame's own peak bounds the gain (−0.3 dBFS).
+            let peak = frame.iter().map(|&s| (s as i32).unsigned_abs()).max().unwrap_or(0) as f32;
+            if peak > 0.0 {
+                target = target.min((32_000.0 / peak).max(1.0));
+            }
+            // Cuts apply to the whole frame at once (the frame is known
+            // before it is scaled, so this is look-ahead, not a click);
+            // raises ramp across the frame.
+            let g0 = if target < self.gain { target } else { self.gain };
+            let n = frame.len() as f32;
             for (i, &s) in frame.iter().enumerate() {
                 let g = g0 + (target - g0) * ((i + 1) as f32 / n);
                 out.push((s as f32 * g).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16);
@@ -310,6 +335,13 @@ impl LevelNormalizer {
         }
         out
     }
+}
+
+/// `ALWAYS_PREVIEW_BOOST=0` turns the Parakeet level boost off (A/B in the
+/// field without a rebuild).
+fn boost_disabled() -> bool {
+    static OFF: OnceLock<bool> = OnceLock::new();
+    *OFF.get_or_init(|| std::env::var("ALWAYS_PREVIEW_BOOST").as_deref() == Ok("0"))
 }
 
 /// One utterance's feed into the helper. Dropping it ends the utterance.
@@ -506,17 +538,33 @@ mod tests {
     }
 
     #[test]
-    fn loud_onset_after_quiet_pause_never_wraps() {
+    fn loud_onset_after_quiet_pause_is_never_clipped() {
         let mut n = LevelNormalizer::new();
         n.process(&tone(150.0, 4800)); // very quiet voice: gain at max
         n.process(&vec![0; 4800]); // pause holds it
+        // The loud frame is known before it is scaled: the cut applies to
+        // all of it — no wrap, no clipping, unity gain at once.
         let y = n.process(&tone(30000.0, 480));
-        // Saturates instead of wrapping around.
-        assert!(y.iter().any(|&v| v == i16::MAX) && y.iter().any(|&v| v == i16::MIN));
-        // Attack is instant: the next frame is back at unity.
-        let y2 = n.process(&tone(30000.0, 480));
         assert_eq!(n.gain(), 1.0);
-        assert_eq!(y2, tone(30000.0, 480));
+        assert_eq!(y, tone(30000.0, 480));
+    }
+
+    /// The 2026-10-14 onset failure: a pre-buffer whose first frames are
+    /// the quiet rise of a word must not pump the gain to +24 dB onto the
+    /// word's loud frames (which clipped to −2.7 dBFS frames and lost the
+    /// first word). The block's loudest frame sizes the gain.
+    #[test]
+    fn prebuffer_block_is_sized_on_its_loudest_frame() {
+        let mut n = LevelNormalizer::new();
+        let mut block = tone(60.0, 480 * 4); // rise: ≈ −58 dBFS (below gate)
+        block.extend(tone(300.0, 480 * 2)); // ≈ −44 dBFS
+        block.extend(tone(6000.0, 480 * 6)); // the word: ≈ −18 dBFS
+        let y = n.process(&block);
+        assert!(y.iter().all(|&v| v != i16::MAX && v != i16::MIN), "no clipping");
+        // Loud part ≈ unchanged (gain ≈ 1), quiet rise not boosted 24 dB.
+        let tail = &y[480 * 7..];
+        assert!((rms(tail) / rms(&block[480 * 7..]) - 1.0).abs() < 0.05);
+        assert!(rms(&y[480 * 4..480 * 6]) < 3.0 * rms(&block[480 * 4..480 * 6]));
     }
 
     /// Real helper, real time, quiet speech (TTS at −20 dB ≈ the bypassed
