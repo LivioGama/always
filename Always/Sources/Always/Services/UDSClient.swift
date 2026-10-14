@@ -22,6 +22,9 @@ enum DaemonEventType: String, Codable {
     // Consume mode: the final above was parked, not pasted (daemon `held.rs`).
     // Decoded so the frame never counts as a decode failure; the GUI ignores it.
     case transcriptHeld = "TranscriptHeld"
+    // Voice edit result / Iris rewrite handoff (daemon `voice_edit.rs`).
+    // Strings only; decoded so it never counts as a decode failure.
+    case voiceEdit = "VoiceEdit"
     case transcriptionInterim = "TranscriptionInterim"
     // Live preview heard before "My Voice" verified the speaker: shown
     // immediately but DIMMED (decision 2026-10-14). Strings only.

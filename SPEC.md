@@ -104,6 +104,24 @@ ducked (`duckingLevel = .min`) and VPIO's AGC is off, so energy thresholds stay
 calibrated to the raw mic. **Default ON** (the user confirmed dictation over a playing video works
 with it, 2026-10-14). Kill switch: `always config set capture_aec false`
 (applied at the next daemon start); env `ALWAYS_AEC=0/1` overrides.
+**Echo canceller only while something plays (2026-10-14, user request:
+"optimise the fuck out of it… voice is badly lagging").** The canceller only
+has work when the Mac is producing sound, so while no other process runs audio
+output the helper sets `isVoiceProcessingBypassed = true` and re-engages it the
+instant any process starts output (CoreAudio process objects:
+`kAudioHardwarePropertyProcessObjectList` + per-process
+`kAudioProcessPropertyIsRunningOutput` listeners — event-driven, no polling;
+macOS ≥ 14.2, otherwise always engaged). It stays engaged 2 s after the last
+output stops (track gaps, room tail) and for each status cue's duration
++ 0.5 s (a cue rendered while bypassed would leak into the mic).
+`corespeechd` is ignored: it reports running output around the clock without
+playing anything. The stream is continuous across transitions (measured: 30 s
+idle = 960 164 bytes = 16 kHz s16 mono, no gap). Measured on the user's
+MacBook Air, 60 s windows, same room: VPIO engaged 15.1 CPU-s/min, bypassed
+3.0 CPU-s/min (gated helper idle: 2.8 CPU-s/min), plain capture 0.5. `--aec-always`
+restores the previous always-engaged behaviour. The parent-death watchdog is a
+kqueue process-exit source instead of a 1 Hz poll; stderr lines use `fputs`
+(an `NSFileHandle` write raises and aborts on EPIPE).
 **Ducking.** A voice-processing unit ducks *other* audio on the Mac. The
 helper requests the minimum (`enableAdvancedDucking: false`,
 `duckingLevel: .min`), re-applied once the engine runs and read back in its
@@ -741,6 +759,14 @@ recognition. Requires no API key and never uploads audio on macOS 26+.
   language model (`SFCustomLanguageModelData` + `DictationTranscriber`) was
   evaluated and rejected: it added 2-5 s of latency per utterance and was less
   accurate on technical vocabulary than plain `SpeechTranscriber`.
+- The assistant's name — `Iris` and `Hey Iris` — is in the default list
+  (requested 2026-10-14: the recognizer hears it as "Irish"/"IRS"). It is a
+  default, not a glossary term: the glossary's phonetic matcher would also
+  rewrite "Irish" mid-sentence. The file path's alternative-hypothesis
+  rescore matches phrases as case-insensitive substrings, so an alternative
+  containing "Irish" also counts as an "Iris" hit there. The Parakeet live
+  preview (`StreamingEouAsrManager`, FluidAudio 0.17.7) has no vocabulary
+  biasing API; its text is preview-only.
 - Missing locale assets are installed via
   `AssetInventory.assetInstallationRequest(supporting:)` on first use.
 - It is a non-streaming backend: `Transcriber::supports_streaming()` returns
@@ -821,6 +847,15 @@ Between transcription and the keyboard:
      With today's latencies this almost never lands in time — it is kept
      as an option, not a dependency.
    - **Off** (`off`) — raw transcript + `local_cleanup` only.
+   - **Leading wake normalisation** (all modes, before the mode branch and
+     the short-utterance/snippet paths, so the consume-mode handoff sees it
+     too): a misheard assistant name as the FIRST token (or right after one
+     greeting: hey/hi/hello/ok/okay/yo/you) — irish, irs, i.r.s., ires,
+     iras, ira's, iris's, iris', eris — becomes `Iris`, but only when the
+     next word opens a request (question word or imperative verb, or an
+     auxiliary followed by a subject / in a sentence ending `?`). "Irish
+     coffee is great", "IRS forms are due", "I told Irish…" are untouched
+     (`det_correct::normalize_leading_wake`, requested 2026-10-14).
    - **Migration** when `postprocess_mode` is unset (no silent change of
      kind): Smart Postprocess on + provider Apple → `apple`; on + Groq
      (or unset provider, the old default) → `groq`; Smart Postprocess off
@@ -986,6 +1021,84 @@ do not record transcript content — only aggregate counts and glossary term
 pairs.
 
 ---
+
+## 9c. Voice editing
+
+Requested by the product owner 2026-10-14 (gap #11). Code: `voice_edit.rs`,
+`voice_edit_grammar.rs`, `ax_edit.rs`.
+
+**Commands** (the WHOLE utterance, after punctuation/case normalisation and an
+optional leading "please"/"okay" or trailing "please"):
+
+| Command | Phrasings (examples) | Effect |
+|---|---|---|
+| scratch that | scratch / delete / remove / erase / strike that | removes the last paste exactly (repeatable: walks back up to 8 pastes in the same field) |
+| replace | change X to Y, replace X with Y, correct/fix X to Y, swap X with Y (each side ≤ 5 words) | replaces the last word-bounded, case-insensitive X **inside the last paste**; Y takes X's capitalisation |
+| case | capitalise that, uppercase that, lowercase that | title / upper / lower case of the last paste |
+| list | make that a list | last paste → "- item" lines (sentences; else commas/"and") |
+| new line / new paragraph | new line, new paragraph | inserts "\n" / "\n\n" at the caret (never a bare Return: no accidental send) |
+| undo / redo | undo (that), redo (that) | ⌘Z / ⇧⌘Z |
+| select | select that, select the last word, select the last sentence, select all | selection |
+| delete | delete the last word, delete the last sentence | removes it (plus trailing space) |
+| go to | go to the end / start | caret |
+| rewrite | make that shorter / more formal / friendlier, fix the grammar, translate that to <language> | handed to Iris (on-device model) — see below |
+
+**Gate — dictation is never swallowed.** An utterance is claimed only when
+all hold, otherwise it pastes as normal dictation:
+
+1. the whole utterance parses as a command (≤ 12 words, ≤ 120 bytes);
+2. a paste happened ≤ 30 s ago (or ≤ 30 s since the last voice edit), in the
+   same app and the same AX field (`AXFocusedUIElement` snapshotted 60 ms after
+   the paste, off the paste thread);
+3. nothing committed it (auto-enter Return) and the user has not typed or
+   clicked since;
+4. the field is not secure (`AXSecureTextField`);
+5. the command is executable right now: the pasted text still ends at the
+   caret (AX fields), the replace target X exists in the paste, etc.
+
+Saying "Iris, …" first ("Iris, scratch that") addresses the command explicitly:
+step 2–3 are skipped; 4–5 still apply, and "change X to Y" may then search the
+whole field before the caret.
+
+**Execution.** Primary path is native AX: set `AXSelectedTextRange`, set
+`AXSelectedText` (one undoable edit in Cocoa text views), restore the caret,
+then read `AXValue` back and verify. If the write is unsupported, the range
+stays selected and the text is typed over it (`ax_select+keys`). Fields with no
+writable AX text (terminals, some Electron views) use synthesised keystrokes —
+only when the field is provably untouched since the paste (no user input, no
+untracked edit since); Backspace × the paste length for "scratch that". A
+failed edit restores the prior selection and the utterance is pasted instead.
+Edits serialise with the paste path (`try_begin_paste`), clear the
+dictation-session merge buffer, and keep `last_pasted` (⌃⌥X baseline) equal to
+what is on screen.
+
+**Correction learning.** A "change X to Y" inside the last paste where X and Y
+look like a recognition error (`looks_like_correction` or equal Soundex) is
+learned like ⌃⌥X: applied to the glossary (provenance `manual`) when
+auto-learn is on, else queued.
+
+**Rewrite handoff to Iris.** Iris pings `VoiceEditRewriterAlive` (TTL 15 s).
+A gated rewrite command is claimed only while Iris is alive and a target
+exists (non-empty selection, or the last paste still in place); Always emits
+`VoiceEdit { op: "rewrite_request", detail: style }`. Iris reads the target
+(`VoiceEditGetTarget`), rewrites on-device, and commits with
+`VoiceEditReplaceTarget { expect, text }` — one AX replacement, refused if the
+target changed or the field is secure.
+
+**Shadow dataset.** Every grammar hit (claimed or declined, with reason,
+method and ms) is appended to `<config dir>/voice_edit_shadow.jsonl`; the
+utterance text only when transcript logging is on (I9).
+
+**Safety replay.** `cargo test --lib voice_edit_replay` replays every
+utterance in `~/Library/Logs/Always/always.2026-10-1*` and
+`~/.always/transcripts.jsonl` through grammar + gate with the previous paste as
+anchor and real timing; it fails on any claim not whitelisted after a manual
+read. 2026-10-14: 3 048 utterances, 0 grammar hits, 0 claims.
+
+**UDS** (Iris): `VoiceEdit { req, command, force }`, `VoiceEditGetTarget
+{ req }`, `VoiceEditReplaceTarget { req, expect, text }`,
+`VoiceEditRewriterAlive`; answered with `DaemonEvent::VoiceEdit { req, op, ok,
+method, ms, detail, text }` (strings only).
 
 ## 9a. First-run setup
 

@@ -788,6 +788,8 @@ pub fn start_keyboard_listener() -> Result<()> {
                     if matches!(key, Key::Function) {
                         return;
                     }
+                    // Any user keystroke ends "right after a paste".
+                    crate::always::voice_edit::note_user_input();
                     let Some(name) = key_to_shortcut_name(key) else {
                         if pause::countdown_active() {
                             pause::countdown_request_cancel();
@@ -948,6 +950,10 @@ pub fn start_keyboard_listener() -> Result<()> {
                     }
                 }
                 _ => {
+                    if matches!(event.event_type, EventType::ButtonPress(_)) {
+                        // A click can move the caret: no longer "right after a paste".
+                        crate::always::voice_edit::note_user_input();
+                    }
                     if pause::countdown_active()
                         && matches!(event.event_type, EventType::ButtonPress(_))
                     {

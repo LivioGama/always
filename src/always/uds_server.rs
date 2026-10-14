@@ -914,6 +914,73 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                 }
             }
         }
+        DaemonCommand::VoiceEdit { req, command, force } => {
+            std::thread::spawn(move || {
+                let o = crate::always::voice_edit::run(
+                    &command,
+                    force,
+                    "iris",
+                    crate::always::ax_edit::KeyTarget::Hid,
+                    None,
+                );
+                // Claimed edits already broadcast; answer declines too so
+                // the requester never waits on silence.
+                if !o.claimed || !req.is_empty() {
+                    global_broadcaster().send(DaemonEvent::VoiceEdit {
+                        req,
+                        op: o.op.to_string(),
+                        ok: o.claimed.to_string(),
+                        method: o.method.to_string(),
+                        ms: format!("{:.1}", o.ms),
+                        detail: o.reason.to_string(),
+                        text: String::new(),
+                    });
+                }
+            });
+        }
+        DaemonCommand::VoiceEditRewriterAlive => {
+            crate::always::voice_edit::note_rewriter_alive();
+        }
+        DaemonCommand::VoiceEditGetTarget { req } => {
+            std::thread::spawn(move || {
+                let t0 = std::time::Instant::now();
+                let t = crate::always::voice_edit::current_target(None);
+                let detail = if t.secure { "secure" } else { t.source };
+                global_broadcaster().send(DaemonEvent::VoiceEdit {
+                    req,
+                    op: "get_target".into(),
+                    ok: (t.source != "none").to_string(),
+                    method: "ax".into(),
+                    ms: format!("{:.1}", t0.elapsed().as_secs_f64() * 1000.0),
+                    detail: detail.into(),
+                    text: t.text,
+                });
+            });
+        }
+        DaemonCommand::VoiceEditReplaceTarget { req, expect, text } => {
+            std::thread::spawn(move || {
+                let r = crate::always::voice_edit::replace_target(
+                    &expect,
+                    &text,
+                    None,
+                    crate::always::ax_edit::KeyTarget::Hid,
+                );
+                tracing::info!(ok = r.is_ok(), result = ?r, "voice_edit_replace_target");
+                let (ok, method, ms, detail) = match r {
+                    Ok((m, ms)) => (true, m, ms, "ok"),
+                    Err(e) => (false, "", 0.0, e),
+                };
+                global_broadcaster().send(DaemonEvent::VoiceEdit {
+                    req,
+                    op: "replace_target".into(),
+                    ok: ok.to_string(),
+                    method: method.into(),
+                    ms: format!("{ms:.1}"),
+                    detail: detail.into(),
+                    text: String::new(),
+                });
+            });
+        }
         DaemonCommand::LogCorrection { intended } => {
             handle_log_correction(&intended);
         }

@@ -57,6 +57,11 @@ pub mod vad;
 pub mod vad_silero;
 pub mod vocab;
 pub mod voiceprint;
+pub mod voice_edit;
+pub mod voice_edit_grammar;
+mod voice_edit_replay;
+mod voice_edit_live;
+pub mod ax_edit;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod apple_intelligence;

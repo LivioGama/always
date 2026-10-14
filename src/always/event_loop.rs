@@ -785,6 +785,21 @@ fn handle_speech(
             // fillers before snippet matching / grammar so they never reach the
             // paste buffer or the LLM prompt.
             let transformed = crate::always::postprocess::local_cleanup(&transformed);
+            // A misheard leading "Iris" ("Irish what time is it", "IRS what
+            // time is it") becomes the name the user said — only at the very
+            // start and only before a request (det_correct::normalize_leading_wake).
+            // Before every branch below, so the short-utterance and snippet
+            // paths and the consume-mode handoff to Iris all see it.
+            let transformed = crate::always::det_correct::normalize_leading_wake(&transformed);
+            // Voice editing ("scratch that", "change X to Y", "new line"):
+            // claimed ONLY when the whole utterance is an edit command right
+            // after a paste into this same field (voice_edit.rs gate);
+            // otherwise this is a no-op and the utterance pastes as usual.
+            if crate::always::voice_edit::try_claim(&transformed) {
+                pause::dictation_buffer_clear();
+                event::global_broadcaster().voice_activity_ended();
+                return Ok(());
+            }
             // Log the raw Whisper transcript for debugging STT quality issues
             // Privacy: gate transcript text behind `should_log_transcripts`
             if crate::always::telemetry::should_log_transcripts() {
@@ -1216,6 +1231,8 @@ fn deliver_paste(
             return Err(err);
         }
         let pasted_at = Instant::now();
+        // Remember exactly what was pasted, for voice editing.
+        crate::always::voice_edit::note_paste(&written_clipboard);
         // One structured line per pasted utterance so production logs
         // expose where speech-end → paste time goes. `stt_wait_ms` is 0
         // when speculative STT beat the final-silence cut; `grammar_ms`

@@ -137,6 +137,26 @@ pub enum DaemonEvent {
         text: String,
         at_us: String,
     },
+    /// A voice-edit command ran ("scratch that", "change X to Y", …) or
+    /// answered an Iris `VoiceEdit*` request (`voice_edit.rs`). Strings
+    /// only, like `TranscriptHeld`, so the GUI's loose decode accepts it.
+    /// `req` echoes the request id (empty for dictation-path edits); `ok`
+    /// is "true"/"false"; `detail` is the decline reason or target source;
+    /// `text` carries the edit target for `VoiceEditGetTarget`.
+    VoiceEdit {
+        #[serde(default)]
+        req: String,
+        op: String,
+        ok: String,
+        #[serde(default)]
+        method: String,
+        #[serde(default)]
+        ms: String,
+        #[serde(default)]
+        detail: String,
+        #[serde(default)]
+        text: String,
+    },
     /// Interim transcription result from a streaming transcriber.
     /// This text is provisional and may change as more audio is processed.
     /// Used by streaming engines (e.g., MoonshineStreaming, streaming APIs)
@@ -746,6 +766,38 @@ pub enum DaemonCommand {
     /// no restart needed. Sent after each `always config set shortcut_*`
     /// call from the Swift app.
     ReloadShortcuts,
+    /// Iris → voice edit: run an edit command (same grammar as dictation,
+    /// e.g. "scratch that", "change X to Y"). `force` = Iris was addressed
+    /// explicitly, so the paste-window gate is skipped (secure fields and
+    /// verification still apply). Answered with `DaemonEvent::VoiceEdit`.
+    VoiceEdit {
+        #[serde(default)]
+        req: String,
+        command: String,
+        #[serde(default)]
+        force: bool,
+    },
+    /// Iris heartbeat: its rewrite handler is connected, so Always may
+    /// claim "make that shorter" / "translate that to …" and hand it off
+    /// (`DaemonEvent::VoiceEdit { op: "rewrite_request" }`). Expires 15 s
+    /// after the last ping.
+    VoiceEditRewriterAlive,
+    /// Iris → read what "that" is: the selection, else the last paste.
+    /// Answered with `DaemonEvent::VoiceEdit { op: "get_target", text,
+    /// detail: "selection" | "last_paste" | "none" | "secure" }`.
+    VoiceEditGetTarget {
+        #[serde(default)]
+        req: String,
+    },
+    /// Iris → replace the target (as read by `VoiceEditGetTarget`) with
+    /// `text` in ONE undoable edit. Refused when the target no longer
+    /// equals `expect` or the field is secure.
+    VoiceEditReplaceTarget {
+        #[serde(default)]
+        req: String,
+        expect: String,
+        text: String,
+    },
     /// Setup mode — bypasses per-app pause rules so the daemon allows
     /// recording + pasting while the onboarding wizard is visible.
     /// This lets users test voice typing during setup without having
