@@ -7,8 +7,16 @@
 // is subtracted from the microphone signal BEFORE the daemon's VAD, speaker
 // gate and speech recognizers ever see it.
 //
-// Usage: always-capture [--no-vp] [--agc] [--duck]
+// Echo cancellation only costs CPU when there is an echo to cancel: while no
+// other process on the Mac is playing audio (and no status cue is rendering)
+// the voice-processing DSP is BYPASSED, and it is re-engaged the moment any
+// process starts output — event-driven via CoreAudio process objects, no
+// polling. Measured 2026-10-14 on the user's MacBook Air (60 s windows, same
+// room): VPIO active 15.1 CPU-s/min, VPIO bypassed 3.0 CPU-s/min.
+//
+// Usage: always-capture [--no-vp] [--aec-always] [--agc] [--duck]
 //   --no-vp  plain capture (no echo cancellation) — measurement baseline
+//   --aec-always  never bypass the echo canceller (pre-2026-10-14 behaviour)
 //   --agc    keep VPIO's automatic gain control on (default off: the daemon's
 //            energy thresholds are calibrated on un-gained mic levels)
 //   --duck   let VPIO duck other apps' audio (default: no ducking — Always must
@@ -16,6 +24,7 @@
 // Exits when stdout closes (EPIPE) or the parent process dies.
 
 import AVFoundation
+import CoreAudio
 import Foundation
 
 signal(SIGPIPE, SIG_IGN)
@@ -24,7 +33,9 @@ let useVP = !args.contains("--no-vp")
 let parentPid = getppid()
 
 func log(_ s: String) {
-    FileHandle.standardError.write("always-capture: \(s)\n".data(using: .utf8)!)
+    // fputs, not FileHandle.write: the latter raises (and abort()s) on EPIPE
+    // when the daemon has gone (same crash as Iris's pcm-play/brief-fm).
+    _ = "always-capture: \(s)\n".withCString { fputs($0, stderr) }
 }
 
 let engine = AVAudioEngine()
@@ -76,15 +87,26 @@ func writeAll(_ ptr: UnsafeRawPointer, _ count: Int) {
     }
 }
 
+// Tap buffers are reused across callbacks (the tap fires ~40×/s; allocating
+// two PCM buffers per callback was pure malloc churn). Only the tap thread
+// touches them.
+var monoBuf: AVAudioPCMBuffer?
+var outBuf: AVAudioPCMBuffer?
 input.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { buffer, _ in
     let frames = Int(buffer.frameLength)
-    guard frames > 0, let src = buffer.floatChannelData?[0],
-          let mono = AVAudioPCMBuffer(pcmFormat: monoIn, frameCapacity: AVAudioFrameCount(frames))
-    else { return }
+    guard frames > 0, let src = buffer.floatChannelData?[0] else { return }
+    if monoBuf == nil || Int(monoBuf!.frameCapacity) < frames {
+        monoBuf = AVAudioPCMBuffer(pcmFormat: monoIn, frameCapacity: AVAudioFrameCount(max(frames, 4096)))
+    }
+    guard let mono = monoBuf else { return }
     mono.frameLength = AVAudioFrameCount(frames)
     mono.floatChannelData![0].update(from: src, count: frames)
     let cap = AVAudioFrameCount(Double(frames) * 16_000 / inFormat.sampleRate) + 32
-    guard let out = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: cap) else { return }
+    if outBuf == nil || outBuf!.frameCapacity < cap {
+        outBuf = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: max(cap, 2048))
+    }
+    guard let out = outBuf else { return }
+    out.frameLength = 0
     var fed = false
     var err: NSError?
     converter.convert(to: out, error: &err) { _, status in
@@ -143,6 +165,10 @@ func playCue(_ path: String) {
     guard let buf = loadCue(path) else { log("cue_failed load \(path)"); return }
     let p = cuePlayers[nextCuePlayer % cuePlayers.count]
     nextCuePlayer += 1
+    // A cue rendered while the canceller is bypassed would leak into the mic:
+    // engage it for the cue's duration (+ echo tail) first.
+    let cueSecs = Double(buf.frameLength) / cueFormat.sampleRate
+    DispatchQueue.main.sync { aecHoldFor(seconds: cueSecs + 0.5) }
     p.stop()
     p.scheduleBuffer(buf, at: nil, options: [], completionHandler: nil)
     p.play()
@@ -205,6 +231,145 @@ func applyDucking() {
     }
 }
 
+// ---- Echo canceller only while something is playing -------------------------
+// All state below is touched on the main queue only (CoreAudio listener blocks
+// are delivered there; cue holds hop there).
+let aecAlways = args.contains("--aec-always")
+let selfPid = getpid()
+var aecEngaged = true                 // VPIO starts un-bypassed
+var aecHoldUntil = DispatchTime.now() // cue hold
+var aecOffWork: DispatchWorkItem?
+var aecWatched = Set<AudioObjectID>()
+/// Keep the canceller engaged this long after the last output stops: apps
+/// stop/start their output between tracks, and the room still rings briefly.
+let aecHangover = 2.0
+
+func caAddr(_ sel: AudioObjectPropertySelector) -> AudioObjectPropertyAddress {
+    AudioObjectPropertyAddress(mSelector: sel, mScope: kAudioObjectPropertyScopeGlobal,
+                               mElement: kAudioObjectPropertyElementMain)
+}
+
+@available(macOS 14.2, *)
+func audioProcesses() -> [AudioObjectID] {
+    var addr = caAddr(kAudioHardwarePropertyProcessObjectList)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size) == noErr,
+          size > 0 else { return [] }
+    var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &ids) == noErr
+    else { return [] }
+    return Array(ids.prefix(Int(size) / MemoryLayout<AudioObjectID>.size))
+}
+
+func caU32(_ obj: AudioObjectID, _ sel: AudioObjectPropertySelector) -> UInt32? {
+    var addr = caAddr(sel)
+    var v: UInt32 = 0
+    var size = UInt32(MemoryLayout<UInt32>.size)
+    return AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, &v) == noErr ? v : nil
+}
+
+func caPid(_ obj: AudioObjectID) -> pid_t? {
+    var addr = caAddr(kAudioProcessPropertyPID)
+    var v: pid_t = 0
+    var size = UInt32(MemoryLayout<pid_t>.size)
+    return AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, &v) == noErr ? v : nil
+}
+
+/// System daemons that keep an output stream running permanently without
+/// playing anything audible (measured 2026-10-14: `corespeechd` — Siri's
+/// voice trigger — reports running input AND output around the clock).
+/// Counting them would pin the canceller on forever.
+let aecIgnoredNames: Set<String> = Set(["corespeechd"]).union(
+    (ProcessInfo.processInfo.environment["ALWAYS_CAPTURE_AEC_IGNORE"] ?? "")
+        .split(separator: ",").map(String.init))  // extra names, for side-by-side tests
+
+func procName(_ pid: pid_t) -> String {
+    var buf = [CChar](repeating: 0, count: 256)
+    return proc_name(pid, &buf, UInt32(buf.count)) > 0 ? String(cString: buf) : ""
+}
+
+/// PIDs of OTHER processes currently running audio output.
+@available(macOS 14.2, *)
+func otherOutputPids() -> [pid_t] {
+    audioProcesses().compactMap { obj in
+        guard let pid = caPid(obj), pid != selfPid,
+              caU32(obj, kAudioProcessPropertyIsRunningOutput) == 1,
+              !aecIgnoredNames.contains(procName(pid)) else { return nil }
+        return pid
+    }
+}
+
+func setAecEngaged(_ on: Bool, _ why: String) {
+    guard on != aecEngaged else { return }
+    aecEngaged = on
+    input.isVoiceProcessingBypassed = !on
+    log("aec \(on ? "engaged" : "bypassed") (\(why))")
+}
+
+/// Main queue only.
+func aecReevaluate() {
+    guard useVP, !aecAlways else { return }
+    guard #available(macOS 14.2, *) else { return }
+    let playing = otherOutputPids()
+    let held = DispatchTime.now() < aecHoldUntil
+    if !playing.isEmpty || held {
+        aecOffWork?.cancel(); aecOffWork = nil
+        setAecEngaged(true, held && playing.isEmpty ? "cue" : "output pids \(playing)")
+        if held && playing.isEmpty {
+            // Re-check when the hold expires.
+            let w = DispatchWorkItem { aecReevaluate() }
+            aecOffWork = w
+            DispatchQueue.main.asyncAfter(deadline: aecHoldUntil + 0.05, execute: w)
+        }
+        return
+    }
+    guard aecEngaged, aecOffWork == nil else { return }
+    let w = DispatchWorkItem {
+        aecOffWork = nil
+        if #available(macOS 14.2, *), otherOutputPids().isEmpty, DispatchTime.now() >= aecHoldUntil {
+            setAecEngaged(false, "no other output")
+        }
+    }
+    aecOffWork = w
+    DispatchQueue.main.asyncAfter(deadline: .now() + aecHangover, execute: w)
+}
+
+/// Main queue only.
+func aecHoldFor(seconds: Double) {
+    guard useVP, !aecAlways else { return }
+    let until = DispatchTime.now() + seconds
+    if until > aecHoldUntil { aecHoldUntil = until }
+    aecReevaluate()
+}
+
+/// Listen for processes appearing/disappearing and for each one's
+/// "running output" flag. Main queue only.
+@available(macOS 14.2, *)
+func aecWatchProcesses() {
+    let procs = audioProcesses()
+    aecWatched.formIntersection(procs)
+    for obj in procs where !aecWatched.contains(obj) {
+        var addr = caAddr(kAudioProcessPropertyIsRunningOutput)
+        if AudioObjectAddPropertyListenerBlock(obj, &addr, .main, { _, _ in aecReevaluate() }) == noErr {
+            aecWatched.insert(obj)
+        }
+    }
+}
+
+func startAecGate() {
+    guard useVP else { return }
+    if aecAlways { log("aec always engaged (--aec-always)"); return }
+    guard #available(macOS 14.2, *) else { log("aec gate unavailable (< macOS 14.2): always engaged"); return }
+    var addr = caAddr(kAudioHardwarePropertyProcessObjectList)
+    AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &addr, .main) { _, _ in
+        aecWatchProcesses()
+        aecReevaluate()
+    }
+    aecWatchProcesses()
+    log("aec gate on: other output pids now \(otherOutputPids()) (bypassed after \(aecHangover)s of none)")
+    aecReevaluate()
+}
+
 do {
     engine.prepare()
     try engine.start()
@@ -215,13 +380,16 @@ do {
 // Re-applied once running: the ducking configuration is only guaranteed to
 // take effect on a running voice-processing unit.
 applyDucking()
+startAecGate()
 log("capturing")
 
 // Parent-death watchdog: the daemon may be SIGKILLed with our stdout pipe
-// still referenced elsewhere; never outlive it.
-Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-    if getppid() != parentPid { exit(0) }
-}
+// still referenced elsewhere; never outlive it. Kernel exit notification
+// (kqueue NOTE_EXIT) instead of a 1 Hz getppid() poll.
+let parentWatch = DispatchSource.makeProcessSource(identifier: parentPid, eventMask: .exit, queue: .main)
+parentWatch.setEventHandler { exit(0) }
+parentWatch.resume()
+if getppid() != parentPid { exit(0) }  // parent died before the source armed
 NotificationCenter.default.addObserver(
     forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
 ) { _ in
