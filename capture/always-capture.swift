@@ -303,7 +303,10 @@ func setAecEngaged(_ on: Bool, _ why: String) {
     guard on != aecEngaged else { return }
     aecEngaged = on
     input.isVoiceProcessingBypassed = !on
-    log("aec \(on ? "engaged" : "bypassed") (\(why))")
+    // The tap format must not change with the state (the converter and the
+    // 16 kHz mono s16 stream are built once); logged so a test can prove it.
+    let f = input.outputFormat(forBus: 0)
+    log("aec \(on ? "engaged" : "bypassed") (\(why)) tap=\(f.channelCount)ch@\(Int(f.sampleRate))")
 }
 
 /// Main queue only.
@@ -314,10 +317,14 @@ func aecReevaluate() {
     let held = DispatchTime.now() < aecHoldUntil
     if !playing.isEmpty || held {
         aecOffWork?.cancel(); aecOffWork = nil
-        setAecEngaged(true, held && playing.isEmpty ? "cue" : "output pids \(playing)")
+        setAecEngaged(true, held && playing.isEmpty ? "cue" : "output pids \(playing.map { "\($0):\(procName($0))" })")
         if held && playing.isEmpty {
-            // Re-check when the hold expires.
-            let w = DispatchWorkItem { aecReevaluate() }
+            // Re-check when the hold expires. The item must clear itself
+            // first: left set, the `aecOffWork == nil` guard below refused
+            // to arm the bypass timer, pinning the canceller on after every
+            // cue until some other process happened to play (measured
+            // 2026-10-14: engaged 08:55:58 → 09:00:23 after one cue).
+            let w = DispatchWorkItem { aecOffWork = nil; aecReevaluate() }
             aecOffWork = w
             DispatchQueue.main.asyncAfter(deadline: aecHoldUntil + 0.05, execute: w)
         }
@@ -366,7 +373,7 @@ func startAecGate() {
         aecReevaluate()
     }
     aecWatchProcesses()
-    log("aec gate on: other output pids now \(otherOutputPids()) (bypassed after \(aecHangover)s of none)")
+    log("aec gate on: other output pids now \(otherOutputPids().map { "\($0):\(procName($0))" }) (bypassed after \(aecHangover)s of none)")
     aecReevaluate()
 }
 
