@@ -87,6 +87,72 @@ func writeAll(_ ptr: UnsafeRawPointer, _ count: Int) {
     }
 }
 
+// ---- Double-talk evidence: processed vs raw mic levels ----------------------
+// 2026-10-14 16:36–16:39Z the user's own speech under music came out of the
+// voice processor near-silent (peak −71 dBFS, STT heard nothing) or scored
+// −0.10…0.25 against his voiceprint, and passed again the moment the music
+// paused. Whether VPIO suppressed him (double-talk) cannot be told from the
+// processed stream alone, so while the canceller is engaged a second, plain
+// (non-voice-processing) input engine meters the RAW microphone and both
+// levels are logged once per second of audible activity. Metering only —
+// the raw signal is never sent to the daemon. Measured: starting/stopping the
+// raw engine raises no configuration change on the VPIO engine; with VPIO
+// running the raw device level reads ~20 dB below the processed one.
+// Disable: ALWAYS_CAPTURE_RAW_LEVELS=0.
+final class LevelMeter {
+    private var lock = os_unfair_lock()
+    private var sumSq = 0.0, n = 0, peak: Float = 0, voicedMs = 0.0
+    let voicedDbfs: Float
+    init(voicedDbfs: Float) { self.voicedDbfs = voicedDbfs }
+    /// Accumulate one channel of samples at `rate` Hz (10 ms frames).
+    func add(_ p: UnsafePointer<Float>, _ count: Int, rate: Double) {
+        let frame = max(1, Int(rate / 100))
+        let thr = powf(10, voicedDbfs / 20)
+        var s = 0.0, pk: Float = 0, voiced = 0
+        var i = 0
+        while i < count {
+            let end = min(count, i + frame)
+            var fs: Float = 0
+            for j in i..<end { let v = p[j]; fs += v * v; pk = max(pk, abs(v)) }
+            s += Double(fs)
+            if sqrtf(fs / Float(end - i)) >= thr { voiced += end - i }
+            i = end
+        }
+        os_unfair_lock_lock(&lock)
+        sumSq += s; n += count; peak = max(peak, pk); voicedMs += Double(voiced) * 1000 / rate
+        os_unfair_lock_unlock(&lock)
+    }
+    /// (rms dBFS, peak dBFS, voiced ms) since the last call; resets.
+    func take() -> (Float, Float, Int) {
+        os_unfair_lock_lock(&lock)
+        defer { sumSq = 0; n = 0; peak = 0; voicedMs = 0; os_unfair_lock_unlock(&lock) }
+        let rms = n > 0 ? Float(10 * log10(max(sumSq / Double(n), 1e-12))) : -120
+        return (rms, 20 * log10f(max(peak, 1e-6)), Int(voicedMs))
+    }
+}
+let procMeter = LevelMeter(voicedDbfs: -55)
+let rawMeter = LevelMeter(voicedDbfs: -75)
+let rawLevelsEnabled = useVP && ProcessInfo.processInfo.environment["ALWAYS_CAPTURE_RAW_LEVELS"] != "0"
+var rawEngine: AVAudioEngine?   // main queue only
+
+func startRawMeter() {
+    guard rawLevelsEnabled, rawEngine == nil else { return }
+    let e = AVAudioEngine()
+    let f = e.inputNode.outputFormat(forBus: 0)
+    guard f.sampleRate > 0, f.channelCount > 0 else { return }
+    e.inputNode.installTap(onBus: 0, bufferSize: 2048, format: f) { b, _ in
+        guard let ch = b.floatChannelData?[0] else { return }
+        rawMeter.add(ch, Int(b.frameLength), rate: f.sampleRate)
+    }
+    do { e.prepare(); try e.start(); rawEngine = e; _ = rawMeter.take() }
+    catch { log("raw meter unavailable: \(error)") }
+}
+
+func stopRawMeter() {
+    rawEngine?.stop()
+    rawEngine = nil
+}
+
 // Tap buffers are reused across callbacks (the tap fires ~40×/s; allocating
 // two PCM buffers per callback was pure malloc churn). Only the tap thread
 // touches them.
@@ -95,6 +161,7 @@ var outBuf: AVAudioPCMBuffer?
 input.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { buffer, _ in
     let frames = Int(buffer.frameLength)
     guard frames > 0, let src = buffer.floatChannelData?[0] else { return }
+    if rawLevelsEnabled { procMeter.add(src, frames, rate: inFormat.sampleRate) }
     if monoBuf == nil || Int(monoBuf!.frameCapacity) < frames {
         monoBuf = AVAudioPCMBuffer(pcmFormat: monoIn, frameCapacity: AVAudioFrameCount(max(frames, 4096)))
     }
@@ -319,6 +386,7 @@ func setAecEngaged(_ on: Bool, _ why: String) {
     guard on != aecEngaged else { return }
     aecEngaged = on
     input.isVoiceProcessingBypassed = !on
+    if on { startRawMeter() } else { stopRawMeter() }
     // The tap format must not change with the state (the converter and the
     // 16 kHz mono s16 stream are built once); logged so a test can prove it.
     let f = input.outputFormat(forBus: 0)
@@ -421,6 +489,22 @@ do {
 // take effect on a running voice-processing unit.
 applyDucking()
 startAecGate()
+if aecEngaged { startRawMeter() }
+// Kept at top level: a timer source released at the end of a scope never fires.
+let levelTimer = DispatchSource.makeTimerSource(queue: .main)
+if rawLevelsEnabled {
+    // Once per second while the canceller is engaged, only when something
+    // was audible in either stream (a quiet room logs nothing).
+    levelTimer.schedule(deadline: .now() + 1, repeating: 1)
+    levelTimer.setEventHandler {
+        let (pr, pp, pv) = procMeter.take()
+        let (rr, rp, rv) = rawMeter.take()
+        guard aecEngaged, rawEngine != nil, pv > 0 || rv > 0 else { return }
+        log(String(format: "levels media=%d vp=%.1f/%.1f voiced=%d raw=%.1f/%.1f voiced=%d",
+                   aecLastOutputWasMedia ? 1 : 0, pr, pp, pv, rr, rp, rv))
+    }
+    levelTimer.resume()
+}
 log("capturing")
 
 // Parent-death watchdog: the daemon may be SIGKILLed with our stdout pipe
