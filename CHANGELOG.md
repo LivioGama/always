@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2] - 2026-10-15
+
+### Fixed
+- **No dictated words lost** — at chunk seams (quiet-point cuts + 0.6 s seam context, duplicate words merged), in a quiet last sentence, to the grammar pass, or when the last chunk's STT pass fails (committed chunks are still pasted; the tail audio is saved and recovered by the Parakeet preview when available).
+- **My Voice speaker gate never destroys the user** — early drop needs ~1 s of continuously non-matching audio; an unavailable embedder fails open; phone/reel speech around the user's words is trimmed before STT.
+- **Master mute** fires once per Fn press (rdev no longer double-delivers it).
+- **Recorder** is no longer recycled every ~100 s while media plays (24 h hygiene cap instead).
+- Boot with Groq selected and no key falls back to on-device Apple STT instead of blocking every utterance.
+
+### Added
+- Live streaming Apple STT (strictly on-device): partials while speaking, near-instant final.
+- Echo-cancelling capture helper (`always-capture`, VPIO) with `rec` fallback; engaged only while other audio plays.
+- Instant live preview (Apple + Parakeet), deterministic "Always Fast" postprocess mode, voice-edit commands on the last paste ("scratch that", "change X to Y").
+- Onboarding: setup mode for voice testing, HUD suppressed during setup, voiceprint enables the gate on completion.
+
+
 ### Added
 - **Tauri v2 migration** — Application now uses Tauri v2 runtime: a single-process architecture with a Rust backend and a web frontend (React + Vite + Tailwind) in a native WebView container. Eliminates UDS daemon, orphan watchdog, and cross-process IPC.
 - **Marketing website** (`web/`) — Professional landing page with Hero, Features (7-card grid), How It Works (3-step), Download (platform selector), Screenshots placeholders, and Footer. Built with React 19, Vite 7, Tailwind CSS 4, TypeScript 5.8.
