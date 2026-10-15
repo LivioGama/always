@@ -2,8 +2,6 @@ import SwiftUI
 import AppKit
 
 struct AboutPanel: View {
-    @ObservedObject private var updateService = UpdateService.shared
-
     private var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
     }
@@ -29,8 +27,8 @@ struct AboutPanel: View {
 
                 Divider()
 
-                // Updates — inline checker
-                updateSection
+                // Updates — daemon-driven (SPEC §12a)
+                UpdateSection()
 
                 Divider()
 
@@ -86,187 +84,6 @@ struct AboutPanel: View {
             }
             .padding(20)
         }
-    }
-
-    // MARK: - Update section
-
-    @ViewBuilder
-    private var updateSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Updates")
-                .font(.headline)
-
-            if !updateService.canCheckForUpdates {
-                // Sparkle not configured (missing SUPublicEDKey in dev builds)
-                Text("Automatic updates are not configured in this build.")
-                    .font(.body)
-                    .foregroundColor(.secondary)
-            } else {
-                updateCheckerUI
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var updateCheckerUI: some View {
-        switch updateService.checkState {
-        case .idle:
-            HStack(spacing: 10) {
-                Button {
-                    updateService.checkForUpdates()
-                } label: {
-                    Label("Check for Updates", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                Text("Last checked automatically by Sparkle.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-        case .checking:
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Checking for updates…")
-                    .font(.body)
-                    .foregroundColor(.secondary)
-            }
-
-        case .upToDate:
-            HStack(spacing: 8) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
-                Text("Always is up to date.")
-                    .font(.body)
-                Spacer()
-                Button("Check Again") { updateService.checkForUpdates() }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-            }
-            .transition(.opacity)
-
-        case .updateAvailable(let version, let notes):
-            updateAvailableCard(version: version, notes: notes)
-
-        case .downloading(let progress):
-            downloadProgressCard(progress: progress, label: "Downloading")
-
-        case .extracting(let progress):
-            downloadProgressCard(progress: progress, label: "Extracting")
-
-        case .readyToInstall:
-            HStack(spacing: 10) {
-                Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
-                    .foregroundColor(.accentColor)
-                Text("Update ready to install.")
-                    .font(.body)
-                Spacer()
-                Button("Install & Relaunch") { updateService.installUpdate() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-            }
-
-        case .installing:
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Installing… Always will relaunch shortly.")
-                    .font(.body)
-                    .foregroundColor(.secondary)
-            }
-
-        case .installed:
-            HStack(spacing: 8) {
-                Image(systemName: "checkmark.seal.fill")
-                    .foregroundColor(.green)
-                Text("Update installed successfully.")
-                    .font(.body)
-            }
-
-        case .error(let message):
-            HStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(.orange)
-                Text(message)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer()
-                Button("Retry") { updateService.checkForUpdates() }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func updateAvailableCard(version: String, notes: String?) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                ZStack {
-                    Circle()
-                        .fill(Color.accentColor.opacity(0.12))
-                        .frame(width: 36, height: 36)
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 18))
-                        .foregroundColor(.accentColor)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Update available — \(version)")
-                        .font(.body.weight(.medium))
-                    if let notes, !notes.isEmpty {
-                        Text(notes)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                Spacer()
-            }
-
-            HStack(spacing: 8) {
-                Button {
-                    updateService.installUpdate()
-                } label: {
-                    Label("Download & Install", systemImage: "arrow.down.circle.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-
-                Button("Later") { updateService.dismissUpdate() }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-            }
-        }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.accentColor.opacity(0.06))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.accentColor.opacity(0.15), lineWidth: 1)
-                )
-        )
-        .transition(.opacity.combined(with: .move(edge: .top)))
-    }
-
-    @ViewBuilder
-    private func downloadProgressCard(progress: Double, label: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("\(label)… \(Int(progress * 100))%")
-                    .font(.body.weight(.medium))
-                Spacer()
-            }
-            ProgressView(value: progress)
-                .progressViewStyle(.linear)
-        }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.secondary.opacity(0.06))
-        )
     }
 
     private struct LinkButton: View {
