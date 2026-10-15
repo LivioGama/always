@@ -38,6 +38,10 @@ It's less a speech-to-text tool than an idea: your hands should be free, speakin
 
 > Everything below is the macOS app. On Linux and Windows, Always runs as a background daemon you drive from the command line — see [Install](#-install).
 
+### 📖 Day one, it already knows your words
+
+The first time you open Always, before you've said a single word, it quietly reads the names of the apps on your Mac, your macOS Text Replacements, and the dictionaries you spent months building in **Wispr Flow** and **SuperWhisper** — and makes them its own. So the very first time you say "Notion", "Kubernetes" or that client's name you once taught Wispr Flow, it comes out right. Switching costs you nothing you already taught another app.
+
 ### 🗣️ Hands-free
 
 - **Always on** — no push-to-talk. Start speaking and your words appear.

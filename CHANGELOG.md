@@ -14,8 +14,7 @@ The first public release, installable on macOS, Linux and Windows with one comma
 ### Added
 - **install:** one command installs Always: `curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash` on macOS and Linux, `irm https://raw.githubusercontent.com/LivioGama/always/main/scripts/install.ps1 | iex` on Windows. It picks the build for your platform and verifies its SHA-256 before installing. ([#108](https://github.com/LivioGama/always/pull/108))
 - **release:** every release now ships macOS arm64, Linux x86_64 and aarch64 (tar.gz, deb, rpm) and Windows x86_64 builds, each with a `.sha256` checksum and a build provenance attestation you can check with `gh attestation verify`. ([#108](https://github.com/LivioGama/always/pull/108))
-
-- **vocabulary:** on first launch, Always imports your installed app names, macOS Text Replacements and your Wispr Flow and SuperWhisper vocabulary into its dictionary, so it spells your words right from day one.
+- **vocabulary:** on its first launch on macOS, Always imports your installed app names, your macOS Text Replacements and the dictionaries you built in Wispr Flow and SuperWhisper into its own, so it spells your words right from day one. ([#113](https://github.com/LivioGama/always/pull/113))
 
 ### Changed
 - **website:** a redesigned landing page with a live dictation demo, a to-scale timeline of one sentence, and the install command for your operating system. ([#108](https://github.com/LivioGama/always/pull/108))
