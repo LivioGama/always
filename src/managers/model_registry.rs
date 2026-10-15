@@ -1249,7 +1249,12 @@ fn compute_sha256(path: &Path) -> Result<String> {
         }
         hasher.update(&buffer[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    // sha2 0.11 digests are byte arrays without `LowerHex`; hex-encode by hand.
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 fn discover_custom_whisper_models(
