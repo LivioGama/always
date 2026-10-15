@@ -503,13 +503,27 @@ pub fn locate_capture_helper() -> Option<PathBuf> {
     dev.is_file().then_some(dev)
 }
 
-/// Block until `fd` is readable (or hung up) or `timeout_ms` elapses.
-/// `Ok(true)` = readable now, `Ok(false)` = timed out. Raw `poll(2)`
+/// Outcome of [`wait_readable`].
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Readiness {
+    /// Nothing arrived within the timeout.
+    TimedOut,
+    /// Bytes are readable and the writer end is still open.
+    Data,
+    /// The writer end is closed (`POLLHUP`): the process exited or closed
+    /// its stdout. macOS reports `POLLIN|POLLHUP` for this, and it does so
+    /// BEFORE the exit is visible to `waitpid`, so `try_wait` cannot be
+    /// relied on to confirm it.
+    HungUp,
+}
+
+/// Block until `fd` is readable (or hung up) or `timeout_ms` elapses. Raw `poll(2)`
 /// rather than a `libc`/`nix` dependency — one struct, one extern. Used
 /// only for the capture helper's first-bytes check, before its stdout is
 /// handed to the reader thread.
 #[cfg(target_os = "macos")]
-fn wait_readable(fd: i32, timeout_ms: i32) -> io::Result<bool> {
+fn wait_readable(fd: i32, timeout_ms: i32) -> io::Result<Readiness> {
     #[repr(C)]
     struct PollFd {
         fd: i32,
@@ -517,6 +531,7 @@ fn wait_readable(fd: i32, timeout_ms: i32) -> io::Result<bool> {
         revents: i16,
     }
     const POLLIN: i16 = 0x0001;
+    const POLLHUP: i16 = 0x0010;
     unsafe extern "C" {
         fn poll(fds: *mut PollFd, nfds: u32, timeout: i32) -> i32;
     }
@@ -535,9 +550,13 @@ fn wait_readable(fd: i32, timeout_ms: i32) -> io::Result<bool> {
             }
             return Err(err);
         }
-        // POLLHUP/POLLERR also count as "go read": the read will observe
-        // EOF/error immediately instead of blocking.
-        return Ok(rc > 0);
+        return Ok(if rc == 0 {
+            Readiness::TimedOut
+        } else if pfd.revents & POLLHUP != 0 {
+            Readiness::HungUp
+        } else {
+            Readiness::Data
+        });
     }
 }
 
@@ -672,11 +691,13 @@ impl RecChild {
                 }
             });
         }
-        let ready = wait_readable(stdout.as_raw_fd(), CAPTURE_HELPER_FIRST_BYTES_MS)?;
-        // Readable could also be EOF (helper exited, e.g. VPIO unavailable);
-        // `try_wait` tells the two apart.
+        let readiness = wait_readable(stdout.as_raw_fd(), CAPTURE_HELPER_FIRST_BYTES_MS)?;
+        // Readable could also be EOF (helper exited, e.g. VPIO unavailable).
+        // The hang-up flag is authoritative: `try_wait` alone races, since
+        // the pipe closes before the exit becomes waitable, which let a dead
+        // helper through as "healthy" and skipped the `--no-vp` fallback.
         let exited = child.try_wait().ok().flatten();
-        if !ready || exited.is_some() {
+        if readiness != Readiness::Data || exited.is_some() {
             let _ = child.kill();
             let _ = child.wait();
             anyhow::bail!(
