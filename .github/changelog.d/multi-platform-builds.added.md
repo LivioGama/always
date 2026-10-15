@@ -1,1 +1,0 @@
-**release:** every release now ships macOS arm64, Linux x86_64 and aarch64 (tar.gz, deb, rpm) and Windows x86_64 builds, each with a `.sha256` checksum and a build provenance attestation you can check with `gh attestation verify`.
