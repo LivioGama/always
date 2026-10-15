@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, type ReactElement } from "react";
 import {
   DaemonState,
   ModelInfo,
@@ -41,7 +41,7 @@ type Tab =
   | "permissions"
   | "about";
 
-const TABS: { key: Tab; label: string; icon: JSX.Element }[] = [
+const TABS: { key: Tab; label: string; icon: ReactElement }[] = [
   {
     key: "general",
     label: "General",
