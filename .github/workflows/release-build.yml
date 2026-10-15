@@ -1,0 +1,355 @@
+name: Release build
+
+# Builds, packages and attests everything a release publishes. Called by
+# release.yml once its `verify` job passed. It lives in its own reusable
+# workflow so the build-provenance attestation's signer is this file, not the
+# caller: `gh attestation verify --signer-workflow
+# LivioGama/always/.github/workflows/release-build.yml` accepts only what this
+# file built. It holds no secret.
+#
+# Assets (stable contract, shared with scripts/release/install.sh / install.ps1):
+#   always-<tag>-aarch64-apple-darwin.tar.gz      Always.app (ad-hoc signed, not notarized)
+#   always-<tag>-x86_64-unknown-linux-gnu.{tar.gz,deb,rpm}
+#   always-<tag>-aarch64-unknown-linux-gnu.{tar.gz,deb,rpm}
+#   always-<tag>-x86_64-pc-windows-msvc.zip
+#   <each of the above>.sha256, install.sh, install.ps1, always-<tag>.intoto.jsonl
+#
+# Linux is glibc, not musl: the ONNX Runtime that `ort` downloads has no musl
+# build, and the speaker/VAD models are not optional.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Release tag, or v<version>-dryrun for a branch dry run'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag }}
+
+jobs:
+  build-macos:
+    name: Build aarch64-apple-darwin
+    # macOS 26 runner = Xcode 26 SDK. The Apple STT (SpeechAnalyzer) and
+    # Apple Intelligence (FoundationModels) bridges need it; with an older SDK
+    # build.rs silently compiles stubs and the app reports
+    # "Apple STT not available in this build".
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-aarch64-apple-darwin
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref_type == 'tag' }}
+
+      - name: Cache SwiftPM builds
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            Always/.build
+            preview-asr/.build
+          key: swiftpm-release-${{ runner.os }}-${{ hashFiles('Always/Package.resolved', 'preview-asr/Package.resolved') }}
+          restore-keys: |
+            swiftpm-release-${{ runner.os }}-
+
+      - name: Build daemon
+        env:
+          # kaldi-fbank-rust-kautism bundles C++14 code (see ci.yml).
+          CXXFLAGS: -std=c++14
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          file target/aarch64-apple-darwin/release/always
+          # Never ship the SDK stubs (see runs-on above).
+          if grep -aq 'SDK requirement not met' target/aarch64-apple-darwin/release/always; then
+            echo "::error::daemon was built with the Apple STT / Apple Intelligence stubs (SDK too old)"
+            exit 1
+          fi
+
+      # No x86_64 macOS build: ort-sys ships no prebuilt ONNX Runtime for
+      # x86_64-apple-darwin.
+
+      - name: Build Always.app (build.sh, release profile)
+        env:
+          ALWAYS_BUILD_PROFILE: release
+          ALWAYS_SWIFT_CONFIGURATION: release
+          ALWAYS_DAEMON_PATH: ${{ github.workspace }}/target/aarch64-apple-darwin/release/always
+          # Ad-hoc ("-"): no certificate, no notarization. build.sh signs the
+          # bundle with `codesign --force --deep` (plus the entitlements and
+          # bundle identifier), which is what we ship.
+          ALWAYS_CODESIGN_IDENTITY: "-"
+          # build.sh also "deploys"; keep that away from /Applications.
+          ALWAYS_DEPLOY_PATH: ${{ runner.temp }}/deploy/Always.app
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/deploy"
+          cd Always
+          ./build.sh
+          codesign --verify --deep --strict --verbose=2 Always.app
+          codesign -dv Always.app 2>&1 | grep -E 'Signature|Identifier'
+          ls -l Always.app/Contents/MacOS
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          TARGET=aarch64-apple-darwin
+          STAGING="always-${TAG}-${TARGET}"
+          ARCHIVE="${STAGING}.tar.gz"
+          mkdir -p "$STAGING"
+          # ditto keeps the signature, symlinks and xattrs intact.
+          ditto Always/Always.app "$STAGING/Always.app"
+          cp README.md LICENSE "$STAGING/"
+          # COPYFILE_DISABLE: no AppleDouble (._*) files in the archive.
+          COPYFILE_DISABLE=1 tar czf "$ARCHIVE" "$STAGING"
+          shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+          # Round trip: the extracted bundle must still verify.
+          d="$(mktemp -d)"
+          tar xzf "$ARCHIVE" -C "$d"
+          codesign --verify --deep --strict "$d/$STAGING/Always.app"
+          test -x "$d/$STAGING/Always.app/Contents/MacOS/always-daemon"
+          rm -rf "$d"
+          ls -l always-*
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: always-aarch64-apple-darwin
+          path: |
+            always-*.tar.gz
+            always-*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  build-linux:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # 24.04 on purpose: the oldest runner whose glibc (2.39) the ONNX
+          # Runtime needs, so the binaries run on the widest range of hosts.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref_type == 'tag' }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libssl-dev pkg-config g++ rpm
+
+      - name: Install cargo-deb and cargo-generate-rpm
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+
+      # Same feature set as ci.yml / the Dockerfile. `cpal` is required: without
+      # it the linux build fails with E0425 get_or_spawn.
+      - name: Build daemon (linux,cpal)
+        run: cargo build --release --locked --no-default-features --features linux,cpal
+
+      - name: Smoke-test binary
+        run: ./target/release/always --version
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          TARGET="${{ matrix.target }}"
+          STAGING="always-${TAG}-${TARGET}"
+          mkdir -p "$STAGING/bin" "$STAGING/share"
+          install -m 755 target/release/always "$STAGING/bin/always"
+          install -m 644 scripts/release/always-daemon.service "$STAGING/share/always-daemon.service"
+          cp README.md LICENSE "$STAGING/"
+          tar czf "$STAGING.tar.gz" "$STAGING"
+          cargo deb --no-build --no-strip --output "$STAGING.deb"
+          cargo generate-rpm --output "$STAGING.rpm"
+          for f in "$STAGING.tar.gz" "$STAGING.deb" "$STAGING.rpm"; do
+            sha256sum "$f" > "$f.sha256"
+          done
+          ls -l always-*
+          dpkg-deb --info "$STAGING.deb"
+          dpkg-deb --contents "$STAGING.deb"
+          rpm -qpl "$STAGING.rpm"
+          tar tzvf "$STAGING.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: always-${{ matrix.target }}
+          path: |
+            always-*.tar.gz
+            always-*.deb
+            always-*.rpm
+            always-*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  build-windows:
+    name: Build x86_64-pc-windows-msvc
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-x86_64-pc-windows-msvc
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref_type == 'tag' }}
+
+      - name: Build daemon (windows,cpal)
+        run: cargo build --release --locked --no-default-features --features windows,cpal --target x86_64-pc-windows-msvc
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = 'x86_64-pc-windows-msvc'
+          $staging = "always-$env:TAG-$target"
+          New-Item -ItemType Directory -Path $staging | Out-Null
+          Copy-Item "target/$target/release/always.exe" $staging
+          Copy-Item README.md, LICENSE $staging
+          & "./$staging/always.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'always.exe failed to run' }
+          $zip = "$staging.zip"
+          Compress-Archive -Path $staging -DestinationPath $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+          # `<hash>  <name>`, the same shape as shasum/sha256sum.
+          [IO.File]::WriteAllText("$zip.sha256", "$hash  $zip`n")
+          Get-ChildItem always-* | Format-Table Name, Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: always-x86_64-pc-windows-msvc
+          path: |
+            always-*.zip
+            always-*.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  attest:
+    name: Collect and attest
+    needs: [build-macos, build-linux, build-windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Provenance attestation: the OIDC token Sigstore exchanges for a
+      # short-lived signing certificate naming this workflow, and the write
+      # that stores the signed attestation on the repository.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download the archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: always-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Check the full asset set is present and checksummed
+        run: |
+          set -euo pipefail
+          cd artifacts
+          missing=0
+          for f in \
+            "always-${TAG}-aarch64-apple-darwin.tar.gz" \
+            "always-${TAG}-x86_64-unknown-linux-gnu.tar.gz" \
+            "always-${TAG}-x86_64-unknown-linux-gnu.deb" \
+            "always-${TAG}-x86_64-unknown-linux-gnu.rpm" \
+            "always-${TAG}-aarch64-unknown-linux-gnu.tar.gz" \
+            "always-${TAG}-aarch64-unknown-linux-gnu.deb" \
+            "always-${TAG}-aarch64-unknown-linux-gnu.rpm" \
+            "always-${TAG}-x86_64-pc-windows-msvc.zip"; do
+            for g in "$f" "$f.sha256"; do
+              if [ ! -s "$g" ]; then echo "::error::missing asset $g"; missing=1; fi
+            done
+          done
+          [ "$missing" -eq 0 ]
+          sha256sum -c ./*.sha256
+          ls -l
+
+      # SLSA build provenance for what a user downloads and runs: every archive
+      # and package, plus the two installers the README pipes into a shell. The
+      # .sha256 files prove the download was not corrupted, never who built it;
+      # an attestation is signed by this workflow on this ref and checked with
+      # `gh attestation verify`. Before the hand-off on purpose: a signing
+      # failure stops the release instead of publishing it unattested.
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            artifacts/always-*.tar.gz
+            artifacts/always-*.zip
+            artifacts/always-*.deb
+            artifacts/always-*.rpm
+            scripts/release/install.sh
+            scripts/release/install.ps1
+
+      # The attestation also ships as a file (the Sigstore bundle, one JSON
+      # line covering every subject), checkable offline with
+      # `gh attestation verify --bundle`. *.intoto.jsonl is the suffix OpenSSF
+      # Scorecard's Signed-Releases check reads as provenance.
+      - name: Stage the release assets
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          cp artifacts/always-* scripts/release/install.sh scripts/release/install.ps1 release-assets/
+          if [ ! -s "$BUNDLE" ]; then
+            echo "::error::actions/attest left no bundle at '$BUNDLE'; the release would ship without its provenance file"
+            exit 1
+          fi
+          cp "$BUNDLE" "release-assets/always-${TAG}.intoto.jsonl"
+          ls -l release-assets
+
+      - name: Upload the release assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-assets
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 14

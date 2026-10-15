@@ -4,6 +4,7 @@ updates:
   # ── Rust ────────────────────────────────────────────────────────────────────
   - package-ecosystem: "cargo"
     directory: "/"
+    target-branch: "develop"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -33,6 +34,7 @@ updates:
   # ── npm (Tauri GUI) ────────────────────────────────────────────────────────
   - package-ecosystem: "npm"
     directory: "/always-gui"
+    target-branch: "develop"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -61,6 +63,7 @@ updates:
   # ── GitHub Actions ─────────────────────────────────────────────────────────
   - package-ecosystem: "github-actions"
     directory: "/"
+    target-branch: "develop"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -77,6 +80,7 @@ updates:
   # ── Swift (Always app) ─────────────────────────────────────────────────────
   - package-ecosystem: "swift"
     directory: "/Always"
+    target-branch: "develop"
     schedule:
       interval: "weekly"
       day: "monday"
