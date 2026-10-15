@@ -221,6 +221,12 @@ impl FrameRing {
         self.pop(timeout)
     }
 
+    /// Copy of the most recently queued frame, without consuming anything.
+    /// Non-blocking: `None` when nothing is queued.
+    fn peek_newest(&self) -> Option<[u8; FRAME_BYTES]> {
+        self.state.lock().frames.back().map(|f| f.bytes)
+    }
+
     /// Discard everything queued, plus any frame captured before now that
     /// is still in flight inside SoX. Returns the queued audio dropped,
     /// in bytes.
@@ -415,6 +421,36 @@ const CAPTURE_HELPER_FIRST_BYTES_MS: i32 = 4_000;
 static CAPTURE_HELPER_FAILED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Same, for the helper's plain (`--no-vp`) mode: set when even plain
+/// capture failed, so the daemon goes straight to `rec` if one exists.
+#[cfg(target_os = "macos")]
+static CAPTURE_PLAIN_FAILED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// SoX `rec`, if installed: Homebrew (Apple Silicon, then Intel), the
+/// system, then `PATH`. Never required on macOS — the bundled capture
+/// helper covers capture — but kept as the last resort for dev builds.
+pub fn find_rec() -> Option<PathBuf> {
+    let fixed = [
+        "/opt/homebrew/bin/rec",
+        "/usr/local/bin/rec",
+        "/usr/bin/rec",
+    ];
+    fixed
+        .iter()
+        .map(PathBuf::from)
+        .chain(
+            std::env::var_os("PATH")
+                .map(|p| {
+                    std::env::split_paths(&p)
+                        .map(|d| d.join("rec"))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        )
+        .find(|p| p.is_file())
+}
+
 /// Pref `capture_aec` (applied at config load). Default on.
 static AEC_PREF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
@@ -542,34 +578,75 @@ pub(crate) fn note_capture_helper_line_for_test(line: &str) {
 
 #[cfg(target_os = "macos")]
 impl RecChild {
-    /// Spawn the recorder: the echo-cancelling capture helper when AEC is
-    /// enabled and the helper is installed and delivers audio, otherwise
-    /// SoX `rec`. Either way exactly ONE recorder process exists (I4) — a
-    /// helper that fails its start-up check is killed and reaped before
-    /// `rec` is spawned.
+    /// Spawn the recorder. Order:
+    /// 1. the capture helper with echo cancellation (AEC on, helper healthy);
+    /// 2. the same helper in plain mode (`--no-vp`) — AEC off, or VPIO
+    ///    unavailable on this Mac/device;
+    /// 3. SoX `rec`, only if it happens to be installed (dev machines).
+    ///
+    /// The helper ships inside `Always.app`, so a fresh Mac never needs
+    /// Homebrew or SoX (before this, any helper failure — or AEC turned
+    /// off — fell through to `/opt/homebrew/bin/rec`, which a new user
+    /// does not have, and dictation silently never started). Whatever is
+    /// chosen, exactly ONE recorder process exists (I4) — a helper that
+    /// fails its start-up check is killed and reaped before the next try.
     pub fn spawn() -> Result<Self> {
-        if aec_enabled()
-            && !CAPTURE_HELPER_FAILED.load(Ordering::Relaxed)
-            && let Some(helper) = locate_capture_helper()
-        {
-            match Self::spawn_capture_helper(&helper) {
-                Ok(rec) => return Ok(rec),
-                Err(error) => {
-                    CAPTURE_HELPER_FAILED.store(true, Ordering::Relaxed);
-                    tracing::warn!(error = %error, "capture_helper_fallback_to_rec");
+        Self::spawn_from(locate_capture_helper(), aec_enabled())
+    }
+
+    /// [`Self::spawn`] with the helper location and AEC choice explicit.
+    fn spawn_from(helper: Option<PathBuf>, aec: bool) -> Result<Self> {
+        if let Some(helper) = helper.as_deref() {
+            if aec && !CAPTURE_HELPER_FAILED.load(Ordering::Relaxed) {
+                match Self::spawn_capture_helper(helper, &[]) {
+                    Ok(rec) => return Ok(rec),
+                    Err(error) => {
+                        CAPTURE_HELPER_FAILED.store(true, Ordering::Relaxed);
+                        tracing::warn!(error = %error, "capture_helper_fallback_to_plain");
+                    }
+                }
+            }
+            if !CAPTURE_PLAIN_FAILED.load(Ordering::Relaxed) {
+                match Self::spawn_capture_helper(helper, &["--no-vp"]) {
+                    Ok(rec) => return Ok(rec),
+                    Err(error) => {
+                        CAPTURE_PLAIN_FAILED.store(true, Ordering::Relaxed);
+                        tracing::warn!(error = %error, "capture_helper_plain_fallback_to_rec");
+                    }
                 }
             }
         }
-        Self::spawn_rec()
+        match find_rec() {
+            Some(rec_path) => Self::spawn_rec(&rec_path),
+            None => {
+                // Re-arm plain mode: whatever made it fail (no input device
+                // yet) may be gone by the next attempt, and there is nothing
+                // else to fall back to. Plain failures are fast (the helper
+                // exits at once); echo cancellation stays off until the next
+                // input-device change (`force_respawn`) so the gated loop's
+                // 100 ms retries never each wait out the 4 s VPIO start-up.
+                CAPTURE_PLAIN_FAILED.store(false, Ordering::Relaxed);
+                match helper {
+                    Some(h) => anyhow::bail!(
+                        "microphone capture failed: '{}' produced no audio (check System Settings → Privacy & Security → Microphone, and that an input device is connected)",
+                        h.display()
+                    ),
+                    None => anyhow::bail!(
+                        "microphone capture unavailable: '{CAPTURE_HELPER_NAME}' is missing from the app bundle and SoX `rec` is not installed — reinstall Always"
+                    ),
+                }
+            }
+        }
     }
 
-    /// Spawn `always-capture` (VPIO echo cancellation) and require its
+    /// Spawn `always-capture` (with `args`, e.g. `--no-vp`) and require its
     /// first bytes within [`CAPTURE_HELPER_FIRST_BYTES_MS`].
-    fn spawn_capture_helper(path: &std::path::Path) -> Result<Self> {
+    fn spawn_capture_helper(path: &std::path::Path, args: &[&str]) -> Result<Self> {
         use std::os::fd::AsRawFd as _;
-        tracing::info!(path = %path.display(), "capture_helper_spawn_starting");
+        tracing::info!(path = %path.display(), args = ?args, "capture_helper_spawn_starting");
         let started = std::time::Instant::now();
         let mut child = std::process::Command::new(path)
+            .args(args)
             // stdin carries status-cue commands (`play <path>`): cues are
             // rendered through the helper's voice-processing output so they
             // are never ducked by it (see `capture_cue_play`).
@@ -651,14 +728,9 @@ impl RecChild {
         Ok(ring)
     }
 
-    fn spawn_rec() -> Result<Self> {
-        tracing::info!("rec_spawn_starting");
+    fn spawn_rec(rec_path: &std::path::Path) -> Result<Self> {
+        tracing::info!(path = %rec_path.display(), "rec_spawn_starting");
         let overruns = Arc::new(OverrunWindow::new());
-        let rec_path = if cfg!(target_os = "macos") {
-            "/opt/homebrew/bin/rec"
-        } else {
-            "/usr/bin/rec"
-        };
         let buffer_arg = SOX_BUFFER_BYTES.to_string();
         let mut child = std::process::Command::new(rec_path)
             // Capture at the device's native rate/channels (typically 48 kHz
@@ -695,7 +767,7 @@ impl RecChild {
             // denial looked identical to a healthy idle daemon.
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .with_context(|| format!("Failed to run '{rec_path}'. Install SoX"))?;
+            .with_context(|| format!("Failed to run '{}'", rec_path.display()))?;
         let stdout = child.stdout.take().context("sox stdout missing")?;
         let ring = Self::start_reader(stdout, Instant::now(), "rec-reader")?;
         if let Some(stderr) = child.stderr.take() {
@@ -809,6 +881,7 @@ impl RecChild {
         }
         // A new input device gets a fresh chance at echo cancellation.
         CAPTURE_HELPER_FAILED.store(false, Ordering::Relaxed);
+        CAPTURE_PLAIN_FAILED.store(false, Ordering::Relaxed);
         // Drop (kill + wait) the old recorder BEFORE spawning the
         // replacement — same I4 invariant as `get_or_spawn`.
         *recorder = None;
@@ -877,6 +950,12 @@ impl RecChild {
             .ring
             .pop_newest(Duration::from_millis(READ_FRAME_TIMEOUT_MS as u64));
         self.deliver(frame, buf)
+    }
+
+    /// The newest queued frame, left in the queue (wake-on-voice probe:
+    /// "is someone speaking NOW?" without disturbing the next read).
+    pub fn peek_newest_frame(&self) -> Option<[u8; FRAME_BYTES]> {
+        self.ring.peek_newest()
     }
 
     /// Capture stamp of the frame last returned by a read — the clock
@@ -1184,8 +1263,29 @@ pub mod mock {
 #[cfg(feature = "cpal")]
 pub mod cpal_audio;
 
-#[cfg(feature = "cpal")]
+// Dictation capture. macOS reads the bundled capture helper
+// (`always-capture`: Apple voice-processing echo cancellation, resampled
+// to 16 kHz mono by AVAudioConverter) through `RecChild`; cpal is the
+// capture path on the other platforms only. On macOS the cpal path took
+// the device's native rate with no resampling (a 48 kHz-only mic was read
+// as 16 kHz: slowed 3x, garbage transcripts), accepted mono configs only
+// (stereo-only interfaces failed outright), dropped the tail of every
+// callback buffer that was not a multiple of 480 samples, and ran beside
+// the helper the gated loop spawns — two recorders on one mic.
+#[cfg(all(feature = "cpal", not(target_os = "macos")))]
 pub use cpal_audio::{CpalsAudioSource, force_respawn, get_or_spawn};
+
+/// The process-wide dictation recorder (see the note above).
+#[cfg(target_os = "macos")]
+pub fn get_or_spawn() -> Result<Arc<Mutex<Option<RecChild>>>> {
+    RecChild::get_or_spawn()
+}
+
+/// Rebind the dictation recorder to the current default input device.
+#[cfg(target_os = "macos")]
+pub fn force_respawn() -> Result<()> {
+    RecChild::force_respawn()
+}
 
 pub fn temp_wav_path() -> PathBuf {
     let stamp = SystemTime::now()
@@ -1362,7 +1462,7 @@ mod tests {
     #[test]
     fn capture_helper_that_exits_is_rejected_fast() {
         let started = std::time::Instant::now();
-        let r = super::RecChild::spawn_capture_helper(std::path::Path::new("/usr/bin/false"));
+        let r = super::RecChild::spawn_capture_helper(std::path::Path::new("/usr/bin/false"), &[]);
         assert!(r.is_err(), "an exiting helper must not become the recorder");
         assert!(
             started.elapsed().as_millis() < 2_000,
@@ -1375,8 +1475,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn capture_helper_that_streams_is_accepted() {
-        let mut rec = super::RecChild::spawn_capture_helper(std::path::Path::new("/usr/bin/yes"))
-            .expect("streaming helper accepted");
+        let mut rec =
+            super::RecChild::spawn_capture_helper(std::path::Path::new("/usr/bin/yes"), &[])
+                .expect("streaming helper accepted");
         let mut buf = [0u8; super::FRAME_BYTES];
         assert_eq!(rec.read_frame(&mut buf).expect("read"), super::FRAME_BYTES);
     }
@@ -1391,8 +1492,47 @@ mod tests {
         std::fs::write(&script, "#!/bin/sh\nexec sleep 30\n").unwrap();
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let r = super::RecChild::spawn_capture_helper(&script);
+        let r = super::RecChild::spawn_capture_helper(&script, &[]);
         assert!(r.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A helper whose echo-cancelling mode fails (VPIO unavailable — seen
+    /// on a fresh macOS 26 VM: kAUInitialize -10875) must fall back to the
+    /// SAME helper in plain `--no-vp` mode, never to SoX `rec` (absent on a
+    /// new user's Mac). Stand-in helper: exits 4 unless given `--no-vp`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn helper_vp_failure_falls_back_to_plain_helper_not_rec() {
+        use std::sync::atomic::Ordering;
+        let dir = std::env::temp_dir().join(format!("always-cap-plain-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-capture");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\ncase \"$1\" in --no-vp) exec /usr/bin/yes ;; *) exit 4 ;; esac\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        super::CAPTURE_HELPER_FAILED.store(false, Ordering::Relaxed);
+        super::CAPTURE_PLAIN_FAILED.store(false, Ordering::Relaxed);
+
+        let mut rec = super::RecChild::spawn_from(Some(script.clone()), true)
+            .expect("plain helper must take over");
+        assert!(
+            super::CAPTURE_HELPER_FAILED.load(Ordering::Relaxed),
+            "VP failure recorded"
+        );
+        assert!(
+            !super::CAPTURE_PLAIN_FAILED.load(Ordering::Relaxed),
+            "plain mode healthy"
+        );
+        let mut buf = [0u8; super::FRAME_BYTES];
+        assert_eq!(rec.read_frame(&mut buf).expect("read"), super::FRAME_BYTES);
+        assert!(rec.peek_newest_frame().is_some() || rec.read_frame(&mut buf).is_ok());
+        drop(rec);
+        super::CAPTURE_HELPER_FAILED.store(false, Ordering::Relaxed);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1405,7 +1545,7 @@ mod tests {
         let Some(path) = super::locate_capture_helper() else {
             panic!("always-capture not built (capture/build.sh)");
         };
-        let mut rec = super::RecChild::spawn_capture_helper(&path).expect("helper starts");
+        let mut rec = super::RecChild::spawn_capture_helper(&path, &[]).expect("helper starts");
         let mut buf = [0u8; super::FRAME_BYTES];
         // Discard start-up burst, then time 100 frames (3.0 s of audio).
         for _ in 0..10 {
