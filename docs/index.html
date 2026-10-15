@@ -264,6 +264,22 @@ kbd, .key {
 }
 .copy-btn:hover { border-color: var(--signal); color: var(--signal); }
 .copy-btn svg { width: 14px; height: 14px; }
+.install-group { display: grid; gap: 8px; min-width: 0; }
+.os-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.os-tabs[hidden] { display: none !important; }
+.os-tab {
+  display: inline-flex; align-items: center;
+  height: 28px; padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg-2);
+  font: 500 0.78rem/1 var(--sans);
+  cursor: pointer;
+}
+.os-tab:hover { border-color: var(--line-2); color: var(--fg); }
+.os-tab:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+.os-tab[aria-selected="true"] { border-color: var(--signal); color: var(--fg); background: color-mix(in srgb, var(--signal) 9%, transparent); }
 .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 .hero-meta { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 0.86rem; color: var(--muted); }
 .hero-meta span { display: inline-flex; align-items: center; gap: 7px; }
@@ -757,13 +773,20 @@ kbd, .key {
             <span class="typed">Anywhere.<span class="caret" aria-hidden="true"></span></span>
           </h1>
           <p class="lede">No push-to-talk and no window to open. Always sits in your menu bar, hears your voice, and types what you say <strong>wherever your cursor is</strong>: terminal, editor, chat, or AI agent.</p>
-          <div class="install-line">
-            <span class="prompt" aria-hidden="true">$</span>
-            <code id="install-hero">curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash</code>
+          <div class="install-group">
+<div class="os-tabs" role="tablist" aria-label="Install command for your operating system" data-os-tabs hidden>
+<button class="os-tab" role="tab" type="button" aria-selected="true" tabindex="0" data-os="mac">macOS</button>
+<button class="os-tab" role="tab" type="button" aria-selected="false" tabindex="-1" data-os="linux">Linux</button>
+<button class="os-tab" role="tab" type="button" aria-selected="false" tabindex="-1" data-os="win">Windows</button>
+</div>
+          <div class="install-line" id="install-line-hero" role="tabpanel" aria-label="Install command">
+            <span class="prompt" data-prompt aria-hidden="true">$</span>
+            <code id="install-hero" data-install>curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash</code>
             <button class="copy-btn" type="button" data-copy="curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash" aria-label="Copy the one-line install command">
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5" y="5" width="9" height="9" rx="2"/><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5"/></svg>
               <span class="copy-label">Copy</span>
             </button>
+          </div>
           </div>
           <div class="hero-actions">
             <a class="btn btn-primary btn-lg" href="https://github.com/LivioGama/always/releases/latest">All downloads</a>
@@ -1059,18 +1082,25 @@ kbd, .key {
         </div>
         <div class="paths">
           <div class="path">
-            <div class="path-top"><b>One-line installer</b><span>macOS and Linux</span></div>
-            <div class="install-line">
-              <span class="prompt" aria-hidden="true">$</span>
-              <code>curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash</code>
+            <div class="path-top"><b>One-line installer</b><span>macOS, Linux, and Windows</span></div>
+            <div class="install-group">
+<div class="os-tabs" role="tablist" aria-label="Install command for your operating system" data-os-tabs hidden>
+<button class="os-tab" role="tab" type="button" aria-selected="true" tabindex="0" data-os="mac">macOS</button>
+<button class="os-tab" role="tab" type="button" aria-selected="false" tabindex="-1" data-os="linux">Linux</button>
+<button class="os-tab" role="tab" type="button" aria-selected="false" tabindex="-1" data-os="win">Windows</button>
+</div>
+            <div class="install-line" id="install-line-panel" role="tabpanel" aria-label="Install command">
+              <span class="prompt" data-prompt aria-hidden="true">$</span>
+              <code data-install>curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash</code>
               <button class="copy-btn" type="button" data-copy="curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash" aria-label="Copy the one-line install command">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5" y="5" width="9" height="9" rx="2"/><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5"/></svg>
                 <span class="copy-label">Copy</span>
               </button>
             </div>
+            </div>
           </div>
           <div class="path">
-            <div class="path-top"><b>Packages</b><span>.tar.gz · .deb · .rpm · .msi</span></div>
+            <div class="path-top"><b>Packages</b><span>.tar.gz · .deb · .rpm · .zip</span></div>
             <div class="path-row"><p>Prefer to install by hand? Every build for Mac, Linux, and Windows is on the releases page.</p><a class="btn" href="https://github.com/LivioGama/always/releases/latest">All downloads ↗</a></div>
           </div>
         </div>
@@ -1108,6 +1138,54 @@ kbd, .key {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
   const cssVar = (name, el = document.documentElement) => getComputedStyle(el).getPropertyValue(name).trim();
+
+  /* install command: pick by OS, switch by hand */
+  const WIN_CMD = 'irm https://raw.githubusercontent.com/LivioGama/always/main/scripts/install.ps1 | iex';
+  const CMDS = { mac: ['$', 'curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash'], linux: ['$', 'curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash'], win: ['PS>', WIN_CMD] };
+  const detectOS = () => {
+    let p = '';
+    try { p = navigator.userAgentData?.platform || ''; } catch { /* ignore */ }
+    const t = (p || navigator.userAgent || '').toLowerCase();
+    if (t.includes('win')) return 'win';
+    if (t.includes('mac') || t.includes('iphone') || t.includes('ipad')) return 'mac';
+    if (t.includes('linux') || t.includes('x11') || t.includes('cros')) return 'linux';
+    return 'mac';
+  };
+  const setOS = (os) => {
+    const [prompt, cmd] = CMDS[os];
+    $$('[data-os-tabs]').forEach((list) => {
+      $$('.os-tab', list).forEach((tab) => {
+        const on = tab.dataset.os === os;
+        tab.setAttribute('aria-selected', String(on));
+        tab.tabIndex = on ? 0 : -1;
+      });
+      const group = list.parentElement;
+      const pr = $('[data-prompt]', group);
+      if (pr) pr.textContent = prompt;
+      const code = $('[data-install]', group);
+      if (code) code.textContent = cmd;
+      const btn = $('[data-copy]', group);
+      if (btn) btn.dataset.copy = cmd;
+    });
+  };
+  $$('[data-os-tabs]').forEach((list) => {
+    list.hidden = false;
+    const tabs = $$('.os-tab', list);
+    tabs.forEach((tab, i) => {
+      tab.addEventListener('click', () => setOS(tab.dataset.os));
+      tab.addEventListener('keydown', (e) => {
+        const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+        let next = step === undefined ? -1 : (i + step + tabs.length) % tabs.length;
+        if (e.key === 'Home') next = 0;
+        if (e.key === 'End') next = tabs.length - 1;
+        if (next < 0) return;
+        e.preventDefault();
+        setOS(tabs[next].dataset.os);
+        tabs[next].focus();
+      });
+    });
+  });
+  setOS(detectOS());
 
   /* copy buttons */
   $$('[data-copy]').forEach((btn) => {
