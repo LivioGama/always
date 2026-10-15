@@ -5,14 +5,20 @@ name: Release build
 # workflow so the build-provenance attestation's signer is this file, not the
 # caller: `gh attestation verify --signer-workflow
 # LivioGama/always/.github/workflows/release-build.yml` accepts only what this
-# file built. It holds no secret.
+# file built. Its one secret is the minisign signing key, used by the `attest`
+# job alone (see "Sign the release assets").
 #
-# Assets (stable contract, shared with scripts/release/install.sh / install.ps1):
+# Assets (stable contract, shared with scripts/release/install.sh / install.ps1
+# and the updater, SPEC section 12a):
 #   always-<tag>-aarch64-apple-darwin.tar.gz      Always.app (ad-hoc signed, not notarized)
 #   always-<tag>-x86_64-unknown-linux-gnu.{tar.gz,deb,rpm}
 #   always-<tag>-aarch64-unknown-linux-gnu.{tar.gz,deb,rpm}
 #   always-<tag>-x86_64-pc-windows-msvc.zip
 #   <each of the above>.sha256, install.sh, install.ps1, always-<tag>.intoto.jsonl
+#   <each archive/package, install.sh and install.ps1>.minisig
+#       minisign signature, verified by `always update` against the public key
+#       compiled into the app (resources/update-signing.pub). Trusted comment:
+#       timestamp:<unix> TAB file:<asset name> TAB tag:<tag>.
 #
 # Linux is glibc, not musl: the ONNX Runtime that `ort` downloads has no musl
 # build, and the speaker/VAD models are not optional.
@@ -23,6 +29,14 @@ on:
         description: 'Release tag, or v<version>-dryrun for a branch dry run'
         required: true
         type: string
+    secrets:
+      # The private half of resources/update-signing.pub, minisign secret key
+      # file contents (unencrypted, or encrypted with the password below).
+      ALWAYS_MINISIGN_SECRET_KEY:
+        required: false
+      # Only if the key is encrypted; leave unset for an unencrypted key.
+      ALWAYS_MINISIGN_PASSWORD:
+        required: false
 
 permissions:
   contents: read
@@ -361,6 +375,67 @@ jobs:
           fi
           cp "$BUNDLE" "release-assets/always-${TAG}.intoto.jsonl"
           ls -l release-assets
+
+      # minisign comes from the Ubuntu archive (apt verifies the repository's
+      # GPG signature): package `minisign` 0.11 in noble/universe, which has
+      # everything used here (-S -s -m -x -t, -V -p -m -x).
+      # https://packages.ubuntu.com/noble/minisign  https://jedisct1.github.io/minisign/
+      - name: Install minisign
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
+          minisign -v
+
+      # The updater (`always update`, SPEC section 12a) installs nothing that is
+      # not covered by a signature verifying against the public key compiled
+      # into the app. So every archive, package and installer script gets a
+      # .minisig here, and each is checked straight away against the key
+      # committed in the repo: a secret that does not match
+      # resources/update-signing.pub fails the build instead of shipping
+      # signatures no app accepts.
+      #
+      # No secret (a fork, or a branch dry run without it): a dry run skips
+      # signing with a notice; a tag run FAILS, because a release without
+      # signatures cannot be updated to.
+      #
+      # An unencrypted key (minisign -G -W) needs no password; stdin is
+      # /dev/null so minisign can never wait on a prompt.
+      - name: Sign the release assets (minisign)
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.ALWAYS_MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.ALWAYS_MINISIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            if [ "$GITHUB_REF_TYPE" = tag ]; then
+              echo "::error::ALWAYS_MINISIGN_SECRET_KEY is not available; refusing to build a release without signatures"
+              exit 1
+            fi
+            echo "::notice::DRY RUN without ALWAYS_MINISIGN_SECRET_KEY: minisign signing skipped, no .minisig files in this run"
+            echo "### Signing skipped (no ALWAYS_MINISIGN_SECRET_KEY in this run)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          umask 077
+          key="$RUNNER_TEMP/minisign.key"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key"
+          tab="$(printf '\t')"
+          cd release-assets
+          shopt -s nullglob
+          count=0
+          for f in always-*.tar.gz always-*.zip always-*.deb always-*.rpm install.sh install.ps1; do
+            comment="timestamp:$(date +%s)${tab}file:${f}${tab}tag:${TAG}"
+            if [ -n "$MINISIGN_PASSWORD" ]; then
+              printf '%s\n' "$MINISIGN_PASSWORD" | minisign -S -s "$key" -m "$f" -x "$f.minisig" -t "$comment"
+            else
+              minisign -S -s "$key" -m "$f" -x "$f.minisig" -t "$comment" < /dev/null
+            fi
+            minisign -V -p "$GITHUB_WORKSPACE/resources/update-signing.pub" -m "$f" -x "$f.minisig"
+            count=$((count + 1))
+          done
+          [ "$count" -ge 2 ] || { echo "::error::signed only $count files"; exit 1; }
+          echo "### Signed $count files with minisign (verified against resources/update-signing.pub)" >> "$GITHUB_STEP_SUMMARY"
+          ls -l ./*.minisig
 
       - name: Upload the release assets
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

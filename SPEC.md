@@ -1398,8 +1398,9 @@ build first).
 - Failures are logged once at info/debug and are never user-visible errors:
   HTTP 404 (no published release — true until the first release) =
   `no_release`; DNS/connect/timeout = `offline`; HTTP 403/429 with an
-  exhausted rate limit = `rate_limited`; anything else = `error`. The next
-  attempt is the next 24 h tick.
+  exhausted rate limit = `rate_limited`; anything else = `error`. A failed
+  attempt is retried at the next hourly wake-up; a definitive answer
+  (`up_to_date`, `update_available`, `no_release`) is not asked again for 24 h.
 - Logs (JSON lines, no user data): `update_check_done {result}`,
   `update_available {current, latest}`.
 - A **dev instance** (`ALWAYS_INSTANCE` ≠ prod, or running from `Always Dev.app`)
@@ -1442,7 +1443,8 @@ Per OS:
   installer is started **detached** (own process group, output to
   `~/Library/Logs/Always/update-install.log`), and the daemon returns. The
   installer quits the running app (AppleScript quit, then terminates what is
-  left of that bundle, sparing the updater's own pid), swaps
+  left of that bundle; from `always update` it spares that process, so the
+  user keeps the output), swaps
   `Always.app` in place — the directory the running bundle lives in, normally
   `/Applications` — with `ditto`, and relaunches it if it was running. Needs
   the bundle named `Always.app` and its parent directory writable; otherwise
@@ -1460,8 +1462,11 @@ Per OS:
 - **Linux, deb or rpm** (binary owned by dpkg/rpm) — the package manager owns
   the files. Only `always update` from a terminal, where the `sudo` prompt
   passes through. `InstallUpdate` is **refused** (`can_apply: "false"`,
-  `UpdateFailed { stage: "refused" }`). A `/usr` binary owned by no package is
-  refused for both.
+  `UpdateFailed { stage: "refused" }`). A binary that is not at
+  `<prefix>/bin/always`, or whose `bin` directory is not writable by the user,
+  is refused for both (reinstall instead). After a Linux update the running
+  daemon is still the old binary: the installer restarts the user service when
+  it is active; otherwise `always update` says to restart it.
 
 Downloaded files live only in the update directory; stale ones (older than 1 h,
 other than a running update's) are removed at daemon start and on

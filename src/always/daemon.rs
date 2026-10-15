@@ -600,6 +600,10 @@ pub fn status() -> Result<()> {
         remove_stale_pid();
         println!("Always-on daemon not running.");
     }
+    // Notify-only (SPEC §12a): what the last background check found.
+    if let Some(line) = crate::always::updater::status_line() {
+        println!("{line}");
+    }
     Ok(())
 }
 
