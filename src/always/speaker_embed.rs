@@ -56,7 +56,12 @@ fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    // sha2 0.11 digests are byte arrays without `LowerHex`; hex-encode by hand.
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// True if the model is already on disk with the right checksum. Cheap
@@ -268,6 +273,16 @@ pub fn combine_embeddings(embeddings: &[Vec<f32>]) -> Result<Vec<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sha256_hex_is_lowercase_hex_of_the_digest() {
+        // FIPS 180-2 test vector; guards the hand-rolled hex encoding that
+        // replaced `{:x}` when sha2 0.11 dropped `LowerHex` on digests.
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     fn synth_voice(seed: u64, secs: f32) -> Vec<i16> {
         // Deterministic pseudo-speech: a fundamental + formant-ish
