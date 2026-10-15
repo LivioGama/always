@@ -279,6 +279,10 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     // inline check that used to live at the top of this loop.
     mic_watcher::spawn(rt.handle(), cfg.mic_conflict_exclusion_bundles.clone());
 
+    // Update check (SPEC §12a): a plain background thread that first waits
+    // 15 s, then asks GitHub once; notify-only. Never delays audio or the UDS.
+    crate::always::updater::spawn_background();
+
     let mut last_process = Instant::now() - Duration::from_secs(10);
     let mut last_dup_check = Instant::now();
     // True once capture has been gated, until the stale audio that piled

@@ -143,3 +143,74 @@ fn unknown_command_rejected() {
     let json = r#"{"type":"FormatHardDrive"}"#;
     assert!(DaemonCommand::from_json_line(json).is_err());
 }
+
+// ── Updates (SPEC §12a) ─────────────────────────────────────────────────────
+//
+// Every field is a string so the Mac app's loose `[String: String]` payload
+// decode accepts these frames. PROTOCOL_VERSION is NOT bumped: the variants
+// are additive and an older client ignores events it does not know.
+
+#[test]
+fn update_available_serializes_all_string_fields() {
+    let ev = DaemonEvent::UpdateAvailable {
+        current: "0.1.0".to_string(),
+        latest: "0.2.0".to_string(),
+        url: "https://github.com/LivioGama/always/releases/tag/v0.2.0".to_string(),
+        can_apply: "true".to_string(),
+        apply_hint: String::new(),
+    };
+    assert_eq!(
+        serde_json::to_string(&ev).unwrap(),
+        r#"{"type":"UpdateAvailable","data":{"current":"0.1.0","latest":"0.2.0","url":"https://github.com/LivioGama/always/releases/tag/v0.2.0","can_apply":"true","apply_hint":""}}"#
+    );
+    // Round trip: the daemon's own parser accepts what it emits.
+    let line = ev.to_json_line().unwrap();
+    assert!(matches!(
+        DaemonEvent::from_json_line(&line).unwrap(),
+        DaemonEvent::UpdateAvailable { .. }
+    ));
+}
+
+#[test]
+fn update_check_done_progress_and_failed_serialize_flat_strings() {
+    let done = DaemonEvent::UpdateCheckDone {
+        result: "up_to_date".to_string(),
+        current: "0.1.0".to_string(),
+        latest: "0.1.0".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_string(&done).unwrap(),
+        r#"{"type":"UpdateCheckDone","data":{"result":"up_to_date","current":"0.1.0","latest":"0.1.0"}}"#
+    );
+
+    let progress = DaemonEvent::UpdateProgress {
+        phase: "downloading".to_string(),
+        percent: "42".to_string(),
+        detail: "always-v0.2.0-aarch64-apple-darwin.tar.gz".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_string(&progress).unwrap(),
+        r#"{"type":"UpdateProgress","data":{"phase":"downloading","percent":"42","detail":"always-v0.2.0-aarch64-apple-darwin.tar.gz"}}"#
+    );
+
+    let failed = DaemonEvent::UpdateFailed {
+        stage: "verify".to_string(),
+        message: "signature did not verify".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_string(&failed).unwrap(),
+        r#"{"type":"UpdateFailed","data":{"stage":"verify","message":"signature did not verify"}}"#
+    );
+}
+
+#[test]
+fn update_commands_are_unit_variants() {
+    assert!(matches!(
+        DaemonCommand::from_json_line(r#"{"type":"CheckForUpdates"}"#).unwrap(),
+        DaemonCommand::CheckForUpdates
+    ));
+    assert!(matches!(
+        DaemonCommand::from_json_line(r#"{"type":"InstallUpdate"}"#).unwrap(),
+        DaemonCommand::InstallUpdate
+    ));
+}

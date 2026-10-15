@@ -441,6 +441,61 @@ pub enum DaemonEvent {
         enabled: bool,
         steps: Vec<String>,
     },
+    /// A newer release than the running build is published on GitHub
+    /// (SPEC §12a Updates). Notify-only: nothing installs until the client
+    /// sends [`DaemonCommand::InstallUpdate`] (or the user runs
+    /// `always update`). Sent when a check finds an update and in the
+    /// initial state burst of every client that connects while an update
+    /// is known. Strings only, like `TranscriptHeld`, so the GUI's loose
+    /// `[String: String]` payload decode accepts it.
+    /// - `current` / `latest`: semver without the `v` (`"0.1.0"`).
+    /// - `url`: the release page (`https://github.com/LivioGama/always/releases/tag/v<latest>`).
+    /// - `can_apply`: `"true"` / `"false"` — whether `InstallUpdate` can
+    ///   work for THIS install (false: dev instance, Linux deb/rpm, a
+    ///   binary outside an installed location, no asset for this target).
+    /// - `apply_hint`: empty when `can_apply` is `"true"`, else a
+    ///   ready-to-show sentence saying what to do instead.
+    UpdateAvailable {
+        current: String,
+        latest: String,
+        url: String,
+        can_apply: String,
+        apply_hint: String,
+    },
+    /// Answer to [`DaemonCommand::CheckForUpdates`] (user-initiated checks
+    /// only; background checks stay silent unless they find an update).
+    /// Strings only. `result` is one of `up_to_date`, `update_available`
+    /// (an `UpdateAvailable` follows), `no_release` (nothing published
+    /// yet), `offline`, `rate_limited`, `error`. `latest` is `""` when the
+    /// check did not learn it.
+    UpdateCheckDone {
+        result: String,
+        current: String,
+        latest: String,
+    },
+    /// Progress of an [`DaemonCommand::InstallUpdate`]. Strings only.
+    /// `phase`: `downloading` (`percent` `"0"`..`"100"`, `detail` = asset
+    /// name), `verifying` (minisign check of every downloaded file),
+    /// `installing` (the verified installer was started detached; on macOS
+    /// it quits the app and daemon, swaps `Always.app` and relaunches, so
+    /// the UDS connection ends shortly after this frame). `percent` is
+    /// `""` outside `downloading`.
+    UpdateProgress {
+        phase: String,
+        percent: String,
+        detail: String,
+    },
+    /// An [`DaemonCommand::InstallUpdate`] stopped before the installer
+    /// started, or could not start it. Nothing was changed on disk outside
+    /// the updater's own download directory. Strings only. `stage`:
+    /// `refused` (this install cannot be updated from the GUI),
+    /// `check`, `download`, `verify` (a signature or checksum did not
+    /// verify: the download was discarded), `install` (spawning the
+    /// installer failed). `message` is short human text.
+    UpdateFailed {
+        stage: String,
+        message: String,
+    },
 }
 
 /// Upper bound (in chars) on any single user-/network-supplied string
@@ -812,6 +867,20 @@ pub enum DaemonCommand {
     SetupMode {
         enabled: bool,
     },
+    /// "Check for updates" (About panel / menu). Runs one GitHub release
+    /// check now, even when the background check is disabled by
+    /// `update_check` / `ALWAYS_UPDATE_CHECK=0` (an explicit request).
+    /// Answered with [`DaemonEvent::UpdateCheckDone`] (and
+    /// [`DaemonEvent::UpdateAvailable`] when a newer release exists).
+    CheckForUpdates,
+    /// "Install update". Downloads the platform asset plus the release's
+    /// installer, verifies every file against the embedded minisign key,
+    /// then starts the verified installer detached (SPEC §12a). Progress
+    /// streams as [`DaemonEvent::UpdateProgress`], failure as
+    /// [`DaemonEvent::UpdateFailed`]. Refused (`UpdateFailed { stage:
+    /// "refused" }`) when the last `UpdateAvailable` had `can_apply:
+    /// "false"`, and when another install is already running.
+    InstallUpdate,
 }
 
 impl DaemonCommand {

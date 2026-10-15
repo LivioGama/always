@@ -55,6 +55,7 @@ pub mod telemetry;
 pub mod text_match;
 pub mod transcript_stream;
 pub mod uds_server;
+pub mod updater;
 pub mod vad;
 pub mod vad_silero;
 pub mod vocab;

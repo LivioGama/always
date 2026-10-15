@@ -107,6 +107,14 @@ enum Commands {
         #[command(flatten)]
         args: LogsCommand,
     },
+    /// Check for a newer release and install it (verified against the
+    /// release signing key built into this binary)
+    Update {
+        /// Only report. Exit code 0 = up to date, 10 = update available,
+        /// 1 = error.
+        #[arg(long)]
+        check: bool,
+    },
     /// Toggle pause/resume state
     TogglePause,
     /// Toggle auto-enter state
@@ -251,6 +259,15 @@ fn main() -> Result<()> {
         Some(Commands::TogglePause) => handle_toggle_pause(),
         Some(Commands::ToggleAutoEnter) => handle_toggle_auto_enter(),
         Some(Commands::Logs { args }) => cli::handle_logs(args),
+        Some(Commands::Update { check }) => {
+            let code = cli::update::run(check)?;
+            if code != 0 {
+                // Flush the log appender; process::exit skips destructors.
+                drop(_logging_guard);
+                std::process::exit(code);
+            }
+            Ok(())
+        }
         Some(Commands::MenuBar { action }) => match action {
             MenuBarAction::Reset => cli::menu_bar::reset(),
         },
@@ -277,6 +294,9 @@ fn main() -> Result<()> {
             eprintln!("  toggle-pause      Toggle pause/resume state");
             eprintln!("  toggle-auto-enter Toggle auto-enter state");
             eprintln!("  logs              View and manage Always logs");
+            eprintln!(
+                "  update            Check for a newer release and install it (--check: report only)"
+            );
             eprintln!("  menu-bar reset    Clear macOS menu bar cache for Always");
             #[cfg(feature = "overlay")]
             eprintln!("  overlay run       Run overlay companion process (Linux)");
@@ -460,6 +480,7 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                 )
             );
             println!("capture_aec: {}", prefs.capture_aec.unwrap_or(true));
+            println!("update_check: {}", prefs.update_check.unwrap_or(true));
             #[cfg(target_os = "macos")]
             println!(
                 "apple_intelligence_available: {}",

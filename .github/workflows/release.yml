@@ -9,9 +9,13 @@ name: Release
 #            tag is on main, CHANGELOG section exists, cargo deny
 #   test     the ci.yml test suite on macOS
 #   assets   release-build.yml: macOS arm64 / Linux x86_64+aarch64 / Windows
-#            builds, checksums, build-provenance attestation
+#            builds, checksums, build-provenance attestation, minisign
+#            signatures (*.minisig) for every archive/package and the two
+#            installer scripts (secret ALWAYS_MINISIGN_SECRET_KEY; a tag run
+#            without it fails, a dry run without it skips signing)
 #   release  publishes a NON-draft GitHub Release; body = the CHANGELOG section
-#   smoke    installs from the published release on macOS, Linux and Windows
+#   smoke    installs from the published release on macOS, Linux and Windows,
+#            and checks every *.minisig against resources/update-signing.pub
 #
 # Manual dispatch on a BRANCH is a DRY RUN: verify (version/changelog checks
 # are reported, not enforced), assets, then smoke against the built assets via
@@ -146,6 +150,11 @@ jobs:
     uses: ./.github/workflows/release-build.yml
     with:
       tag: ${{ needs.verify.outputs.tag }}
+    # Passed explicitly (not `secrets: inherit`): the called workflow gets the
+    # minisign signing key and nothing else.
+    secrets:
+      ALWAYS_MINISIGN_SECRET_KEY: ${{ secrets.ALWAYS_MINISIGN_SECRET_KEY }}
+      ALWAYS_MINISIGN_PASSWORD: ${{ secrets.ALWAYS_MINISIGN_PASSWORD }}
 
   release:
     name: Publish release
@@ -162,7 +171,8 @@ jobs:
           persist-credentials: false
 
       # The files release-build.yml built and attested: archives, packages,
-      # their .sha256, install.sh, install.ps1 and the provenance bundle.
+      # their .sha256, install.sh, install.ps1, the provenance bundle and the
+      # minisign signatures (*.minisig) the updater verifies.
       - name: Download the release assets
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
@@ -205,6 +215,7 @@ jobs:
             assets/always-*.intoto.jsonl
             assets/install.sh
             assets/install.ps1
+            assets/*.minisig
 
   # Post-publish smoke test: installs what was just published (real release) or
   # what was just built (dry run, via file://), with the real installer scripts,
@@ -279,7 +290,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/published" && cd "$RUNNER_TEMP/published"
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'install.sh' --pattern 'install.ps1' --pattern '*.intoto.jsonl' --pattern '*.sha256' \
+            --pattern 'install.sh' --pattern 'install.ps1' --pattern '*.intoto.jsonl' --pattern '*.sha256' --pattern '*.minisig' \
             --pattern 'always-*.tar.gz' --pattern 'always-*.zip' --pattern 'always-*.deb' --pattern 'always-*.rpm'
           for subject in always-*.tar.gz always-*.zip always-*.deb always-*.rpm install.sh install.ps1; do
             gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" \
@@ -291,6 +302,111 @@ jobs:
               --source-ref "$GITHUB_REF" --deny-self-hosted-runners
           done
           shasum -a 256 -c ./*.sha256
+
+      # --- minisign signatures (SPEC section 12a, rule U1) -------------------
+      # Every .minisig that exists must verify with the public key committed in
+      # this repo -- the same key `always update` has compiled in -- and name
+      # its file and this tag. A real release must have them; a dry run without
+      # the signing secret has none, and says so.
+      #
+      # minisign sources: ubuntu runners use the Ubuntu archive (apt checks its
+      # GPG signature; noble/universe 0.11, https://packages.ubuntu.com/noble/minisign).
+      # macOS and Windows use the upstream 0.12 release zip, pinned by SHA-256
+      # (both checked against upstream's published minisign signature, made with
+      # its well-known key RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3,
+      # when the pins were taken): https://github.com/jedisct1/minisign/releases/tag/0.12
+      - name: Install minisign (apt)
+        if: matrix.kind == 'docker'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
+          minisign -v
+
+      - name: Install minisign (pinned release)
+        if: matrix.kind == 'macos'
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/minisign-bin"
+          mkdir -p "$d"
+          curl -fsSL -o "$d/minisign.zip" "https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-macos.zip"
+          echo "89000b19535765f9cffc65a65d64a820f433ef6db8020667f7570e06bf6aac63  $d/minisign.zip" | shasum -a 256 -c -
+          unzip -q -o "$d/minisign.zip" minisign -d "$d"
+          chmod +x "$d/minisign"
+          echo "$d" >> "$GITHUB_PATH"
+
+      - name: Verify minisign signatures
+        if: matrix.kind != 'windows'
+        run: |
+          set -euo pipefail
+          minisign -v
+          dir=assets
+          [ "$IS_RELEASE" != true ] || dir="$RUNNER_TEMP/published"
+          shopt -s nullglob
+          sigs=("$dir"/*.minisig)
+          if [ "${#sigs[@]}" -eq 0 ]; then
+            if [ "$IS_RELEASE" = true ]; then
+              echo "::error::the published release has no .minisig files"
+              exit 1
+            fi
+            echo "::notice::no .minisig files in this dry run (signing was skipped); nothing to verify"
+            exit 0
+          fi
+          for sig in "${sigs[@]}"; do
+            f="${sig%.minisig}"
+            [ -f "$f" ] || { echo "::error::$sig has no file $f next to it"; exit 1; }
+            out="$(minisign -V -p resources/update-signing.pub -m "$f" -x "$sig")"
+            echo "$out"
+            case "$out" in
+              *"file:$(basename "$f")"*"tag:$TAG"*) ;;
+              *) echo "::error::$sig is not bound to file $(basename "$f") and tag $TAG"; exit 1 ;;
+            esac
+          done
+          echo "verified ${#sigs[@]} signatures"
+
+      - name: Install minisign and verify signatures (Windows)
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $d = Join-Path $env:RUNNER_TEMP 'minisign-bin'
+          New-Item -ItemType Directory -Force -Path $d | Out-Null
+          $zip = Join-Path $d 'minisign.zip'
+          Invoke-WebRequest -UseBasicParsing -OutFile $zip -Uri 'https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip'
+          $want = '37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479'
+          $got = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+          if ($got -ne $want) { throw "minisign zip checksum mismatch: $got" }
+          Expand-Archive -LiteralPath $zip -DestinationPath $d -Force
+          $minisign = Join-Path $d 'minisign-win64\x86_64\minisign.exe'
+
+          if ($env:IS_RELEASE -eq 'true') {
+            $dir = Join-Path $env:RUNNER_TEMP 'published'
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            gh release download $env:TAG --repo $env:GITHUB_REPOSITORY --dir $dir `
+              --pattern 'install.ps1' --pattern 'install.ps1.minisig' `
+              --pattern 'always-*-x86_64-pc-windows-msvc.zip' --pattern 'always-*-x86_64-pc-windows-msvc.zip.minisig'
+            if ($LASTEXITCODE -ne 0) { throw 'gh release download failed' }
+          } else {
+            $dir = (Resolve-Path assets).Path
+          }
+          $sigs = @(Get-ChildItem -LiteralPath $dir -Filter '*.minisig' |
+            Where-Object { $_.Name -eq 'install.ps1.minisig' -or $_.Name -like 'always-*-x86_64-pc-windows-msvc.zip.minisig' })
+          if ($sigs.Count -eq 0) {
+            if ($env:IS_RELEASE -eq 'true') { throw 'the published release has no .minisig files' }
+            Write-Host '::notice::no .minisig files in this dry run (signing was skipped); nothing to verify'
+            return
+          }
+          foreach ($sig in $sigs) {
+            $file = $sig.FullName -replace '\.minisig$', ''
+            if (-not (Test-Path -LiteralPath $file)) { throw "$($sig.Name) has no file next to it" }
+            $out = (& $minisign -V -p resources/update-signing.pub -m $file -x $sig.FullName) -join "`n"
+            if ($LASTEXITCODE -ne 0) { throw "minisign rejected $($sig.Name)" }
+            Write-Host $out
+            $leaf = Split-Path -Leaf $file
+            if ($out -notmatch [regex]::Escape("file:$leaf") -or $out -notmatch [regex]::Escape("tag:$($env:TAG)")) {
+              throw "$($sig.Name) is not bound to file $leaf and tag $($env:TAG)"
+            }
+          }
+          Write-Host "verified $($sigs.Count) signatures"
 
       - name: Linux (container)
         if: matrix.kind == 'docker'

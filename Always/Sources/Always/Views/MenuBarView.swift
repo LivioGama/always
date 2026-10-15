@@ -68,6 +68,27 @@ struct MenuBarView: View {
         )
     }
 
+    /// The single updates row: "Install update to vY…" once the daemon has
+    /// announced a newer release, otherwise a plain "Check for Updates…".
+    private var updateRow: (label: String, systemImage: String, isDisabled: Bool, action: () -> Void) {
+        switch updateService.state {
+        case .available(let offer):
+            return ("Install update to v\(offer.latest)…", "arrow.down.circle.fill", false,
+                    { UpdateInstallPrompt.present(for: offer) })
+        case .failed where updateService.offer != nil:
+            let offer = updateService.offer!
+            return ("Install update to v\(offer.latest)…", "arrow.down.circle.fill",
+                    !updateService.canInstall, { UpdateInstallPrompt.present(for: offer) })
+        case .checking:
+            return ("Checking for updates…", "arrow.down.circle", true, {})
+        case .installing:
+            return ("Installing update…", "arrow.down.circle", true, {})
+        default:
+            return ("Check for Updates…", "arrow.down.circle", !updateService.canCheck,
+                    { updateService.checkNow() })
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             MenuStatusRow(
@@ -109,10 +130,10 @@ struct MenuBarView: View {
             Divider()
 
             MenuRow(
-                label: "Check for Updates…",
-                systemImage: "arrow.down.circle",
-                isDisabled: !updateService.canCheckForUpdates,
-                action: { updateService.checkForUpdates() }
+                label: updateRow.label,
+                systemImage: updateRow.systemImage,
+                isDisabled: updateRow.isDisabled,
+                action: updateRow.action
             )
 
             Divider()
