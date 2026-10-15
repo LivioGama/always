@@ -237,6 +237,13 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         }
     });
 
+    // First launch only: import the user's installed app names, macOS Text
+    // Replacements, Wispr Flow dictionary and SuperWhisper vocabulary into the
+    // glossary so Always spells their words right from day one. Runs in its
+    // own background thread (UDS and audio never wait for it) and is a no-op
+    // once the one-time marker exists. See `vocab::spawn_first_launch_import`.
+    crate::always::vocab::spawn_first_launch_import();
+
     // Heartbeat task: emit Heartbeat every 5s so connected GUI clients can
     // detect a dead/stalled daemon via watchdog timeout.
     let _heartbeat_handle = rt.spawn(async {

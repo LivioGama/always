@@ -11,9 +11,9 @@
 //! | Plugin | Source |
 //! |--------|--------|
 //! | `MacosTextReplacementsPlugin` | `defaults read NSGlobalDomain NSUserDictionaryReplacementItems` |
-//! | `SuperwhisperPlugin` | SQLite recordings DB at `~/Library/Application Support/superwhisper/database/superwhisper.sqlite` |
+//! | `SuperwhisperPlugin` | Vocabulary + Replacements in `<SuperWhisper folder>/superwhisper/settings/settings.json`, plus terms mined from the recordings DB at `~/Library/Application Support/superwhisper/database/superwhisper.sqlite` |
 //! | `MacWhisperPlugin` | Sandboxed preferences plist + Replacements file |
-//! | `WisprflowPlugin` | Detection only (their dictionary is cloud-hosted) |
+//! | `WisprflowPlugin` | Local `Dictionary` table in `~/Library/Application Support/Wispr Flow/flow.sqlite` |
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -322,7 +322,23 @@ fn resolve_plist_escapes(s: &str) -> String {
 // SuperWhisper
 // ============================================================================
 
+/// SuperWhisper contributes two kinds of terms:
+///
+/// 1. **Explicit** — what the user typed into SuperWhisper on purpose, from
+///    `settings/settings.json` in SuperWhisper's data folder: the
+///    `vocabulary` list (strings) and, for each entry of `replacements`
+///    (`{id, original, with}`), the `with` value, mirroring how macOS Text
+///    Replacements use the "with" side. These are always imported, uncapped.
+/// 2. **Mined** — statistical outlier words from the most recent
+///    transcripts in the recordings database (see `extract_vocabulary_from_data`).
 pub struct SuperwhisperPlugin;
+
+/// Defaults domain of the SuperWhisper app; its `appFolderDirectory` key
+/// records the folder that contains the `superwhisper/` data directory.
+const SUPERWHISPER_DEFAULTS_DOMAIN: &str = "com.superduper.superwhisper";
+
+/// Cap on the mined (statistical) terms; explicit terms are never capped.
+const SUPERWHISPER_MAX_MINED_TERMS: usize = 200;
 
 impl SuperwhisperPlugin {
     fn db_path() -> Option<PathBuf> {
@@ -330,6 +346,88 @@ impl SuperwhisperPlugin {
             PathBuf::from(home)
                 .join("Library/Application Support/superwhisper/database/superwhisper.sqlite")
         })
+    }
+
+    /// The folder the user chose for SuperWhisper's data in its settings
+    /// (`defaults read com.superduper.superwhisper appFolderDirectory`),
+    /// if any. SuperWhisper keeps its `superwhisper/` directory inside it.
+    fn custom_app_folder() -> Option<PathBuf> {
+        if !cfg!(target_os = "macos") {
+            return None;
+        }
+        let output = Command::new("defaults")
+            .args(["read", SUPERWHISPER_DEFAULTS_DOMAIN, "appFolderDirectory"])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if raw.is_empty() {
+            return None;
+        }
+        match raw.strip_prefix("~/") {
+            Some(rest) => dirs::home_dir().map(|home| home.join(rest)),
+            None => Some(PathBuf::from(raw)),
+        }
+    }
+
+    /// Candidate `settings.json` locations, most authoritative first: the
+    /// folder recorded in SuperWhisper's preferences, then its default
+    /// (`~/Documents`).
+    fn settings_paths() -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        roots.extend(Self::custom_app_folder());
+        roots.extend(dirs::home_dir().map(|home| home.join("Documents")));
+        let mut paths: Vec<PathBuf> = roots
+            .into_iter()
+            .map(|root| root.join("superwhisper/settings/settings.json"))
+            .collect();
+        paths.dedup();
+        paths
+    }
+
+    /// [`Self::parse_settings`] applied to the file at `path`; an unreadable
+    /// file yields nothing.
+    fn read_settings_file(path: &Path) -> Vec<String> {
+        match std::fs::read_to_string(path) {
+            Ok(json) => Self::parse_settings(&json),
+            Err(e) => {
+                tracing::warn!(error = %e, "superwhisper settings read failed");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Words the user explicitly gave SuperWhisper, from the text of its
+    /// `settings.json`: every string in `vocabulary` plus the `with` of each
+    /// entry in `replacements`. Trimmed, de-duplicated, order preserved.
+    /// Malformed JSON or unexpected shapes yield whatever is usable (or
+    /// nothing) rather than an error.
+    fn parse_settings(json: &str) -> Vec<String> {
+        let Ok(settings) = serde_json::from_str::<serde_json::Value>(json) else {
+            return Vec::new();
+        };
+        let vocabulary = settings
+            .get("vocabulary")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.as_str());
+        let replacements = settings
+            .get("replacements")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.get("with").and_then(|w| w.as_str()));
+
+        let mut seen = std::collections::HashSet::new();
+        vocabulary
+            .chain(replacements)
+            .map(str::trim)
+            .filter(|term| !term.is_empty())
+            .filter(|term| seen.insert(*term))
+            .map(str::to_string)
+            .collect()
     }
 }
 
@@ -339,13 +437,17 @@ impl VocabPlugin for SuperwhisperPlugin {
     }
 
     fn description(&self) -> &str {
-        "Reads SuperWhisper's local recording database to mine the user's actual transcribed vocabulary"
+        "Reads SuperWhisper's own Vocabulary list and Replacements, and mines the user's recent transcripts for the terms they actually say"
     }
 
+    /// The app bundle OR SuperWhisper's `settings.json`: the explicit
+    /// vocabulary stays readable if the app lives somewhere unusual.
     fn get_installation_paths(&self) -> Vec<PathBuf> {
         #[cfg(target_os = "macos")]
         {
-            vec![PathBuf::from("/Applications/superwhisper.app")]
+            let mut paths = vec![PathBuf::from("/Applications/superwhisper.app")];
+            paths.extend(Self::settings_paths());
+            paths
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -355,6 +457,31 @@ impl VocabPlugin for SuperwhisperPlugin {
 
     fn is_installed(&self) -> bool {
         self.get_installation_paths().iter().any(|p| p.exists())
+    }
+
+    /// The user's explicit SuperWhisper vocabulary and replacements (see
+    /// [`Self::parse_settings`]), from the first `settings.json` that
+    /// exists. Read-only; a missing or unreadable file yields nothing.
+    fn extract_vocabulary_from_config(&self) -> Result<Vec<String>> {
+        let Some(path) = Self::settings_paths().into_iter().find(|p| p.is_file()) else {
+            return Ok(Vec::new());
+        };
+        Ok(Self::read_settings_file(&path))
+    }
+
+    /// Explicit terms first and uncapped, then the mined terms, capped at
+    /// [`SUPERWHISPER_MAX_MINED_TERMS`] as before. (The trait default would
+    /// cap everything together, letting mined words push explicit ones out.)
+    fn extract_all_vocabulary(&self) -> Result<Vec<String>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut terms = self.extract_vocabulary_from_config().unwrap_or_default();
+        terms.retain(|t| seen.insert(t.clone()));
+
+        let mut mined = self.extract_vocabulary_from_data().unwrap_or_default();
+        mined.retain(|t| seen.insert(t.clone()));
+        mined.truncate(SUPERWHISPER_MAX_MINED_TERMS);
+        terms.extend(mined);
+        Ok(terms)
     }
 
     /// Pull every transcript out of SuperWhisper's local SQLite DB and
@@ -378,29 +505,53 @@ impl VocabPlugin for SuperwhisperPlugin {
             }
         };
 
-        // The recording_fts virtual table mirrors `recording`. Pulling
-        // `result` (the final transcript) avoids reading raw audio
-        // metadata. Cap at 5000 rows so a multi-year history doesn't
-        // OOM the daemon during import.
-        let mut stmt = match conn
-            .prepare("SELECT result FROM recording_fts WHERE result IS NOT NULL LIMIT 5000")
-        {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(error = %e, "superwhisper sqlite prepare failed");
-                return Ok(Vec::new());
-            }
-        };
-        let mut corpus = String::new();
-        let rows = stmt.query_map([], |row| row.get::<_, Option<String>>(0));
-        if let Ok(iter) = rows {
-            for row in iter.flatten().flatten() {
+        let corpus = Self::recent_transcripts_corpus(&conn, SUPERWHISPER_MAX_RECORDINGS);
+        Ok(extract_interesting_words(&corpus))
+    }
+}
+
+/// How many of SuperWhisper's most recent recordings are mined. Caps a
+/// multi-year history so the import can't OOM the daemon.
+const SUPERWHISPER_MAX_RECORDINGS: usize = 5000;
+
+impl SuperwhisperPlugin {
+    /// Concatenate the final transcripts (`result`) of the `limit` most
+    /// recent recordings.
+    ///
+    /// The `recording_fts` virtual table mirrors `recording` and carries
+    /// the transcript, but has no timestamp of its own, so recency comes
+    /// from `recording.datetime` via the `recordingId` link. The `IN`
+    /// subquery is materialised once, so this stays a single FTS scan
+    /// (~25 ms for 8k recordings). If the schema doesn't have that shape
+    /// (older/newer SuperWhisper), fall back to the FTS rowid, which is
+    /// assigned in insertion order, so a larger rowid is a newer row.
+    fn recent_transcripts_corpus(conn: &rusqlite::Connection, limit: usize) -> String {
+        let by_datetime = "SELECT result FROM recording_fts \
+             WHERE result IS NOT NULL AND recordingId IN \
+             (SELECT id FROM recording ORDER BY datetime DESC LIMIT ?1)";
+        let by_rowid = "SELECT result FROM recording_fts \
+             WHERE result IS NOT NULL ORDER BY rowid DESC LIMIT ?1";
+        let limit = limit as i64;
+        for sql in [by_datetime, by_rowid] {
+            let mut stmt = match conn.prepare(sql) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::debug!(error = %e, "superwhisper sqlite prepare failed, trying next query");
+                    continue;
+                }
+            };
+            let Ok(rows) = stmt.query_map([limit], |row| row.get::<_, Option<String>>(0)) else {
+                continue;
+            };
+            let mut corpus = String::new();
+            for row in rows.flatten().flatten() {
                 corpus.push_str(&row);
                 corpus.push(' ');
             }
+            return corpus;
         }
-
-        Ok(extract_interesting_words(&corpus))
+        tracing::warn!("superwhisper sqlite query failed");
+        String::new()
     }
 }
 
@@ -510,10 +661,91 @@ impl VocabPlugin for MacWhisperPlugin {
 // Wispr Flow
 // ============================================================================
 
-/// Wispr Flow is an Electron app whose user dictionary lives server-side.
-/// We can detect installation but local extraction is not feasible
-/// without authenticating against their cloud, which we won't do.
+/// Wispr Flow is an Electron app that syncs the user's dictionary with
+/// its cloud but keeps a full local copy in `flow.sqlite`, in the
+/// `Dictionary` table. We read that local copy, read-only; nothing is ever
+/// sent to or fetched from Wispr's servers, and no credentials are touched.
+///
+/// Relevant columns (verified against a real `flow.sqlite`):
+///
+/// | Column | Meaning |
+/// |--------|---------|
+/// | `phrase` | the word as spoken / added by the user |
+/// | `replacement` | optional: what Wispr types instead of `phrase` |
+/// | `isDeleted` | soft delete; 1 = the user removed the word |
+/// | `isSnippet` | 1 = a text-expansion snippet, not a vocabulary word |
+///
+/// The glossary term is `replacement` when set (the spelling the user wants
+/// typed), otherwise `phrase`. Deleted entries and snippets are skipped.
 pub struct WisprflowPlugin;
+
+impl WisprflowPlugin {
+    fn db_path() -> Option<PathBuf> {
+        dirs::home_dir().map(|home| home.join("Library/Application Support/Wispr Flow/flow.sqlite"))
+    }
+
+    /// Read the vocabulary words out of a Wispr Flow `flow.sqlite`.
+    ///
+    /// Tolerant of schema drift: only `phrase` is required; `replacement`,
+    /// `isDeleted` and `isSnippet` are used when present. Opened read-only
+    /// with a short busy timeout so a running Wispr Flow is never blocked.
+    fn read_dictionary(db: &Path) -> Result<Vec<String>> {
+        use rusqlite::{Connection, OpenFlags};
+
+        let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(std::time::Duration::from_secs(2))?;
+
+        let mut columns = std::collections::HashSet::new();
+        {
+            let mut info = conn.prepare("PRAGMA table_info(Dictionary)")?;
+            let names = info.query_map([], |row| row.get::<_, String>(1))?;
+            columns.extend(names.flatten());
+        }
+        if !columns.contains("phrase") {
+            return Ok(Vec::new());
+        }
+
+        let replacement = if columns.contains("replacement") {
+            "replacement"
+        } else {
+            "NULL"
+        };
+        let mut sql = format!("SELECT phrase, {replacement} FROM Dictionary");
+        let filters: Vec<&str> = [
+            ("isDeleted", "COALESCE(isDeleted, 0) = 0"),
+            ("isSnippet", "COALESCE(isSnippet, 0) = 0"),
+        ]
+        .into_iter()
+        .filter(|(col, _)| columns.contains(*col))
+        .map(|(_, filter)| filter)
+        .collect();
+        if !filters.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&filters.join(" AND "));
+        }
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for (phrase, replacement) in rows.flatten() {
+            let pick = |s: &Option<String>| {
+                s.as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            if let Some(term) = pick(&replacement).or_else(|| pick(&phrase)) {
+                out.push(term);
+            }
+        }
+        Ok(out)
+    }
+}
 
 impl VocabPlugin for WisprflowPlugin {
     fn name(&self) -> &str {
@@ -521,13 +753,21 @@ impl VocabPlugin for WisprflowPlugin {
     }
 
     fn description(&self) -> &str {
-        "Detection only — Wispr Flow stores the user's custom dictionary in their cloud"
+        "Reads the user's Wispr Flow dictionary from its local flow.sqlite (read-only; nothing leaves the Mac)"
     }
 
+    /// The app bundle (either Applications folder) OR the local database:
+    /// the dictionary is readable whenever `flow.sqlite` exists, even if
+    /// the app was installed somewhere unusual or has since been removed.
     fn get_installation_paths(&self) -> Vec<PathBuf> {
         #[cfg(target_os = "macos")]
         {
-            vec![PathBuf::from("/Applications/Wispr Flow.app")]
+            let mut paths = vec![PathBuf::from("/Applications/Wispr Flow.app")];
+            if let Some(home) = dirs::home_dir() {
+                paths.push(home.join("Applications/Wispr Flow.app"));
+            }
+            paths.extend(Self::db_path());
+            paths
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -537,6 +777,32 @@ impl VocabPlugin for WisprflowPlugin {
 
     fn is_installed(&self) -> bool {
         self.get_installation_paths().iter().any(|p| p.exists())
+    }
+
+    fn extract_vocabulary_from_data(&self) -> Result<Vec<String>> {
+        let Some(db) = Self::db_path() else {
+            return Ok(Vec::new());
+        };
+        if !db.exists() {
+            return Ok(Vec::new());
+        }
+        match Self::read_dictionary(&db) {
+            Ok(terms) => Ok(terms),
+            Err(e) => {
+                tracing::warn!(error = %e, "wispr flow dictionary read failed");
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    /// Every word, uncapped. The trait default keeps only the top 200 by
+    /// frequency, which for a hand-curated dictionary (all weight 1) would
+    /// drop words arbitrarily.
+    fn extract_all_vocabulary(&self) -> Result<Vec<String>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut terms = self.extract_vocabulary_from_data()?;
+        terms.retain(|t| seen.insert(t.clone()));
+        Ok(terms)
     }
 }
 
@@ -744,5 +1010,280 @@ mod tests {
         assert!(names.contains(&"Superwhisper"));
         assert!(names.contains(&"MacWhisper"));
         assert!(names.contains(&"Wispr Flow"));
+    }
+
+    // -- Wispr Flow ---------------------------------------------------------
+
+    /// A unique, empty scratch directory (no `tempfile` dependency).
+    fn scratch_dir(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "always-plugins-test-{label}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The `Dictionary` table exactly as Wispr Flow's Sequelize migrations
+    /// create it (copied from a real `flow.sqlite`).
+    const WISPR_DICTIONARY_DDL: &str = r#"CREATE TABLE "Dictionary" (`id` VARCHAR(36) NOT NULL PRIMARY KEY, `phrase` VARCHAR(255) NOT NULL, `replacement` VARCHAR(255), `teamDictionaryId` VARCHAR(36) NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000', `lastUsed` DATETIME, `frequencyUsed` INTEGER NOT NULL DEFAULT 0, `remoteFrequencyUsed` INTEGER NOT NULL DEFAULT 0, `manualEntry` TINYINT(1) NOT NULL DEFAULT 0, `createdAt` DATETIME NOT NULL, `modifiedAt` DATETIME NOT NULL, `isDeleted` TINYINT(1) NOT NULL DEFAULT 0, `source` VARCHAR(255), `isSnippet` TINYINT(1) NOT NULL DEFAULT 0, `observedSource` VARCHAR(255), `isStarred` TINYINT(1) NOT NULL DEFAULT 0, CONSTRAINT `uq_dictionary_phrase_team_dictionary_id` UNIQUE (`phrase`, `teamDictionaryId`));"#;
+
+    fn wispr_row(
+        conn: &rusqlite::Connection,
+        id: &str,
+        phrase: &str,
+        replacement: Option<&str>,
+        is_deleted: i64,
+        is_snippet: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO Dictionary (id, phrase, replacement, createdAt, modifiedAt, isDeleted, isSnippet) \
+             VALUES (?1, ?2, ?3, '2026-01-01', '2026-01-01', ?4, ?5)",
+            rusqlite::params![id, phrase, replacement, is_deleted, is_snippet],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn wispr_flow_extracts_words_skipping_deleted_and_snippets() {
+        let dir = scratch_dir("wispr");
+        let db = dir.join("flow.sqlite");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(WISPR_DICTIONARY_DDL).unwrap();
+            wispr_row(&conn, "1", "Zorblax", None, 0, 0);
+            wispr_row(&conn, "2", "  Frobnicate  ", Some(""), 0, 0);
+            // A replacement pair: the spelling the user wants typed wins.
+            wispr_row(&conn, "3", "gee pee tee", Some("GPT"), 0, 0);
+            // Removed by the user: must not come back.
+            wispr_row(&conn, "4", "Deleted Word", None, 1, 0);
+            // A text-expansion snippet is not vocabulary.
+            wispr_row(
+                &conn,
+                "5",
+                "my address",
+                Some("1 Fake Street, Nowhere"),
+                0,
+                1,
+            );
+            // Blank phrase and no replacement: nothing to import.
+            wispr_row(&conn, "6", "   ", None, 0, 0);
+        }
+        let mut terms = WisprflowPlugin::read_dictionary(&db).unwrap();
+        terms.sort();
+        assert_eq!(terms, vec!["Frobnicate", "GPT", "Zorblax"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wispr_flow_tolerates_a_minimal_or_missing_dictionary_table() {
+        let dir = scratch_dir("wispr-min");
+
+        // Older shape: only `phrase`.
+        let old = dir.join("old.sqlite");
+        {
+            let conn = rusqlite::Connection::open(&old).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE Dictionary (phrase TEXT NOT NULL); \
+                 INSERT INTO Dictionary VALUES ('Zorblax');",
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            WisprflowPlugin::read_dictionary(&old).unwrap(),
+            vec!["Zorblax"]
+        );
+
+        // No Dictionary table at all: empty, not an error.
+        let none = dir.join("none.sqlite");
+        {
+            let conn = rusqlite::Connection::open(&none).unwrap();
+            conn.execute_batch("CREATE TABLE Notes (id TEXT);").unwrap();
+        }
+        assert!(WisprflowPlugin::read_dictionary(&none).unwrap().is_empty());
+
+        // Not a database: an error the caller turns into "no terms".
+        let junk = dir.join("junk.sqlite");
+        std::fs::write(&junk, b"definitely not sqlite").unwrap();
+        assert!(WisprflowPlugin::read_dictionary(&junk).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wispr_flow_is_read_only() {
+        let dir = scratch_dir("wispr-ro");
+        let db = dir.join("flow.sqlite");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(WISPR_DICTIONARY_DDL).unwrap();
+            wispr_row(&conn, "1", "Zorblax", None, 0, 0);
+        }
+        let before = std::fs::read(&db).unwrap();
+        WisprflowPlugin::read_dictionary(&db).unwrap();
+        assert_eq!(std::fs::read(&db).unwrap(), before, "DB must be untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wispr_flow_is_detected_by_its_database_not_only_the_app_bundle() {
+        let p = WisprflowPlugin;
+        assert!(!p.description().to_lowercase().contains("detection only"));
+        if cfg!(target_os = "macos") {
+            let paths = p.get_installation_paths();
+            assert!(
+                paths.iter().any(|p| p.ends_with("Wispr Flow/flow.sqlite")),
+                "DB path must count as an install signal: {paths:?}"
+            );
+            assert!(
+                paths
+                    .iter()
+                    .any(|p| p.ends_with("Applications/Wispr Flow.app"))
+            );
+        } else {
+            assert!(p.get_installation_paths().is_empty());
+            assert!(!p.is_installed());
+        }
+    }
+
+    // -- SuperWhisper -------------------------------------------------------
+
+    #[test]
+    fn superwhisper_picks_the_most_recent_recordings_by_datetime() {
+        // FTS rows are inserted in an order that differs from recency, so a
+        // plain `LIMIT` (or a rowid order) would pick the wrong two.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE recording (id TEXT PRIMARY KEY, datetime DATETIME NOT NULL); \
+             CREATE VIRTUAL TABLE recording_fts USING fts5(recordingId, llmResult, rawResult, result); \
+             INSERT INTO recording VALUES ('a', '2026-01-01'), ('b', '2026-03-01'), ('c', '2026-02-01'); \
+             INSERT INTO recording_fts (recordingId, result) VALUES ('b', 'newest'); \
+             INSERT INTO recording_fts (recordingId, result) VALUES ('a', 'oldest'); \
+             INSERT INTO recording_fts (recordingId, result) VALUES ('c', 'middle');",
+        )
+        .unwrap();
+        let corpus = SuperwhisperPlugin::recent_transcripts_corpus(&conn, 2);
+        assert!(corpus.contains("newest"), "{corpus:?}");
+        assert!(corpus.contains("middle"), "{corpus:?}");
+        assert!(!corpus.contains("oldest"), "{corpus:?}");
+    }
+
+    #[test]
+    fn superwhisper_falls_back_to_rowid_order_without_a_recording_table() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE recording_fts (recordingId TEXT, result TEXT); \
+             INSERT INTO recording_fts VALUES ('1', 'first'); \
+             INSERT INTO recording_fts VALUES ('2', 'second'); \
+             INSERT INTO recording_fts VALUES ('3', 'third');",
+        )
+        .unwrap();
+        let corpus = SuperwhisperPlugin::recent_transcripts_corpus(&conn, 2);
+        assert!(
+            corpus.contains("third") && corpus.contains("second"),
+            "{corpus:?}"
+        );
+        assert!(!corpus.contains("first"), "{corpus:?}");
+    }
+
+    #[test]
+    fn superwhisper_settings_import_vocabulary_and_the_with_side_of_replacements() {
+        let json = r#"{
+            "favoriteModelIDs": ["a", "b"],
+            "modeKeys": ["default"],
+            "vocabulary": ["Zorblax", "  Frobnicate  ", "Zorblax", "", "   "],
+            "replacements": [
+                {"id": "1", "original": "zorb lax", "with": "Zorblax Pro"},
+                {"id": "2", "original": "frob", "with": "Frobnicate"},
+                {"id": "3", "original": "empty", "with": "  "},
+                {"id": "4", "original": "no with side"}
+            ]
+        }"#;
+        let terms = SuperwhisperPlugin::parse_settings(json);
+        assert_eq!(
+            terms,
+            vec!["Zorblax", "Frobnicate", "Zorblax Pro"],
+            "vocabulary first, then replacement `with` values; trimmed and de-duplicated"
+        );
+        // The `original` (what the user says) is never imported.
+        assert!(!terms.iter().any(|t| t == "zorb lax" || t == "frob"));
+    }
+
+    #[test]
+    fn superwhisper_settings_tolerate_malformed_or_unexpected_content() {
+        for junk in [
+            "",
+            "{ this is not json",
+            "[]",
+            "null",
+            r#"{"vocabulary": "not a list", "replacements": 7}"#,
+            r#"{"vocabulary": [1, null, {"x": 1}], "replacements": ["s", 3, {"with": 5}]}"#,
+            r#"{"other": ["Zorblax"]}"#,
+        ] {
+            assert!(
+                SuperwhisperPlugin::parse_settings(junk).is_empty(),
+                "{junk:?} should yield nothing"
+            );
+        }
+        // One bad section does not discard the good one.
+        let partial = r#"{"vocabulary": ["Zorblax", 3, null], "replacements": "oops"}"#;
+        assert_eq!(SuperwhisperPlugin::parse_settings(partial), vec!["Zorblax"]);
+    }
+
+    #[test]
+    fn superwhisper_settings_file_missing_or_unreadable_yields_nothing() {
+        let dir = scratch_dir("sw-settings");
+        let good = dir.join("settings.json");
+        std::fs::write(&good, r#"{"vocabulary": ["Zorblax"]}"#).unwrap();
+        assert_eq!(
+            SuperwhisperPlugin::read_settings_file(&good),
+            vec!["Zorblax"]
+        );
+        assert!(SuperwhisperPlugin::read_settings_file(&dir.join("absent.json")).is_empty());
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, b"\xff\xfe not utf8 {").unwrap();
+        assert!(SuperwhisperPlugin::read_settings_file(&bad).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn superwhisper_is_detected_by_the_app_or_its_settings_file() {
+        let paths = SuperwhisperPlugin::settings_paths();
+        assert!(!paths.is_empty());
+        assert!(
+            paths
+                .iter()
+                .all(|p| p.ends_with("superwhisper/settings/settings.json"))
+        );
+        // The default folder (~/Documents) is always a candidate.
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.to_string_lossy().contains("Documents"))
+        );
+
+        let p = SuperwhisperPlugin;
+        assert!(p.description().contains("Vocabulary"));
+        if cfg!(target_os = "macos") {
+            let install = p.get_installation_paths();
+            assert!(install.iter().any(|p| p.ends_with("superwhisper.app")));
+            assert!(
+                install
+                    .iter()
+                    .any(|p| p.ends_with("superwhisper/settings/settings.json")),
+                "settings.json must count as an install signal: {install:?}"
+            );
+        } else {
+            assert!(!p.is_installed());
+        }
+    }
+
+    #[test]
+    fn superwhisper_query_failure_yields_an_empty_corpus() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        assert!(SuperwhisperPlugin::recent_transcripts_corpus(&conn, 10).is_empty());
     }
 }
