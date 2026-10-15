@@ -9,7 +9,7 @@ Thank you for your interest in contributing to Always! This document provides gu
 - Rust 1.70 or later
 - Swift 5.9 or later
 - Xcode 15 or later (for Swift app development)
-- SoX (via Homebrew: `brew install sox`)
+- SoX on Linux only (macOS records through the bundled `always-capture` helper)
 
 ### Building
 

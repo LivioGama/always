@@ -10,9 +10,15 @@ always run                                 # Run foreground to see errors
 
 ## Audio issues?
 
+**macOS:** nothing to install. The app records through its bundled helper
+(`Always.app/Contents/MacOS/always-capture`): echo-cancelled when the Mac
+supports it, plain capture otherwise. The daemon log says which one runs
+(`capture_helper_spawned`, `capture_helper_fallback_to_plain`). Check
+System Settings → Privacy & Security → Microphone if it reports no audio.
+
+**Linux:**
+
 ```bash
-# Install SoX
-macOS:   brew install sox
 Ubuntu:  apt install sox
 Arch:    pacman -S sox
 
