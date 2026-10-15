@@ -1253,6 +1253,7 @@ Stored in the daemon's database, editable from Settings and the CLI
 | `capture_aec` | true | Echo-cancelled capture via `always-capture` (§3); false = plain `rec` |
 | `audible_status_sound` | off | Sound cues (off/low/medium/high; see §10.1) |
 | `per_app_settings_json` | — | Per-application pause rules |
+| `update_check` | true | Background GitHub release check (§12a); `ALWAYS_UPDATE_CHECK=0` also disables it |
 
 Shortcuts: pause `ctrl+alt+p` · master pause/mute `ctrl+alt+shift+p` ·
 auto-enter `ctrl+alt+a` · force paste `ctrl+alt+v` · log correction
@@ -1297,7 +1298,7 @@ daemon (I4/I5 hold *per instance*).
 | State dir | `~/Library/Application Support/always` | `~/Library/Application Support/always-dev` |
 | Socket | `~/Library/Caches/Always/always.sock` | `~/Library/Caches/Always/always-dev.sock` |
 | URL scheme | `always://` | `always-dev://` |
-| Sparkle | on | off (keys stripped at build; updater disabled in code) |
+| Updates (§12a) | background check + notify; apply on request | no background check; apply refused |
 | Focus-state file | `~/Library/Caches/Always/focus-state.json` | `focus-state-dev.json` |
 | Daemon logs | `~/Library/Logs/Always` | `~/Library/Logs/Always-dev` |
 
@@ -1358,6 +1359,138 @@ user's choice wins.
 > hardware microphone — the mic-conflict monitor (§7) will pause one side.
 > Test the dev daemon with file/STT paths while production holds the mic,
 > or pause production manually first.
+
+---
+
+## 12a. Updates
+
+One updater, inside the `always` daemon binary, on macOS, Linux and Windows.
+It replaces Sparkle (removed). GitHub Releases of `LivioGama/always` is the
+only channel. It **notifies; it never installs on its own.**
+
+**U1 — Signed bytes only.** Every byte that gets installed is covered by a
+minisign signature that verifies against the public key compiled into the
+binary (`resources/update-signing.pub`, `include_str!`). That means the
+platform archive/package **and** the release's `install.sh` / `install.ps1`.
+Verification is Ed25519 over the BLAKE2b-512 pre-hash (the minisign default);
+legacy (non-pre-hashed) signatures are refused. The signature's trusted
+comment must bind the file: it carries `file:<asset name>` and `tag:<release
+tag>` fields, and both must match what was asked for, so a validly signed
+asset of another release or another name cannot be substituted. A missing,
+malformed or non-verifying `.minisig` aborts the update: the download is
+deleted and nothing is installed. There is no "install anyway" path. A build
+whose embedded key does not parse refuses every update (a unit test fails the
+build first).
+
+**Check.**
+- `GET https://api.github.com/repos/LivioGama/always/releases/latest`. Sends a
+  `User-Agent: always/<version>` and `Accept` header, no token, no cookie, no
+  identifier of the user or machine. Response capped at 1 MiB.
+- When: 15 s after daemon start (so audio/UDS start-up never waits on it;
+  skipped, and the stored result replayed, when the last check was under
+  1 h ago — a flapping daemon must not burn GitHub's 60 requests/h/IP), then
+  every 24 h by wall clock. The last result is kept in
+  `<config dir>/update-state.json` (checked-at, latest tag; nothing else).
+- Compare: the release tag (`vX.Y.Z`, `v` stripped) against `CARGO_PKG_VERSION`
+  with semver ordering. Newer = update available. Equal or older = up to date
+  (a downgrade is never offered). Drafts, prereleases and tags that are not
+  semver are ignored.
+- Failures are logged once at info/debug and are never user-visible errors:
+  HTTP 404 (no published release — true until the first release) =
+  `no_release`; DNS/connect/timeout = `offline`; HTTP 403/429 with an
+  exhausted rate limit = `rate_limited`; anything else = `error`. A failed
+  attempt is retried at the next hourly wake-up; a definitive answer
+  (`up_to_date`, `update_available`, `no_release`) is not asked again for 24 h.
+- Logs (JSON lines, no user data): `update_check_done {result}`,
+  `update_available {current, latest}`.
+- A **dev instance** (`ALWAYS_INSTANCE` ≠ prod, or running from `Always Dev.app`)
+  never checks in the background and refuses to apply.
+
+**Opt-out.** Preference `update_check` (default `true`;
+`always config set update_check false`) and env `ALWAYS_UPDATE_CHECK=0`
+(`0`/`false`/`no`/`off`) each disable the *background* check; either one is
+enough. The preference is re-read on every tick (no restart). Explicit
+requests — `always update`, `always update --check`, the `CheckForUpdates` UDS
+command — always run: the user asked.
+
+**Notify.** On finding an update the daemon logs `update_available` and
+broadcasts `UpdateAvailable` (once per newly seen version per process, and in
+the initial state burst of every client that connects while one is known).
+`always status` prints one line when a stored result says an update exists.
+The GUI shows it; it does not install it.
+
+**Apply** — `always update`, or the `InstallUpdate` UDS command.
+`always update --check` only reports; exit code 0 = up to date (including "no
+published release"), 10 = update available, 1 = error.
+1. Fetch the latest release again (never trust a cached answer to install).
+   Not newer than the running build → stop, nothing downloaded.
+2. Work out how this binary was installed (below). Unsupported → refuse with a
+   message saying what to do instead.
+3. Download into a fresh `0700` directory under the user cache dir: the asset
+   the installer would use on this platform (`always-<tag>-<target>.tar.gz`,
+   `.zip`, `.deb` or `.rpm`) + `.minisig` + `.sha256`, and `install.sh`
+   (`install.ps1` on Windows) + `.minisig`. `https` only; the URLs are built
+   from the tag, not taken from the API response. The archive streams to disk
+   while it is hashed, so the bytes verified are the bytes written.
+4. Verify every signature (U1). Any failure deletes the directory.
+5. Run the **verified installer** against the **verified local archive**
+   (`ALWAYS_VERSION=<tag> ALWAYS_ARCHIVE=<path>`; the installer does not touch
+   the network, and still checks the archive against the `.sha256` sibling).
+   The installer is the one in the same release, so it can change per release.
+
+Per OS:
+- **macOS** — the daemon lives inside the bundle being replaced, so the
+  installer is started **detached** (own process group, output to
+  `~/Library/Logs/Always/update-install.log`), and the daemon returns. The
+  installer quits the running app (AppleScript quit, then terminates what is
+  left of that bundle; from `always update` it spares that process, so the
+  user keeps the output), swaps
+  `Always.app` in place — the directory the running bundle lives in, normally
+  `/Applications` — with `ditto`, and relaunches it if it was running. Needs
+  the bundle named `Always.app` and its parent directory writable; otherwise
+  refused. Ad-hoc signed, not notarized (unchanged).
+- **Windows** — `always update` runs `install.ps1` as a child and waits.
+  A running `.exe` cannot be overwritten but can be renamed: the installer
+  stops the other Always processes in the install dir (never the updater's own
+  pid), renames the current `always.exe` to `always.exe.old`, copies the new
+  files, and the leftover `.old` is deleted by the next `always update` / daemon
+  start. Installs into the directory the running `always.exe` lives in
+  (normally `%LOCALAPPDATA%\Programs\Always`). No UDS on Windows: CLI only.
+- **Linux, tarball install** (binary at `<prefix>/bin/always`, not owned by a
+  package) — replaced in place, then the user service is restarted if it was
+  active. Allowed from the CLI and from `InstallUpdate`.
+- **Linux, deb or rpm** (binary owned by dpkg/rpm) — the package manager owns
+  the files. Only `always update` from a terminal, where the `sudo` prompt
+  passes through. `InstallUpdate` is **refused** (`can_apply: "false"`,
+  `UpdateFailed { stage: "refused" }`). A binary that is not at
+  `<prefix>/bin/always`, or whose `bin` directory is not writable by the user,
+  is refused for both (reinstall instead). After a Linux update the running
+  daemon is still the old binary: the installer restarts the user service when
+  it is active; otherwise `always update` says to restart it.
+
+Downloaded files live only in the update directory; stale ones (older than 1 h,
+other than a running update's) are removed at daemon start and on
+`always update`.
+
+**UDS contract** (protocol version stays 12: additive; every `data` value is a
+string). Events: `UpdateAvailable {current, latest, url, can_apply, apply_hint}`,
+`UpdateCheckDone {result, current, latest}`, `UpdateProgress {phase, percent,
+detail}`, `UpdateFailed {stage, message}`. Commands: `CheckForUpdates`,
+`InstallUpdate` (unit variants, no `data`). Field meanings are documented on the
+variants in `src/always/event.rs`; wire shape pinned by
+`tests/uds_protocol_test.rs`.
+
+**Release signing** (`.github/workflows/release-build.yml`): the `attest` job
+signs every archive, package, `install.sh` and `install.ps1` with `minisign`
+using repository secret `ALWAYS_MINISIGN_SECRET_KEY` (an unencrypted key; an
+optional `ALWAYS_MINISIGN_PASSWORD` unlocks an encrypted one) and uploads each
+`<asset>.minisig` next to it; the release publishes them. A branch dry run has
+no secret: signing is skipped with a visible notice. The smoke jobs verify
+every `.minisig` that exists with the public key from the repo. The signing
+step sets the trusted comment to `timestamp:<unix>`, `file:<asset name>` and
+`tag:<release tag>`, tab-separated (what U1 checks). Losing the private key
+means installed apps can no longer verify future updates; those users would
+have to reinstall from the release page.
 
 ---
 

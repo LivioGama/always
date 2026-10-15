@@ -24,6 +24,19 @@
 #   ALWAYS_PREFIX      Linux tar install prefix (default: ~/.local)
 #   ALWAYS_NO_LAUNCH   macOS: set to 1 to skip opening the app
 #   ALWAYS_SYSTEMD     Linux: 1 = enable the user service, 0 = skip; default: ask
+#
+# Self-update mode (`always update`, or the app's "Install update"). The
+# updater has ALREADY downloaded the release files and verified their minisign
+# signatures against the public key built into the app; this script then must
+# not touch the network:
+#   ALWAYS_ARCHIVE       path of the already-downloaded archive/package. Needs
+#                        ALWAYS_VERSION; its file name must be the one this
+#                        platform/method installs; <path>.sha256 must sit next
+#                        to it and is still checked. Changes: macOS relaunches
+#                        the app only if it was running; Linux restarts an
+#                        active user service instead of asking about one.
+#   ALWAYS_UPDATER_PID   pid of an `always update` process that must survive
+#                        this script quitting the running copy (macOS)
 # ──────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -75,6 +88,13 @@ no_release() {
       See ${RELEASES_URL}"
 }
 
+ARCHIVE_OVERRIDE="${ALWAYS_ARCHIVE:-}"
+if [[ -n "$ARCHIVE_OVERRIDE" ]]; then
+  [[ -n "${ALWAYS_VERSION:-}" ]] \
+    || fail "ALWAYS_ARCHIVE needs ALWAYS_VERSION (the tag the archive belongs to)."
+  [[ -f "$ARCHIVE_OVERRIDE" ]] || fail "ALWAYS_ARCHIVE does not exist: ${ARCHIVE_OVERRIDE}"
+fi
+
 TAG="${ALWAYS_VERSION:-}"
 if [[ -n "$TAG" ]]; then
   [[ "$TAG" == v* ]] || TAG="v${TAG}"
@@ -120,10 +140,20 @@ sha256_of() {
 VERIFIED=""
 fetch_verified() {
   local name="$1" dest="$TMP/$1" want got
-  log "Downloading ${name}"
-  fetch "$name" "$dest" 2>/dev/null || no_release "Could not download ${BASE_URL}/${name}"
-  fetch "${name}.sha256" "${dest}.sha256" 2>/dev/null \
-    || fail "Could not download ${BASE_URL}/${name}.sha256; refusing to install without its checksum."
+  if [[ -n "$ARCHIVE_OVERRIDE" ]]; then
+    # Self-update: the updater downloaded and signature-verified this file.
+    [[ "$(basename "$ARCHIVE_OVERRIDE")" == "$name" ]] \
+      || fail "ALWAYS_ARCHIVE is $(basename "$ARCHIVE_OVERRIDE"), but this install needs ${name}."
+    dest="$ARCHIVE_OVERRIDE"
+    [[ -f "${dest}.sha256" ]] \
+      || fail "Missing ${dest}.sha256; refusing to install without its checksum."
+    log "Using the already-verified ${name}"
+  else
+    log "Downloading ${name}"
+    fetch "$name" "$dest" 2>/dev/null || no_release "Could not download ${BASE_URL}/${name}"
+    fetch "${name}.sha256" "${dest}.sha256" 2>/dev/null \
+      || fail "Could not download ${BASE_URL}/${name}.sha256; refusing to install without its checksum."
+  fi
   want="$(awk 'NR == 1 {print $1}' "${dest}.sha256")"
   [[ "$want" =~ ^[0-9a-f]{64}$ ]] || fail "Could not read a SHA-256 digest from ${name}.sha256"
   got="$(sha256_of "$dest")"
@@ -155,14 +185,22 @@ install_macos() {
   [[ -d "$src" ]] || fail "Archive does not contain ${PREFIX_NAME}/Always.app"
 
   # Quit a running copy that lives in the target location before replacing it.
+  local was_running=0 pid
   if [[ -d "$dest" ]] && pgrep -f "${dest}/Contents/MacOS/Always" >/dev/null 2>&1; then
+    was_running=1
     log "Quitting the running Always"
     osascript -e 'tell application "Always" to quit' >/dev/null 2>&1 || true
     for _ in 1 2 3 4 5 6 7 8 9 10; do
       pgrep -f "${dest}/Contents/MacOS/Always" >/dev/null 2>&1 || break
       sleep 0.5
     done
-    pkill -f "${dest}/Contents/MacOS/" >/dev/null 2>&1 || true
+    # What is left of that bundle (the daemon, helpers). Never this script,
+    # nor the `always update` process that started it: ending that one would
+    # cut off the output the user is reading.
+    for pid in $(pgrep -f "${dest}/Contents/MacOS/" 2>/dev/null || true); do
+      [[ "$pid" == "$$" || "$pid" == "${ALWAYS_UPDATER_PID:-}" ]] && continue
+      kill "$pid" >/dev/null 2>&1 || true
+    done
   fi
 
   rm -rf "$dest"
@@ -174,7 +212,8 @@ install_macos() {
     || warn "Code signature check failed for ${dest}"
   ok "Installed ${dest}"
 
-  if [[ "${ALWAYS_NO_LAUNCH:-0}" != "1" ]]; then
+  # A self-update relaunches only what it quit; a fresh install opens the app.
+  if [[ "${ALWAYS_NO_LAUNCH:-0}" != "1" ]] && { [[ -z "$ARCHIVE_OVERRIDE" ]] || [[ "$was_running" == 1 ]]; }; then
     log "Opening Always"
     open "$dest"
   fi
@@ -274,6 +313,17 @@ offer_systemd() {
   esac
 }
 
+# Self-update on Linux: the new binary only runs after a restart, so restart
+# the user service when (and only when) it is already active.
+restart_service_if_active() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl --user is-active --quiet always-daemon.service >/dev/null 2>&1 || return 0
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+  log "Restarting always-daemon.service"
+  systemctl --user restart always-daemon.service \
+    || warn "Could not restart always-daemon.service; restart it to use the new version."
+}
+
 install_linux() {
   if ldd --version 2>&1 | grep -qi musl; then
     fail "musl libc detected (Alpine). The Linux builds target glibc 2.39+."
@@ -299,7 +349,7 @@ install_linux() {
     tar) install_tar ;;
     *)   fail "Unknown ALWAYS_METHOD: ${method} (use auto, deb, rpm or tar)" ;;
   esac
-  offer_systemd
+  if [[ -n "$ARCHIVE_OVERRIDE" ]]; then restart_service_if_active; else offer_systemd; fi
   log "Run 'always --help' to get started. Docs: https://liviogama.github.io/always/"
 }
 

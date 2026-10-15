@@ -18,6 +18,17 @@
 #                        files; needs ALWAYS_VERSION
 #   ALWAYS_INSTALL_DIR   install directory (default: %LOCALAPPDATA%\Programs\Always)
 #   ALWAYS_NO_PATH       set to 1 to leave the user PATH untouched
+#
+# Self-update mode (`always update`): the updater has ALREADY downloaded the
+# release files and verified their minisign signatures against the public key
+# built into always.exe; this script must not touch the network:
+#   ALWAYS_ARCHIVE       path of the already-downloaded .zip. Needs
+#                        ALWAYS_VERSION; its file name must be the zip this
+#                        installer installs; <path>.sha256 must sit next to it
+#                        and is still checked.
+#   ALWAYS_UPDATER_PID   pid of the `always update` process running this
+#                        script; it is not stopped (it may be the very
+#                        always.exe being replaced -- see "rename" below)
 # ------------------------------------------------------------------------------
 
 function Install-Always {
@@ -36,6 +47,13 @@ function Install-Always {
         Write-Warning 'ARM64 detected: installing the x86_64 build, which runs under emulation.'
     } elseif ($arch -ne 'AMD64') {
         throw "Unsupported architecture: $arch (Always for Windows is x86_64)."
+    }
+
+    # -- Self-update: a pre-verified local archive -----------------------------
+    $archive = $env:ALWAYS_ARCHIVE
+    if ($archive) {
+        if (-not $env:ALWAYS_VERSION) { throw 'ALWAYS_ARCHIVE needs ALWAYS_VERSION (the tag the archive belongs to).' }
+        if (-not (Test-Path -LiteralPath $archive)) { throw "ALWAYS_ARCHIVE does not exist: $archive" }
     }
 
     # -- Tag + base URL ------------------------------------------------------
@@ -90,9 +108,19 @@ function Install-Always {
         Write-Host ">>> Installing Always $tag on Windows (x86_64)"
         $zip = Join-Path $tmp $asset
         $sha = "$zip.sha256"
-        Write-Host ">>> Downloading $asset"
-        Get-Asset $asset $zip
-        Get-Asset "$asset.sha256" $sha
+        if ($archive) {
+            if ((Split-Path -Leaf $archive) -ne $asset) {
+                throw "ALWAYS_ARCHIVE is $(Split-Path -Leaf $archive), but this install needs $asset."
+            }
+            $zip = $archive
+            $sha = "$archive.sha256"
+            if (-not (Test-Path -LiteralPath $sha)) { throw "Missing $sha; refusing to install without its checksum." }
+            Write-Host ">>> Using the already-verified $asset"
+        } else {
+            Write-Host ">>> Downloading $asset"
+            Get-Asset $asset $zip
+            Get-Asset "$asset.sha256" $sha
+        }
 
         # -- Verify SHA256 ---------------------------------------------------
         $line = (Get-Content -LiteralPath $sha -TotalCount 1)
@@ -113,11 +141,29 @@ function Install-Always {
 
         New-Item -ItemType Directory -Force -Path $installDir | Out-Null
         $exe = Join-Path $installDir 'always.exe'
-        # A running daemon locks the exe; stop only the copy in the install dir.
+        # A running daemon locks the exe; stop only the copy in the install dir,
+        # and never the `always update` process that started this script.
         Get-Process -Name always -ErrorAction SilentlyContinue |
-            Where-Object { $_.Path -eq $exe } |
+            Where-Object { $_.Path -eq $exe -and "$($_.Id)" -ne $env:ALWAYS_UPDATER_PID } |
             ForEach-Object { Write-Host '>>> Stopping running Always'; $_ | Stop-Process -Force }
-        Copy-Item -Path (Join-Path $srcDir '*') -Destination $installDir -Recurse -Force
+        # A running exe cannot be overwritten but CAN be renamed: move it aside
+        # (the updater itself may be that exe), then copy the new files in. The
+        # .old file is deleted now if possible, else by the next update / daemon
+        # start. If the copy fails the old exe is put back.
+        $old = "$exe.old"
+        if (Test-Path -LiteralPath $exe) {
+            Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
+            try { Move-Item -LiteralPath $exe -Destination $old -Force } catch { }
+        }
+        try {
+            Copy-Item -Path (Join-Path $srcDir '*') -Destination $installDir -Recurse -Force
+        } catch {
+            if ((Test-Path -LiteralPath $old) -and -not (Test-Path -LiteralPath $exe)) {
+                Move-Item -LiteralPath $old -Destination $exe -Force
+            }
+            throw
+        }
+        Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
         Write-Host "OK  Installed $exe"
 
         # -- PATH (user scope) -----------------------------------------------

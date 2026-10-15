@@ -473,6 +473,12 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         });
     }
 
+    // A known newer release (SPEC §12a): the client may connect long after
+    // the check that found it.
+    if let Some(update) = crate::always::updater::initial_burst_event() {
+        initial_events.push(update);
+    }
+
     let mut initial_payload = String::new();
     for event in initial_events {
         if let Ok(json_line) = event.to_json_line() {
@@ -1153,6 +1159,10 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             pause::recompute_effective();
             tracing::info!(enabled, "setup_mode_toggled");
         }
+        // Both run on their own thread (blocking network work) and answer
+        // through the global broadcaster. See SPEC §12a.
+        DaemonCommand::CheckForUpdates => crate::always::updater::request_check(),
+        DaemonCommand::InstallUpdate => crate::always::updater::request_install(),
     }
 }
 
