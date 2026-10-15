@@ -1,0 +1,1 @@
+**install:** one command installs Always: `curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash` on macOS and Linux, `irm https://raw.githubusercontent.com/LivioGama/always/main/scripts/install.ps1 | iex` on Windows. It picks the build for your platform and verifies its SHA-256 before installing.

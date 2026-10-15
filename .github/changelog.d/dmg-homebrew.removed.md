@@ -1,0 +1,1 @@
+**install:** the DMG download and Homebrew cask instructions are gone; install with the one-line installer or the release archives. The macOS app is ad-hoc signed and not notarized, and the installer-delivered app opens without a quarantine prompt.
