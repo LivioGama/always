@@ -135,8 +135,13 @@ jobs:
       - name: Generate coverage (lcov)
         run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
 
+      # Coverage is informational: a Codecov network outage (e.g. the
+      # uploader download timing out) must not fail a required check, nor
+      # skip the cargo deny gate below.
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
+        continue-on-error: true
+        timeout-minutes: 3
         with:
           files: lcov.info
           fail_ci_if_error: false
