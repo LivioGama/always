@@ -7,7 +7,7 @@
 The always-on dictation app. No push-to-talk, no window to open — just talk.
 
 [![Release](https://img.shields.io/github/v/release/LivioGama/always)](https://github.com/LivioGama/always/releases/latest)
-[![License](https://img.shields.io/github/license/LivioGama/also)](LICENSE)
+[![License](https://img.shields.io/github/license/LivioGama/always)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-14%2B-000000?style=flat&logo=apple)](https://developer.apple.com/macos/)
 [![Linux](https://img.shields.io/badge/Linux-Ubuntu_22.04%2B%2C_Debian_12%2B%2C_Fedora_38%2B-000000?style=flat&logo=linux)](https://www.linux.org/)
 [![Windows](https://img.shields.io/badge/Windows_10_1909%2B%2C_Windows_11-0078D6?style=flat&logo=windows)](https://www.windows.com/)
@@ -68,7 +68,13 @@ All shortcuts are customizable in **Settings → Shortcuts**.
 
 ### macOS (Apple Silicon)
 
-**Download:** the signed DMG from [Releases](https://github.com/LivioGama/always/releases/latest) — open it and drag Always.app to Applications.
+**Install** (Apple Silicon, one command):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash
+```
+
+Or grab `always-macos-arm64.tar.gz` (with `SHA256SUMS`) from [Releases](https://github.com/LivioGama/always/releases/latest).
 
 **Or build it** (no Homebrew, no SoX — everything Always needs ships inside the app):
 
@@ -94,22 +100,28 @@ ALWAYS_BUILD_PROFILE=release ALWAYS_SWIFT_CONFIGURATION=release ./Always/build.s
 ### Linux
 
 ```bash
-# Debian / Ubuntu (x86_64)
-wget https://github.com/LivioGama/also/releases/latest/download/always_0.0.1_amd64.deb
-sudo apt install ./also_0.0.1_amd64.deb
-
-# Fedora / RHEL (x86_64)
-wget https://github.com/LivioGama/also/releases/latest/download/always-0.0.1-x86_64.rpm
-sudo dnf install ./also-0.0.1-x86_64.rpm
-
-# Alternative: flatpak (coming soon)
-# flatpak install flathub com.liviogama.always
+# Any distro (x86_64 or aarch64)
+curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash
 ```
+
+Or install a package from [Releases](https://github.com/LivioGama/always/releases/latest):
+
+```bash
+# Debian / Ubuntu
+wget https://github.com/LivioGama/always/releases/latest/download/always-linux-x86_64.deb
+sudo apt install ./always-linux-x86_64.deb
+
+# Fedora / RHEL
+wget https://github.com/LivioGama/always/releases/latest/download/always-linux-x86_64.rpm
+sudo dnf install ./always-linux-x86_64.rpm
+```
+
+(`aarch64` builds: replace `x86_64` with `aarch64`. A `.tar.gz` is also published.)
 
 **After first install (Linux):**
 
 1. Enable the microphone for your desktop environment.
-2. Start the daemon with `sudo systemctl enable --now also-daemon` (systemd service provided).
+2. Start the daemon with `sudo systemctl enable --now always-daemon` (systemd service provided).
 3. Configure udev rules for microphone access if needed — see [docs/SETUP.md](docs/SETUP.md#linux).
 
 **System Requirements:** Ubuntu 22.04+ / Debian 12+ / Fedora 38+, ALSA or PulseAudio/PipeWire, 4 GB RAM minimum.
@@ -119,10 +131,10 @@ sudo dnf install ./also-0.0.1-x86_64.rpm
 ### Windows
 
 ```powershell
-# Download the MSI installer from releases
-#   https://github.com/LivioGama/also/releases/latest
-#   Run also-0.0.1-x64.msi as Administrator
+irm https://raw.githubusercontent.com/LivioGama/always/main/scripts/install.ps1 | iex
 ```
+
+Or download `always-windows-x86_64.zip` (with `SHA256SUMS`) from [Releases](https://github.com/LivioGama/always/releases/latest).
 
 **After first install (Windows):**
 
@@ -193,8 +205,8 @@ Nine panels, all in the menu bar:
 **Built by humans who got tired of typing.**
 
 [⭐ Star this repo](../../) ·
-[Issues](https://github.com/LivioGama/also/issues) ·
-[Discussions](https://github.com/LivioGama/also/discussions) ·
-[Releases](https://github.com/LivioGama/also/releases)
+[Issues](https://github.com/LivioGama/always/issues) ·
+[Discussions](https://github.com/LivioGama/always/discussions) ·
+[Releases](https://github.com/LivioGama/always/releases)
 
 </div>

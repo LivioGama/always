@@ -304,7 +304,7 @@ const steps = [
   {
     num: '01',
     title: 'Install',
-    desc: 'Download the app for your platform — macOS DMG, Linux DEB, or Windows MSI. One click and it\'s in your menu bar.',
+    desc: 'Download the app for your platform — macOS, Linux, or Windows. Paste one command and it\'s in your menu bar.',
     icon: <DownloadIcon className="w-8 h-8" />,
   },
   {
@@ -410,23 +410,23 @@ function Download() {
 
           {platform === 'mac' && (
             <div className="mt-8 text-left max-w-md mx-auto space-y-3 text-sm text-zinc-400">
-              <p>📦 Format: DMG (signed & notarized)</p>
+              <p>📦 Install: <code className="break-all">curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash</code></p>
               <p>🍎 Requires: macOS 14 (Sonoma) or later</p>
               <p>🔑 After install: System Settings → Privacy & Security → Allow Always to run</p>
             </div>
           )}
           {platform === 'linux' && (
             <div className="mt-8 text-left max-w-md mx-auto space-y-3 text-sm text-zinc-400">
-              <p>📦 Format: DEB package (x86_64)</p>
+              <p>📦 Install: <code className="break-all">curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash</code></p>
               <p>🐧 Requires: Ubuntu 22.04+ / Debian 12+ / Fedora 38+</p>
               <p>🔑 After install: Enable microphone & accessibility permissions</p>
             </div>
           )}
           {platform === 'win' && (
             <div className="mt-8 text-left max-w-md mx-auto space-y-3 text-sm text-zinc-400">
-              <p>📦 Format: MSI installer (x64)</p>
+              <p>📦 Install: <code className="break-all">irm https://raw.githubusercontent.com/LivioGama/always/main/scripts/install.ps1 | iex</code></p>
               <p>🪟 Requires: Windows 10 1909+ or Windows 11</p>
-              <p>🔑 After install: Run installer as Administrator for full microphone access</p>
+              <p>🔑 After install: Grant microphone access in Settings → Privacy → Microphone</p>
             </div>
           )}
         </div>
@@ -527,7 +527,7 @@ function Footer() {
             <ul className="space-y-2 text-sm text-zinc-500">
               <li><a href="https://github.com/LivioGama/always" target="_blank" rel="noreferrer" className="hover:text-white transition-colors">GitHub</a></li>
               <li><a href="https://github.com/LivioGama/always/releases" target="_blank" rel="noreferrer" className="hover:text-white transition-colors">Releases</a></li>
-              <li><a href="https://github.com/LivioGama/also/issues" target="_blank" rel="noreferrer" className="hover:text-white transition-colors">Issues</a></li>
+              <li><a href="https://github.com/LivioGama/always/issues" target="_blank" rel="noreferrer" className="hover:text-white transition-colors">Issues</a></li>
               <li><a href="docs/ARCHITECTURE.md" className="hover:text-white transition-colors">Architecture</a></li>
             </ul>
           </div>
@@ -538,7 +538,7 @@ function Footer() {
             © {new Date().getFullYear()} Always. Licensed under AGPL-3.0.
           </p>
           <div className="flex items-center gap-4 text-xs text-zinc-600">
-            <a href="https://github.com/LivioGama/also" target="_blank" rel="noreferrer" className="hover:text-zinc-400 transition-colors">GitHub</a>
+            <a href="https://github.com/LivioGama/always" target="_blank" rel="noreferrer" className="hover:text-zinc-400 transition-colors">GitHub</a>
             <span>·</span>
             <span>AGPL-3.0</span>
             <span>·</span>

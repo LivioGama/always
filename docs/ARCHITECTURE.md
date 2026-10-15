@@ -242,9 +242,9 @@ cargo tauri build --target x86_64-pc-windows-msvc  # Windows
 
 | Platform | Format | Notes |
 |---|---|---|
-| macOS | `.dmg` (signed & notarized) | Sparkle auto-update wiring |
-| Linux | `.deb` / `.rpm` | systemd service included |
-| Windows | `.msi` | Administrator install recommended |
+| macOS | `.tar.gz` (arm64) + install script | Not notarized yet |
+| Linux | `.tar.gz` / `.deb` / `.rpm` (x86_64, aarch64) | systemd service included |
+| Windows | `.zip` (x86_64) + `install.ps1` | Administrator install recommended |
 
 ---
 
