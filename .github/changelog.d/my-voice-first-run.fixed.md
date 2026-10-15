@@ -1,1 +1,0 @@
-**my voice:** first-time voice enrollment now shows "Preparing voice model…" until recording has really started, and the speaker model downloads in the background at startup, so you no longer speak into a silent wait that ends in "not enough speech captured".
