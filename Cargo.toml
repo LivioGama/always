@@ -139,11 +139,11 @@ windows = { version = "0.62", features = [
     "Win32_System_Com",
 ] }
 # Windows: generic whisper-cpp build + ONNX (non-macOS target).
-transcribe-rs = { version = "=0.3.8", features = ["whisper-cpp", "onnx"], optional = true }
+transcribe-rs = { version = "=0.3.12", features = ["whisper-cpp", "onnx"], optional = true }
 
 [target.'cfg(all(target_os = "linux", not(target_os = "windows")))'.dependencies]
 # Linux-only targets — transcribe-rs with whisper-cpp.
-transcribe-rs = { version = "=0.3.8", features = ["whisper-cpp", "onnx"], optional = true }
+transcribe-rs = { version = "=0.3.12", features = ["whisper-cpp", "onnx"], optional = true }
 
 [dev-dependencies]
 assert_cmd = "2"
