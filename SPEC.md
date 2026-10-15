@@ -993,8 +993,16 @@ their vocabulary correctly from day one.
      when set, otherwise the `phrase`; soft-deleted rows and text-expansion
      snippets are skipped. Wispr Flow counts as present when its database or
      its app bundle (either Applications folder) exists;
-  4. SuperWhisper — statistical outlier words from the transcripts of its 5000
-     most recent recordings (ordered by `recording.datetime`);
+  4. SuperWhisper — its Vocabulary list and Replacements, plus mined
+     transcript terms. The explicit part comes from
+     `<SuperWhisper folder>/superwhisper/settings/settings.json` (the folder is
+     the `appFolderDirectory` of the `com.superduper.superwhisper` defaults
+     domain when set, otherwise `~/Documents`): every `vocabulary` string and
+     the `with` value of each `replacements` entry, uncapped. The mined part
+     is statistical outlier words from the transcripts of its 5000 most
+     recent recordings (ordered by `recording.datetime`), capped at 200.
+     SuperWhisper counts as present when its app bundle or its
+     `settings.json` exists. All of it is counted under `superwhisper`;
   5. MacWhisper Replacements, and the legacy Dragon seed list when Dragon is
      installed.
 - **Merge rules.** Only terms missing from the glossary are added (compared

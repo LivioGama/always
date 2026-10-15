@@ -11,7 +11,7 @@
 //! | Plugin | Source |
 //! |--------|--------|
 //! | `MacosTextReplacementsPlugin` | `defaults read NSGlobalDomain NSUserDictionaryReplacementItems` |
-//! | `SuperwhisperPlugin` | SQLite recordings DB at `~/Library/Application Support/superwhisper/database/superwhisper.sqlite` |
+//! | `SuperwhisperPlugin` | Vocabulary + Replacements in `<SuperWhisper folder>/superwhisper/settings/settings.json`, plus terms mined from the recordings DB at `~/Library/Application Support/superwhisper/database/superwhisper.sqlite` |
 //! | `MacWhisperPlugin` | Sandboxed preferences plist + Replacements file |
 //! | `WisprflowPlugin` | Local `Dictionary` table in `~/Library/Application Support/Wispr Flow/flow.sqlite` |
 
@@ -322,7 +322,23 @@ fn resolve_plist_escapes(s: &str) -> String {
 // SuperWhisper
 // ============================================================================
 
+/// SuperWhisper contributes two kinds of terms:
+///
+/// 1. **Explicit** — what the user typed into SuperWhisper on purpose, from
+///    `settings/settings.json` in SuperWhisper's data folder: the
+///    `vocabulary` list (strings) and, for each entry of `replacements`
+///    (`{id, original, with}`), the `with` value, mirroring how macOS Text
+///    Replacements use the "with" side. These are always imported, uncapped.
+/// 2. **Mined** — statistical outlier words from the most recent
+///    transcripts in the recordings database (see `extract_vocabulary_from_data`).
 pub struct SuperwhisperPlugin;
+
+/// Defaults domain of the SuperWhisper app; its `appFolderDirectory` key
+/// records the folder that contains the `superwhisper/` data directory.
+const SUPERWHISPER_DEFAULTS_DOMAIN: &str = "com.superduper.superwhisper";
+
+/// Cap on the mined (statistical) terms; explicit terms are never capped.
+const SUPERWHISPER_MAX_MINED_TERMS: usize = 200;
 
 impl SuperwhisperPlugin {
     fn db_path() -> Option<PathBuf> {
@@ -330,6 +346,88 @@ impl SuperwhisperPlugin {
             PathBuf::from(home)
                 .join("Library/Application Support/superwhisper/database/superwhisper.sqlite")
         })
+    }
+
+    /// The folder the user chose for SuperWhisper's data in its settings
+    /// (`defaults read com.superduper.superwhisper appFolderDirectory`),
+    /// if any. SuperWhisper keeps its `superwhisper/` directory inside it.
+    fn custom_app_folder() -> Option<PathBuf> {
+        if !cfg!(target_os = "macos") {
+            return None;
+        }
+        let output = Command::new("defaults")
+            .args(["read", SUPERWHISPER_DEFAULTS_DOMAIN, "appFolderDirectory"])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if raw.is_empty() {
+            return None;
+        }
+        match raw.strip_prefix("~/") {
+            Some(rest) => dirs::home_dir().map(|home| home.join(rest)),
+            None => Some(PathBuf::from(raw)),
+        }
+    }
+
+    /// Candidate `settings.json` locations, most authoritative first: the
+    /// folder recorded in SuperWhisper's preferences, then its default
+    /// (`~/Documents`).
+    fn settings_paths() -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        roots.extend(Self::custom_app_folder());
+        roots.extend(dirs::home_dir().map(|home| home.join("Documents")));
+        let mut paths: Vec<PathBuf> = roots
+            .into_iter()
+            .map(|root| root.join("superwhisper/settings/settings.json"))
+            .collect();
+        paths.dedup();
+        paths
+    }
+
+    /// [`Self::parse_settings`] applied to the file at `path`; an unreadable
+    /// file yields nothing.
+    fn read_settings_file(path: &Path) -> Vec<String> {
+        match std::fs::read_to_string(path) {
+            Ok(json) => Self::parse_settings(&json),
+            Err(e) => {
+                tracing::warn!(error = %e, "superwhisper settings read failed");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Words the user explicitly gave SuperWhisper, from the text of its
+    /// `settings.json`: every string in `vocabulary` plus the `with` of each
+    /// entry in `replacements`. Trimmed, de-duplicated, order preserved.
+    /// Malformed JSON or unexpected shapes yield whatever is usable (or
+    /// nothing) rather than an error.
+    fn parse_settings(json: &str) -> Vec<String> {
+        let Ok(settings) = serde_json::from_str::<serde_json::Value>(json) else {
+            return Vec::new();
+        };
+        let vocabulary = settings
+            .get("vocabulary")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.as_str());
+        let replacements = settings
+            .get("replacements")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.get("with").and_then(|w| w.as_str()));
+
+        let mut seen = std::collections::HashSet::new();
+        vocabulary
+            .chain(replacements)
+            .map(str::trim)
+            .filter(|term| !term.is_empty())
+            .filter(|term| seen.insert(*term))
+            .map(str::to_string)
+            .collect()
     }
 }
 
@@ -339,13 +437,17 @@ impl VocabPlugin for SuperwhisperPlugin {
     }
 
     fn description(&self) -> &str {
-        "Reads SuperWhisper's local recording database to mine the user's actual transcribed vocabulary"
+        "Reads SuperWhisper's own Vocabulary list and Replacements, and mines the user's recent transcripts for the terms they actually say"
     }
 
+    /// The app bundle OR SuperWhisper's `settings.json`: the explicit
+    /// vocabulary stays readable if the app lives somewhere unusual.
     fn get_installation_paths(&self) -> Vec<PathBuf> {
         #[cfg(target_os = "macos")]
         {
-            vec![PathBuf::from("/Applications/superwhisper.app")]
+            let mut paths = vec![PathBuf::from("/Applications/superwhisper.app")];
+            paths.extend(Self::settings_paths());
+            paths
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -355,6 +457,31 @@ impl VocabPlugin for SuperwhisperPlugin {
 
     fn is_installed(&self) -> bool {
         self.get_installation_paths().iter().any(|p| p.exists())
+    }
+
+    /// The user's explicit SuperWhisper vocabulary and replacements (see
+    /// [`Self::parse_settings`]), from the first `settings.json` that
+    /// exists. Read-only; a missing or unreadable file yields nothing.
+    fn extract_vocabulary_from_config(&self) -> Result<Vec<String>> {
+        let Some(path) = Self::settings_paths().into_iter().find(|p| p.is_file()) else {
+            return Ok(Vec::new());
+        };
+        Ok(Self::read_settings_file(&path))
+    }
+
+    /// Explicit terms first and uncapped, then the mined terms, capped at
+    /// [`SUPERWHISPER_MAX_MINED_TERMS`] as before. (The trait default would
+    /// cap everything together, letting mined words push explicit ones out.)
+    fn extract_all_vocabulary(&self) -> Result<Vec<String>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut terms = self.extract_vocabulary_from_config().unwrap_or_default();
+        terms.retain(|t| seen.insert(t.clone()));
+
+        let mut mined = self.extract_vocabulary_from_data().unwrap_or_default();
+        mined.retain(|t| seen.insert(t.clone()));
+        mined.truncate(SUPERWHISPER_MAX_MINED_TERMS);
+        terms.extend(mined);
+        Ok(terms)
     }
 
     /// Pull every transcript out of SuperWhisper's local SQLite DB and
@@ -1060,6 +1187,98 @@ mod tests {
             "{corpus:?}"
         );
         assert!(!corpus.contains("first"), "{corpus:?}");
+    }
+
+    #[test]
+    fn superwhisper_settings_import_vocabulary_and_the_with_side_of_replacements() {
+        let json = r#"{
+            "favoriteModelIDs": ["a", "b"],
+            "modeKeys": ["default"],
+            "vocabulary": ["Zorblax", "  Frobnicate  ", "Zorblax", "", "   "],
+            "replacements": [
+                {"id": "1", "original": "zorb lax", "with": "Zorblax Pro"},
+                {"id": "2", "original": "frob", "with": "Frobnicate"},
+                {"id": "3", "original": "empty", "with": "  "},
+                {"id": "4", "original": "no with side"}
+            ]
+        }"#;
+        let terms = SuperwhisperPlugin::parse_settings(json);
+        assert_eq!(
+            terms,
+            vec!["Zorblax", "Frobnicate", "Zorblax Pro"],
+            "vocabulary first, then replacement `with` values; trimmed and de-duplicated"
+        );
+        // The `original` (what the user says) is never imported.
+        assert!(!terms.iter().any(|t| t == "zorb lax" || t == "frob"));
+    }
+
+    #[test]
+    fn superwhisper_settings_tolerate_malformed_or_unexpected_content() {
+        for junk in [
+            "",
+            "{ this is not json",
+            "[]",
+            "null",
+            r#"{"vocabulary": "not a list", "replacements": 7}"#,
+            r#"{"vocabulary": [1, null, {"x": 1}], "replacements": ["s", 3, {"with": 5}]}"#,
+            r#"{"other": ["Zorblax"]}"#,
+        ] {
+            assert!(
+                SuperwhisperPlugin::parse_settings(junk).is_empty(),
+                "{junk:?} should yield nothing"
+            );
+        }
+        // One bad section does not discard the good one.
+        let partial = r#"{"vocabulary": ["Zorblax", 3, null], "replacements": "oops"}"#;
+        assert_eq!(SuperwhisperPlugin::parse_settings(partial), vec!["Zorblax"]);
+    }
+
+    #[test]
+    fn superwhisper_settings_file_missing_or_unreadable_yields_nothing() {
+        let dir = scratch_dir("sw-settings");
+        let good = dir.join("settings.json");
+        std::fs::write(&good, r#"{"vocabulary": ["Zorblax"]}"#).unwrap();
+        assert_eq!(
+            SuperwhisperPlugin::read_settings_file(&good),
+            vec!["Zorblax"]
+        );
+        assert!(SuperwhisperPlugin::read_settings_file(&dir.join("absent.json")).is_empty());
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, b"\xff\xfe not utf8 {").unwrap();
+        assert!(SuperwhisperPlugin::read_settings_file(&bad).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn superwhisper_is_detected_by_the_app_or_its_settings_file() {
+        let paths = SuperwhisperPlugin::settings_paths();
+        assert!(!paths.is_empty());
+        assert!(
+            paths
+                .iter()
+                .all(|p| p.ends_with("superwhisper/settings/settings.json"))
+        );
+        // The default folder (~/Documents) is always a candidate.
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.to_string_lossy().contains("Documents"))
+        );
+
+        let p = SuperwhisperPlugin;
+        assert!(p.description().contains("Vocabulary"));
+        if cfg!(target_os = "macos") {
+            let install = p.get_installation_paths();
+            assert!(install.iter().any(|p| p.ends_with("superwhisper.app")));
+            assert!(
+                install
+                    .iter()
+                    .any(|p| p.ends_with("superwhisper/settings/settings.json")),
+                "settings.json must count as an install signal: {install:?}"
+            );
+        } else {
+            assert!(!p.is_installed());
+        }
     }
 
     #[test]
