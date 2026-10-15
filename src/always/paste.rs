@@ -282,6 +282,13 @@ fn copy_via_subprocess(text: String) -> Result<()> {
     };
 
     let mut command = Command::new(copy_cmd);
+    // Force a UTF-8 locale for the clipboard tool. pbcopy decodes its stdin
+    // bytes via CFStringGetSystemEncoding(); under the launchd-spawned daemon
+    // environment (no LANG/LC_*/__CF_USER_TEXT_ENCODING) that is MacRoman, so
+    // every non-ASCII transcript ("it’s", "—", "…") landed on the pasteboard
+    // as literal mojibake ("it‚Äôs"). LANG alone is sufficient but LC_ALL
+    // overrides a stray POSIX LC_* inherited from a non-GUI launch.
+    command.env("LANG", "en_US.UTF-8").env("LC_ALL", "en_US.UTF-8");
     if cfg!(target_os = "linux") {
         command.args(["-selection", "clipboard", "-in"]);
     }
@@ -543,6 +550,11 @@ pub fn read_clipboard_text() -> Result<String> {
     };
     let output = std::process::Command::new(cmd)
         .args(args)
+        // pbpaste ENCODES the pasteboard string to stdout via the system
+        // encoding — under a C/POSIX locale that emits MacRoman bytes, which
+        // the UTF-8 decode below then turns into mojibake. Pin UTF-8.
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8")
         .output()
         .with_context(|| format!("spawn {cmd}"))?;
     if !output.status.success() {
