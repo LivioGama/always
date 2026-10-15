@@ -23,7 +23,7 @@ Install with one command (Apple Silicon):
 curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash
 ```
 
-The script downloads the latest release from [GitHub Releases](https://github.com/LivioGama/always/releases/latest) and installs `Always.app`. To install by hand, download `always-macos-arm64.tar.gz` from the same page, check it against `SHA256SUMS`, and unpack it.
+The script downloads the latest release from [GitHub Releases](https://github.com/LivioGama/always/releases/latest) and installs `Always.app`. To install by hand, download `always-vX.Y.Z-aarch64-apple-darwin.tar.gz` and its `.sha256` from the same page, check it with `shasum -a 256 -c`, and unpack it.
 
 Launch from `Applications` or Spotlight (`⌘ + Space`, type "Always").
 
@@ -57,11 +57,9 @@ macOS may show: *"Always.app" needs to be opened to continue.*
 # Gatekeeper override — only if you downloaded from the web
 xattr -d com.apple.quarantine /Applications/Always.app
 
-# Re-notarize check (should pass automatically)
+# Signature check (the app is ad-hoc signed, not notarized)
 codesign --verify --deep --strict /Applications/Always.app
-
-# If already notarized, you should see:
-# /Applications/Always.app: valid on disk
+# Prints nothing on success; a failure names the broken file
 ```
 
 ### First Launch Workflow
@@ -98,33 +96,33 @@ Or install a package from [GitHub Releases](https://github.com/LivioGama/always/
 #### Debian / Ubuntu
 
 ```bash
-# Download the latest release
-wget https://github.com/LivioGama/always/releases/latest/download/always-linux-x86_64.deb
+# Download a release (replace vX.Y.Z with the release tag)
+wget https://github.com/LivioGama/always/releases/latest/download/always-vX.Y.Z-x86_64-unknown-linux-gnu.deb
 
-# Install (this places the daemon binary, desktop file, and systemd service)
-sudo apt install ./always-linux-x86_64.deb
+# Install (this places the daemon binary and the systemd user service)
+sudo apt install ./always-vX.Y.Z-x86_64-unknown-linux-gnu.deb
 ```
 
 #### Fedora / RHEL
 
 ```bash
-# Download the latest release
-wget https://github.com/LivioGama/always/releases/latest/download/always-linux-x86_64.rpm
+# Download a release (replace vX.Y.Z with the release tag)
+wget https://github.com/LivioGama/always/releases/latest/download/always-vX.Y.Z-x86_64-unknown-linux-gnu.rpm
 
 # Install
-sudo dnf install ./always-linux-x86_64.rpm
+sudo dnf install ./always-vX.Y.Z-x86_64-unknown-linux-gnu.rpm
 ```
 
 ### systemd Service
 
-The DEB/RPM packages install a systemd service for the Always daemon:
+The DEB/RPM packages install a systemd **user** service for the Always daemon
+(`/usr/lib/systemd/user/always-daemon.service`, source
+`scripts/release/always-daemon.service`, runs `always run`). The one-line
+installer does the same for a tarball install under `~/.config/systemd/user/`.
 
 ```bash
-# Start the daemon now
-sudo systemctl start always-daemon
-
-# Enable auto-start on boot
-sudo systemctl enable always-daemon
+# Start the daemon now and enable auto-start on login
+systemctl --user enable --now always-daemon.service
 
 # Check status
 systemctl --user status always-daemon
@@ -133,7 +131,7 @@ systemctl --user status always-daemon
 journalctl --user -u always-daemon -f
 ```
 
-The daemon runs as the **current user** (via `--user` scope), so no root privileges are needed at runtime. The `sudo` is only required for the initial service enable/start.
+The daemon runs as the **current user** (via `--user` scope), so no root privileges are needed at runtime. Installing the package needs `sudo`; enabling the service does not.
 
 ### Audio Configuration
 
@@ -183,7 +181,7 @@ sudo usermod -aG audio $USER
 ### First Launch Workflow
 
 1. **Install** with the one-liner or the DEB/RPM package.
-2. **Start the daemon:** `sudo systemctl --user enable --now always-daemon`
+2. **Start the daemon:** `systemctl --user enable --now always-daemon.service`
 3. **Configure your audio input** — verify with `arecord -l`.
 4. **Set a Groq API key** in the CLI or settings:
 
@@ -215,7 +213,7 @@ Install from PowerShell (Windows 10 1909+ and Windows 11):
 irm https://raw.githubusercontent.com/LivioGama/always/main/scripts/install.ps1 | iex
 ```
 
-To install by hand, download `always-windows-x86_64.zip` from [GitHub Releases](https://github.com/LivioGama/always/releases/latest), check it against `SHA256SUMS`, and unzip it.
+To install by hand, download `always-vX.Y.Z-x86_64-pc-windows-msvc.zip` and its `.sha256` from [GitHub Releases](https://github.com/LivioGama/always/releases/latest), check the hash with `Get-FileHash`, and unzip it.
 
 ### Admin Requirements
 

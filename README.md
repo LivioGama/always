@@ -74,7 +74,7 @@ All shortcuts are customizable in **Settings → Shortcuts**.
 curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash
 ```
 
-Or grab `always-macos-arm64.tar.gz` (with `SHA256SUMS`) from [Releases](https://github.com/LivioGama/always/releases/latest).
+Or grab `always-vX.Y.Z-aarch64-apple-darwin.tar.gz` (with its `.sha256`) from [Releases](https://github.com/LivioGama/always/releases/latest).
 
 **Or build it** (no Homebrew, no SoX — everything Always needs ships inside the app):
 
@@ -107,21 +107,21 @@ curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/insta
 Or install a package from [Releases](https://github.com/LivioGama/always/releases/latest):
 
 ```bash
-# Debian / Ubuntu
-wget https://github.com/LivioGama/always/releases/latest/download/always-linux-x86_64.deb
-sudo apt install ./always-linux-x86_64.deb
+# Debian / Ubuntu  (replace vX.Y.Z with the release tag)
+wget https://github.com/LivioGama/always/releases/latest/download/always-vX.Y.Z-x86_64-unknown-linux-gnu.deb
+sudo apt install ./always-vX.Y.Z-x86_64-unknown-linux-gnu.deb
 
 # Fedora / RHEL
-wget https://github.com/LivioGama/always/releases/latest/download/always-linux-x86_64.rpm
-sudo dnf install ./always-linux-x86_64.rpm
+wget https://github.com/LivioGama/always/releases/latest/download/always-vX.Y.Z-x86_64-unknown-linux-gnu.rpm
+sudo dnf install ./always-vX.Y.Z-x86_64-unknown-linux-gnu.rpm
 ```
 
-(`aarch64` builds: replace `x86_64` with `aarch64`. A `.tar.gz` is also published.)
+(`aarch64` builds: replace `x86_64` with `aarch64`. A `.tar.gz` is also published. The one-line installer above picks the right package for you.)
 
 **After first install (Linux):**
 
 1. Enable the microphone for your desktop environment.
-2. Start the daemon with `sudo systemctl enable --now always-daemon` (systemd service provided).
+2. Start the daemon with `systemctl --user enable --now always-daemon.service` (systemd user service provided).
 3. Configure udev rules for microphone access if needed — see [docs/SETUP.md](docs/SETUP.md#linux).
 
 **System Requirements:** Ubuntu 22.04+ / Debian 12+ / Fedora 38+, ALSA or PulseAudio/PipeWire, 4 GB RAM minimum.
@@ -134,7 +134,7 @@ sudo dnf install ./always-linux-x86_64.rpm
 irm https://raw.githubusercontent.com/LivioGama/always/main/scripts/install.ps1 | iex
 ```
 
-Or download `always-windows-x86_64.zip` (with `SHA256SUMS`) from [Releases](https://github.com/LivioGama/always/releases/latest).
+Or download `always-vX.Y.Z-x86_64-pc-windows-msvc.zip` (with its `.sha256`) from [Releases](https://github.com/LivioGama/always/releases/latest).
 
 **After first install (Windows):**
 
