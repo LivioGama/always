@@ -99,7 +99,7 @@ libc = "0.2"
 x11 = { version = "2.21", optional = true }
 # Local-model registry support (ports Handy's downloader). `sha2`/`tar`/`flate2`
 # for verify+extract, `futures-util` for streaming download bodies.
-sha2 = "0.10"
+sha2 = "0.11"
 tar = "0.4"
 flate2 = "1"
 futures-util = "0.3"
@@ -111,6 +111,10 @@ parakeet-rs = { version = "=0.3.6", optional = true }
 # Cross-platform audio capture — replaces SoX on all platforms.
 # Shared mode by default: never acquires exclusive device access.
 cpal = { version = "0.18", optional = true }
+# Updater (SPEC §12a): pure-Rust minisign verification of every downloaded
+# file against resources/update-signing.pub, and semver ordering of releases.
+minisign-verify = "0.3"
+semver = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # `core-graphics` uses framework linking which only works on macOS.
@@ -153,6 +157,7 @@ predicates = "3"
 wiremock = "0.6"
 tokio = { version = "1", features = ["full", "test-util"] }
 criterion = "0.5"
+tempfile = "3"
 
 [[bench]]
 name = "vad"

@@ -417,6 +417,10 @@ impl OverlayStateReducer {
             | DaemonEvent::VoiceEnrollmentSampleCaptured { .. }
             | DaemonEvent::VoiceEnrollmentFailed { .. }
             | DaemonEvent::VoiceProfileStatus { .. }
+            | DaemonEvent::UpdateAvailable { .. }
+            | DaemonEvent::UpdateCheckDone { .. }
+            | DaemonEvent::UpdateProgress { .. }
+            | DaemonEvent::UpdateFailed { .. }
             | DaemonEvent::ShortcutListenerStatus {
                 input_monitoring_granted: _,
             } => None,

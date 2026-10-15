@@ -144,7 +144,6 @@ echo "▶ Swift bundle + deploy (Always Dev)..."
     ALWAYS_BUNDLE_ID="com.always.v3.dev" \
     ALWAYS_DEPLOY_PATH="$DEV_APP" \
     ALWAYS_URL_SCHEME="always-dev" \
-    ALWAYS_SPARKLE=0 \
     ./build.sh
 )
 

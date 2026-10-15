@@ -12,9 +12,6 @@ APP_BUNDLE="${APP_NAME}.app"
 BUNDLE_ID="${ALWAYS_BUNDLE_ID:-com.always.v3}"
 DEPLOY_PATH="${ALWAYS_DEPLOY_PATH:-/Applications/${APP_BUNDLE}}"
 URL_SCHEME="${ALWAYS_URL_SCHEME:-always}"
-# 0 strips Sparkle keys from the plist — dev builds must never self-update
-# into a production release.
-SPARKLE_ENABLED="${ALWAYS_SPARKLE:-1}"
 
 echo "Building ${APP_NAME}..."
 cd "$APP_DIR"
@@ -54,11 +51,6 @@ cp Info.plist "$APP_BUNDLE/Contents/"
 /usr/libexec/PlistBuddy -c "Set :CFBundleName $APP_NAME" "$APP_BUNDLE/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $APP_NAME" "$APP_BUNDLE/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 $URL_SCHEME" "$APP_BUNDLE/Contents/Info.plist"
-if [ "$SPARKLE_ENABLED" = "0" ]; then
-    for key in SUFeedURL SUPublicEDKey SUEnableAutomaticChecks SUScheduledCheckInterval; do
-        /usr/libexec/PlistBuddy -c "Delete :$key" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
-    done
-fi
 cp "$SWIFT_BIN" "$APP_BUNDLE/Contents/MacOS/"
 cp Resources/AlwaysIcon.icns "$APP_BUNDLE/Contents/Resources/"
 
@@ -115,28 +107,6 @@ swift build -c release --package-path "$APP_DIR/../preview-asr"
 cp "$APP_DIR/../preview-asr/.build/release/always-preview-asr" "$APP_BUNDLE/Contents/MacOS/always-preview-asr"
 echo "✓ Preview helper copied"
 
-# Bundle Sparkle.framework and add @executable_path/../Frameworks rpath for dyld.
-# Sparkle.framework is always bundled when present — the binary links it
-# via @rpath, so omitting it crashes at dyld. For dev builds the updater
-# stays inert anyway: plist keys are stripped above and UpdateService
-# refuses to start under a .dev bundle id.
-SPARKLE_SRC=".build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
-if [ -d "$SPARKLE_SRC" ]; then
-    echo "Bundling Sparkle.framework..."
-    mkdir -p "$APP_BUNDLE/Contents/Frameworks"
-    rm -rf "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
-    cp -R "$SPARKLE_SRC" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
-    if ! otool -l "$APP_BUNDLE/Contents/MacOS/Always" \
-            | grep -A2 LC_RPATH | grep -q "@executable_path/../Frameworks"; then
-        install_name_tool -add_rpath "@executable_path/../Frameworks" \
-            "$APP_BUNDLE/Contents/MacOS/Always"
-        echo "✓ Added @executable_path/../Frameworks rpath"
-    fi
-    echo "✓ Sparkle.framework copied"
-else
-    echo "⚠️  Sparkle.framework not found at $SPARKLE_SRC — auto-update will not work"
-fi
-
 echo "Code signing app..."
 # Signing identity resolution — STABILITY over pedigree. macOS TCC keys
 # Accessibility/Input Monitoring grants to the signature: a real cert
@@ -170,14 +140,6 @@ if [ "$SIGN_IDENTITY" != "-" ] \
         && [ -n "${ALWAYS_NOTARIZE_APPLE_ID:-}" ] \
         && [ -n "${ALWAYS_NOTARIZE_APP_PWD:-}" ]; then
     echo "Notarizing app..."
-
-    if /usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" \
-            "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null \
-            | grep -q "REPLACE_WITH_BASE64_EDDSA_PUBLIC_KEY"; then
-        echo "✗ Info.plist still contains the Sparkle SUPublicEDKey placeholder."
-        echo "  Replace with the real EdDSA public key before publishing — see docs/RELEASE.md."
-        exit 1
-    fi
 
     ZIP_PATH="${APP_NAME}.zip"
     ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_PATH"

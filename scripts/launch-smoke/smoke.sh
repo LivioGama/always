@@ -19,7 +19,7 @@ cp "$SRC/Contents/MacOS/always-capture" "$SRC/Contents/MacOS/always-preview-asr"
 cp "$SRC/Contents/Info.plist" "$APP/Contents/Info.plist"; P="$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable always-smoked" -c "Set :CFBundleName AlwaysSmoke" "$P"
 /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$P" 2>/dev/null || /usr/libexec/PlistBuddy -c "Set :LSUIElement true" "$P"
-for k in SUFeedURL SUPublicEDKey SUEnableAutomaticChecks SUScheduledCheckInterval CFBundleURLTypes; do /usr/libexec/PlistBuddy -c "Delete :$k" "$P" 2>/dev/null; done
+for k in CFBundleURLTypes; do /usr/libexec/PlistBuddy -c "Delete :$k" "$P" 2>/dev/null; done
 codesign --force --deep --sign "Always Local Signing" --identifier com.always.v3 "$APP" >/dev/null 2>&1 || { echo "sign failed"; exit 1; }
 stop_smoke() {
   # Only processes inside the scratch AlwaysSmoke.app — can never match prod.

@@ -235,7 +235,7 @@ jobs:
           path: |
             Always/.build
             ~/Library/Caches/org.swift.swiftpm
-          key: ${{ runner.os }}-swiftpm-${{ hashFiles('Always/Package.swift', 'Always/Package.resolved') }}
+          key: ${{ runner.os }}-swiftpm-${{ hashFiles('Always/Package.swift') }}
           restore-keys: |
             ${{ runner.os }}-swiftpm-
 

@@ -177,6 +177,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             exit(0)
         }
         installKeepAliveWindow()
+        // Subscribe before the first connect so the daemon's initial
+        // `UpdateAvailable` frame is not missed (the menu item needs it even
+        // if Settings is never opened).
+        MainActor.assumeIsolated { _ = UpdateService.shared }
         StateMonitor.shared.beginBootstrap()
         StateMonitor.shared.connectToDaemon()
     }

@@ -137,7 +137,9 @@ always config set groq_api_key <your-groq-key>
 always run
 ```
 
-**Manual downloads:** every installer and package (`.tar.gz`, `.deb`, `.rpm`, `.zip`), each with its `.sha256`, is on [Releases](https://github.com/LivioGama/always/releases/latest).
+**Manual downloads:** every installer and package (`.tar.gz`, `.deb`, `.rpm`, `.zip`), each with its `.sha256` and a [minisign](https://jedisct1.github.io/minisign/) `.minisig` signature, is on [Releases](https://github.com/LivioGama/always/releases/latest). The public key is [`resources/update-signing.pub`](resources/update-signing.pub).
+
+**Updating:** Always tells you when a newer version exists and never installs it by itself. Run `always update` (`always update --check` only reports: exit code 10 means an update is available). It downloads the release, verifies every file against the signing key built into the app, then installs it. On Linux, a `.deb` or `.rpm` install is updated this way from a terminal (it asks for `sudo`); the macOS app also offers an **Install update** button.
 
 **Build from source (macOS):** needs Rust and Xcode 26 (older SDKs build without on-device Apple speech). No Homebrew, no SoX: everything Always needs ships inside the app.
 
@@ -174,7 +176,7 @@ On macOS, everything lives in one Settings window, opened from the menu bar:
 - **No telemetry, no analytics, no account.**
 - **On-device by default** — on macOS 26+, Apple's speech engine transcribes on your Mac.
 - **Groq only if you add a key** — audio goes to Groq when it's your speech engine, and transcript text when Groq does the clean-up pass. Without a key nothing is sent; the daemon only opens an empty warm-up connection to `api.groq.com` at startup.
-- **Other traffic** — update checks against GitHub Releases (macOS) and one-time model downloads.
+- **Other traffic** — on every OS, an update check: a plain request to GitHub Releases when the daemon starts and then once a day, which sends nothing about you (just a `User-Agent` with the app version) and only tells you a newer version exists. Turn it off with `always config set update_check false` or `ALWAYS_UPDATE_CHECK=0`. Plus one-time model downloads.
 - **Your voiceprint stays local** — in `~/Library/Application Support/always/voiceprint.json`, never uploaded.
 - **Transcripts stay out of the logs** in release builds, unless you opt in with `ALWAYS_LOG_TRANSCRIPTS=1`.
 - **Your API key** is stored in Always's local database (not the Keychain) or read from `GROQ_API_KEY`, and is never written to logs.
