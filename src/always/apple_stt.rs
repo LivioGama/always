@@ -17,6 +17,8 @@ struct AppleSttResponse {
 
 unsafe extern "C" {
     fn is_apple_stt_available() -> c_int;
+    fn apple_stt_default_capable() -> c_int;
+    fn apple_stt_prepare(lang: *const c_char, timeout_secs: c_int) -> c_int;
     fn transcribe_wav_with_apple_stt(
         wav_path: *const c_char,
         lang: *const c_char,
@@ -41,6 +43,46 @@ unsafe extern "C" {
 /// authorized on this device and build.
 pub fn check_availability() -> bool {
     unsafe { is_apple_stt_available() == 1 }
+}
+
+/// True when Apple's on-device engine may be the default for a user who
+/// never picked a backend: SpeechAnalyzer present (macOS 26+) and Speech
+/// Recognition not refused.
+pub fn default_capable() -> bool {
+    unsafe { apple_stt_default_capable() == 1 }
+}
+
+/// Outcome of [`prepare`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrepareOutcome {
+    AlreadyInstalled,
+    Installed,
+    UnsupportedLocale,
+    DownloadFailed,
+    TimedOut,
+    NeedsMacos26,
+    /// SpeechTranscriber is unavailable on this hardware; the on-device
+    /// legacy dictation model serves (nothing to install).
+    LegacyOnDevice,
+}
+
+/// Install the on-device speech model for `lang` (None = current locale)
+/// ahead of the first utterance, blocking up to `timeout_secs`. Download
+/// progress goes to the Apple STT log.
+pub fn prepare(lang: Option<&str>, timeout_secs: i32) -> PrepareOutcome {
+    let lang_cstr = lang
+        .filter(|l| !l.is_empty())
+        .and_then(|l| CString::new(l).ok());
+    let ptr = lang_cstr.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
+    match unsafe { apple_stt_prepare(ptr, timeout_secs) } {
+        0 => PrepareOutcome::AlreadyInstalled,
+        1 => PrepareOutcome::Installed,
+        -1 => PrepareOutcome::UnsupportedLocale,
+        -3 => PrepareOutcome::TimedOut,
+        -4 => PrepareOutcome::NeedsMacos26,
+        -5 => PrepareOutcome::LegacyOnDevice,
+        _ => PrepareOutcome::DownloadFailed,
+    }
 }
 
 /// Transcribe a WAV file using Apple's speech engine. `lang` is an optional

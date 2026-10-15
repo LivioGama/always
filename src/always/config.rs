@@ -26,6 +26,13 @@ pub const DEFAULT_SILENCE_SECS: f64 = 0.9;
 /// Ten minutes of no voice before idle auto-pause. Short values (e.g. 120s)
 /// felt like the daemon "randomly" paused during normal desk work.
 const DEFAULT_IDLE_PAUSE_SECS: u32 = 600;
+/// Post-utterance cooldown. Matches the 150 ms the Settings UI and
+/// `always config show` already present as the default (Swift
+/// `Config.defaultConfig`); the runtime used 800 ms, so a fresh install
+/// silently dropped a follow-up sentence finished inside 0.8 s of the last
+/// one. Duplicate pastes stay guarded by `PASTE_DEDUPE_MIN_WINDOW_MS` (3 s),
+/// independent of this value.
+pub const DEFAULT_COOLDOWN_MS: u32 = 150;
 
 /// Default bundle IDs excluded from mic-conflict detection — screen
 /// recording apps that hold the mic for the duration of a recording
@@ -503,7 +510,10 @@ impl AlwaysConfig {
             energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.012).clamp(0.0, 1.0),
             hear_energy_threshold: prefs.hear_energy_threshold.unwrap_or(0.001).clamp(0.0, 1.0),
             onset_ms: 60,
-            cooldown_ms: prefs.stt_cooldown_ms.unwrap_or(800).min(5000),
+            cooldown_ms: prefs
+                .stt_cooldown_ms
+                .unwrap_or(DEFAULT_COOLDOWN_MS)
+                .min(5000),
             log_path: log_path_from_preferences(&prefs),
             post_processor,
             project_root,
@@ -607,7 +617,7 @@ impl Default for AlwaysConfig {
             energy_threshold: 0.012,
             hear_energy_threshold: 0.001,
             onset_ms: 60,
-            cooldown_ms: 800,
+            cooldown_ms: DEFAULT_COOLDOWN_MS,
             log_path: default_log_path(),
             post_processor: None,
             project_root: detect_project_root(),
@@ -878,7 +888,7 @@ fn default_log_path() -> PathBuf {
 }
 
 /// Resolve the active STT backend from the prefs DB, with env override.
-/// Order: `ALWAYS_TRANSCRIBER` env var → DB pref → default Groq.
+/// Order: `ALWAYS_TRANSCRIBER` env var → DB pref → [`default_transcriber_backend`].
 /// An invalid stored value falls back to Groq with a warning rather
 /// than refusing to start the daemon.
 fn resolve_transcriber_backend(prefs: &Preferences) -> TranscriberBackendChoice {
@@ -892,6 +902,20 @@ fn resolve_transcriber_backend(prefs: &Preferences) -> TranscriberBackendChoice 
             Ok(parsed) => return parsed,
             Err(e) => tracing::warn!(stored, error = %e, "ignoring_invalid_transcriber_backend"),
         }
+    }
+    default_transcriber_backend()
+}
+
+/// Backend for a user who never picked one. Apple's on-device engine when
+/// it can serve (macOS 26+ SpeechAnalyzer, Speech Recognition not refused):
+/// no API key, nothing leaves the Mac, lowest latency — the configuration
+/// the app is tuned on. Otherwise Groq, as before. Not persisted, so a
+/// later grant/refusal is picked up at the next start.
+fn default_transcriber_backend() -> TranscriberBackendChoice {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if crate::always::apple_stt::default_capable() {
+        tracing::info!("transcriber_default_apple");
+        return TranscriberBackendChoice::Apple;
     }
     TranscriberBackendChoice::default()
 }

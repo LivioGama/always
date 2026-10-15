@@ -641,7 +641,7 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
             // the single source of truth for the wire format.
             let _: crate::stt_dispatch::TranscriberBackendChoice = value
                 .parse()
-                .context("transcriber_backend must be 'groq' or 'local:<model_id>'")?;
+                .context("transcriber_backend must be 'groq', 'apple' or 'local:<model_id>'")?;
         }
         "postprocess_mode" => {
             let _: crate::always::postprocess::PostprocessMode =

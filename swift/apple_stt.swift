@@ -46,6 +46,121 @@ public func isAppleSttAvailable() -> Int32 {
     return (status == .authorized || status == .notDetermined) ? 1 : 0
 }
 
+/// 1 when Apple's on-device engine can be the DEFAULT backend for a user
+/// who never chose one: SpeechAnalyzer exists (macOS 26+) and Speech
+/// Recognition has not been refused. On older macOS the legacy recognizer's
+/// file path may use Apple's servers, so it is never picked silently.
+@_cdecl("apple_stt_default_capable")
+public func appleSttDefaultCapable() -> Int32 {
+    if #available(macOS 26.0, *) {
+        let status = SFSpeechRecognizer.authorizationStatus()
+        if status == .denied || status == .restricted { return 0 }
+        // SpeechTranscriber is hardware-gated (`isAvailable` is false on
+        // e.g. virtualised Apple silicon); there the on-device legacy
+        // dictation model serves instead — still nothing leaves the Mac.
+        if SpeechTranscriber.isAvailable { return 1 }
+        return SFSpeechRecognizer(locale: Locale.current)?.supportsOnDeviceRecognition == true ? 1 : 0
+    }
+    return 0
+}
+
+/// Install the on-device SpeechTranscriber model for `lang` (nil/empty =
+/// current locale) BEFORE the first utterance. Without this the model was
+/// downloaded inside the first transcription's 12 s budget: on a fresh Mac
+/// the first sentences failed with "speech recognition timed out" while the
+/// download carried on unseen. Progress is logged every ~5%.
+/// Returns 0 = already installed, 1 = installed now, -1 = unsupported
+/// locale, -2 = download failed, -3 = timed out, -4 = needs macOS 26,
+/// -5 = SpeechTranscriber unavailable on this hardware (the on-device
+/// legacy dictation model is used; nothing to install).
+@_cdecl("apple_stt_prepare")
+public func appleSttPrepare(_ lang: UnsafePointer<CChar>?, _ timeoutSecs: Int32) -> Int32 {
+    guard #available(macOS 26.0, *) else { return -4 }
+    guard SpeechTranscriber.isAvailable else {
+        appleLog("[apple-stt] prepare: SpeechTranscriber unavailable on this Mac — on-device legacy dictation model in use")
+        return -5
+    }
+    let hint = lang.map { String(cString: $0) }.flatMap { $0.isEmpty ? nil : $0 }
+    final class Box: @unchecked Sendable { var code: Int32 = -3 }
+    let box = Box()
+    let semaphore = DispatchSemaphore(value: 0)
+    Task {
+        defer { semaphore.signal() }
+        do {
+            let locale = try await resolveAnalyzerLocale(hint)
+            let installed = await SpeechTranscriber.installedLocales
+            if installed.contains(where: { $0.identifier == locale.identifier }) {
+                appleLog("[apple-stt] prepare: model for \(locale.identifier) already installed")
+                box.code = 0
+                return
+            }
+            let transcriber = SpeechTranscriber(
+                locale: locale, transcriptionOptions: [],
+                reportingOptions: [.alternativeTranscriptions],
+                attributeOptions: [.transcriptionConfidence])
+            guard let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) else {
+                appleLog("[apple-stt] prepare: no installation request for \(locale.identifier) (installed)")
+                box.code = 0
+                return
+            }
+            appleLog("[apple-stt] prepare: downloading model for \(locale.identifier)")
+            let started = Date()
+            let progress = request.progress
+            let reporter = Task {
+                var last = -1
+                while !Task.isCancelled {
+                    let pct = Int(progress.fractionCompleted * 100)
+                    if pct / 5 != last / 5 {
+                        appleLog("[apple-stt] prepare: download \(pct)%")
+                        last = pct
+                    }
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
+            }
+            defer { reporter.cancel() }
+            try await request.downloadAndInstall()
+            appleLog(String(format: "[apple-stt] prepare: installed %@ in %.1f s", locale.identifier, Date().timeIntervalSince(started)))
+            box.code = 1
+        } catch let error as NSError where error.domain == "AlwaysAppleSTT" && error.code == 2 {
+            appleLog("[apple-stt] prepare: \(error.localizedDescription)")
+            box.code = -1
+        } catch {
+            appleLog("[apple-stt] prepare: download failed: \(error.localizedDescription)")
+            box.code = -2
+        }
+    }
+    if semaphore.wait(timeout: .now() + .seconds(Int(max(timeoutSecs, 1)))) == .timedOut {
+        appleLog("[apple-stt] prepare: still downloading after \(timeoutSecs) s")
+        return -3
+    }
+    return box.code
+}
+
+/// The SpeechTranscriber locale for a language hint (nil = current locale),
+/// shared by transcription and `apple_stt_prepare` so both pick — and
+/// install — the same model.
+@available(macOS 26.0, *)
+private func resolveAnalyzerLocale(_ langHint: String?) async throws -> Locale {
+    let hint = langHint?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let wanted = hint.isEmpty ? Locale.current : Locale(identifier: hint)
+    let supported = await SpeechTranscriber.supportedLocales
+    let normalized = wanted.identifier.components(separatedBy: "@").first ?? wanted.identifier
+    let wantedLanguage = wanted.language.languageCode?.identifier
+    let languageMatches = supported.filter {
+        $0.language.languageCode?.identifier == wantedLanguage && wantedLanguage != nil
+    }
+    guard
+        let locale = supported.first(where: { $0.identifier == normalized })
+            ?? languageMatches.first(where: { $0.identifier.hasSuffix("_US") })
+            ?? languageMatches.first
+    else {
+        throw NSError(
+            domain: "AlwaysAppleSTT", code: 2,
+            userInfo: [NSLocalizedDescriptionKey: "unsupported locale \(wanted.identifier)"])
+    }
+    return locale
+}
+
 /// SpeechAnalyzer + SpeechTranscriber path (macOS 26+). SpeechTranscriber is
 /// Apple's newest, most accurate on-device engine (~4x lower WER than the
 /// legacy SFSpeechRecognizer model) and the fastest path measured here
@@ -61,33 +176,7 @@ private func transcribeWithSpeechAnalyzer(
     langHint: String?,
     phrases: [String]
 ) async throws -> (text: String, confidence: Float) {
-    let hint = langHint?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    let wanted = hint.isEmpty ? Locale.current : Locale(identifier: hint)
-
-    let supported = await SpeechTranscriber.supportedLocales
-    appleLog("[apple-stt] supported locales: \(supported.map { $0.identifier })")
-    // Locale.current can carry a region-override subtag (e.g.
-    // "en_US@rg=chzzzz") that never appears in supportedLocales — compare on
-    // the base identifier. For a language-only match prefer the <lang>_US
-    // variant (best-trained English model) over an arbitrary sibling.
-    let normalized = wanted.identifier.components(separatedBy: "@").first ?? wanted.identifier
-    let wantedLanguage = wanted.language.languageCode?.identifier
-    let languageMatches = supported.filter {
-        $0.language.languageCode?.identifier == wantedLanguage && wantedLanguage != nil
-    }
-    guard
-        let locale = supported.first(where: { $0.identifier == normalized })
-            ?? languageMatches.first(where: { $0.identifier.hasSuffix("_US") })
-            ?? languageMatches.first
-    else {
-        throw NSError(
-            domain: "AlwaysAppleSTT",
-            code: 2,
-            userInfo: [
-                NSLocalizedDescriptionKey: "unsupported locale \(wanted.identifier)"
-            ]
-        )
-    }
+    let locale = try await resolveAnalyzerLocale(langHint)
 
     // .alternativeTranscriptions gives per-segment hypotheses we can rescore
     // against the vocabulary; .transcriptionConfidence attributes each run
@@ -210,8 +299,21 @@ private func transcribeWithLegacyRecognizer(
     recognizer.queue = callbackQueue
 
     let req = SFSpeechURLRecognitionRequest(url: fileURL)
-    // contextualStrings only works with cloud recognition.
-    req.requiresOnDeviceRecognition = false
+    // contextualStrings only works with cloud recognition — except on
+    // macOS 26+, where this path only runs because SpeechTranscriber is
+    // unavailable on the hardware and Apple's engine is the DEFAULT for
+    // users who never opted into anything: keep that on-device.
+    if #available(macOS 26.0, *) {
+        req.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
+    } else {
+        req.requiresOnDeviceRecognition = false
+    }
+    // Sentence punctuation: endpointing reads the final terminator to
+    // decide the speaker is done (`classify_pause_text`). Without it every
+    // legacy transcript looked mid-sentence and the silence window doubled
+    // (measured on a fresh macOS 26 VM: all 11 utterances "MidSentence",
+    // ~2.1 s from end of speech to text).
+    if #available(macOS 13.0, *) { req.addsPunctuation = true }
     if !phrases.isEmpty {
         req.contextualStrings = phrases
     }
@@ -304,7 +406,7 @@ public func transcribeWavWithAppleStt(
         return responsePtr
     }
 
-    if #available(macOS 26.0, *) {
+    if #available(macOS 26.0, *), SpeechTranscriber.isAvailable {
         let semaphore = DispatchSemaphore(value: 0)
         final class ResultBox: @unchecked Sendable {
             var text: String?
@@ -485,6 +587,7 @@ final class AppleSttStreamSession: @unchecked Sendable {
         // entire path local: nothing about unverified audio ever leaves
         // the machine.
         req.requiresOnDeviceRecognition = true
+        if #available(macOS 13.0, *) { req.addsPunctuation = true }  // see transcribeWithLegacyRecognizer
         if !phrases.isEmpty {
             req.contextualStrings = phrases
         }

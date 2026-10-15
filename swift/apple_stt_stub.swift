@@ -10,6 +10,16 @@ public func isAppleSttAvailable() -> Int32 {
     return 0
 }
 
+@_cdecl("apple_stt_default_capable")
+public func appleSttDefaultCapable() -> Int32 {
+    return 0
+}
+
+@_cdecl("apple_stt_prepare")
+public func appleSttPrepare(_ lang: UnsafePointer<CChar>?, _ timeoutSecs: Int32) -> Int32 {
+    return -4
+}
+
 @_cdecl("transcribe_wav_with_apple_stt")
 public func transcribeWavWithAppleStt(
     _ wavPath: UnsafePointer<CChar>,

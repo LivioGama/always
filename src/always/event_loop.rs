@@ -167,6 +167,26 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         })
         .expect("spawn transcriber-init thread");
 
+    // Apple backend: install the on-device speech model now, in the
+    // background, instead of inside the first utterance's transcription
+    // budget (a fresh Mac lost its first sentences to "speech recognition
+    // timed out" while the model downloaded). No-op when installed.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if cfg.transcriber_backend.is_apple() {
+        let lang = (cfg.lang != "auto" && !cfg.lang.is_empty()).then(|| cfg.lang.clone());
+        let _ = std::thread::Builder::new()
+            .name("apple-model-prepare".into())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                let outcome = crate::always::apple_stt::prepare(lang.as_deref(), 900);
+                tracing::info!(
+                    outcome = ?outcome,
+                    secs = started.elapsed().as_secs_f32(),
+                    "apple_speech_model_prepare"
+                );
+            });
+    }
+
     // Now do the expensive operations after UDS is accepting connections
     let active = active_placeholder;
 
@@ -431,7 +451,36 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
 /// matching on the anyhow error chain since the STT layer surfaces opaque strings.
 fn classify_transcription_error(err: &anyhow::Error) -> (&'static str, String) {
     let s = format!("{err:#}").to_lowercase();
-    if s.contains("401")
+    // Local causes first: they used to fall through to the Groq wording
+    // below ("Network error reaching Groq" for an Apple engine timeout,
+    // "Transcription failed" for a missing permission), which told a new
+    // user nothing they could act on.
+    if s.contains("siri and dictation are disabled") {
+        (
+            "dictation_disabled",
+            "Turn on Dictation: System Settings → Keyboard → Dictation".to_string(),
+        )
+    } else if s.contains("speech recognition not authorized") {
+        (
+            "speech_permission",
+            "Allow Speech Recognition for Always: System Settings → Privacy & Security".to_string(),
+        )
+    } else if s.contains("unsupported locale") {
+        (
+            "language",
+            "Your language isn't supported by Apple's on-device engine".to_string(),
+        )
+    } else if s.contains("speech recognition timed out") {
+        (
+            "apple_timeout",
+            "Speech engine timed out — its language model may still be downloading".to_string(),
+        )
+    } else if s.contains("microphone capture") || s.contains("no input device") {
+        (
+            "microphone",
+            "No audio from the microphone — check System Settings → Privacy & Security → Microphone".to_string(),
+        )
+    } else if s.contains("401")
         || s.contains("unauthorized")
         || s.contains("invalid api key")
         || s.contains("invalid_api_key")
@@ -1646,6 +1695,36 @@ fn print_banner(cfg: &AlwaysConfig) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn local_failures_get_actionable_messages_not_groq_wording() {
+        let cases = [
+            (
+                "Apple STT failed: Siri and Dictation are disabled",
+                "dictation_disabled",
+            ),
+            (
+                "Apple STT failed: speech recognition not authorized",
+                "speech_permission",
+            ),
+            ("Apple STT failed: unsupported locale xx_XX", "language"),
+            (
+                "Apple STT failed: speech recognition timed out",
+                "apple_timeout",
+            ),
+            (
+                "microphone capture failed: '/x/always-capture' produced no audio",
+                "microphone",
+            ),
+            ("Groq returned 401 Unauthorized", "auth"),
+            ("error sending request: connection refused", "network"),
+        ];
+        for (msg, kind) in cases {
+            let err = anyhow::anyhow!(msg.to_string());
+            assert_eq!(super::classify_transcription_error(&err).0, kind, "{msg}");
+        }
+    }
+
     // Pure-logic tests for the speech pipeline (classifier, dictation
     // merge, cooldown window, localization seam) live in
     // `super::speech_action::tests` — they were extracted alongside
