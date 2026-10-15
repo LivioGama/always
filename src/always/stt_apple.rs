@@ -52,23 +52,37 @@ impl Transcriber for AppleTranscriber {
         let phrases = context_phrases();
         let result = {
             let _guard = APPLE_STT_MUTEX.lock().unwrap();
-            crate::always::apple_stt::transcribe_wav(&temp_path, self.language.as_deref(), &phrases)
-                .map_err(|e| SttError::Other(anyhow::anyhow!("Apple STT failed: {e}")))
+            crate::always::apple_stt::transcribe_wav_scored(
+                &temp_path,
+                self.language.as_deref(),
+                &phrases,
+            )
+            .map_err(|e| SttError::Other(anyhow::anyhow!("Apple STT failed: {e}")))
         };
 
         let _ = std::fs::remove_file(&temp_path);
 
-        let text = result?;
+        let scored = result?;
+        let text = scored.text;
         if text.is_empty() {
             tracing::warn!(language = ?self.language, "Apple STT returned empty text");
         } else {
-            tracing::info!(language = ?self.language, "Apple STT result: {}", text);
+            tracing::info!(
+                language = ?self.language,
+                confidence = scored.confidence.unwrap_or(-1.0),
+                "Apple STT result: {}",
+                text
+            );
         }
         Ok(TranscriptionResult {
             text: text.trim().to_string(),
             duration: 0.0,
             language: self.language.clone().unwrap_or_default(),
             segments: vec![],
+            evidence: crate::stt::RecognitionEvidence {
+                confidence: scored.confidence,
+                ..Default::default()
+            },
         })
     }
 
@@ -92,8 +106,13 @@ impl Transcriber for AppleTranscriber {
 /// biasing. Default tech terms are merged with every canonical glossary term;
 /// the engine only boosts, never rewrites, so the full glossary is safe to
 /// include. Capped at 100 phrases (Apple's documented budget).
-fn context_phrases() -> Vec<String> {
+pub fn context_phrases() -> Vec<String> {
     const DEFAULTS: &[&str] = &[
+        // The assistant's name: the recognizer hears "Irish" / "IRS" for it
+        // at the start of an utterance. Defaults, not glossary: the glossary's
+        // fuzzy matcher would rewrite "Irish" mid-sentence too.
+        "Iris",
+        "Hey Iris",
         "Claude Code",
         "Claude",
         "Codex",

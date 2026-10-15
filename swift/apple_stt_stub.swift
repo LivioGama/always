@@ -10,6 +10,16 @@ public func isAppleSttAvailable() -> Int32 {
     return 0
 }
 
+@_cdecl("apple_stt_default_capable")
+public func appleSttDefaultCapable() -> Int32 {
+    return 0
+}
+
+@_cdecl("apple_stt_prepare")
+public func appleSttPrepare(_ lang: UnsafePointer<CChar>?, _ timeoutSecs: Int32) -> Int32 {
+    return -4
+}
+
 @_cdecl("transcribe_wav_with_apple_stt")
 public func transcribeWavWithAppleStt(
     _ wavPath: UnsafePointer<CChar>,
@@ -17,7 +27,7 @@ public func transcribeWavWithAppleStt(
     _ phrases: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<AppleSttResponse> {
     let responsePtr = ResponsePointer.allocate(capacity: 1)
-    responsePtr.initialize(to: AppleSttResponse(text: nil, success: 0, error_message: nil))
+    responsePtr.initialize(to: AppleSttResponse(text: nil, success: 0, error_message: nil, confidence: -1))
 
     let msg = "Apple STT not available in this build (SDK requirement not met)."
     responsePtr.pointee.error_message = strdup(msg)
@@ -38,4 +48,61 @@ public func freeAppleSttResult(_ response: UnsafeMutablePointer<AppleSttResponse
     }
 
     response.deallocate()
+}
+
+// ---- Streaming recognition: unavailable in stub builds ----
+// `apple_stt_stream_start` returns NULL, so the daemon never holds a session
+// handle and falls back to the file path; the remaining entry points exist
+// only so the Rust side links against older SDKs.
+
+@_cdecl("apple_stt_stream_start")
+public func appleSttStreamStart(
+    _ lang: UnsafePointer<CChar>?,
+    _ phrases: UnsafePointer<CChar>?
+) -> UnsafeMutableRawPointer? {
+    return nil
+}
+
+@_cdecl("apple_stt_stream_set_callback")
+public func appleSttStreamSetCallback(
+    _ handle: UnsafeMutableRawPointer,
+    _ cb: apple_stt_partial_cb?,
+    _ ctx: UnsafeMutableRawPointer?
+) {}
+
+@_cdecl("apple_stt_stream_feed")
+public func appleSttStreamFeed(
+    _ handle: UnsafeMutableRawPointer,
+    _ samples: UnsafePointer<Int16>,
+    _ count: Int32
+) {}
+
+@_cdecl("apple_stt_stream_partial")
+public func appleSttStreamPartial(
+    _ handle: UnsafeMutableRawPointer,
+    _ seen: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    return nil
+}
+
+@_cdecl("apple_stt_stream_finish")
+public func appleSttStreamFinish(
+    _ handle: UnsafeMutableRawPointer,
+    _ timeoutMs: Int32
+) -> UnsafeMutablePointer<CChar>? {
+    return nil
+}
+
+@_cdecl("apple_stt_stream_outcome")
+public func appleSttStreamOutcome(_ handle: UnsafeMutableRawPointer) -> Int32 {
+    return 3
+}
+
+@_cdecl("apple_stt_stream_free")
+public func appleSttStreamFree(_ handle: UnsafeMutableRawPointer?) {}
+
+@_cdecl("free_apple_stt_string")
+public func freeAppleSttString(_ ptr: UnsafeMutablePointer<CChar>?) {
+    guard let ptr else { return }
+    free(ptr)
 }

@@ -451,6 +451,15 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                 "postprocess_provider: {}",
                 prefs.postprocess_provider.as_deref().unwrap_or("groq")
             );
+            println!(
+                "postprocess_mode: {}",
+                always::always::postprocess::resolve_mode(
+                    prefs.postprocess_mode.as_deref(),
+                    prefs.postprocess_enabled,
+                    prefs.postprocess_provider.as_deref(),
+                )
+            );
+            println!("capture_aec: {}", prefs.capture_aec.unwrap_or(true));
             #[cfg(target_os = "macos")]
             println!(
                 "apple_intelligence_available: {}",

@@ -82,5 +82,7 @@ pub fn schedule(rt: &Handle, delay_ms: u32) {
 }
 
 fn press_return_now() -> anyhow::Result<()> {
+    // The pasted text is being submitted: voice edits must not touch it.
+    super::voice_edit::note_committed();
     super::paste::press_return()
 }

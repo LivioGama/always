@@ -216,13 +216,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // links the user to System Settings. We deliberately do NOT
         // open modal alerts at launch — the user just sees the banner
         // and can act when convenient.
+        //
+        // First run: onboarding walks through each permission one card at
+        // a time, so nothing is requested here. Firing them all at launch
+        // put the microphone prompt plus TWO System Settings panes
+        // (Accessibility, Input Monitoring) on top of the welcome window
+        // before the user had read a word.
         let perms = PermissionsManager.shared
-        perms.requestMicrophoneIfNeeded()
-        perms.requestAccessibilityIfNeeded()
-        // Input Monitoring gates the daemon's global-hotkey tap (listen-only
-        // CGEventTap). Requested from the GUI so "Always" appears in the list
-        // and the prompt fires — the daemon's own request never surfaces it.
-        perms.requestInputMonitoringIfNeeded()
+        if OnboardingCompletion.isComplete {
+            perms.requestMicrophoneIfNeeded()
+            perms.requestAccessibilityIfNeeded()
+            // Input Monitoring gates the daemon's global-hotkey tap
+            // (listen-only CGEventTap). Requested from the GUI so "Always"
+            // appears in the list and the prompt fires — the daemon's own
+            // request never surfaces it.
+            perms.requestInputMonitoringIfNeeded()
+        }
 
         let cli = cliService
         // Connect immediately — UDS retries until the socket is live. Daemon

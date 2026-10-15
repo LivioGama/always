@@ -342,7 +342,28 @@ pub fn build_transcriber(
 ) -> Result<Arc<dyn Transcriber>> {
     match &cfg.transcriber_backend {
         TranscriberBackendChoice::Groq => {
-            Ok(wrap_with_local_fallback(build_groq(cfg)?, cfg, registry))
+            // A Groq selection with no key must never leave the daemon with
+            // NO transcriber: the boot placeholder then blocks every
+            // utterance for 30 s and fails — during that window the audio
+            // pipe overruns, speech is discarded, and the app reads as
+            // deaf (observed live: 150 CoreAudio overruns + 124 dropped
+            // utterances in one session). Degrade to on-device Apple STT
+            // instead.
+            match build_groq(cfg) {
+                Ok(t) => Ok(wrap_with_local_fallback(t, cfg, registry)),
+                Err(groq_err) => match build_apple(cfg) {
+                    Ok(t) => {
+                        tracing::warn!(
+                            error = %groq_err,
+                            "groq_unavailable_degraded_to_apple"
+                        );
+                        Ok(t)
+                    }
+                    Err(apple_err) => Err(groq_err.context(format!(
+                        "Groq unavailable and Apple STT fallback failed: {apple_err}"
+                    ))),
+                },
+            }
         }
         TranscriberBackendChoice::Apple => build_apple(cfg),
         TranscriberBackendChoice::Local { model_id } => {
@@ -354,7 +375,21 @@ pub fn build_transcriber(
                     model = %model_id,
                     "local model not downloaded, falling back to remote Groq"
                 );
-                return Ok(wrap_with_local_fallback(build_groq(cfg)?, cfg, registry));
+                return match build_groq(cfg) {
+                    Ok(t) => Ok(wrap_with_local_fallback(t, cfg, registry)),
+                    Err(groq_err) => match build_apple(cfg) {
+                        Ok(t) => {
+                            tracing::warn!(
+                                error = %groq_err,
+                                "groq_unavailable_degraded_to_apple"
+                            );
+                            Ok(t)
+                        }
+                        Err(apple_err) => Err(groq_err.context(format!(
+                            "Groq unavailable and Apple STT fallback failed: {apple_err}"
+                        ))),
+                    },
+                };
             }
             build_local(cfg, registry, &info)
         }

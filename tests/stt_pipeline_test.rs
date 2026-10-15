@@ -81,6 +81,7 @@ fn make_result(text: &str) -> TranscriptionResult {
         duration: 0.0,
         language: "en".to_string(),
         segments: Vec::new(),
+        ..Default::default()
     }
 }
 

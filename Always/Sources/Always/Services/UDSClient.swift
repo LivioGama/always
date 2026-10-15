@@ -19,7 +19,22 @@ enum DaemonEventType: String, Codable {
     case transcribingStopped = "TranscribingStopped"
     case transcriptChunk = "TranscriptChunk"
     case transcriptFinal = "TranscriptFinal"
+    // Consume mode: the final above was parked, not pasted (daemon `held.rs`).
+    // Decoded so the frame never counts as a decode failure; the GUI ignores it.
+    case transcriptHeld = "TranscriptHeld"
+    // Voice edit result / Iris rewrite handoff (daemon `voice_edit.rs`).
+    // Strings only; decoded so it never counts as a decode failure.
+    case voiceEdit = "VoiceEdit"
     case transcriptionInterim = "TranscriptionInterim"
+    // Live preview heard before "My Voice" verified the speaker: shown
+    // immediately but DIMMED (decision 2026-10-14). Strings only.
+    case transcriptionInterimPending = "TranscriptionInterimPending"
+    // ~20 Hz speaking-loudness meter (numeric payload). Consumed by Iris's
+    // notch; the GUI decodes it only so it never counts as a decode failure.
+    case voiceLevel = "VoiceLevel"
+    // A "My Voice"-rejected utterance kept recoverable ("paste anyway?").
+    // Strings only; the GUI currently ignores it (Iris offers the prompt).
+    case transcriptRejected = "TranscriptRejected"
     case paused = "Paused"
     case resumed = "Resumed"
     // Quiet pair: state-only updates from focus-driven per-app rules.
@@ -387,6 +402,9 @@ struct DaemonEvent: Codable {
         case .voiceProfileStatus:
             voiceProfileStatus = try container.decodeIfPresent(
                 VoiceProfileStatusData.self, forKey: .data)
+        case .voiceLevel:
+            // Numeric payload; nothing in the GUI reads it.
+            break
         default:
             // Fall-through path: text-bearing or empty events. Keep using
             // the loose dict so existing call sites (e.g. transcript chunk
@@ -1033,6 +1051,19 @@ class UDSClient: ObservableObject {
         } catch {
             logger.error("sendCommandWithData(\(commandType)) encode failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Toggle daemon setup mode (bypasses per-app pause rules).
+    /// Used by the onboarding flow so users can test voice typing
+    /// without having to add an app to the resumed-app allowlist first.
+    func sendSetupMode(enabled: Bool) {
+        guard isConnected else {
+            self.logger.warning("sendSetupMode(\(enabled)) skipped — not connected")
+            return
+        }
+        // Manual JSON construction — Any doesn't conform to Encodable.
+        let line = "{\"type\":\"SetupMode\",\"data\":{\"enabled\":\(enabled ? "true" : "false")}}\n"
+        writeLine(line, commandType: "SetupMode")
     }
 
     /// Single funnel for socket writes. Logs success/failure consistently

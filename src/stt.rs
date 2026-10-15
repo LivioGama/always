@@ -141,6 +141,43 @@ pub struct TranscriptionResult {
     pub language: String,
     #[serde(default)]
     pub segments: Vec<TranscriptionSegment>,
+    /// Engine-side signals about whether the audio was speech in the
+    /// recognizer's language at all. Never sent over the wire.
+    #[serde(skip)]
+    pub evidence: RecognitionEvidence,
+}
+
+/// How an utterance's live (streaming) recognizer session ended.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LiveStreamOutcome {
+    /// No live session ran for this utterance (other backend, chunked
+    /// utterance, or the engine was unavailable) — no signal.
+    #[default]
+    NotRun,
+    /// Session ended without a verdict (timed out before any result).
+    Unknown,
+    /// The live recognizer produced words.
+    Heard,
+    /// The live recognizer finished cleanly having recognized NO word of
+    /// its locale's language across the whole utterance.
+    NoWords,
+    /// Recognition failed — says nothing about the audio.
+    Failed,
+}
+
+/// Already-computed engine signals the foreign-speech gate
+/// (`hallucination::foreign_speech`) reads. All optional: an engine that
+/// does not report one simply leaves it at its default (= no signal).
+#[derive(Debug, Clone, Default)]
+pub struct RecognitionEvidence {
+    /// Mean per-word acoustic confidence in `[0, 1]` (Apple
+    /// SpeechTranscriber `.transcriptionConfidence`).
+    pub confidence: Option<f32>,
+    /// Outcome of the live Apple streaming session for this utterance.
+    pub live_stream: LiveStreamOutcome,
+    /// Final text of the English-only Parakeet preview engine, when it ran
+    /// for this utterance (`Some("")` = it ran and heard nothing).
+    pub preview_text: Option<String>,
 }
 
 /// Streaming transcription result with progressive updates.
@@ -544,6 +581,7 @@ pub mod mock {
                 duration: 1.0,
                 language: "en".to_string(),
                 segments: vec![],
+                ..Default::default()
             }));
         }
         pub fn invocations(&self) -> u32 {

@@ -138,17 +138,15 @@ struct PermissionsBanner: View {
                 perms.openSystemSettings(for: .microphone)
             }
         case .accessibility:
-            // Always-try-prompt first; if the system already showed it
-            // once, this is a cheap no-op and we just deep-link.
+            // requestAccessibilityIfNeeded now opens System Settings
+            // directly (the AX prompt can't fire without accessibility),
+            // so just call it once.
             _ = perms.requestAccessibilityIfNeeded()
-            if !perms.accessibilityStatus.isOK {
-                perms.openSystemSettings(for: .accessibility)
-            }
         case .inputMonitoring:
-            // Surface "Always" in the Input Monitoring list (fires the
-            // one-time prompt), then deep-link so the user can enable it.
+            // Register "Always" in the Input Monitoring list and open
+            // the system setting pane so the user can toggle it ON.
+            // The banner will auto-refresh (1.5s after focus returns).
             _ = perms.requestInputMonitoringIfNeeded()
-            perms.openSystemSettings(for: .inputMonitoring)
         }
     }
 

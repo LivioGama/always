@@ -481,7 +481,40 @@ fn handle_per_app_pause_hotkey(bundle: &str) {
 /// EFFECTIVE_PAUSED stale at true because `set_idle_auto_paused` is a
 /// plain setter that does not recompute.
 #[cfg(target_os = "macos")]
+/// Minimum interval between two master-pause toggles. A physical press
+/// that reaches the handler twice (two taps, key repeat) toggles once;
+/// the second call inside this window is swallowed. 150ms sits well
+/// below deliberate rapid tapping (~4-5 Hz ceiling ≈ 200ms+) while
+/// swallowing the 2-4ms double-delivery window.
+const MASTER_PAUSE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
+#[cfg(target_os = "macos")]
+static MASTER_PAUSE_LAST_FIRE: parking_lot::Mutex<Option<std::time::Instant>> =
+    parking_lot::Mutex::new(None);
+
+#[cfg(target_os = "macos")]
 fn handle_master_pause_hotkey() {
+    // Re-entrancy guard: a physical press must produce ONE logical toggle.
+    // The master mute is reachable through independent event sources (the
+    // flagsChanged Fn tap, and historically rdev's KeyPress(Function) arm);
+    // any second source firing ~2ms later re-toggles and cancels the first,
+    // which the user experiences as "mutes and immediately unmutes". The
+    // source bug is fixed at each arm, but the invariant lives HERE so a
+    // future tap or listener regression can never double-toggle again.
+    {
+        let mut last = MASTER_PAUSE_LAST_FIRE.lock();
+        if let Some(t) = *last {
+            let elapsed = t.elapsed();
+            if elapsed < MASTER_PAUSE_DEBOUNCE {
+                tracing::debug!(
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "master_pause_debounced"
+                );
+                return;
+            }
+        }
+        *last = Some(std::time::Instant::now());
+    }
+
     let (effective, changed) = if pause::is_any_global_pause() || pause::is_idle_auto_paused() {
         pause::set_idle_auto_paused(false);
         pause::mark_voice_seen();
@@ -732,19 +765,31 @@ pub fn start_keyboard_listener() -> Result<()> {
                     CMD_HELD_EVENT.store(false, Ordering::Relaxed);
                 }
                 // NOTE: Fn/Globe key is NOT handled here. rdev's CGEventTap
-                // forwards keyDown/keyUp but macOS delivers Fn as
-                // flagsChanged, which rdev drops. A dedicated CGEventTap
-                // (`start_fn_listener`) watches flagsChanged for keycode 63
-                // and is started only when Fn is the configured master-pause
-                // shortcut. Handling Fn here too caused two bugs:
-                //   1. When Fn was NOT the configured shortcut, every Fn
-                //      press (i.e. every function-key use under macOS's
-                //      default "Use F1-F12 as standard function keys = off")
-                //      toggled the master mute unintentionally.
-                //   2. When Fn WAS the configured shortcut, both this
-                //      handler and the Fn CGEventTap fired on a single press,
-                //      double-toggling and cancelling out.
+                // forwards keyDown/keyUp; macOS ALSO surfaces Fn as
+                // flagsChanged, which rdev drops — but on some macOS
+                // versions rdev delivers Fn as KeyPress(Function) too. A
+                // dedicated CGEventTap (`start_fn_listener`) watches
+                // flagsChanged for keycode 63 and is started only when Fn
+                // is the configured master-pause shortcut. It is the single
+                // owner: handling Fn here as well double-fired the master
+                // toggle (two `hotkey_pause_chord` events 2-4ms apart —
+                // mutes then instantly unmutes), and when Fn was NOT the
+                // configured shortcut, every Fn press toggled the mute
+                // unintentionally.
                 EventType::KeyPress(ref key) => {
+                    // Fn/Globe is owned EXCLUSIVELY by the flagsChanged tap
+                    // (`start_fn_listener`). On this macOS version rdev ALSO
+                    // delivers Fn as KeyPress(Function); handling it here too
+                    // meant every press ran the master toggle twice, ~2ms
+                    // apart (measured: two `hotkey_pause_chord` events per
+                    // `fn_key_pressed`, master True then False) — the key
+                    // muted and instantly unmuted itself. This arm is the
+                    // double-fire, whatever the old comment above claimed.
+                    if matches!(key, Key::Function) {
+                        return;
+                    }
+                    // Any user keystroke ends "right after a paste".
+                    crate::always::voice_edit::note_user_input();
                     let Some(name) = key_to_shortcut_name(key) else {
                         if pause::countdown_active() {
                             pause::countdown_request_cancel();
@@ -905,6 +950,10 @@ pub fn start_keyboard_listener() -> Result<()> {
                     }
                 }
                 _ => {
+                    if matches!(event.event_type, EventType::ButtonPress(_)) {
+                        // A click can move the caret: no longer "right after a paste".
+                        crate::always::voice_edit::note_user_input();
+                    }
                     if pause::countdown_active()
                         && matches!(event.event_type, EventType::ButtonPress(_))
                     {

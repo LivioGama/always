@@ -127,6 +127,11 @@ fn compute_effective() -> bool {
     if IDLE_AUTO_PAUSED.load(Ordering::Relaxed) {
         return true;
     }
+    // Setup mode: bypass per-app pause rules so onboarding users can test
+    // voice typing without adding an app to the resumed-app allowlist first.
+    if SETUP_MODE.load(Ordering::Relaxed) {
+        return false;
+    }
     crate::always::per_app::effective_paused_for_current_app()
 }
 
@@ -248,6 +253,20 @@ pub fn is_any_global_pause() -> bool {
     is_master_paused() || is_audio_output_paused() || is_mic_conflict_paused()
 }
 
+/// Setup mode: when true, bypasses per-app pause rules so the daemon
+/// allows recording and pasting while onboarding is visible. This lets
+/// users test voice typing during setup without needing a resumed app.
+/// Cleared when onboarding is dismissed.
+static SETUP_MODE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_setup_mode(v: bool) {
+    SETUP_MODE.store(v, Ordering::Relaxed);
+}
+
+pub fn is_setup_mode() -> bool {
+    SETUP_MODE.load(Ordering::Relaxed)
+}
+
 /// Should the capture loop stop recording/transcribing right now?
 ///
 /// Outside consume mode this is just `is_paused()`. In consume mode
@@ -330,6 +349,60 @@ pub fn set_dictation_origin_app(bundle_id: Option<String>) {
 
 pub fn dictation_origin_app() -> Option<String> {
     DICTATION_ORIGIN_APP.lock().clone()
+}
+
+/// What happens to an utterance that is ready to paste while Always is
+/// (effectively) paused — i.e. a pause began after its capture started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PausedUtterance {
+    /// Master is the only active source and focus never left the app the
+    /// words were dictated into: paste as normal (§7, I3 binds on capture
+    /// time).
+    Paste,
+    /// Any other pause (per-app, mic conflict, audio output, idle, no-GUI,
+    /// or master with focus moved): never typed automatically, but kept in
+    /// the recoverable ring and announced as `TranscriptRejected` so the
+    /// words are never lost.
+    KeepRecoverable,
+}
+
+/// Paste-time verdict for a finished utterance while paused. `origin` is
+/// the app the utterance began in, `focus_now` the live focused app; an
+/// unknown origin fails closed to [`PausedUtterance::KeepRecoverable`].
+pub fn paused_utterance_verdict(origin: Option<&str>, focus_now: Option<&str>) -> PausedUtterance {
+    if paused_only_by_master() && origin.is_some_and(|o| focus_now == Some(o)) {
+        PausedUtterance::Paste
+    } else {
+        PausedUtterance::KeepRecoverable
+    }
+}
+
+/// Active pause sources as a stable `+`-joined tag for logs
+/// (`"master"`, `"per_app"`, `"mic_conflict+master"`, …). Empty string
+/// when nothing is pausing.
+pub fn active_pause_sources() -> String {
+    let mut out: Vec<&str> = Vec::new();
+    if MASTER_PAUSED.load(Ordering::Relaxed) {
+        out.push("master");
+    }
+    if MIC_CONFLICT_PAUSED.load(Ordering::Relaxed) {
+        out.push("mic_conflict");
+    }
+    if AUDIO_OUTPUT_PAUSED.load(Ordering::Relaxed) {
+        out.push("audio_output");
+    }
+    if NO_GUI_PAUSED.load(Ordering::Relaxed) {
+        out.push("no_gui");
+    }
+    if IDLE_AUTO_PAUSED.load(Ordering::Relaxed) {
+        out.push("idle");
+    }
+    if !SETUP_MODE.load(Ordering::Relaxed)
+        && crate::always::per_app::effective_paused_for_current_app()
+    {
+        out.push("per_app");
+    }
+    out.join("+")
 }
 
 pub fn set_last_filtered(text: impl Into<String>) {
@@ -585,6 +658,8 @@ mod tests {
         AUDIO_OUTPUT_PAUSED.store(false, Ordering::Relaxed);
         MIC_CONFLICT_PAUSED.store(false, Ordering::Relaxed);
         IDLE_AUTO_PAUSED.store(false, Ordering::Relaxed);
+        NO_GUI_PAUSED.store(false, Ordering::Relaxed);
+        SETUP_MODE.store(false, Ordering::Relaxed);
         EFFECTIVE_PAUSED.store(true, Ordering::Relaxed);
         CONSUME_MODE_LEASES.store(0, Ordering::Relaxed);
         *CURRENT_APP.lock() = None;
@@ -929,5 +1004,183 @@ mod tests {
         set_current_app(Some("com.example.editor".into()));
         assert!(recompute_effective().0, "fresh app, no allowlist — paused");
         assert!(should_gate_capture());
+    }
+
+    // ---- Pause mid-utterance: the words are never lost -----------------
+    //
+    // Each test starts an utterance in an allowlisted app with nothing
+    // pausing (capture legitimately began), lets one pause source fire
+    // mid-utterance, then runs the exact paste-time decision
+    // `event_loop::handle_speech` runs: `paused_utterance_verdict` →
+    // paste, or `rejected::keep_withheld` (ring + `TranscriptRejected`).
+
+    const ORIGIN: &str = "com.example.editor";
+
+    /// Utterance begins: unpaused, focused in ORIGIN.
+    fn begin_utterance() {
+        reset_pause_state_for_test();
+        focus_allowlisted_app(ORIGIN);
+        set_dictation_origin_app(Some(ORIGIN.to_string()));
+        assert!(!is_paused(), "capture must begin unpaused");
+    }
+
+    /// Run the withheld branch and prove the text is recoverable: it is in
+    /// the ring, `PasteRejected`-takeable by id, and was announced as
+    /// `TranscriptRejected` with the `-1.000` sentinel score.
+    fn assert_kept_recoverable(text: &str, expect_sources: &str) {
+        assert!(is_paused());
+        assert_eq!(active_pause_sources(), expect_sources);
+        let mut rx = crate::always::event::global_broadcaster().subscribe();
+        let id = crate::always::rejected::keep_withheld(text, &active_pause_sources())
+            .expect("non-empty text is kept");
+        assert!(
+            crate::always::rejected::list()
+                .iter()
+                .any(|r| r.id == id && r.text == text),
+            "withheld utterance must be in the recoverable ring"
+        );
+        let mut announced = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let crate::always::event::DaemonEvent::TranscriptRejected {
+                id: eid,
+                text: t,
+                score,
+                ..
+            } = ev
+                && t == text
+            {
+                assert_eq!(eid, id.to_string());
+                assert_eq!(score, "-1.000");
+                announced = true;
+            }
+        }
+        assert!(
+            announced,
+            "TranscriptRejected must be broadcast for {expect_sources}"
+        );
+        let taken = crate::always::rejected::take(id).expect("recoverable by id");
+        assert_eq!(taken.text, text);
+    }
+
+    #[test]
+    fn master_pause_mid_utterance_still_pastes() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        begin_utterance();
+        set_paused(true);
+        assert_eq!(active_pause_sources(), "master");
+        assert_eq!(
+            paused_utterance_verdict(Some(ORIGIN), Some(ORIGIN)),
+            PausedUtterance::Paste,
+            "user mute mid-sentence must not throw away what was already said"
+        );
+    }
+
+    #[test]
+    fn master_pause_mid_utterance_focus_moved_is_recoverable() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        let _ring = crate::always::rejected::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        begin_utterance();
+        set_paused(true);
+        assert_eq!(
+            paused_utterance_verdict(Some(ORIGIN), Some("com.example.other")),
+            PausedUtterance::KeepRecoverable
+        );
+        // Unknown origin fails closed — still recoverable, never lost.
+        assert_eq!(
+            paused_utterance_verdict(None, Some(ORIGIN)),
+            PausedUtterance::KeepRecoverable
+        );
+        assert_kept_recoverable("master pause then focus moved", "master");
+    }
+
+    #[test]
+    fn per_app_pause_mid_utterance_is_recoverable_not_pasted() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        let _ring = crate::always::rejected::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        begin_utterance();
+        // Focus moves to an excluded app (not on the allowlist) mid-utterance.
+        let (effective, _) = set_current_app_and_recompute(Some("com.apple.Notes".into()));
+        assert!(effective);
+        assert_eq!(
+            paused_utterance_verdict(Some(ORIGIN), Some("com.apple.Notes")),
+            PausedUtterance::KeepRecoverable,
+            "must never be typed into an excluded app"
+        );
+        assert_kept_recoverable("Man, my sleep is being really disturbed", "per_app");
+    }
+
+    #[test]
+    fn mic_conflict_pause_mid_utterance_is_recoverable_not_pasted() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        let _ring = crate::always::rejected::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        begin_utterance();
+        set_mic_conflict_paused(true);
+        // Even with focus unchanged: I7 forbids the paste.
+        assert_eq!(
+            paused_utterance_verdict(Some(ORIGIN), Some(ORIGIN)),
+            PausedUtterance::KeepRecoverable
+        );
+        assert_kept_recoverable("words before the other app took the mic", "mic_conflict");
+    }
+
+    #[test]
+    fn audio_output_idle_and_no_gui_pause_mid_utterance_are_recoverable() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        let _ring = crate::always::rejected::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        type Source = fn();
+        let cases: [(&str, Source); 3] = [
+            ("audio_output", || {
+                set_audio_output_paused(true);
+            }),
+            ("idle", || {
+                set_idle_auto_paused(true);
+                recompute_effective();
+            }),
+            ("no_gui", || {
+                set_no_gui_paused(true);
+            }),
+        ];
+        for (tag, fire) in cases {
+            begin_utterance();
+            fire();
+            assert_eq!(
+                paused_utterance_verdict(Some(ORIGIN), Some(ORIGIN)),
+                PausedUtterance::KeepRecoverable,
+                "{tag}"
+            );
+            assert_kept_recoverable(&format!("spoken before {tag} pause"), tag);
+        }
+    }
+
+    #[test]
+    fn master_plus_watchdog_mid_utterance_is_recoverable() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        let _ring = crate::always::rejected::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        begin_utterance();
+        set_paused(true);
+        set_mic_conflict_paused(true);
+        assert_eq!(
+            paused_utterance_verdict(Some(ORIGIN), Some(ORIGIN)),
+            PausedUtterance::KeepRecoverable
+        );
+        assert_kept_recoverable("mute and call at once", "master+mic_conflict");
+    }
+
+    #[test]
+    fn keep_withheld_ignores_blank_text() {
+        let _ring = crate::always::rejected::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        assert!(crate::always::rejected::keep_withheld("   ", "per_app").is_none());
     }
 }

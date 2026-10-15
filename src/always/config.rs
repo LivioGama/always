@@ -26,6 +26,13 @@ pub const DEFAULT_SILENCE_SECS: f64 = 0.9;
 /// Ten minutes of no voice before idle auto-pause. Short values (e.g. 120s)
 /// felt like the daemon "randomly" paused during normal desk work.
 const DEFAULT_IDLE_PAUSE_SECS: u32 = 600;
+/// Post-utterance cooldown. Matches the 150 ms the Settings UI and
+/// `always config show` already present as the default (Swift
+/// `Config.defaultConfig`); the runtime used 800 ms, so a fresh install
+/// silently dropped a follow-up sentence finished inside 0.8 s of the last
+/// one. Duplicate pastes stay guarded by `PASTE_DEDUPE_MIN_WINDOW_MS` (3 s),
+/// independent of this value.
+pub const DEFAULT_COOLDOWN_MS: u32 = 150;
 
 /// Default bundle IDs excluded from mic-conflict detection — screen
 /// recording apps that hold the mic for the duration of a recording
@@ -191,6 +198,17 @@ pub struct AlwaysConfig {
     /// mid-sentence (see `vad.rs::looks_mid_sentence`). Default on;
     /// DB pref `stt_adaptive_silence`.
     pub adaptive_silence_enabled: bool,
+    /// Silence (seconds) a pause must reach to end the utterance when the
+    /// words before it end on a hesitation — a filler ("uh", "um", "you
+    /// know"), a trailing connector ("and", "the", "to"), a trailing comma
+    /// or the recogniser's cut-off "...". A complete sentence still ends at
+    /// `silence_secs`; this only holds a cut the speaker is plainly not
+    /// done with (`vad.rs::classify_pause_text`). Default 2.5 s: on
+    /// 2026-10-14 the user resumed after a hesitation-ending fragment within
+    /// 1.21, 1.44, 1.63 and 2.43 s (log upper bounds); a 10.4 s gap was a
+    /// new thought and still ends at 2.5 s.
+    /// Env `ALWAYS_HESITATION_SILENCE_SECS` (0-10).
+    pub hesitation_silence_secs: f64,
     /// "My Voice" speaker-verification gate. Active only when BOTH
     /// this flag is on AND a complete voiceprint is enrolled — so the
     /// default experience is unchanged until the user opts in via
@@ -253,6 +271,13 @@ pub struct AlwaysConfig {
     /// cadence is much slower than the streaming-engine preview loop
     /// (see `LIVE_PREVIEW_INTERVAL_MS` in vad.rs). Default on.
     pub stt_live_preview: bool,
+    /// Enforce the foreign-speech LOW-CONFIDENCE rule (mean Apple word
+    /// confidence < 0.40 → not pasted, kept recoverable). Default false:
+    /// log-only (`foreign_speech_would_reject`) — dictation is never
+    /// swallowed on an untuned cut. DB pref
+    /// `foreign_speech_confidence_enforce`, env
+    /// `ALWAYS_FOREIGN_SPEECH_CONFIDENCE_ENFORCE`.
+    pub foreign_speech_confidence_enforce: bool,
     /// Bundle IDs excluded from mic-conflict detection (apps that hold
     /// the mic but shouldn't pause Always, e.g. screen recorders).
     /// User-configurable via `always config set
@@ -400,6 +425,29 @@ impl AlwaysConfig {
             effective_postprocess.provider = provider;
         }
 
+        // The single "Postprocess mode" setting (SPEC §9/§10). Explicit
+        // `postprocess_mode` wins; otherwise it is migrated from the legacy
+        // enabled+provider pair. The LLM only runs in the LLM modes — and
+        // even then never blocks the paste (event_loop).
+        let postprocess_mode = crate::always::postprocess::resolve_mode(
+            prefs.postprocess_mode.as_deref(),
+            prefs.postprocess_enabled,
+            prefs.postprocess_provider.as_deref(),
+        );
+        crate::always::postprocess::set_mode(postprocess_mode);
+        effective_postprocess.grammar_correction_enabled = postprocess_mode.uses_llm();
+        match postprocess_mode {
+            crate::always::postprocess::PostprocessMode::Apple => {
+                effective_postprocess.provider = PostprocessProvider::Apple;
+            }
+            crate::always::postprocess::PostprocessMode::Groq => {
+                effective_postprocess.provider = PostprocessProvider::Groq;
+            }
+            _ => {}
+        }
+        tracing::info!(mode = %postprocess_mode, "postprocess_mode_resolved");
+        crate::always::audio::set_aec_pref(prefs.capture_aec);
+
         // Apple Intelligence postprocess adds ~2-4s and can over-correct,
         // but it is fully on-device and private — the user's provider pref
         // decides. No forced disable: Apple+Apple is a valid combination
@@ -439,6 +487,11 @@ impl AlwaysConfig {
             // allowing absurdly tiny windows that split normal phrases.
             silence_secs: resolve_silence_secs(silence_secs, &prefs),
             adaptive_silence_enabled: prefs.stt_adaptive_silence.unwrap_or(true),
+            hesitation_silence_secs: resolve_hesitation_silence_secs(
+                std::env::var("ALWAYS_HESITATION_SILENCE_SECS")
+                    .ok()
+                    .as_deref(),
+            ),
             speaker_gate_enabled: prefs.speaker_gate_enabled.unwrap_or(false),
             speaker_gate_threshold: prefs
                 .speaker_gate_threshold
@@ -457,7 +510,10 @@ impl AlwaysConfig {
             energy_threshold: prefs.stt_energy_threshold.unwrap_or(0.012).clamp(0.0, 1.0),
             hear_energy_threshold: prefs.hear_energy_threshold.unwrap_or(0.001).clamp(0.0, 1.0),
             onset_ms: 60,
-            cooldown_ms: prefs.stt_cooldown_ms.unwrap_or(800).min(5000),
+            cooldown_ms: prefs
+                .stt_cooldown_ms
+                .unwrap_or(DEFAULT_COOLDOWN_MS)
+                .min(5000),
             log_path: log_path_from_preferences(&prefs),
             post_processor,
             project_root,
@@ -497,6 +553,7 @@ impl AlwaysConfig {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or_default(),
             stt_live_preview: resolve_stt_live_preview(&prefs),
+            foreign_speech_confidence_enforce: resolve_foreign_speech_confidence_enforce(&prefs),
             mic_conflict_exclusion_bundles: resolve_mic_conflict_exclusion_bundles(&prefs),
         };
 
@@ -552,6 +609,7 @@ impl Default for AlwaysConfig {
             // (Pause tolerance picker).
             silence_secs: DEFAULT_SILENCE_SECS,
             adaptive_silence_enabled: true,
+            hesitation_silence_secs: DEFAULT_HESITATION_SILENCE_SECS,
             speaker_gate_enabled: false,
             speaker_gate_threshold: DEFAULT_SPEAKER_GATE_THRESHOLD,
             auto_enter: true,
@@ -559,7 +617,7 @@ impl Default for AlwaysConfig {
             energy_threshold: 0.012,
             hear_energy_threshold: 0.001,
             onset_ms: 60,
-            cooldown_ms: 800,
+            cooldown_ms: DEFAULT_COOLDOWN_MS,
             log_path: default_log_path(),
             post_processor: None,
             project_root: detect_project_root(),
@@ -577,6 +635,7 @@ impl Default for AlwaysConfig {
             transcript_stream_enabled: false,
             audible_status_sound: StatusSoundSetting::default(),
             stt_live_preview: true,
+            foreign_speech_confidence_enforce: false,
             mic_conflict_exclusion_bundles: DEFAULT_MIC_CONFLICT_EXCLUSION_BUNDLES
                 .iter()
                 .map(|s| s.to_string())
@@ -599,6 +658,33 @@ fn resolve_stt_live_preview(prefs: &Preferences) -> bool {
             _ => None,
         })
         .unwrap_or(true)
+}
+
+/// Default hesitation hold — see `AlwaysConfig::hesitation_silence_secs`.
+pub const DEFAULT_HESITATION_SILENCE_SECS: f64 = 2.5;
+
+/// `ALWAYS_HESITATION_SILENCE_SECS` → clamped 0-10 s; unset/invalid → default.
+fn resolve_hesitation_silence_secs(env: Option<&str>) -> f64 {
+    env.and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite())
+        .map(|v| v.clamp(0.0, 10.0))
+        .unwrap_or(DEFAULT_HESITATION_SILENCE_SECS)
+}
+
+/// Resolve the foreign-speech low-confidence enforcement. Order: DB pref →
+/// `ALWAYS_FOREIGN_SPEECH_CONFIDENCE_ENFORCE` env var → default OFF.
+fn resolve_foreign_speech_confidence_enforce(prefs: &Preferences) -> bool {
+    if let Some(saved) = prefs.foreign_speech_confidence_enforce {
+        return saved;
+    }
+    std::env::var("ALWAYS_FOREIGN_SPEECH_CONFIDENCE_ENFORCE")
+        .ok()
+        .and_then(|s| match s.to_lowercase().as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 /// Resolve the mic-conflict exclusion bundle IDs. Order: DB pref →
@@ -802,7 +888,7 @@ fn default_log_path() -> PathBuf {
 }
 
 /// Resolve the active STT backend from the prefs DB, with env override.
-/// Order: `ALWAYS_TRANSCRIBER` env var → DB pref → default Groq.
+/// Order: `ALWAYS_TRANSCRIBER` env var → DB pref → [`default_transcriber_backend`].
 /// An invalid stored value falls back to Groq with a warning rather
 /// than refusing to start the daemon.
 fn resolve_transcriber_backend(prefs: &Preferences) -> TranscriberBackendChoice {
@@ -816,6 +902,20 @@ fn resolve_transcriber_backend(prefs: &Preferences) -> TranscriberBackendChoice 
             Ok(parsed) => return parsed,
             Err(e) => tracing::warn!(stored, error = %e, "ignoring_invalid_transcriber_backend"),
         }
+    }
+    default_transcriber_backend()
+}
+
+/// Backend for a user who never picked one. Apple's on-device engine when
+/// it can serve (macOS 26+ SpeechAnalyzer, Speech Recognition not refused):
+/// no API key, nothing leaves the Mac, lowest latency — the configuration
+/// the app is tuned on. Otherwise Groq, as before. Not persisted, so a
+/// later grant/refusal is picked up at the next start.
+fn default_transcriber_backend() -> TranscriberBackendChoice {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if crate::always::apple_stt::default_capable() {
+        tracing::info!("transcriber_default_apple");
+        return TranscriberBackendChoice::Apple;
     }
     TranscriberBackendChoice::default()
 }
@@ -838,6 +938,22 @@ fn resolve_silence_secs(cli_silence_secs: Option<f64>, prefs: &Preferences) -> f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hesitation_silence_resolves_env_with_clamp_and_default() {
+        assert_eq!(
+            resolve_hesitation_silence_secs(None),
+            DEFAULT_HESITATION_SILENCE_SECS
+        );
+        assert_eq!(resolve_hesitation_silence_secs(Some("1.5")), 1.5);
+        assert_eq!(resolve_hesitation_silence_secs(Some("99")), 10.0);
+        assert_eq!(resolve_hesitation_silence_secs(Some("-1")), 0.0);
+        assert_eq!(
+            resolve_hesitation_silence_secs(Some("nope")),
+            DEFAULT_HESITATION_SILENCE_SECS
+        );
+        assert_eq!(AlwaysConfig::default().hesitation_silence_secs, 2.5);
+    }
 
     #[test]
     fn explicit_cli_silence_overrides_saved_preference() {

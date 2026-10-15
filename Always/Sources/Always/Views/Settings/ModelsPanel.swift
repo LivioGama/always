@@ -122,49 +122,74 @@ struct ModelsPanel: View {
         config.postprocessProvider == "apple"
     }
 
+    /// One explicit Postprocess mode (SPEC §9/§10). Changing it restarts
+    /// the daemon, like the provider switch it replaces.
     private var postprocessSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Postprocessing").font(.headline)
 
-            Picker("Provider", selection: $config.postprocessProvider) {
-                Text("Apple Intelligence (on-device)").tag("apple")
-                Text("Groq (cloud)").tag("groq")
-            }
-            .pickerStyle(.menu)
-            .onChange(of: config.postprocessProvider) { oldValue, newValue in
-                if oldValue != newValue {
-                    savePostprocessProvider()
+            Picker("Postprocess mode", selection: postprocessModeBinding) {
+                Text("Always Fast").tag("fast")
+                Text("Apple Intelligence").tag("apple")
+                if config.resolvedPostprocessMode == "groq" {
+                    Text("Groq (cloud)").tag("groq")
                 }
+                Text("Off").tag("off")
             }
-            .help("Which engine fixes grammar and glossary terms after transcription.")
+            .pickerStyle(.segmented)
+            .help("How a transcript is cleaned up before it is pasted.")
 
-            Toggle(
-                "Smart Postprocess (LLM grammar + glossary fixes)",
-                isOn: $config.postprocessEnabled
-            )
-            .disabled(usesGroqWithoutKey)
+            Text(postprocessModeDescription)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(postprocessModeLatency)
+                .font(.caption2)
+                .foregroundColor(.secondary.opacity(0.8))
 
-            if usesGroqWithoutKey {
-                Text("Enter and save a Groq API key above to enable smart postprocessing.")
+            if config.resolvedPostprocessMode == "apple" && !config.appleIntelligenceAvailable {
+                Text("Apple Intelligence isn't ready on this Mac yet. Enable it and download the language model in System Settings → Apple Intelligence & Siri. Until then Always Fast corrections are used.")
                     .font(.caption)
                     .foregroundColor(.orange)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if usesApple && !config.appleIntelligenceAvailable {
-                Text("Apple Intelligence isn't ready on this Mac yet. Enable it and download the language model in System Settings → Apple Intelligence & Siri, then the on-device model will run automatically.")
+            } else if config.resolvedPostprocessMode == "groq" && !hasGroqKey {
+                Text("Enter and save a Groq API key above. Until then Always Fast corrections are used.")
                     .font(.caption)
                     .foregroundColor(.orange)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if usesApple {
-                Text("Runs on-device using Apple Intelligence — no API key needed (macOS 15+). Fixes grammar and applies your glossary automatically.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                Text("Runs after each transcription — fixes grammar and applies your glossary automatically.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    private var postprocessModeBinding: Binding<String> {
+        Binding(
+            get: { config.resolvedPostprocessMode },
+            set: { newValue in
+                guard newValue != config.resolvedPostprocessMode else { return }
+                config.postprocessMode = newValue
+                savePostprocessProvider()
+            }
+        )
+    }
+
+    private var postprocessModeDescription: String {
+        switch config.resolvedPostprocessMode {
+        case "fast":
+            return "Built-in corrector: your glossary and learned corrections, casing, stray punctuation and recognizer artifacts. No model, nothing leaves the Mac."
+        case "apple":
+            return "Always Fast first, plus Apple Intelligence on-device grammar cleanup when its result is ready by paste time. Pasting never waits for it."
+        case "groq":
+            return "Always Fast first, plus Groq cloud grammar cleanup when its result is ready by paste time. Pasting never waits for it."
+        default:
+            return "The raw transcript, with only filler words and repeated words removed."
+        }
+    }
+
+    private var postprocessModeLatency: String {
+        switch config.resolvedPostprocessMode {
+        case "fast": return "Adds about 1 ms before paste."
+        case "apple", "groq": return "Adds about 1 ms before paste; the model runs in the background."
+        default: return "Adds under 1 ms before paste."
         }
     }
 

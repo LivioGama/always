@@ -66,25 +66,28 @@ All shortcuts are customizable in **Settings → Shortcuts**.
 
 ## 🖥️ Installation
 
-### macOS (Apple Silicon / Intel)
+### macOS (Apple Silicon)
+
+**Download:** the signed DMG from [Releases](https://github.com/LivioGama/always/releases/latest) — open it and drag Always.app to Applications.
+
+**Or build it** (no Homebrew, no SoX — everything Always needs ships inside the app):
 
 ```bash
-# Option 1: Homebrew tap (recommended)
-brew install --cask liviogama/always/always
-
-# Option 2: Download the signed DMG from releases
-#   https://github.com/LivioGama/also/releases/latest
-#   Open the .dmg → drag Always.app to Applications
+# needs Xcode 26 (App Store) for the macOS 26 SDK
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh  # Rust
+git clone https://github.com/LivioGama/always.git && cd always
+cargo build --release --bin always
+ALWAYS_BUILD_PROFILE=release ALWAYS_SWIFT_CONFIGURATION=release ./Always/build.sh   # installs /Applications/Always.app
 ```
 
-**After first install (macOS):**
+**First launch** walks you through everything — nothing to set up beforehand:
 
-1. Open **System Settings → Privacy & Security**.
-2. Grant **Microphone** access to Always.
-3. Grant **Input Monitoring** and **Accessibility** access in **System Settings → Privacy & Security**.
-4. Launch Always from **Applications** or **Launchpad**.
+1. **Microphone**, **Accessibility** (to type into other apps) and, on macOS 26+, **Speech Recognition** — each with a button that opens the right prompt or System Settings pane.
+2. On macOS 26+ the on-device speech model downloads in the background, with progress. Transcription runs on your Mac with Apple's engine: no account, no API key. (A Groq key in Settings → Models switches to the cloud.)
+3. **My Voice** (optional): three short samples.
+4. **Pick the apps Always types into.** Every other app stays paused until you turn it on (menu bar → *Resume Always for …*).
 
-**System Requirements:** macOS 14 (Sonoma) or later, 4 GB RAM minimum.
+**System Requirements:** Apple Silicon, macOS 14 (Sonoma) or later; macOS 26 (Tahoe) or later for on-device transcription without an API key. 4 GB RAM minimum.
 
 ---
 

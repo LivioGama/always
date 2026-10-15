@@ -79,6 +79,11 @@ struct Config: Codable {
     /// Post-processing LLM provider: "groq" (remote, needs API key) or
     /// "apple" (on-device Apple Intelligence, keyless). Default "groq".
     var postprocessProvider: String
+    /// The single Postprocess mode (daemon `postprocess_mode`): "fast",
+    /// "apple", "groq" or "off". Optional so Config JSON written before it
+    /// existed still decodes; nil = derive from the legacy pair exactly as
+    /// the daemon does (`resolvedPostprocessMode`).
+    var postprocessMode: String?
     /// Whether Apple's on-device language model is ready on this machine.
     /// The daemon reports it via `config show`; when false, selecting the
     /// Apple provider can't actually run. Defaults true so older daemons
@@ -117,6 +122,7 @@ struct Config: Codable {
         shortcutMasterPause: "ctrl+alt+shift+p",
         postprocessEnabled: true,
         postprocessProvider: "groq",
+        postprocessMode: nil,
         appleIntelligenceAvailable: true,
         perAppSettingsJson: nil,
         idlePauseSecs: 600,
@@ -124,6 +130,14 @@ struct Config: Codable {
         lang: nil,
         micConflictExclusionBundles: #"["net.telestream.screenflow10","pl.maketheweb.cleanshotx"]"#
     )
+
+    /// Mirrors `postprocess::resolve_mode` in the daemon: explicit mode
+    /// wins; Smart Postprocess on → its provider; off → Always Fast.
+    var resolvedPostprocessMode: String {
+        if let mode = postprocessMode { return mode }
+        if !postprocessEnabled { return "fast" }
+        return postprocessProvider == "apple" ? "apple" : "groq"
+    }
 
     static func fromCLI(output: String) -> Config? {
         var config = defaultConfig
@@ -203,6 +217,10 @@ struct Config: Codable {
                     // avoid persisting a value the daemon can't parse.
                     if ["groq", "apple"].contains(value) {
                         config.postprocessProvider = value
+                    }
+                case "postprocess_mode":
+                    if ["fast", "apple", "groq", "off"].contains(value) {
+                        config.postprocessMode = value
                     }
                 case "apple_intelligence_available":
                     config.appleIntelligenceAvailable = (value == "true" || value == "1")

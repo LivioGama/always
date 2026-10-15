@@ -77,7 +77,23 @@ fn is_daemon_run_command(command: &str) -> bool {
 /// is prod. Without this gate a dev daemon startup would "reconcile" the
 /// production daemon as a duplicate and kill it.
 fn same_instance(command: &str) -> bool {
-    command.contains("Always Dev.app") == (config::instance() == "dev")
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    same_instance_for(config::instance(), &exe, command)
+}
+
+/// Pure form of [`same_instance`]. Sandbox instances (anything but prod and
+/// dev, e.g. the launch smoke test's `ALWAYS_INSTANCE=smoke`) only ever
+/// match their OWN executable — 2026-10-14: the previous rule treated a
+/// sandbox like prod and the sandbox daemon's startup sweep killed the
+/// production daemon. Prod in turn never matches a sandbox bundle.
+fn same_instance_for(instance: &str, own_exe: &str, command: &str) -> bool {
+    match instance {
+        "dev" => command.contains("Always Dev.app"),
+        "prod" => !command.contains("Always Dev.app") && !command.contains("AlwaysSmoke.app"),
+        _ => !own_exe.is_empty() && command.starts_with(own_exe),
+    }
 }
 
 fn process_table() -> Vec<(u32, String)> {
@@ -196,9 +212,13 @@ pub fn socket_is_live(sock: &std::path::Path) -> bool {
 
 /// The OTHER instance's UDS socket: prod↔dev.
 pub fn peer_socket_path() -> Option<PathBuf> {
+    // Only the prod↔dev pair hands off. Any other instance (a sandbox such
+    // as the launch smoke test's `ALWAYS_INSTANCE=smoke`) must never pause
+    // or resume the user's daemons.
     let file = match config::instance() {
         "prod" => "always-dev.sock",
-        _ => "always.sock",
+        "dev" => "always.sock",
+        _ => return None,
     };
     #[cfg(target_os = "macos")]
     {
@@ -853,6 +873,26 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(pids.len(), sorted.len());
+    }
+
+    #[test]
+    fn sandbox_instance_never_matches_prod_or_dev() {
+        let prod = "/Applications/Always.app/Contents/MacOS/always-daemon run --lang auto";
+        let dev = "/Applications/Always Dev.app/Contents/MacOS/always-daemon run";
+        let smoke_exe = "/tmp/x/AlwaysSmoke.app/Contents/MacOS/always-daemon";
+        let smoke = format!("{smoke_exe} run --lang auto");
+        assert!(
+            !same_instance_for("smoke", smoke_exe, prod),
+            "sandbox must not reap prod"
+        );
+        assert!(!same_instance_for("smoke", smoke_exe, dev));
+        assert!(same_instance_for("smoke", smoke_exe, &smoke));
+        assert!(
+            !same_instance_for("prod", "", &smoke),
+            "prod must not reap a sandbox"
+        );
+        assert!(same_instance_for("prod", "", prod));
+        assert!(same_instance_for("dev", "", dev) && !same_instance_for("dev", "", prod));
     }
 
     #[test]

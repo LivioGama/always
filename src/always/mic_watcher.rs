@@ -35,15 +35,60 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Always comes back after a genuine call, which is imperceptible.
 const RESUME_FREE_POLLS: u32 = 3;
 
+/// What one poll decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MicAction {
+    None,
+    Pause,
+    Resume,
+}
+
+/// Pause/resume state machine, separated from the Core Audio probe so the
+/// "every auto-pause auto-resumes" guarantee is testable.
+///
+/// The probe result per poll is `Some(true)` (mic taken), `Some(false)`
+/// (free) or `None` (probe failed). A failed probe while paused counts as a
+/// FREE poll: a probe that keeps erroring must never strand Always paused
+/// with no way back except a restart. A failed probe while listening does
+/// nothing (no evidence of a conflict).
+#[derive(Debug, Default)]
+struct MicConflictState {
+    paused: bool,
+    free_polls: u32,
+}
+
+impl MicConflictState {
+    fn on_poll(&mut self, in_use: Option<bool>) -> MicAction {
+        match (self.paused, in_use) {
+            (false, Some(true)) => {
+                self.paused = true;
+                self.free_polls = 0;
+                MicAction::Pause
+            }
+            (false, _) => MicAction::None,
+            // Mic taken again — cancel any resume that was building.
+            (true, Some(true)) => {
+                self.free_polls = 0;
+                MicAction::None
+            }
+            (true, Some(false) | None) => {
+                self.free_polls += 1;
+                if self.free_polls < RESUME_FREE_POLLS {
+                    return MicAction::None;
+                }
+                self.free_polls = 0;
+                self.paused = false;
+                MicAction::Resume
+            }
+        }
+    }
+}
+
 /// Spawn the watchdog task. Lives for the daemon lifetime.
 pub fn spawn(rt: &Handle, coexisting_bundles: Vec<String>) {
     rt.spawn(async move {
         let mut monitor = MicrophoneMonitor::new(coexisting_bundles);
-        let mut paused_for_mic = false;
-        // Consecutive polls seeing a free mic while paused. Reset by any
-        // poll that finds the mic taken again, so a dictation app
-        // toggling between phrases never accumulates a resume.
-        let mut free_polls: u32 = 0;
+        let mut state = MicConflictState::default();
         let mut interval = tokio::time::interval(POLL_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -51,12 +96,38 @@ pub fn spawn(rt: &Handle, coexisting_bundles: Vec<String>) {
             // `is_microphone_in_use` is an in-process CoreAudio query
             // (microseconds; lsof subprocess only as a pre-14.4
             // fallback) — negligible for the runtime workers at 1s.
-            match monitor.is_microphone_in_use() {
-                // Mic taken again — cancel any resume that was building.
-                Ok(true) if paused_for_mic => {
-                    free_polls = 0;
+            let in_use = match monitor.is_microphone_in_use() {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!(error = %e, "microphone_check_failed");
+                    None
                 }
-                Ok(true) if !paused_for_mic => {
+            };
+            // Self-conflict watchdog: if every process we would blame is
+            // Always itself, it is never a conflict. Refuse to pause, and
+            // if already paused, resume at once (logged as an error — the
+            // probe's self-exclusion missed something).
+            let mut in_use = in_use;
+            if in_use == Some(true) || state.paused {
+                let users = monitor.get_microphone_users().unwrap_or_default();
+                if !users.is_empty() && users.iter().all(|u| crate::always::mic_monitor::label_is_self(u)) {
+                    tracing::error!(apps = ?users, paused = state.paused, "mic_conflict_self_only_ignored");
+                    in_use = Some(false);
+                    if state.paused {
+                        state.free_polls = RESUME_FREE_POLLS - 1;
+                    }
+                }
+            }
+            match state.on_poll(in_use) {
+                MicAction::None => {
+                    if state.paused && state.free_polls > 0 {
+                        tracing::debug!(
+                            free_polls = state.free_polls,
+                            "microphone_free_waiting_to_resume"
+                        );
+                    }
+                }
+                MicAction::Pause => {
                     let users = monitor.get_microphone_users().unwrap_or_default();
                     let detail = if users.is_empty() {
                         None
@@ -78,15 +149,8 @@ pub fn spawn(rt: &Handle, coexisting_bundles: Vec<String>) {
                         pause::dictation_buffer_clear();
                         event::global_broadcaster().paused();
                     }
-                    paused_for_mic = true;
                 }
-                Ok(false) if paused_for_mic => {
-                    free_polls += 1;
-                    if free_polls < RESUME_FREE_POLLS {
-                        tracing::debug!(free_polls, "microphone_free_waiting_to_resume");
-                        continue;
-                    }
-                    free_polls = 0;
+                MicAction::Resume => {
                     tracing::info!("microphone_auto_resumed");
                     if let Ok(log_path) = always_config::configured_log_path()
                         && let Ok(mut logger) = Logger::open(&log_path)
@@ -106,13 +170,89 @@ pub fn spawn(rt: &Handle, coexisting_bundles: Vec<String>) {
                             event::global_broadcaster().resumed();
                         }
                     }
-                    paused_for_mic = false;
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "microphone_check_failed");
-                }
-                _ => {}
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mic_self_only_conflict_resumes_on_next_poll() {
+        // Watchdog path: paused, and the next poll is rewritten to "free"
+        // with the resume counter primed — one poll must resume.
+        let mut st = MicConflictState::default();
+        assert_eq!(st.on_poll(Some(true)), MicAction::Pause);
+        st.free_polls = RESUME_FREE_POLLS - 1;
+        assert_eq!(st.on_poll(Some(false)), MicAction::Resume);
+        assert!(!st.paused);
+    }
+
+    #[test]
+    fn mic_pause_then_release_resumes() {
+        let mut s = MicConflictState::default();
+        assert_eq!(s.on_poll(Some(false)), MicAction::None);
+        assert_eq!(s.on_poll(Some(true)), MicAction::Pause);
+        assert_eq!(s.on_poll(Some(true)), MicAction::None, "held: stays paused");
+        for _ in 1..RESUME_FREE_POLLS {
+            assert_eq!(s.on_poll(Some(false)), MicAction::None);
+        }
+        assert_eq!(s.on_poll(Some(false)), MicAction::Resume);
+        assert!(!s.paused);
+        // A later conflict pauses again and again resumes.
+        assert_eq!(s.on_poll(Some(true)), MicAction::Pause);
+        let resumed = (0..RESUME_FREE_POLLS).any(|_| s.on_poll(Some(false)) == MicAction::Resume);
+        assert!(resumed);
+    }
+
+    #[test]
+    fn mic_flapping_dictation_app_does_not_resume_early() {
+        let mut s = MicConflictState::default();
+        s.on_poll(Some(true));
+        for _ in 0..10 {
+            for _ in 1..RESUME_FREE_POLLS {
+                assert_eq!(s.on_poll(Some(false)), MicAction::None);
+            }
+            assert_eq!(s.on_poll(Some(true)), MicAction::None);
+        }
+        assert!(s.paused);
+    }
+
+    #[test]
+    fn mic_failing_probe_never_strands_a_pause() {
+        let mut s = MicConflictState::default();
+        assert_eq!(
+            s.on_poll(None),
+            MicAction::None,
+            "error while listening: no pause"
+        );
+        assert_eq!(s.on_poll(Some(true)), MicAction::Pause);
+        let resumed = (0..RESUME_FREE_POLLS).any(|_| s.on_poll(None) == MicAction::Resume);
+        assert!(resumed, "a probe that keeps failing must still resume");
+    }
+
+    #[test]
+    fn mic_tap_only_helper_never_pauses() {
+        // End to end through the real classifier: an Iris process tap's
+        // aggregate is not a microphone, so the poll reports "free".
+        use crate::always::mic_monitor::{
+            InputDeviceFacts, TRANSPORT_AGGREGATE, process_counts_as_mic,
+        };
+        let tap = InputDeviceFacts {
+            transport: Some(TRANSPORT_AGGREGATE),
+            input_streams: Some(1),
+            taps: 1,
+            sub_input_streams: vec![],
+        };
+        let in_use = process_counts_as_mic(Some(&[tap]))
+            && !crate::always::mic_monitor::is_ignored_captor(Some("music-tap"), None, None, &[]);
+        let mut s = MicConflictState::default();
+        for _ in 0..20 {
+            assert_eq!(s.on_poll(Some(in_use)), MicAction::None);
+        }
+        assert!(!s.paused);
+    }
 }

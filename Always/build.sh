@@ -98,6 +98,23 @@ else
     exit 1
 fi
 
+# Echo-cancelling capture helper (replaces SoX `rec` when present; the daemon
+# falls back to `rec` if it is missing or fails to start). Rebuilt every time —
+# a single swiftc file, a few seconds.
+echo "Building capture helper (always-capture)..."
+"$APP_DIR/../capture/build.sh"
+cp "$APP_DIR/../capture/always-capture" "$APP_BUNDLE/Contents/MacOS/always-capture"
+echo "✓ Capture helper copied"
+
+# Live-preview ASR helper (Parakeet EOU 160 ms on the Neural Engine via
+# FluidAudio; preview text only, never pasted). SwiftPM, always release —
+# a debug FluidAudio is far too slow for real time. Incremental after the
+# first build (~10 min cold: fetches + compiles FluidAudio 0.17.7).
+echo "Building live-preview helper (always-preview-asr)..."
+swift build -c release --package-path "$APP_DIR/../preview-asr"
+cp "$APP_DIR/../preview-asr/.build/release/always-preview-asr" "$APP_BUNDLE/Contents/MacOS/always-preview-asr"
+echo "✓ Preview helper copied"
+
 # Bundle Sparkle.framework and add @executable_path/../Frameworks rpath for dyld.
 # Sparkle.framework is always bundled when present — the binary links it
 # via @rpath, so omitting it crashes at dyld. For dev builds the updater

@@ -79,6 +79,181 @@ impl MicrophoneMonitor {
     }
 }
 
+/// Iris's own native helpers. None of them records the microphone for
+/// dictation: `music-tap`/`caption-tap`/`hud-tap` are Core Audio *process
+/// taps* of system OUTPUT, `pcm-play` plays audio, and `sense-probe`,
+/// `focused-editable`, `life-helper` are accessibility/state probes. A
+/// process tap is consumed through a private aggregate device, which makes
+/// coreaudiod report the helper as "running input" even though it never
+/// touches a microphone (observed 2026-10-13: `microphone_auto_paused apps:
+/// music-tap`, pausing Always for 25 minutes and pre-empting a dictation).
+pub(crate) const IRIS_HELPER_BASENAMES: &[&str] = &[
+    "music-tap",
+    "caption-tap",
+    "hud-tap",
+    "translate-tap",
+    "sense-probe",
+    "focused-editable",
+    "pcm-play",
+    "life-helper",
+];
+
+/// Always's own processes by executable name: the daemon, the GUI, the
+/// recorders (`rec`/`sox`, and the echo-cancelling `always-capture` that
+/// replaces them), the live-preview recognizer, and coreaudiod itself.
+/// (2026-10-14 regression: the new `always-capture` helper was reported by
+/// LaunchServices as "Always" and the daemon paused ITSELF for a mic
+/// conflict that could never clear — dictation dead until a rollback.)
+pub(crate) const SELF_BASENAMES: &[&str] = &[
+    "always",
+    "always-daemon",
+    "always-capture",
+    "always-preview-asr",
+    "rec",
+    "sox",
+    "coreaudiod",
+];
+
+/// Is this capturing process Always itself? Matches, in order: our own pid,
+/// a direct child of ours (every helper the daemon spawns), any executable
+/// inside our own `.app` bundle, or one of [`SELF_BASENAMES`].
+pub(crate) fn is_self_captor(
+    own_pid: i32,
+    own_bundle_root: Option<&str>,
+    pid: i32,
+    ppid: Option<i32>,
+    path: Option<&str>,
+    basename: Option<&str>,
+) -> bool {
+    if pid == own_pid || ppid == Some(own_pid) {
+        return true;
+    }
+    if let (Some(root), Some(path)) = (own_bundle_root, path)
+        && path.starts_with(root)
+    {
+        return true;
+    }
+    basename.is_some_and(|b| SELF_BASENAMES.iter().any(|s| s.eq_ignore_ascii_case(b)))
+}
+
+/// `/…/Name.app/` containing `exe`, when `exe` lives in an app bundle.
+pub(crate) fn bundle_root_of(exe: &str) -> Option<String> {
+    let idx = exe.find(".app/Contents/")?;
+    Some(exe[..idx + ".app/".len()].to_string())
+}
+
+/// The running daemon's own bundle root (cached).
+pub(crate) fn own_bundle_root() -> Option<&'static str> {
+    static ROOT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| bundle_root_of(&p.to_string_lossy()))
+    })
+    .as_deref()
+}
+
+/// Labels the conflict pause reports that are really Always itself — the
+/// last line of defence if a self process ever slips past the probe (the
+/// watcher refuses to pause, or resumes at once, on these).
+pub(crate) fn label_is_self(label: &str) -> bool {
+    let l = label.trim();
+    l.eq_ignore_ascii_case("Always")
+        || l.eq_ignore_ascii_case("Always Dev")
+        || SELF_BASENAMES.iter().any(|s| s.eq_ignore_ascii_case(l))
+}
+
+/// Path fragments that identify an Iris helper binary regardless of its
+/// name: anything built under an Iris package's `native/` dir, or cached
+/// under `~/.iris/cache/`.
+const IRIS_HELPER_PATH_MARKERS: &[(&str, &str)] =
+    &[("/iris-mama/packages/", "/native/"), ("/.iris/cache/", "")];
+
+/// Does a capturing process match the ignore list? `extra` is the
+/// user's `mic_conflict_exclusion_bundles` pref; each entry matches a
+/// bundle id exactly (case-insensitive), an executable basename exactly,
+/// or — when it contains a `/` — any executable path that starts with it.
+/// Built-in Iris helpers are always ignored.
+pub(crate) fn is_ignored_captor(
+    basename: Option<&str>,
+    path: Option<&str>,
+    bundle: Option<&str>,
+    extra: &[String],
+) -> bool {
+    if let Some(name) = basename
+        && IRIS_HELPER_BASENAMES
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(name))
+    {
+        return true;
+    }
+    if let Some(path) = path
+        && IRIS_HELPER_PATH_MARKERS.iter().any(|(a, b)| {
+            path.find(a)
+                .is_some_and(|i| path[i + a.len()..].contains(b))
+        })
+    {
+        return true;
+    }
+    extra.iter().any(|entry| {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return false;
+        }
+        if entry.contains('/') {
+            return path.is_some_and(|p| p.starts_with(entry));
+        }
+        bundle.is_some_and(|b| b.eq_ignore_ascii_case(entry))
+            || basename.is_some_and(|n| n.eq_ignore_ascii_case(entry))
+    })
+}
+
+/// What coreaudiod says about one device a process runs input on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct InputDeviceFacts {
+    /// `kAudioDevicePropertyTransportType`; `None` when the query failed.
+    pub transport: Option<u32>,
+    /// Input-scope stream count; `None` when the query failed.
+    pub input_streams: Option<usize>,
+    /// `kAudioAggregateDevicePropertyTapList` length (0 when not an aggregate).
+    pub taps: usize,
+    /// Input-stream count of each ACTIVE (real) sub-device of an aggregate.
+    pub sub_input_streams: Vec<usize>,
+}
+
+/// 'grup' — `kAudioDeviceTransportTypeAggregate`.
+pub(crate) const TRANSPORT_AGGREGATE: u32 = u32::from_be_bytes(*b"grup");
+
+/// Does running input on this device mean "using a microphone"?
+///
+/// - A device with no input streams cannot capture anything.
+/// - An aggregate built only from process taps (measured on this machine,
+///   2026-10-14: transport `grup`, tap list non-empty, ACTIVE sub-device list
+///   empty) carries system OUTPUT, not a mic. It still counts if any real
+///   sub-device with input streams is aggregated alongside the tap.
+/// - Unknown facts count as a mic (fail towards the existing behaviour).
+pub(crate) fn device_counts_as_mic(d: &InputDeviceFacts) -> bool {
+    if d.input_streams == Some(0) {
+        return false;
+    }
+    if d.transport == Some(TRANSPORT_AGGREGATE)
+        && d.taps > 0
+        && d.sub_input_streams.iter().all(|&n| n == 0)
+    {
+        return false;
+    }
+    true
+}
+
+/// A process is a mic user unless every device it runs input on is
+/// provably not a microphone. An unknown/empty device list counts as a mic.
+pub(crate) fn process_counts_as_mic(devices: Option<&[InputDeviceFacts]>) -> bool {
+    match devices {
+        Some(devs) if !devs.is_empty() => devs.iter().any(device_counts_as_mic),
+        _ => true,
+    }
+}
+
 /// CoreAudio process-object probe (macOS 14.4+): asks coreaudiod which
 /// processes are actually running audio *input* right now — the same
 /// source Control Center uses for the orange-dot attribution. Catches
@@ -116,6 +291,12 @@ mod coreaudio_probe {
     const PROP_PROCESS_PID: u32 = fourcc(b"ppid"); // kAudioProcessPropertyPID
     const PROP_PROCESS_BUNDLE_ID: u32 = fourcc(b"pbid"); // kAudioProcessPropertyBundleID
     const PROP_PROCESS_IS_RUNNING_INPUT: u32 = fourcc(b"piri"); // kAudioProcessPropertyIsRunningInput
+    const PROP_PROCESS_DEVICES: u32 = fourcc(b"pdv#"); // kAudioProcessPropertyDevices
+    const SCOPE_INPUT: u32 = fourcc(b"inpt"); // kAudioObjectPropertyScopeInput
+    const PROP_DEVICE_TRANSPORT: u32 = fourcc(b"tran"); // kAudioDevicePropertyTransportType
+    const PROP_DEVICE_STREAMS: u32 = fourcc(b"stm#"); // kAudioDevicePropertyStreams
+    const PROP_AGG_TAP_LIST: u32 = fourcc(b"tap#"); // kAudioAggregateDevicePropertyTapList
+    const PROP_AGG_ACTIVE_SUBDEVICES: u32 = fourcc(b"agrp"); // kAudioAggregateDevicePropertyActiveSubDeviceList
     const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 
     #[link(name = "CoreAudio", kind = "framework")]
@@ -207,11 +388,6 @@ mod coreaudio_probe {
     /// a real conflict.
     const METERING_ONLY_BUNDLES: &[&str] = &["com.apple.Sound-Settings.extension"];
 
-    /// Our own capture chain: the daemon (`always` / `always-daemon`)
-    /// records through a spawned `rec`/`sox` child, and coreaudiod is
-    /// the audio server itself.
-    const HELPER_BASENAMES: &[&str] = &["always", "always-daemon", "rec", "sox", "coreaudiod"];
-
     fn addr(selector: u32) -> AudioObjectPropertyAddress {
         AudioObjectPropertyAddress {
             selector,
@@ -289,14 +465,93 @@ mod coreaudio_probe {
         (!s.is_empty()).then_some(s)
     }
 
-    fn pid_basename(pid: i32) -> Option<String> {
+    /// Parent pid of `pid` (None when it cannot be read).
+    fn parent_pid(pid: i32) -> Option<i32> {
+        if pid <= 0 {
+            return None;
+        }
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            )
+        };
+        (n == size).then_some(info.pbi_ppid as i32)
+    }
+
+    fn pid_path(pid: i32) -> Option<String> {
         let mut buf = [0u8; 4096];
         let len = unsafe { proc_pidpath(pid, buf.as_mut_ptr(), buf.len() as u32) };
         if len <= 0 {
             return None;
         }
-        let path = String::from_utf8_lossy(&buf[..len as usize]).into_owned();
-        path.rsplit('/').next().map(str::to_string)
+        Some(String::from_utf8_lossy(&buf[..len as usize]).into_owned())
+    }
+
+    /// Read an `AudioObjectID` array property (`None` when the query fails).
+    fn get_ids(object: u32, selector: u32, scope: u32) -> Option<Vec<u32>> {
+        let address = AudioObjectPropertyAddress {
+            selector,
+            scope,
+            element: ELEMENT_MAIN,
+        };
+        let mut size: u32 = 0;
+        let status = unsafe {
+            AudioObjectGetPropertyDataSize(object, &address, 0, std::ptr::null(), &mut size)
+        };
+        if status != 0 {
+            return None;
+        }
+        let mut ids = vec![0u32; size as usize / std::mem::size_of::<u32>()];
+        if ids.is_empty() {
+            return Some(ids);
+        }
+        let status = unsafe {
+            AudioObjectGetPropertyData(
+                object,
+                &address,
+                0,
+                std::ptr::null(),
+                &mut size,
+                ids.as_mut_ptr().cast(),
+            )
+        };
+        if status != 0 {
+            return None;
+        }
+        ids.truncate(size as usize / std::mem::size_of::<u32>());
+        Some(ids)
+    }
+
+    fn device_facts(device: u32) -> super::InputDeviceFacts {
+        let input_streams = |d: u32| get_ids(d, PROP_DEVICE_STREAMS, SCOPE_INPUT).map(|v| v.len());
+        super::InputDeviceFacts {
+            transport: get_u32(device, PROP_DEVICE_TRANSPORT),
+            input_streams: input_streams(device),
+            taps: get_ids(device, PROP_AGG_TAP_LIST, SCOPE_GLOBAL).map_or(0, |v| v.len()),
+            sub_input_streams: get_ids(device, PROP_AGG_ACTIVE_SUBDEVICES, SCOPE_GLOBAL)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|d| input_streams(d).unwrap_or(1))
+                .collect(),
+        }
+    }
+
+    /// Facts for every device `process` runs input on; `None` when
+    /// coreaudiod will not say.
+    fn process_input_devices(process: u32) -> Option<Vec<super::InputDeviceFacts>> {
+        let ids = get_ids(process, PROP_PROCESS_DEVICES, SCOPE_INPUT)?;
+        Some(
+            ids.into_iter()
+                .filter(|&d| d != 0)
+                .map(device_facts)
+                .collect(),
+        )
     }
 
     /// Process-lifetime cache of bundle id → display name.
@@ -493,16 +748,37 @@ mod coreaudio_probe {
                 continue;
             }
             let pid = get_pid(object).unwrap_or(-1);
-            if pid == own_pid {
-                continue;
-            }
-            let basename = pid_basename(pid);
-            if let Some(name) = &basename
-                && HELPER_BASENAMES.contains(&name.to_lowercase().as_str())
-            {
+            let path = pid_path(pid);
+            let basename = path
+                .as_deref()
+                .and_then(|p| p.rsplit('/').next())
+                .map(str::to_string);
+            if super::is_self_captor(
+                own_pid,
+                super::own_bundle_root(),
+                pid,
+                parent_pid(pid),
+                path.as_deref(),
+                basename.as_deref(),
+            ) {
                 continue;
             }
             let bundle = get_bundle_id(object);
+            if super::is_ignored_captor(
+                basename.as_deref(),
+                path.as_deref(),
+                bundle.as_deref(),
+                coexisting_bundles,
+            ) {
+                continue;
+            }
+            // Running "input" on nothing but a process-tap aggregate (or an
+            // input-less device) is not microphone use.
+            let devices = process_input_devices(object);
+            if !super::process_counts_as_mic(devices.as_deref()) {
+                tracing::debug!(pid, name = ?basename, "mic_probe_ignored_tap_only_input");
+                continue;
+            }
             if let Some(b) = &bundle
                 && (SYSTEM_LISTENER_BUNDLES
                     .iter()
@@ -674,7 +950,11 @@ impl MicrophoneMonitor {
                 continue;
             }
             let command_lower = command.to_lowercase();
-            if HELPER_COMMANDS.contains(&command_lower.as_str()) {
+            // lsof truncates COMMAND to 9 chars ("always-ca"), so all of
+            // Always's own helpers are matched by prefix.
+            if HELPER_COMMANDS.contains(&command_lower.as_str())
+                || command_lower.starts_with("always")
+            {
                 continue;
             }
 
@@ -863,6 +1143,176 @@ impl MicrophoneMonitor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mic_self_helpers_are_never_a_conflict() {
+        // The 2026-10-14 prod regression: the daemon's own always-capture
+        // child (bundle label "Always") paused the daemon.
+        let root = Some("/Applications/Always.app/");
+        let own = 500;
+        // by parent pid
+        assert!(super::is_self_captor(
+            own,
+            root,
+            600,
+            Some(own),
+            Some("/x/always-capture"),
+            Some("always-capture")
+        ));
+        // by bundle path even when reparented / renamed
+        assert!(super::is_self_captor(
+            own,
+            root,
+            601,
+            Some(1),
+            Some("/Applications/Always.app/Contents/MacOS/whatever"),
+            Some("whatever")
+        ));
+        // by name
+        for name in [
+            "always-capture",
+            "always-preview-asr",
+            "always-daemon",
+            "rec",
+        ] {
+            assert!(
+                super::is_self_captor(own, None, 602, Some(1), None, Some(name)),
+                "{name}"
+            );
+        }
+        // a real app is not self
+        assert!(!super::is_self_captor(
+            own,
+            root,
+            603,
+            Some(1),
+            Some("/Applications/zoom.us.app/Contents/MacOS/zoom.us"),
+            Some("zoom.us")
+        ));
+        assert_eq!(
+            super::bundle_root_of("/Applications/Always.app/Contents/MacOS/always-daemon")
+                .as_deref(),
+            Some("/Applications/Always.app/")
+        );
+        assert!(super::label_is_self("Always") && super::label_is_self("always-capture"));
+        assert!(!super::label_is_self("Zoom"));
+    }
+
+    #[test]
+    fn mic_tap_only_aggregate_is_not_a_microphone() {
+        // Facts measured 2026-10-14 for a CATap private aggregate (the
+        // shape Iris's music-tap builds): transport 'grup', tap list
+        // present, no active sub-devices.
+        let tap = super::InputDeviceFacts {
+            transport: Some(super::TRANSPORT_AGGREGATE),
+            input_streams: Some(1),
+            taps: 1,
+            sub_input_streams: vec![],
+        };
+        assert!(!super::device_counts_as_mic(&tap));
+        assert!(!super::process_counts_as_mic(Some(std::slice::from_ref(
+            &tap
+        ))));
+        // Built-in mic (measured: transport 'bltn', 1 input stream).
+        let mic = super::InputDeviceFacts {
+            transport: Some(u32::from_be_bytes(*b"bltn")),
+            input_streams: Some(1),
+            taps: 0,
+            sub_input_streams: vec![],
+        };
+        assert!(super::device_counts_as_mic(&mic));
+        assert!(super::process_counts_as_mic(Some(&[tap.clone(), mic])));
+        // A tap aggregated WITH a real input sub-device is a mic.
+        let mixed = super::InputDeviceFacts {
+            sub_input_streams: vec![1],
+            ..tap
+        };
+        assert!(super::device_counts_as_mic(&mixed));
+        // Output-only device: cannot capture.
+        let speaker = super::InputDeviceFacts {
+            transport: Some(u32::from_be_bytes(*b"bltn")),
+            input_streams: Some(0),
+            ..Default::default()
+        };
+        assert!(!super::device_counts_as_mic(&speaker));
+        // Unknown → keep counting (never weakens detection of real calls).
+        assert!(super::process_counts_as_mic(None));
+        assert!(super::process_counts_as_mic(Some(&[])));
+        assert!(super::device_counts_as_mic(
+            &super::InputDeviceFacts::default()
+        ));
+    }
+
+    #[test]
+    fn mic_iris_helpers_are_ignored() {
+        for name in [
+            "music-tap",
+            "caption-tap",
+            "sense-probe",
+            "focused-editable",
+            "pcm-play",
+        ] {
+            assert!(
+                super::is_ignored_captor(Some(name), None, None, &[]),
+                "{name}"
+            );
+        }
+        assert!(super::is_ignored_captor(
+            Some("new-thing"),
+            Some("/Users/abhi/proj/sensei/iris-mama/packages/iris-x/native/new-thing"),
+            None,
+            &[]
+        ));
+        assert!(super::is_ignored_captor(
+            Some("blob"),
+            Some("/Users/abhi/.iris/cache/abc/blob"),
+            None,
+            &[]
+        ));
+        // Real call apps are never ignored by default.
+        assert!(!super::is_ignored_captor(
+            Some("zoom.us"),
+            Some("/Applications/zoom.us.app/Contents/MacOS/zoom.us"),
+            Some("us.zoom.xos"),
+            &[]
+        ));
+        assert!(!super::is_ignored_captor(
+            Some("native"),
+            Some("/opt/native/bin/native"),
+            None,
+            &[]
+        ));
+        // Pref entries match bundle id, basename, or path prefix.
+        let extra = vec![
+            "pl.maketheweb.cleanshotx".to_string(),
+            "my-recorder".to_string(),
+            "/opt/tools/".to_string(),
+        ];
+        assert!(super::is_ignored_captor(
+            None,
+            None,
+            Some("PL.maketheweb.cleanshotx"),
+            &extra
+        ));
+        assert!(super::is_ignored_captor(
+            Some("my-recorder"),
+            None,
+            None,
+            &extra
+        ));
+        assert!(super::is_ignored_captor(
+            Some("x"),
+            Some("/opt/tools/x"),
+            None,
+            &extra
+        ));
+        assert!(!super::is_ignored_captor(
+            Some("x"),
+            Some("/opt/other/x"),
+            None,
+            &extra
+        ));
+    }
+
     use super::MicrophoneMonitor;
 
     #[cfg(target_os = "macos")]

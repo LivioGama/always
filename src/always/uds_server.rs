@@ -363,21 +363,30 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     // chunked, the bigger buffer only avoids the extra round-trips.
     {
         use std::os::fd::AsRawFd;
-        let size: libc::c_int = 1024 * 1024;
-        let rc = unsafe {
-            libc::setsockopt(
-                stream.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_SNDBUF,
-                std::ptr::from_ref(&size).cast::<libc::c_void>(),
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-        if rc != 0 {
-            tracing::warn!(
-                error = %std::io::Error::last_os_error(),
-                "failed to increase send buffer size"
-            );
+        // macOS caps SO_SNDBUF on Unix domain streams well below 1 MB —
+        // asking for it fails with EINVAL on every boot (observed live).
+        // Step down to a size the kernel accepts and log at debug: this
+        // is a throughput nicety, not a correctness requirement.
+        for size in [1024 * 1024, 256 * 1024, 64 * 1024] {
+            let size: libc::c_int = size;
+            let rc = unsafe {
+                libc::setsockopt(
+                    stream.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    std::ptr::from_ref(&size).cast::<libc::c_void>(),
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+            if rc == 0 {
+                break;
+            }
+            if size == 64 * 1024 {
+                tracing::debug!(
+                    error = %std::io::Error::last_os_error(),
+                    "uds_send_buffer_increase_failed (kernel default in use)"
+                );
+            }
         }
     }
 
@@ -605,7 +614,18 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         };
 
         if let Err(e) = writer.write_all(json_line.as_bytes()).await {
-            tracing::error!(error = %e, "uds_write_failed");
+            // A client that vanishes during the initial-state burst (the
+            // GUI opens a second connection and drops the first) surfaces
+            // here as EPIPE on every boot. That is normal connection
+            // lifecycle, not an error — log it at debug and stop writing.
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ) {
+                tracing::debug!(error = %e, "uds_client_left_during_write");
+            } else {
+                tracing::error!(error = %e, "uds_write_failed");
+            }
             break;
         }
 
@@ -673,6 +693,35 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                 pause::release_consume_mode(consume_lease);
             }
             tracing::info!(enabled, "uds_set_consume_mode");
+        }
+        DaemonCommand::ReleaseHeld { id, text } => {
+            let id_num = id.parse::<u64>().unwrap_or(0);
+            let ok = crate::always::held::release(id_num, text.as_deref());
+            tracing::info!(id = %id, ok, "uds_release_held");
+        }
+        DaemonCommand::DiscardHeld { id, text } => {
+            let id_num = id.parse::<u64>().unwrap_or(0);
+            let ok = crate::always::held::discard(id_num, text.as_deref());
+            tracing::info!(id = %id, ok, "uds_discard_held");
+        }
+        DaemonCommand::PlayStatusCue { cue } => {
+            match crate::always::status_sound::StatusSound::from_name(&cue) {
+                Some(sound) => crate::always::status_sound::cue(sound),
+                None => tracing::warn!(cue = %cue, "uds_play_status_cue_unknown"),
+            }
+        }
+        DaemonCommand::SetActStatus {
+            task,
+            goal,
+            text,
+            action,
+        } => {
+            tracing::debug!(task = %task, goal_chars = goal.len(), text_chars = text.len(), action = %action, "uds_act_status_ignored");
+        }
+        DaemonCommand::PasteRejected { id } => {
+            let id_num = id.parse::<u64>().unwrap_or(0);
+            let ok = crate::always::event_loop::paste_rejected(id_num);
+            tracing::info!(id = %id, ok, "uds_paste_rejected");
         }
         DaemonCommand::ApplyRuntimePreferences {
             auto_enter_delay_ms,
@@ -781,6 +830,9 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             tracing::info!(bundle = ?bundle_id, effective, "uds_focused_app_changed");
         }
         DaemonCommand::NotifySystemAudioState { playing } => {
+            // Media playing → the My Voice gate is more patient before an
+            // early reject (own voice over a video scores lower).
+            crate::always::vad::set_media_playing(playing);
             // "My Voice" gate active → the daemon already ignores every
             // voice but the enrolled user's, so media playback is no
             // reason to stop listening. Skip the auto-pause entirely
@@ -866,6 +918,77 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                     tracing::error!(error = %e, bundle = %bundle_id, "uds_set_app_paused_failed");
                 }
             }
+        }
+        DaemonCommand::VoiceEdit {
+            req,
+            command,
+            force,
+        } => {
+            std::thread::spawn(move || {
+                let o = crate::always::voice_edit::run(
+                    &command,
+                    force,
+                    "iris",
+                    crate::always::ax_edit::KeyTarget::Hid,
+                    None,
+                );
+                // Claimed edits already broadcast; answer declines too so
+                // the requester never waits on silence.
+                if !o.claimed || !req.is_empty() {
+                    global_broadcaster().send(DaemonEvent::VoiceEdit {
+                        req,
+                        op: o.op.to_string(),
+                        ok: o.claimed.to_string(),
+                        method: o.method.to_string(),
+                        ms: format!("{:.1}", o.ms),
+                        detail: o.reason.to_string(),
+                        text: String::new(),
+                    });
+                }
+            });
+        }
+        DaemonCommand::VoiceEditRewriterAlive => {
+            crate::always::voice_edit::note_rewriter_alive();
+        }
+        DaemonCommand::VoiceEditGetTarget { req } => {
+            std::thread::spawn(move || {
+                let t0 = std::time::Instant::now();
+                let t = crate::always::voice_edit::current_target(None);
+                let detail = if t.secure { "secure" } else { t.source };
+                global_broadcaster().send(DaemonEvent::VoiceEdit {
+                    req,
+                    op: "get_target".into(),
+                    ok: (t.source != "none").to_string(),
+                    method: "ax".into(),
+                    ms: format!("{:.1}", t0.elapsed().as_secs_f64() * 1000.0),
+                    detail: detail.into(),
+                    text: t.text,
+                });
+            });
+        }
+        DaemonCommand::VoiceEditReplaceTarget { req, expect, text } => {
+            std::thread::spawn(move || {
+                let r = crate::always::voice_edit::replace_target(
+                    &expect,
+                    &text,
+                    None,
+                    crate::always::ax_edit::KeyTarget::Hid,
+                );
+                tracing::info!(ok = r.is_ok(), result = ?r, "voice_edit_replace_target");
+                let (ok, method, ms, detail) = match r {
+                    Ok((m, ms)) => (true, m, ms, "ok"),
+                    Err(e) => (false, "", 0.0, e),
+                };
+                global_broadcaster().send(DaemonEvent::VoiceEdit {
+                    req,
+                    op: "replace_target".into(),
+                    ok: ok.to_string(),
+                    method: method.into(),
+                    ms: format!("{ms:.1}"),
+                    detail: detail.into(),
+                    text: String::new(),
+                });
+            });
         }
         DaemonCommand::LogCorrection { intended } => {
             handle_log_correction(&intended);
@@ -1021,6 +1144,14 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             // Settings → Shortcuts saved a new combo. Re-read the prefs
             // DB and swap the live keyboard listener's shortcut set.
             crate::always::keyboard::reload_shortcuts();
+        }
+        DaemonCommand::SetupMode { enabled } => {
+            // Toggle setup mode: when enabled, bypasses per-app pause
+            // rules so recording and pasting work during onboarding even
+            // when the focused app is Always itself.
+            pause::set_setup_mode(enabled);
+            pause::recompute_effective();
+            tracing::info!(enabled, "setup_mode_toggled");
         }
     }
 }

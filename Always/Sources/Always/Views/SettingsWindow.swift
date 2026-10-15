@@ -235,13 +235,17 @@ struct SettingsWindow: View {
         }
     }
 
-    /// Provider changes are baked into the daemon's PostProcessor at
-    /// startup, so switching Groq <-> Apple Intelligence needs a daemon
-    /// relaunch to take effect (mirrors saveApiKey).
+    /// The Postprocess mode (and provider) is baked into the daemon's
+    /// config at startup, so a change needs a daemon relaunch to take
+    /// effect (mirrors saveApiKey).
     private func savePostprocessProvider() {
         Task {
             do {
-                _ = try await cliService.setConfig(key: "postprocess_provider", value: config.postprocessProvider)
+                if let mode = config.postprocessMode {
+                    _ = try await cliService.setConfig(key: "postprocess_mode", value: mode)
+                } else {
+                    _ = try await cliService.setConfig(key: "postprocess_provider", value: config.postprocessProvider)
+                }
                 _ = try await cliService.restartDaemon()
             } catch {
                 settingsLogger.error("savePostprocessProvider failed: \(error.localizedDescription, privacy: .public)")

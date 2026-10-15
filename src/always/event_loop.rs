@@ -54,7 +54,15 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
 
     // Initialize the auto-enter state from config
     pause::init_auto_enter(cfg.auto_enter);
+    // Pre-load AppKit's pasteboard class: the first in-process NSPasteboard
+    // touch costs ~70 ms (measured: native write max 71.6 ms on the first of
+    // 20, p50 0.84 ms after). Pay it at boot, not on the first paste.
+    #[cfg(target_os = "macos")]
+    let _ = paste::pasteboard_change_count();
     crate::always::status_sound::set_setting(cfg.audible_status_sound);
+    // Spawn + warm the Parakeet live-preview helper now (model load and
+    // first ANE inference), so the user's first word is never cold.
+    crate::always::preview_asr::prewarm(&cfg.lang, cfg.transcriber_backend.is_apple());
 
     // Self-heal the speaker-gate model after a cache wipe. macOS can
     // purge ~/Library/Caches between runs; Silero re-materialises from
@@ -158,6 +166,26 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
             }
         })
         .expect("spawn transcriber-init thread");
+
+    // Apple backend: install the on-device speech model now, in the
+    // background, instead of inside the first utterance's transcription
+    // budget (a fresh Mac lost its first sentences to "speech recognition
+    // timed out" while the model downloaded). No-op when installed.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if cfg.transcriber_backend.is_apple() {
+        let lang = (cfg.lang != "auto" && !cfg.lang.is_empty()).then(|| cfg.lang.clone());
+        let _ = std::thread::Builder::new()
+            .name("apple-model-prepare".into())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                let outcome = crate::always::apple_stt::prepare(lang.as_deref(), 900);
+                tracing::info!(
+                    outcome = ?outcome,
+                    secs = started.elapsed().as_secs_f32(),
+                    "apple_speech_model_prepare"
+                );
+            });
+    }
 
     // Now do the expensive operations after UDS is accepting connections
     let active = active_placeholder;
@@ -337,6 +365,25 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
                 continue;
             }
 
+            // Keep rec's pipe drained while gated. Nobody reads during a
+            // pause, so after ~4s the 131KB buffer overflows and CoreAudio
+            // discards at the device level (rec_coreaudio_overrun spam on
+            // every focus-driven pause). The backlog is stale by
+            // definition — the resume path drops it anyway — so discard it
+            // here instead: the pipe stays empty, the overrun never fires,
+            // and the live wake-on-voice probes below see current audio
+            // rather than a shifting stale backlog.
+            #[cfg(target_os = "macos")]
+            if let Ok(recorder_arc) = audio::RecChild::get_or_spawn() {
+                let mut recorder = recorder_arc.lock();
+                if let Some(rec) = recorder.as_mut() {
+                    let stale = rec.drain_pending();
+                    if stale > 0.0 {
+                        tracing::debug!(stale_secs = format!("{stale:.2}"), "gated_drain");
+                    }
+                }
+            }
+
             std::thread::sleep(Duration::from_millis(100));
             continue;
         }
@@ -404,7 +451,36 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
 /// matching on the anyhow error chain since the STT layer surfaces opaque strings.
 fn classify_transcription_error(err: &anyhow::Error) -> (&'static str, String) {
     let s = format!("{err:#}").to_lowercase();
-    if s.contains("401")
+    // Local causes first: they used to fall through to the Groq wording
+    // below ("Network error reaching Groq" for an Apple engine timeout,
+    // "Transcription failed" for a missing permission), which told a new
+    // user nothing they could act on.
+    if s.contains("siri and dictation are disabled") {
+        (
+            "dictation_disabled",
+            "Turn on Dictation: System Settings → Keyboard → Dictation".to_string(),
+        )
+    } else if s.contains("speech recognition not authorized") {
+        (
+            "speech_permission",
+            "Allow Speech Recognition for Always: System Settings → Privacy & Security".to_string(),
+        )
+    } else if s.contains("unsupported locale") {
+        (
+            "language",
+            "Your language isn't supported by Apple's on-device engine".to_string(),
+        )
+    } else if s.contains("speech recognition timed out") {
+        (
+            "apple_timeout",
+            "Speech engine timed out — its language model may still be downloading".to_string(),
+        )
+    } else if s.contains("microphone capture") || s.contains("no input device") {
+        (
+            "microphone",
+            "No audio from the microphone — check System Settings → Privacy & Security → Microphone".to_string(),
+        )
+    } else if s.contains("401")
         || s.contains("unauthorized")
         || s.contains("invalid api key")
         || s.contains("invalid_api_key")
@@ -438,6 +514,9 @@ fn process_one(
     transcriber: &Arc<dyn Transcriber>,
 ) -> Result<()> {
     let cfg = active_cfg.read();
+    // Keep the paste context fresh for `PasteRejected` (rejected or
+    // expired-held transcripts recovered later).
+    *PASTE_CTX.lock().unwrap_or_else(|p| p.into_inner()) = Some((cfg.clone(), rt.clone()));
     // Snapshot the window this utterance is being dictated into, before a
     // single frame is captured. `handle_speech` compares it against the
     // live focused app so a master-pause paste can only ever land back in
@@ -490,6 +569,10 @@ fn process_one(
             log.write(Event::DroppedSpeaker {
                 score: score as f64,
             });
+            // Never silently lose the user's words: a false reject (their
+            // own voice under music/video) stays recoverable. Transcribe
+            // the stashed audio off-thread — NEVER pasted from here.
+            recover_rejected(&cfg, rt, transcriber);
             Ok(())
         }
         vad::RecordResult::PreemptedByMicConflict { text } => {
@@ -499,11 +582,100 @@ fn process_one(
             // here is the whole point of the variant — the words are
             // kept, the keystrokes are not sent.
             log.write(Event::PreemptedByMicConflict { text: &text });
+            // Never paste (I7) — but never lose either: the words spoken
+            // before the other app took the mic stay recoverable
+            // ("paste anyway?" → `PasteRejected`).
+            let recoverable_id = crate::always::rejected::keep_withheld(&text, "mic_conflict");
+            tracing::info!(
+                recoverable_id,
+                chars = text.chars().count(),
+                "mic_conflict_preempted_kept_recoverable"
+            );
             Ok(())
         }
     };
     emit_utterance_terminal();
     outcome
+}
+
+/// Config + runtime of the most recent capture cycle, so a later
+/// `PasteRejected` can run the normal paste path from the UDS thread.
+static PASTE_CTX: std::sync::Mutex<Option<(AlwaysConfig, Handle)>> = std::sync::Mutex::new(None);
+
+/// Transcribe the audio the "My Voice" gate just rejected and keep it in
+/// the recoverable ring (`rejected.rs`), announcing `TranscriptRejected`.
+/// Runs on its own thread; the paste path is not involved.
+fn recover_rejected(cfg: &AlwaysConfig, rt: &Handle, transcriber: &Arc<dyn Transcriber>) {
+    let Some(stash) = crate::always::rejected::take_stashed() else {
+        return;
+    };
+    *PASTE_CTX.lock().unwrap_or_else(|p| p.into_inner()) = Some((cfg.clone(), rt.clone()));
+    let transcriber = Arc::clone(transcriber);
+    std::thread::Builder::new()
+        .name("rejected-stt".into())
+        .spawn(move || {
+            let started = Instant::now();
+            let result = crate::always::audio::create_wav_bytes_i16_mono_16k(&stash.samples)
+                .ok()
+                .and_then(|wav| transcriber.transcribe_from_bytes(wav).ok());
+            let hallucinated = result
+                .as_ref()
+                .is_some_and(|r| crate::always::hallucination::is_hallucination(r).is_some());
+            let text = result
+                .map(|r| r.text.trim().to_string())
+                .unwrap_or_default();
+            if text.is_empty() || hallucinated {
+                tracing::info!(score = stash.score, "rejected_transcript_empty");
+                return;
+            }
+            let id = crate::always::rejected::push(&text, stash.score);
+            tracing::info!(
+                id,
+                score = stash.score,
+                chars = text.chars().count(),
+                stt_ms = started.elapsed().as_millis() as u64,
+                "rejected_transcript_kept"
+            );
+            event::global_broadcaster().transcript_rejected(id, text, stash.score);
+        })
+        .ok();
+}
+
+/// `PasteRejected { id }`: the user confirmed a gate-rejected utterance was
+/// theirs. Pastes it through the ordinary native paste path (merge,
+/// clipboard, Cmd+V, auto-enter). Returns false when nothing matched.
+pub fn paste_rejected(id: u64) -> bool {
+    let Some(entry) = crate::always::rejected::take(id) else {
+        return false;
+    };
+    let Some((cfg, rt)) = PASTE_CTX.lock().unwrap_or_else(|p| p.into_inner()).clone() else {
+        return false;
+    };
+    std::thread::Builder::new()
+        .name("rejected-paste".into())
+        .spawn(move || {
+            let now = Instant::now();
+            let lat = PasteLatency {
+                speech_end_at: now,
+                stt_done_at: now,
+                grammar_started: now,
+                grammar_ms: 0,
+                pasting_logged_at: now,
+                speculation_used: false,
+                grammar_cache_hit: false,
+                held_ms: None,
+            };
+            let mut log = Logger;
+            let merge_previous =
+                pause::dictation_buffer_text().or_else(crate::always::dictation::session_text);
+            event::global_broadcaster().transcript_final(entry.text.clone());
+            if let Err(error) =
+                deliver_paste(&cfg, &mut log, &rt, entry.text, merge_previous, false, lat)
+            {
+                tracing::warn!(error = %error, "rejected_paste_failed");
+            }
+        })
+        .is_ok()
 }
 
 /// Terminal overlay events for one utterance cycle. Every exit of
@@ -602,11 +774,83 @@ fn handle_speech(
             event::global_broadcaster().transcription_filtered(reason);
             Ok(())
         }
+        SpeechAction::ForeignSpeech { reason } => {
+            // Speech in another language (Nepali to family, …) forced into
+            // English words. Never pasted, never auto-Entered — but never
+            // lost either: it goes to the same recoverable ring as a
+            // My-Voice reject, so `PasteRejected { id }` can still paste it.
+            let evidence = &transcription.evidence;
+            let confidence = evidence.confidence.unwrap_or(-1.0);
+            *PASTE_CTX.lock().unwrap_or_else(|p| p.into_inner()) = Some((cfg.clone(), rt.clone()));
+            let id = crate::always::rejected::push(text, confidence.max(0.0));
+            if crate::always::telemetry::should_log_transcripts() {
+                tracing::info!(text, reason = %reason, "foreign_speech_text");
+            }
+            tracing::info!(
+                id,
+                reason = %reason,
+                confidence,
+                live_stream = ?evidence.live_stream,
+                preview_heard = evidence.preview_text.as_deref().map(|p| !p.trim().is_empty()),
+                chars = text.chars().count(),
+                "foreign_speech_rejected"
+            );
+            tracing::info!(
+                id,
+                score = confidence.max(0.0),
+                chars = text.chars().count(),
+                reason = "foreign_speech",
+                "rejected_transcript_kept"
+            );
+            pause::set_last_filtered(text);
+            event::global_broadcaster().voice_activity_ended();
+            event::global_broadcaster().transcript_rejected_for(
+                id,
+                text.to_string(),
+                confidence.max(0.0),
+                event::RejectReason::ForeignSpeech,
+            );
+            Ok(())
+        }
         SpeechAction::Paste { text: transformed } => {
+            // Foreign-speech rule 1 (low confidence) in LOG-ONLY mode
+            // (pref `foreign_speech_confidence_enforce` off): record what
+            // it would have rejected so the 0.40 cut can be tuned on real
+            // data — and paste anyway. Dictation is never swallowed on an
+            // untuned threshold.
+            if let Some(confidence) =
+                crate::always::hallucination::foreign_speech_low_confidence(transcription)
+            {
+                if crate::always::telemetry::should_log_transcripts() {
+                    tracing::info!(text, "foreign_speech_would_reject_text");
+                }
+                tracing::info!(
+                    confidence,
+                    threshold = crate::always::hallucination::FOREIGN_SPEECH_MAX_CONFIDENCE,
+                    live_stream = ?transcription.evidence.live_stream,
+                    chars = text.chars().count(),
+                    "foreign_speech_would_reject"
+                );
+            }
             // Deterministic local cleanup first: removes adjacent repeats and
             // fillers before snippet matching / grammar so they never reach the
             // paste buffer or the LLM prompt.
             let transformed = crate::always::postprocess::local_cleanup(&transformed);
+            // A misheard leading "Iris" ("Irish what time is it", "IRS what
+            // time is it") becomes the name the user said — only at the very
+            // start and only before a request (det_correct::normalize_leading_wake).
+            // Before every branch below, so the short-utterance and snippet
+            // paths and the consume-mode handoff to Iris all see it.
+            let transformed = crate::always::det_correct::normalize_leading_wake(&transformed);
+            // Voice editing ("scratch that", "change X to Y", "new line"):
+            // claimed ONLY when the whole utterance is an edit command right
+            // after a paste into this same field (voice_edit.rs gate);
+            // otherwise this is a no-op and the utterance pastes as usual.
+            if crate::always::voice_edit::try_claim(&transformed) {
+                pause::dictation_buffer_clear();
+                event::global_broadcaster().voice_activity_ended();
+                return Ok(());
+            }
             // Log the raw Whisper transcript for debugging STT quality issues
             // Privacy: gate transcript text behind `should_log_transcripts`
             if crate::always::telemetry::should_log_transcripts() {
@@ -636,7 +880,6 @@ fn handle_speech(
             // sentence.
             let merge_previous =
                 pause::dictation_buffer_text().or_else(crate::always::dictation::session_text);
-            let merge_active = merge_previous.is_some();
 
             // Short-utterance bypass: tiny inputs like "yes", "ok", "done"
             // get pasted verbatim. Longer utterances: acoustic fix-up is
@@ -705,9 +948,15 @@ fn handle_speech(
                     // into one LLM message. The speculative warm in `vad.rs`
                     // builds the identical request, so the cache key matches
                     // and the LLM cost is usually already paid.
-                    let llm_available = cfg.postprocess_available();
+                    //
+                    // Postprocess mode (SPEC §9): the deterministic corrector
+                    // runs inline (≤ 2 ms); an LLM result is used only when
+                    // the speculative warm already cached it — never waited on.
+                    let mode = crate::always::postprocess::mode();
+                    let llm_available = mode.uses_llm() && cfg.postprocess_available();
                     let req = crate::always::correction_request::build(&transformed, llm_available);
-                    let (corrected, cache_hit) = apply_grammar_blocking_request(&req, cfg, rt);
+                    let (corrected, cache_hit) =
+                        apply_grammar_blocking_request(&req, &transformed, mode, cfg);
                     (corrected, cache_hit, false)
                 };
             let grammar_ms = grammar_started.elapsed().as_millis() as u64;
@@ -740,135 +989,239 @@ fn handle_speech(
             // makes them measurable.
             let pasting_logged_at = Instant::now();
 
-            event::global_broadcaster().transcript_final(final_text.clone());
-
-            // Route to Iris: the transcript has already been broadcast over UDS
-            // (TranscriptChunk previews during speech + TranscriptFinal above).
-            // Route it to the file stream too, then STOP — no clipboard, no
-            // paste, no Enter. Nothing is inserted into any app.
+            // Consume mode (Iris holds the line): park the native paste instead
+            // of running it, announce it (`TranscriptHeld`, then the final),
+            // and let the consumer answer `ReleaseHeld` — dictation after all:
+            // run THIS paste path, auto-enter included — or `DiscardHeld` —
+            // claimed, insert nothing. See `held.rs`.
             // A persisted stream setting is not proof that a controller is
             // connected. Only a live per-connection consume lease may suppress
             // paste; otherwise a controller crash could silently drop a wake
             // word instead of dictating it normally.
+            let lat = PasteLatency {
+                speech_end_at: timing.speech_end_at,
+                stt_done_at: timing.stt_done_at,
+                grammar_started,
+                grammar_ms,
+                pasting_logged_at,
+                speculation_used: timing.speculation_used,
+                grammar_cache_hit,
+                held_ms: None,
+            };
             if pause::is_consume_mode() {
                 if cfg.transcript_stream_enabled {
                     transcript_stream::append(&final_text);
                 }
+                let mut job_cfg = cfg.clone();
+                // Already appended to the transcript stream just above.
+                job_cfg.transcript_stream_enabled = false;
+                let job_rt = rt.clone();
+                let job_text = final_text.clone();
+                let id = crate::always::held::park(
+                    &final_text,
+                    Box::new(move |released_at: Instant| {
+                        let mut log = Logger;
+                        let lat = PasteLatency {
+                            pasting_logged_at: released_at,
+                            held_ms: Some(
+                                released_at
+                                    .saturating_duration_since(lat.pasting_logged_at)
+                                    .as_secs_f64()
+                                    * 1000.0,
+                            ),
+                            ..lat
+                        };
+                        // Re-read the merge anchor at release time: another
+                        // paste may have landed while this one was held.
+                        let merge_previous = pause::dictation_buffer_text()
+                            .or_else(crate::always::dictation::session_text);
+                        if let Err(error) = deliver_paste(
+                            &job_cfg,
+                            &mut log,
+                            &job_rt,
+                            job_text,
+                            merge_previous,
+                            false,
+                            lat,
+                        ) {
+                            tracing::warn!(error = %error, "held_final_paste_failed");
+                        }
+                    }),
+                );
+                // Held BEFORE final: a consumer that decides synchronously on
+                // the final must already know the id it is deciding about.
+                event::global_broadcaster().transcript_held(id, final_text.clone());
+                // Held finals are an internal handoff to the consumer: no cue
+                // here, and none on ReleaseHeld / DiscardHeld either (user
+                // request 2026-10-14). The consumer (Iris) cues its own way.
+                event::global_broadcaster().transcript_final_quiet(final_text.clone());
                 pause::dictation_buffer_clear();
                 event::global_broadcaster().voice_activity_ended();
                 tracing::info!(
+                    id,
                     chars = final_text.chars().count(),
                     "consume_mode_routed_to_stream"
                 );
                 return Ok(());
             }
 
-            // Resume-merge path: if the auto-enter countdown is still
-            // active from the previous utterance, the user paused only
-            // briefly and is now continuing. Append the new transcript
-            // to the existing buffered text (preserving sentence casing
-            // — see `merge_dictation`) instead of pasting it as a fresh,
-            // re-capitalized sentence. Cancels the in-flight countdown
-            // and reschedules so the timer restarts from the resumed
-            // speech, giving the user the full delay to keep going.
-            // Merge whenever the dictation buffer still holds the
-            // previous paste — not just when the countdown is still
-            // ticking. The voice-activity hook in `vad.rs` cancels
-            // the countdown as soon as the user resumes speaking,
-            // which previously broke the merge gate (countdown_active
-            // flipped to false before the new utterance finalised) and
-            // produced split-sentence pastes. The buffer is still
-            // cleared on Return commit / pause / explicit user cancel,
-            // so this can't leak across sessions.
-            let (paste_clipboard, buffer_text) = if merge_active {
-                let previous = merge_previous.unwrap_or_default();
-                let (joined, delta) =
-                    merge_dictation_with(&cfg.localization, &previous, &final_text);
-                tracing::info!(
-                    stage = "dictation_merge",
-                    previous = %previous,
-                    addition = %final_text,
-                    delta = %delta,
-                    joined = %joined,
-                    "merging resumed utterance into in-flight dictation"
-                );
-                pause::countdown_request_cancel();
-                // Delta carries its own leading space when needed; no
-                // trailing space here because we want the merged buffer
-                // to end exactly at the last character pasted so a
-                // subsequent merge picks up correct sentence-end state.
-                (delta, joined)
-            } else {
-                // Fresh paste — preserve the historical trailing space
-                // on the clipboard payload (clients expect it).
-                (format!("{} ", final_text), final_text.clone())
-            };
+            event::global_broadcaster().transcript_final(final_text.clone());
+            deliver_paste(
+                cfg,
+                log,
+                rt,
+                final_text,
+                merge_previous,
+                grammar_patch_async,
+                lat,
+            )
+        }
+    }
+}
 
-            let dup_window = paste_dedupe_window(cfg.cooldown_ms);
-            let paste_payload = paste_clipboard.trim();
-            if pause::should_suppress_duplicate_paste(paste_payload, dup_window) {
-                tracing::info!(
-                    text = %paste_payload,
-                    dup_window_ms = dup_window.as_millis() as u64,
-                    "duplicate_paste_suppressed"
-                );
-                event::global_broadcaster().voice_activity_ended();
-                return Ok(());
-            }
+/// Latency capture points carried into [`deliver_paste`] for the
+/// `latency_breakdown` line. `held_ms` is set only for a consume-mode final
+/// released back to the paste path (`ReleaseHeld`): time spent parked.
+#[derive(Clone, Copy)]
+struct PasteLatency {
+    speech_end_at: Instant,
+    stt_done_at: Instant,
+    grammar_started: Instant,
+    grammar_ms: u64,
+    pasting_logged_at: Instant,
+    speculation_used: bool,
+    grammar_cache_hit: bool,
+    held_ms: Option<f64>,
+}
 
-            if !pause::try_begin_paste() {
-                tracing::info!(
-                    text = %paste_payload,
-                    "duplicate_paste_suppressed_in_flight"
-                );
-                event::global_broadcaster().voice_activity_ended();
-                return Ok(());
-            }
+/// The native paste path: merge, dedupe, clipboard, Cmd+V, auto-enter.
+/// Shared by an ordinary utterance and a consume-mode final the consumer
+/// handed back with `ReleaseHeld` — one path, so a released final behaves
+/// exactly like one that was never held.
+#[allow(clippy::too_many_arguments)]
+fn deliver_paste(
+    cfg: &AlwaysConfig,
+    log: &mut Logger,
+    rt: &Handle,
+    final_text: String,
+    merge_previous: Option<String>,
+    grammar_patch_async: bool,
+    lat: PasteLatency,
+) -> Result<()> {
+    // Sandbox guard (launch smoke test): never type into the user's apps.
+    if std::env::var("ALWAYS_NO_PASTE").as_deref() == Ok("1") {
+        tracing::info!(
+            chars = final_text.chars().count(),
+            "paste_suppressed_no_paste_env"
+        );
+        let _ = (cfg, log, rt, merge_previous, grammar_patch_async, lat);
+        return Ok(());
+    }
+    let merge_active = merge_previous.is_some();
+    // Resume-merge path: if the auto-enter countdown is still
+    // active from the previous utterance, the user paused only
+    // briefly and is now continuing. Append the new transcript
+    // to the existing buffered text (preserving sentence casing
+    // — see `merge_dictation`) instead of pasting it as a fresh,
+    // re-capitalized sentence. Cancels the in-flight countdown
+    // and reschedules so the timer restarts from the resumed
+    // speech, giving the user the full delay to keep going.
+    // Merge whenever the dictation buffer still holds the
+    // previous paste — not just when the countdown is still
+    // ticking. The voice-activity hook in `vad.rs` cancels
+    // the countdown as soon as the user resumes speaking,
+    // which previously broke the merge gate (countdown_active
+    // flipped to false before the new utterance finalised) and
+    // produced split-sentence pastes. The buffer is still
+    // cleared on Return commit / pause / explicit user cancel,
+    // so this can't leak across sessions.
+    let (paste_clipboard, buffer_text) = if merge_active {
+        let previous = merge_previous.unwrap_or_default();
+        let (joined, delta) = merge_dictation_with(&cfg.localization, &previous, &final_text);
+        tracing::info!(
+            stage = "dictation_merge",
+            previous = %previous,
+            addition = %final_text,
+            delta = %delta,
+            joined = %joined,
+            "merging resumed utterance into in-flight dictation"
+        );
+        pause::countdown_request_cancel();
+        // Delta carries its own leading space when needed; no
+        // trailing space here because we want the merged buffer
+        // to end exactly at the last character pasted so a
+        // subsequent merge picks up correct sentence-end state.
+        (delta, joined)
+    } else {
+        // Fresh paste — preserve the historical trailing space
+        // on the clipboard payload (clients expect it).
+        (format!("{} ", final_text), final_text.clone())
+    };
 
-            // External transcript stream (IRIS ears): after dedup so a
-            // suppressed double-paste is never double-streamed, but before
-            // the paused / cmd-held drops — the user DID speak, only the
-            // paste is withheld there.
-            if cfg.transcript_stream_enabled {
-                transcript_stream::append(&final_text);
-            }
+    let dup_window = paste_dedupe_window(cfg.cooldown_ms);
+    let paste_payload = paste_clipboard.trim();
+    if pause::should_suppress_duplicate_paste(paste_payload, dup_window) {
+        tracing::info!(
+            text = %paste_payload,
+            dup_window_ms = dup_window.as_millis() as u64,
+            "duplicate_paste_suppressed"
+        );
+        event::global_broadcaster().voice_activity_ended();
+        return Ok(());
+    }
 
-            // Focus moved to a paused app (or master/idle pause kicked in)
-            // between when we started recording and now. Drop the paste so
-            // the transcript doesn't leak into the wrong window once the
-            // user gets there. Surface as `transcription_filtered` so the
-            // GUI flashes a "not pasted" overlay — same channel as the
-            // cmd-held drop below.
-            //
-            // EXCEPTION: when MASTER pause is the only active source AND
-            // focus never left the app this utterance was dictated into,
-            // paste anyway. The user hitting their own mute means "stop
-            // listening", not "throw away what I already said" — and with
-            // focus unchanged there is no other window to leak into, which
-            // is the entire risk the drop above exists to prevent. Every
-            // other pause source (per-app, idle, mic-conflict,
-            // audio-output, no-GUI) keeps the drop unchanged.
-            let master_mute_same_app = pause::paused_only_by_master()
-                && pause::dictation_origin_app().is_some_and(|origin| {
-                    crate::always::focus_state::load().as_deref() == Some(origin.as_str())
-                });
-            if pause::is_paused() && master_mute_same_app {
+    if !pause::try_begin_paste() {
+        tracing::info!(
+            text = %paste_payload,
+            "duplicate_paste_suppressed_in_flight"
+        );
+        event::global_broadcaster().voice_activity_ended();
+        return Ok(());
+    }
+
+    // External transcript stream (IRIS ears): after dedup so a
+    // suppressed double-paste is never double-streamed, but before
+    // the paused / cmd-held drops — the user DID speak, only the
+    // paste is withheld there.
+    if cfg.transcript_stream_enabled {
+        transcript_stream::append(&final_text);
+    }
+
+    // A pause began after this utterance's capture started (focus
+    // moved to a paused app, mic conflict, audio output, idle, no-GUI,
+    // or the user's own mute). The words were authorised at capture
+    // time (I3) and must NEVER be lost:
+    //
+    // - MASTER is the only source AND focus never left the app the
+    //   utterance was dictated into → paste as normal. Muting means
+    //   "stop listening", not "throw away what I already said", and
+    //   there is no other window to leak into.
+    // - Anything else → not typed automatically (it could land in a
+    //   window the user moved to / an excluded app), but kept in the
+    //   recoverable ring and announced as `TranscriptRejected`
+    //   ("paste anyway?" → `PasteRejected`), plus the ⌃⌥V slot.
+    if pause::is_paused() {
+        let sources = pause::active_pause_sources();
+        let origin = pause::dictation_origin_app();
+        let focus_now = crate::always::focus_state::load();
+        let focus_changed = origin.is_none() || origin != focus_now;
+        match pause::paused_utterance_verdict(origin.as_deref(), focus_now.as_deref()) {
+            pause::PausedUtterance::Paste => {
                 tracing::info!(
-                    text = %paste_payload,
-                    "paste_kept_master_pause_focus_unchanged"
+                    sources = %sources,
+                    chars = paste_payload.chars().count(),
+                    "paused_mid_utterance_pasted"
                 );
             }
-            if pause::is_paused() && !master_mute_same_app {
+            pause::PausedUtterance::KeepRecoverable => {
+                let recoverable_id = crate::always::rejected::keep_withheld(&final_text, &sources);
                 tracing::info!(
-                    text = %paste_payload,
-                    "paste_dropped_paused_mid_utterance"
+                    sources = %sources,
+                    focus_changed,
+                    recoverable_id,
+                    chars = paste_payload.chars().count(),
+                    "paused_mid_utterance_withheld_recoverable"
                 );
-                log.write(Event::Error {
-                    message: "Skipped paste: app paused mid-utterance",
-                });
-                // Keep the corrected text recoverable via the force-paste
-                // shortcut — this drop is the most common "why did my
-                // dictation vanish" path.
                 pause::set_last_filtered(final_text.clone());
                 event::global_broadcaster()
                     .transcription_filtered("App paused — press ⌃⌥V to paste anyway");
@@ -876,184 +1229,223 @@ fn handle_speech(
                 pause::end_paste();
                 return Ok(());
             }
-
-            // NOTE: no duplicate-daemon check here. It used to fork
-            // `ps -eo pid=,args=` on EVERY paste (multi-second stalls were
-            // traced to this window); the 30s reconcile loop at startup
-            // already owns duplicate-process cleanup.
-
-            // Inserted (dictation) text is LEFT on the clipboard on purpose —
-            // the user wants every pasted utterance to land in their clipboard
-            // history. So we no longer snapshot/restore the prior clipboard
-            // here. (Consume-mode / Iris-routed utterances returned above and
-            // never reach this copy, so Iris speech never touches the
-            // clipboard — see the `is_consume_mode()` early return.)
-            let paste_started = Instant::now();
-            // Keep a copy of the payload we're about to write for `note_pasted`
-            // below (`paste_clipboard` itself is moved into copy_to_clipboard).
-            let written_clipboard = paste_clipboard.clone();
-
-            // NOTE: the paste-in-flight lock is held from `try_begin_paste()`
-            // above. Every early-return below MUST release it via
-            // `end_paste()` or the daemon goes permanently mute (future
-            // utterances drop as "in_flight"). A bare `?` here previously
-            // leaked the lock when pbcopy failed.
-            let copy_result = paste::copy_to_clipboard(paste_clipboard);
-            if let Err(err) = copy_result {
-                tracing::warn!(error = %err, "clipboard_copy_failed");
-                log.write(Event::Error {
-                    message: "Skipped paste: clipboard copy failed",
-                });
-                pause::set_last_filtered(final_text.clone());
-                event::global_broadcaster().transcription_filtered("Clipboard error — not pasted");
-                event::global_broadcaster().voice_activity_ended();
-                pause::dictation_buffer_clear();
-                pause::end_paste();
-                return Ok(());
-            }
-
-            // Skip paste if Command is held — likely a shortcut in flight.
-            // Surface the drop on the status overlay (same channel as
-            // hallucination / hard-filter rejections) so the user knows
-            // their utterance was heard but intentionally not pasted.
-            if keyboard::is_cmd_held() {
-                tracing::debug!("skipped_paste_cmd_held");
-                log.write(Event::Error {
-                    message: "Skipped paste: Command key held",
-                });
-                pause::set_last_filtered(final_text.clone());
-                event::global_broadcaster().transcription_filtered("Held Command key — not pasted");
-                pause::dictation_buffer_clear();
-                pause::end_paste();
-                return Ok(());
-            }
-
-            // Always paste WITHOUT enter — the auto-enter Return key
-            // is now decoupled, gated behind an optional countdown so
-            // the user can intercept (any key cancels). When
-            // `auto_enter_delay_ms == 0` the countdown helper presses
-            // Return immediately, preserving the legacy behavior.
-            if let Err(err) = paste::paste_text(false) {
-                pause::end_paste();
-                return Err(err);
-            }
-            let pasted_at = Instant::now();
-            // One structured line per pasted utterance so production logs
-            // expose where speech-end → paste time goes. `stt_wait_ms` is 0
-            // when speculative STT beat the final-silence cut; `grammar_ms`
-            // near 0 means the speculative grammar warm landed in cache.
-            tracing::info!(
-                stage = "latency_breakdown",
-                stt_wait_ms = timing
-                    .stt_done_at
-                    .saturating_duration_since(timing.speech_end_at)
-                    .as_millis() as u64,
-                pipeline_ms = grammar_started
-                    .saturating_duration_since(timing.stt_done_at)
-                    .as_millis() as u64,
-                grammar_ms,
-                pre_paste_ms = paste_started
-                    .saturating_duration_since(pasting_logged_at)
-                    .as_millis() as u64,
-                paste_ms = pasted_at
-                    .saturating_duration_since(paste_started)
-                    .as_millis() as u64,
-                total_ms = pasted_at
-                    .saturating_duration_since(timing.speech_end_at)
-                    .as_millis() as u64,
-                speculation_used = timing.speculation_used,
-                grammar_cache_hit,
-                "utterance latency"
-            );
-            // Snapshot the focused app at paste time. If the user switches
-            // apps (or submits the message) before the grammar patch fires,
-            // Cmd+Z would land in the wrong window and create a double paste.
-            let pasted_to_app = pause::current_app();
-
-            // Add a small delay after paste to prevent double-paste when
-            // the user makes a break mid-utterance. This gives the system
-            // time to settle before releasing the paste-in-flight lock.
-            // 100ms (was 200): the Cmd+V key event has already been posted
-            // and consumed by the target app well within this window; the
-            // extra 100ms only delayed readiness for the next utterance.
-            std::thread::sleep(Duration::from_millis(100));
-
-            if grammar_patch_async {
-                // The async-grammar path ends with `replace_via_undo` INSIDE
-                // `spawn_grammar_patch` (undo + copy(corrected) + Cmd+V), so
-                // the corrected transcript is what's left on the clipboard —
-                // exactly what we want in the user's clipboard history. No
-                // restore, matching the synchronous path below.
-                spawn_grammar_patch(rt, cfg, final_text.clone(), pasted_at, pasted_to_app);
-            } else {
-                pause::end_paste();
-                // Synchronous / no-grammar path: leave the pasted transcript on
-                // the clipboard so it enters the user's clipboard history. We
-                // intentionally do NOT restore the prior clipboard here.
-            }
-
-            let auto_enter_effective =
-                per_app::effective_auto_enter(pause::is_auto_enter_enabled());
-            if auto_enter_effective && should_auto_enter_for_text(&buffer_text) {
-                // Hold the merged buffer so the NEXT utterance can
-                // append again if it arrives before the countdown
-                // fires. Set BEFORE schedule() so even a 0-delay
-                // immediate-Return path sees the buffer for clearing.
-                pause::dictation_buffer_set(buffer_text.clone());
-                let delay = per_app::effective_auto_enter_delay_ms(cfg.auto_enter_delay_ms);
-                auto_enter_countdown::schedule(rt, delay);
-            } else {
-                if auto_enter_effective {
-                    tracing::info!(
-                        text = %buffer_text,
-                        words = word_count(&buffer_text),
-                        "auto_enter_suppressed_short_transcript"
-                    );
-                }
-                // No auto-enter, or transcript too short to submit — no
-                // merge window. Drop any stale buffer so the next utterance
-                // doesn't accidentally try to merge with text the user has
-                // long since committed.
-                pause::dictation_buffer_clear();
-            }
-
-            // Snapshot the freshly-pasted text as the diff baseline for
-            // the manual-correction capture pipeline. We store the
-            // post-vocabulary, post-postprocess `final_text` (i.e. the
-            // exact bytes the user sees in their app) so the ⌃⌥X hotkey
-            // and passive clipboard watcher can compare it against the
-            // user's selection without having to reconstruct what was
-            // pasted. Only runs on the actually-pasted branch — if
-            // Cmd was held the early-return above skipped paste and
-            // there's nothing for a correction-diff to anchor on.
-            // For merge: store the full joined text so correction tools
-            // diff against what's actually on screen.
-            pause::set_last_pasted(buffer_text.clone());
-            // Refresh the dictation session with the authoritative
-            // on-screen text. Runs AFTER the auto-enter branch (which may
-            // clear buffers) — replace semantics make the ordering safe.
-            // The next utterance within the session window joins as a
-            // continuation and the grammar LLM sees this as context.
-            //
-            // Fresh pastes use the CLIPBOARD payload (trailing space
-            // included) so the session mirrors what's actually on screen
-            // — merging against a space-stripped buffer would add a
-            // second space on every continuation. Merge pastes use the
-            // joined text, whose spacing already chains correctly.
-            if merge_active {
-                crate::always::dictation::note_pasted(&buffer_text);
-            } else {
-                crate::always::dictation::note_pasted(&written_clipboard);
-            }
-            // Explicit voice-activity-ended after a successful paste so the
-            // Swift overlay clears cleanly. Without this, the next VAD loop
-            // iteration can pick up residual mic energy and fire a new
-            // VoiceActivityDetected before the overlay from this utterance
-            // has hidden — causing the "listening appears again" flash.
-            event::global_broadcaster().voice_activity_ended();
-            Ok(())
         }
     }
+
+    // NOTE: no duplicate-daemon check here. It used to fork
+    // `ps -eo pid=,args=` on EVERY paste (multi-second stalls were
+    // traced to this window); the 30s reconcile loop at startup
+    // already owns duplicate-process cleanup.
+
+    // Inserted (dictation) text is LEFT on the clipboard on purpose —
+    // the user wants every pasted utterance to land in their clipboard
+    // history. So we no longer snapshot/restore the prior clipboard
+    // here. (Consume-mode / Iris-routed utterances returned above and
+    // never reach this copy, so Iris speech never touches the
+    // clipboard — see the `is_consume_mode()` early return.)
+    let paste_started = Instant::now();
+    // Keep a copy of the payload we're about to write for `note_pasted`
+    // below (`paste_clipboard` itself is moved into copy_to_clipboard).
+    let written_clipboard = paste_clipboard.clone();
+
+    // NOTE: the paste-in-flight lock is held from `try_begin_paste()`
+    // above. Every early-return below MUST release it via
+    // `end_paste()` or the daemon goes permanently mute (future
+    // utterances drop as "in_flight"). A bare `?` here previously
+    // leaked the lock when pbcopy failed.
+    let copy_result = paste::copy_to_clipboard(paste_clipboard);
+    if let Err(err) = copy_result {
+        tracing::warn!(error = %err, "clipboard_copy_failed");
+        log.write(Event::Error {
+            message: "Skipped paste: clipboard copy failed",
+        });
+        pause::set_last_filtered(final_text.clone());
+        event::global_broadcaster().transcription_filtered("Clipboard error — not pasted");
+        event::global_broadcaster().voice_activity_ended();
+        pause::dictation_buffer_clear();
+        pause::end_paste();
+        return Ok(());
+    }
+
+    // Skip paste if Command is held — likely a shortcut in flight.
+    // Surface the drop on the status overlay (same channel as
+    // hallucination / hard-filter rejections) so the user knows
+    // their utterance was heard but intentionally not pasted.
+    if keyboard::is_cmd_held() {
+        tracing::debug!("skipped_paste_cmd_held");
+        log.write(Event::Error {
+            message: "Skipped paste: Command key held",
+        });
+        pause::set_last_filtered(final_text.clone());
+        event::global_broadcaster().transcription_filtered("Held Command key — not pasted");
+        pause::dictation_buffer_clear();
+        pause::end_paste();
+        return Ok(());
+    }
+
+    // Always paste WITHOUT enter — the auto-enter Return key
+    // is now decoupled, gated behind an optional countdown so
+    // the user can intercept (any key cancels). When
+    // `auto_enter_delay_ms == 0` the countdown helper presses
+    // Return immediately, preserving the legacy behavior.
+    if let Err(err) = paste::paste_text(false) {
+        pause::end_paste();
+        return Err(err);
+    }
+    let pasted_at = Instant::now();
+    // Remember exactly what was pasted, for voice editing.
+    crate::always::voice_edit::note_paste(&written_clipboard);
+    // One structured line per pasted utterance so production logs
+    // expose where speech-end → paste time goes. `stt_wait_ms` is 0
+    // when speculative STT beat the final-silence cut; `grammar_ms`
+    // near 0 means the speculative grammar warm landed in cache.
+    tracing::info!(
+        stage = "latency_breakdown",
+        stt_wait_ms = lat
+            .stt_done_at
+            .saturating_duration_since(lat.speech_end_at)
+            .as_millis() as u64,
+        pipeline_ms = lat
+            .grammar_started
+            .saturating_duration_since(lat.stt_done_at)
+            .as_millis() as u64,
+        grammar_ms = lat.grammar_ms,
+        // Same span as grammar_ms (the whole correction stage, which
+        // no longer waits on an LLM); µs detail is in `correction_stage`.
+        correction_ms = lat.grammar_ms,
+        pre_paste_ms = paste_started
+            .saturating_duration_since(lat.pasting_logged_at)
+            .as_millis() as u64,
+        paste_ms = pasted_at
+            .saturating_duration_since(paste_started)
+            .as_millis() as u64,
+        total_ms = pasted_at
+            .saturating_duration_since(lat.speech_end_at)
+            .as_millis() as u64,
+        paste_us = pasted_at
+            .saturating_duration_since(paste_started)
+            .as_micros() as u64,
+        speculation_used = lat.speculation_used,
+        grammar_cache_hit = lat.grammar_cache_hit,
+        held_ms = lat.held_ms,
+        "utterance latency"
+    );
+    // Snapshot the focused app at paste time. If the user switches
+    // apps (or submits the message) before the grammar patch fires,
+    // Cmd+Z would land in the wrong window and create a double paste.
+    let pasted_to_app = pause::current_app();
+
+    let auto_enter_effective = per_app::effective_auto_enter(pause::is_auto_enter_enabled());
+    // Set when Return was pressed synchronously for THIS paste: the
+    // text is sent, so the dictation session must not be re-armed below.
+    let mut return_committed = false;
+    if auto_enter_effective && should_auto_enter_for_text(&buffer_text) {
+        // Hold the merged buffer so the NEXT utterance can
+        // append again if it arrives before the countdown
+        // fires. Set BEFORE schedule() so even a 0-delay
+        // immediate-Return path sees the buffer for clearing.
+        pause::dictation_buffer_set(buffer_text.clone());
+        let delay = per_app::effective_auto_enter_delay_ms(cfg.auto_enter_delay_ms);
+        auto_enter_countdown::schedule(rt, delay);
+        if delay == 0 {
+            // 0-delay presses Return synchronously inside schedule().
+            return_committed = true;
+            tracing::info!(
+                paste_to_enter_us = pasted_at.elapsed().as_micros() as u64,
+                "auto_enter_return_pressed"
+            );
+        }
+    } else {
+        if auto_enter_effective {
+            tracing::info!(
+                text = %buffer_text,
+                words = word_count(&buffer_text),
+                "auto_enter_suppressed_short_transcript"
+            );
+        }
+        // No auto-enter, or transcript too short to submit — no
+        // merge window. Drop any stale buffer so the next utterance
+        // doesn't accidentally try to merge with text the user has
+        // long since committed.
+        pause::dictation_buffer_clear();
+    }
+
+    // Add a small delay after paste to prevent double-paste when
+    // the user makes a break mid-utterance. This gives the system
+    // time to settle before releasing the paste-in-flight lock.
+    // 100ms (was 200): the Cmd+V key event has already been posted
+    // and consumed by the target app well within this window; the
+    // extra 100ms only delayed readiness for the next utterance.
+    //
+    // Runs AFTER auto-enter (2026-10-13, requested by the user — "make
+    // it insanely fast"): this window only guards the paste-in-flight
+    // lock for the NEXT utterance; Return does not need to wait behind
+    // it. The 0-delay auto-enter keeps its own 50ms Cmd+V→Return guard
+    // inside `auto_enter_countdown::schedule`, so Return now lands
+    // ~50ms after the paste instead of ~150ms. Only the remainder of the
+    // 100ms is slept here, so the lock timing is unchanged.
+    let settle = Duration::from_millis(100).saturating_sub(pasted_at.elapsed());
+    if !settle.is_zero() {
+        std::thread::sleep(settle);
+    }
+
+    if grammar_patch_async {
+        // The async-grammar path ends with `replace_via_undo` INSIDE
+        // `spawn_grammar_patch` (undo + copy(corrected) + Cmd+V), so
+        // the corrected transcript is what's left on the clipboard —
+        // exactly what we want in the user's clipboard history. No
+        // restore, matching the synchronous path below.
+        spawn_grammar_patch(rt, cfg, final_text.clone(), pasted_at, pasted_to_app);
+    } else {
+        pause::end_paste();
+        // Synchronous / no-grammar path: leave the pasted transcript on
+        // the clipboard so it enters the user's clipboard history. We
+        // intentionally do NOT restore the prior clipboard here.
+    }
+
+    // Snapshot the freshly-pasted text as the diff baseline for
+    // the manual-correction capture pipeline. We store the
+    // post-vocabulary, post-postprocess `final_text` (i.e. the
+    // exact bytes the user sees in their app) so the ⌃⌥X hotkey
+    // and passive clipboard watcher can compare it against the
+    // user's selection without having to reconstruct what was
+    // pasted. Only runs on the actually-pasted branch — if
+    // Cmd was held the early-return above skipped paste and
+    // there's nothing for a correction-diff to anchor on.
+    // For merge: store the full joined text so correction tools
+    // diff against what's actually on screen.
+    pause::set_last_pasted(buffer_text.clone());
+    // Refresh the dictation session with the authoritative
+    // on-screen text. Runs AFTER the auto-enter branch (which may
+    // clear buffers) — replace semantics make the ordering safe.
+    // The next utterance within the session window joins as a
+    // continuation and the grammar LLM sees this as context.
+    //
+    // Fresh pastes use the CLIPBOARD payload (trailing space
+    // included) so the session mirrors what's actually on screen
+    // — merging against a space-stripped buffer would add a
+    // second space on every continuation. Merge pastes use the
+    // joined text, whose spacing already chains correctly.
+    //
+    // Not after a synchronous Return: that text is already SENT. Re-arming
+    // the session there made the next utterance "merge" into a message
+    // that no longer exists — pasted as a lowercase continuation into a
+    // fresh, empty input ("which is a bit unuseable…", "Is Paris what
+    // time is it"): all 48 merges logged on 2026-10-14 were of that kind.
+    if return_committed {
+        crate::always::dictation::clear();
+    } else if merge_active {
+        crate::always::dictation::note_pasted(&buffer_text);
+    } else {
+        crate::always::dictation::note_pasted(&written_clipboard);
+    }
+    // Explicit voice-activity-ended after a successful paste so the
+    // Swift overlay clears cleanly. Without this, the next VAD loop
+    // iteration can pick up residual mic energy and fire a new
+    // VoiceActivityDetected before the overlay from this utterance
+    // has hidden — causing the "listening appears again" flash.
+    event::global_broadcaster().voice_activity_ended();
+    Ok(())
 }
 
 /// Maximum word count for the short-utterance bypass. Inputs at or below
@@ -1108,86 +1500,69 @@ fn word_count(text: &str) -> usize {
 /// case-insensitively, followed by nothing / a space / a comma. Used only
 /// as a race-guard heuristic (see the call site in `handle_speech`) — the
 /// authoritative routing decision remains `pause::is_consume_mode()`.
-/// Stage 2 — blocking LLM grammar cleanup over a prepared
-/// [`CorrectionRequest`] (tier-1 acoustic text + deferred glossary
-/// candidates + dictation-session context). Returns the corrected text
-/// and whether it came from the PostProcessor cache (true when the
-/// speculative grammar warm already paid the LLM cost).
+/// Stage 2 — correction before paste. NEVER blocks on a model.
+///
+/// - `Off`: the minimal `local_cleanup` of the transcript.
+/// - `Fast`: the deterministic corrector (`det_correct`, ≤ 2 ms).
+/// - `Apple` / `Groq`: the deterministic corrector, unless the LLM result
+///   for exactly this request is ALREADY in the PostProcessor cache (the
+///   speculative warm started during the pause finished in time), in which
+///   case that is used. Not ready → skipped silently; the warm keeps
+///   running in the background and only fills the cache.
+///
+/// Returns the text and whether it came from the LLM cache. (The old
+/// blocking pass waited up to 8 s for Apple Intelligence: measured p50
+/// 5.5 s / p95 8.6 s per call on this machine, so the paste paid it.)
 fn apply_grammar_blocking_request(
     req: &crate::always::correction_request::CorrectionRequest,
+    transcript: &str,
+    mode: crate::always::postprocess::PostprocessMode,
     cfg: &AlwaysConfig,
-    rt: &Handle,
 ) -> (String, bool) {
-    let fallback = req.acoustic_text.clone();
-    if cfg.postprocess_available()
-        && let Some(ref pp) = cfg.post_processor
-    {
-        let started = Instant::now();
-        // Bound the blocking grammar call: this runs on the main loop
-        // thread, so a hung cloud endpoint would otherwise freeze the
-        // whole daemon — no new utterance could be recorded until it
-        // returned. On timeout we fall back to the tier-1 acoustic text
-        // exactly like the error arm below, so behavior on a stalled
-        // endpoint matches a failed one.
-        const GRAMMAR_BLOCKING_TIMEOUT: Duration = Duration::from_secs(8);
-        let timed = rt.block_on(async {
-            tokio::time::timeout(GRAMMAR_BLOCKING_TIMEOUT, pp.process_request(req)).await
-        });
-        let process_result = match timed {
-            Ok(inner) => inner,
-            Err(_elapsed) => {
-                let local = crate::always::postprocess::local_cleanup(&fallback);
-                tracing::warn!(
-                    timeout_secs = GRAMMAR_BLOCKING_TIMEOUT.as_secs(),
-                    fallback_text = %local,
-                    "grammar correction timed out, using local cleanup"
-                );
-                return (local, false);
-            }
-        };
-        match process_result {
-            Ok((mut cleaned, cache_hit)) => {
-                cleaned = crate::always::postprocess::local_cleanup(&cleaned);
-                let elapsed_ms = started.elapsed().as_millis() as u64;
-                if fallback != cleaned {
-                    tracing::info!(
-                        stage = "grammar_correction",
-                        before = %fallback,
-                        after = %cleaned,
-                        elapsed_ms = elapsed_ms,
-                        cache_hit,
-                        "grammar correction applied"
-                    );
-                } else {
-                    tracing::debug!(
-                        stage = "grammar_correction",
-                        text = %cleaned,
-                        elapsed_ms = elapsed_ms,
-                        cache_hit,
-                        "no grammar changes"
-                    );
-                }
-                (cleaned, cache_hit)
-            }
-            Err(err) => {
-                let local = crate::always::postprocess::local_cleanup(&fallback);
-                tracing::warn!(
-                    error = %err,
-                    fallback_text = %local,
-                    "grammar correction failed, using local cleanup"
-                );
-                (local, false)
+    use crate::always::postprocess::PostprocessMode;
+    let started = Instant::now();
+    let (text, cache_hit, source) = match mode {
+        PostprocessMode::Off => (
+            crate::always::postprocess::local_cleanup(transcript),
+            false,
+            "local_cleanup",
+        ),
+        PostprocessMode::Fast => (
+            crate::always::det_correct::correct(transcript),
+            false,
+            "fast",
+        ),
+        PostprocessMode::Apple | PostprocessMode::Groq => {
+            let cached = cfg
+                .post_processor
+                .as_ref()
+                .filter(|_| cfg.postprocess_available())
+                .and_then(|pp| pp.peek_cached(req));
+            match cached {
+                Some(llm) => (
+                    crate::always::postprocess::local_cleanup(&llm),
+                    true,
+                    "llm_cache",
+                ),
+                None => (
+                    crate::always::det_correct::correct(transcript),
+                    false,
+                    "fast_llm_not_ready",
+                ),
             }
         }
-    } else {
-        let local = crate::always::postprocess::local_cleanup(&fallback);
-        tracing::debug!(
+    };
+    let correction_us = started.elapsed().as_micros() as u64;
+    if crate::always::telemetry::should_log_transcripts() && text != transcript {
+        tracing::info!(
             stage = "grammar_correction",
-            text = %local,
-            "grammar correction disabled"
+            before = %transcript,
+            after = %text,
+            "correction applied"
         );
-        (local, false)
     }
+    tracing::info!(mode = %mode, source, cache_hit, correction_us, "correction_stage");
+    (text, cache_hit)
 }
 
 /// After paste-first, patch grammar via Cmd+Z + repaste when the LLM returns.
@@ -1320,6 +1695,36 @@ fn print_banner(cfg: &AlwaysConfig) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn local_failures_get_actionable_messages_not_groq_wording() {
+        let cases = [
+            (
+                "Apple STT failed: Siri and Dictation are disabled",
+                "dictation_disabled",
+            ),
+            (
+                "Apple STT failed: speech recognition not authorized",
+                "speech_permission",
+            ),
+            ("Apple STT failed: unsupported locale xx_XX", "language"),
+            (
+                "Apple STT failed: speech recognition timed out",
+                "apple_timeout",
+            ),
+            (
+                "microphone capture failed: '/x/always-capture' produced no audio",
+                "microphone",
+            ),
+            ("Groq returned 401 Unauthorized", "auth"),
+            ("error sending request: connection refused", "network"),
+        ];
+        for (msg, kind) in cases {
+            let err = anyhow::anyhow!(msg.to_string());
+            assert_eq!(super::classify_transcription_error(&err).0, kind, "{msg}");
+        }
+    }
+
     // Pure-logic tests for the speech pipeline (classifier, dictation
     // merge, cooldown window, localization seam) live in
     // `super::speech_action::tests` — they were extracted alongside
@@ -1424,5 +1829,71 @@ mod tests {
         assert!(should_auto_enter_for_text("  hello over there  "));
 
         assert_eq!(AUTO_ENTER_MIN_WORDS, 1);
+    }
+}
+
+/// Postprocess modes at the paste stage (SPEC §9): none of them waits on
+/// an LLM; `Apple`/`Groq` use the LLM text only when it is already cached.
+#[cfg(test)]
+mod postprocess_mode_tests {
+    use super::*;
+    use crate::always::config::PostprocessConfig;
+    use crate::always::postprocess::{PostProcessor, PostprocessMode};
+
+    fn cfg_with_llm() -> AlwaysConfig {
+        AlwaysConfig {
+            transcriber_backend: crate::stt_dispatch::TranscriberBackendChoice::Groq,
+            post_processor: Some(Arc::new(PostProcessor::new_with_config(
+                PostprocessConfig {
+                    grammar_correction_enabled: true,
+                    ..Default::default()
+                },
+                Some("test-key".into()),
+            ))),
+            ..AlwaysConfig::default()
+        }
+    }
+
+    const RAW: &str = "you.. and i think so uh. then it works";
+
+    #[test]
+    fn off_is_local_cleanup_only() {
+        let cfg = AlwaysConfig::default();
+        let req = crate::always::correction_request::build(RAW, false);
+        let (t, hit) = apply_grammar_blocking_request(&req, RAW, PostprocessMode::Off, &cfg);
+        assert_eq!(t, crate::always::postprocess::local_cleanup(RAW));
+        assert!(!hit);
+    }
+
+    #[test]
+    fn fast_is_the_deterministic_corrector() {
+        let cfg = AlwaysConfig::default();
+        let req = crate::always::correction_request::build(RAW, false);
+        let (t, hit) = apply_grammar_blocking_request(&req, RAW, PostprocessMode::Fast, &cfg);
+        assert_eq!(t, "and I think so. Then it works");
+        assert!(!hit);
+    }
+
+    #[test]
+    fn llm_mode_never_waits_and_uses_only_a_ready_cache() {
+        let cfg = cfg_with_llm();
+        let req = crate::always::correction_request::build(RAW, true);
+        let started = Instant::now();
+        let (t, hit) = apply_grammar_blocking_request(&req, RAW, PostprocessMode::Groq, &cfg);
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "must not wait on the LLM"
+        );
+        assert!(!hit);
+        assert_eq!(t, crate::always::det_correct::correct(RAW));
+
+        // A speculative warm that already finished is used verbatim.
+        cfg.post_processor
+            .as_ref()
+            .unwrap()
+            .insert_cached_for_test(&req.user_message, "And I think so. Then it works.");
+        let (t, hit) = apply_grammar_blocking_request(&req, RAW, PostprocessMode::Groq, &cfg);
+        assert!(hit);
+        assert_eq!(t, "And I think so. Then it works.");
     }
 }

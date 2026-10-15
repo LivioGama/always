@@ -1,6 +1,6 @@
 [package]
 name = "always"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 description = "Always — the first speech-to-text software designed to be always on and free your hands from the affordance"
 license = "AGPL-3.0-only"

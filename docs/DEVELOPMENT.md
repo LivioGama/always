@@ -33,7 +33,7 @@ cargo clippy --release -- -D warnings
 - **Rust** stable with edition 2024 support
 - **Swift** 5.9+ / macOS 14+
 - **SoX** (audio recording)
-  - macOS: `brew install sox`
+  - macOS: not needed — the app bundles its own capture helper (`capture/`); SoX `rec` is only a last-resort fallback if it is installed
   - Ubuntu/Debian: `apt install sox`
   - Arch: `pacman -S sox`
   - Windows: Download from [sox.sourceforge.net](http://sox.sourceforge.net/)

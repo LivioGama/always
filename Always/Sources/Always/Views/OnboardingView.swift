@@ -64,7 +64,7 @@ struct OnboardingView: View {
             case .tips:
                 return "Here are a few tips to get the most out of Always. Auto-enter is on by default, but holding Command prevents the text from being sent. Control Option V pastes filtered content anyway, and Control Option W lets you correct the last transcript to build your vocabulary."
             case .ready:
-                return "You're all set. Start speaking, and I'll type for you. Welcome to Always."
+                return "You're all set. Tick the apps where I should type — every other app stays paused — then start speaking. Welcome to Always."
             }
         }
     }
@@ -72,6 +72,7 @@ struct OnboardingView: View {
     @State private var step: Step = .welcome
     @ObservedObject private var enrollment: VoiceEnrollmentClient = .shared
     @ObservedObject private var narrator: OnboardingNarrator = .shared
+    @ObservedObject private var speech: SpeechModelSetup = .shared
 
     @State private var saveError: String?
     @State private var showSkipVoiceConfirmation = false
@@ -94,8 +95,14 @@ struct OnboardingView: View {
     /// blocking on it would strand users who decline it in a welcome
     /// window they cannot dismiss. The API key is not required either:
     /// a local model needs no key at all.
+    ///
+    /// On macOS 26+ Speech Recognition is required too: Apple's on-device
+    /// engine is the default transcriber there, and without the grant
+    /// every sentence fails. The model download is NOT waited for — it
+    /// keeps going in the background while the user records My Voice.
     private var requiredPermissionsGranted: Bool {
         micStatus == .authorized && accessibilityStatus
+            && (!speech.isOnDeviceEngineAvailable || speech.isAuthorized)
     }
 
     var body: some View {
@@ -126,14 +133,31 @@ struct OnboardingView: View {
             refreshPermissions()
             startPermissionRefreshTimer()
             enrollment.requestStatus()
+            // Start the on-device model download right away (it is large
+            // and the user has three onboarding steps to get through).
+            speech.ensureModelInstalled()
             narrator.speak(Step.welcome.narration)
+            // Bypass per-app pause rules during onboarding so the user can
+            // test voice typing without adding an app to the allowlist first.
+            StateMonitor.shared.setSetupMode(enabled: true)
         }
         .onDisappear {
             stopPermissionRefreshTimer()
             narrator.stop()
+            StateMonitor.shared.setSetupMode(enabled: false)
         }
         .onChange(of: step) { _, newStep in
             narrator.speak(newStep.narration)
+        }
+        .onChange(of: enrollment.isEnrolled) { _, isEnrolled in
+            // Completing all three samples must leave the gate ON — the
+            // step's own copy promises "Always will only listen to you",
+            // and the daemon truthfully reports `enabled: false` until
+            // SetVoiceProfileEnabled arrives. Leaving this to Settings
+            // meant users finished setup with the gate dark.
+            if isEnrolled {
+                enrollment.setEnabled(true)
+            }
         }
     }
 
@@ -234,13 +258,15 @@ struct OnboardingView: View {
         case .welcome:
             return "Always listens to your voice and types what you say — in any app. Let's get set up in three quick steps."
         case .permissions:
-            return "macOS needs you to approve two permissions. This window updates automatically once you do."
+            return speech.isOnDeviceEngineAvailable
+                ? "macOS needs you to approve three permissions. This window updates automatically once you do."
+                : "macOS needs you to approve two permissions. This window updates automatically once you do."
         case .voice:
             return "Optional, but it stops Always transcribing other people, videos and calls."
         case .tips:
             return "A few shortcuts that make Always feel invisible. Memorize these — you'll use them daily."
         case .ready:
-            return "Start speaking and Always will type for you. You can revisit any of this in Settings."
+            return "Pick the apps Always types into, then start speaking. You can revisit any of this in Settings."
         }
     }
 
@@ -334,7 +360,9 @@ struct OnboardingView: View {
     // MARK: - Step 1: Permissions
 
     private var permissionsStep: some View {
-        VStack(spacing: 12) {
+        // Tighter than the other steps: up to four cards plus the speech
+        // model row must fit the fixed 640 pt window.
+        VStack(spacing: speech.isOnDeviceEngineAvailable ? 8 : 12) {
             permissionCard(
                 icon: "mic.fill",
                 iconColor: .red,
@@ -357,6 +385,20 @@ struct OnboardingView: View {
                 action: handleAccessibilityAction
             )
 
+            if speech.isOnDeviceEngineAvailable {
+                permissionCard(
+                    icon: "waveform",
+                    iconColor: .purple,
+                    title: "Speech Recognition",
+                    detail: speechDetail,
+                    granted: speech.isAuthorized,
+                    waiting: false,
+                    actionTitle: speech.isAuthorized ? nil
+                        : (speech.authStatus == .notDetermined ? "Grant" : "Open Settings"),
+                    action: handleSpeechAction
+                )
+            }
+
             permissionCard(
                 icon: "command",
                 iconColor: .indigo,
@@ -364,9 +406,13 @@ struct OnboardingView: View {
                 detail: "Optional — enables global shortcuts (⌃⌥P pause, ⌃⌥V paste).",
                 granted: inputMonitoringGranted,
                 waiting: false,
-                actionTitle: inputMonitoringGranted ? nil : "Grant",
+                actionTitle: inputMonitoringGranted ? nil : "Open System Settings",
                 action: handleInputMonitoringAction
             )
+
+            if speech.isOnDeviceEngineAvailable {
+                speechModelRow
+            }
 
             if !requiredPermissionsGranted {
                 Text("macOS may need you to toggle Always on in System Settings. This window updates on its own once you do.")
@@ -378,6 +424,47 @@ struct OnboardingView: View {
             }
         }
         .padding(.horizontal, 20)
+    }
+
+    private var speechDetail: String {
+        "Required — Always transcribes on this Mac with Apple's on-device engine. No account, no API key, nothing leaves your Mac."
+    }
+
+    /// Download state of the on-device language model (macOS 26+).
+    @ViewBuilder
+    private var speechModelRow: some View {
+        HStack(spacing: 10) {
+            switch speech.modelState {
+            case .installed:
+                Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                Text("Speech model ready\(speech.languageName.isEmpty ? "" : " — \(speech.languageName)")")
+                    .font(.caption).foregroundColor(.secondary)
+            case .downloading(let fraction):
+                ProgressView(value: fraction).frame(width: 140)
+                Text("Downloading speech model\(speech.languageName.isEmpty ? "" : " (\(speech.languageName))")… \(Int(fraction * 100))%")
+                    .font(.caption).foregroundColor(.secondary)
+            case .failed(let reason):
+                Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
+                Text("Speech model: \(reason)")
+                    .font(.caption).foregroundColor(.secondary)
+                    .lineLimit(2)
+                Button("Retry") { speech.retry() }.controlSize(.small)
+            case .needsDictation:
+                Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
+                Text("Turn on Dictation (System Settings → Keyboard) — this Mac's speech engine needs it.")
+                    .font(.caption).foregroundColor(.secondary)
+                    .lineLimit(2)
+                Button("Open") { speech.openDictationSettings() }.controlSize(.small)
+                Button("Retry") { speech.retry() }.controlSize(.small)
+            case .checking, .unknown:
+                ProgressView().controlSize(.small)
+                Text("Checking speech model…").font(.caption).foregroundColor(.secondary)
+            case .notApplicable:
+                EmptyView()
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
     }
 
     @ViewBuilder
@@ -422,7 +509,7 @@ struct OnboardingView: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 14)
+        .padding(.vertical, speech.isOnDeviceEngineAvailable ? 10 : 14)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color.secondary.opacity(0.06))
@@ -590,7 +677,7 @@ struct OnboardingView: View {
     // MARK: - Step 4: Ready
 
     private var readyStep: some View {
-        VStack(spacing: 28) {
+        VStack(spacing: 16) {
             // App logo with success checkmark badge.
             ZStack {
                 if let icon = appIconImage {
@@ -598,32 +685,30 @@ struct OnboardingView: View {
                         .resizable()
                         .interpolation(.high)
                         .aspectRatio(contentMode: .fit)
-                        .frame(width: 120, height: 120)
-                        .clipShape(RoundedRectangle(cornerRadius: 26))
+                        .frame(width: 80, height: 80)
+                        .clipShape(RoundedRectangle(cornerRadius: 18))
                         .shadow(color: Color.green.opacity(0.3), radius: 12, y: 4)
                 } else {
                     Circle()
                         .fill(Color.green.opacity(0.12))
-                        .frame(width: 120, height: 120)
+                        .frame(width: 80, height: 80)
                     Image(systemName: "checkmark.seal.fill")
-                        .font(.system(size: 60))
+                        .font(.system(size: 40))
                         .foregroundColor(.green)
                 }
 
                 // Success checkmark badge in the corner.
                 Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 36))
+                    .font(.system(size: 26))
                     .foregroundColor(.green)
-                    .background(Circle().fill(Color(NSColor.windowBackgroundColor)).frame(width: 38, height: 38))
-                    .offset(x: 42, y: 42)
+                    .background(Circle().fill(Color(NSColor.windowBackgroundColor)).frame(width: 28, height: 28))
+                    .offset(x: 28, y: 28)
             }
-            .padding(.top, 24)
-            .padding(.vertical, 12)
+            .padding(.top, 4)
 
-            // Animated typing demo — simulates Always transcribing
-            // speech into a text field.
-            TypingDemoView()
-                .frame(maxWidth: 440)
+            // Where voice typing is ON. Every app is paused until it is
+            // on this allowlist; setup used to end without saying so.
+            OnboardingAppAllowlist()
         }
         .padding(.horizontal, 20)
     }
@@ -769,14 +854,29 @@ struct OnboardingView: View {
     }
 
     private func handleAccessibilityAction() {
-        requestAccessibility()
         if !AXIsProcessTrusted() {
+            // Register Always in the Accessibility list (and show the
+            // system "would like to control this computer" sheet) BEFORE
+            // opening the pane. Deep-linking alone left the list without
+            // an Always entry, so a new user had to find the app with "+".
+            requestAccessibility()
             openAccessibilitySettings()
         }
     }
 
+    private func handleSpeechAction() {
+        if speech.authStatus == .notDetermined {
+            speech.requestAuthorization()
+        } else {
+            speech.openSystemSettings()
+        }
+    }
+
     private func handleInputMonitoringAction() {
-        requestInputMonitoring()
+        // IOHIDRequestAccess first: it adds Always to the Input Monitoring
+        // list (deep-linking alone left no entry to toggle), then the pane
+        // opens.
+        PermissionsManager.shared.requestInputMonitoringIfNeeded()
     }
 
     // MARK: - Microphone
@@ -810,22 +910,11 @@ struct OnboardingView: View {
     }
 
     private func refreshPermissions() {
+        speech.refreshAuthorization()
         micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         accessibilityStatus = AXIsProcessTrusted()
         inputMonitoringGranted =
             IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
-    }
-
-    // MARK: - Input Monitoring
-
-    private func requestInputMonitoring() {
-        _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
-    }
-
-    private func openInputMonitoringSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
-            NSWorkspace.shared.open(url)
-        }
     }
 
     private func startPermissionRefreshTimer() {

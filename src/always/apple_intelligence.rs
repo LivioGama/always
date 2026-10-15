@@ -27,11 +27,28 @@ unsafe extern "C" {
         max_tokens: i32,
     ) -> *mut AppleLLMResponse;
     fn free_apple_llm_response(response: *mut AppleLLMResponse);
+    fn apple_intelligence_prewarm(system_prompt: *const c_char);
+    #[cfg(test)]
+    fn process_text_with_system_prompt_apple_mode(
+        system_prompt: *const c_char,
+        user_content: *const c_char,
+        max_tokens: i32,
+        mode: i32,
+    ) -> *mut AppleLLMResponse;
 }
 
 /// True when Apple Intelligence is available on this device and build.
 pub fn check_availability() -> bool {
     unsafe { is_apple_intelligence_available() == 1 }
+}
+
+/// Create + prewarm a pooled LanguageModelSession for `system_prompt` in
+/// the background (non-blocking). Only the pooled harness mode uses it —
+/// measured no faster than a fresh session in production.
+pub fn prewarm(system_prompt: &str) {
+    if let Ok(c) = CString::new(system_prompt) {
+        unsafe { apple_intelligence_prewarm(c.as_ptr()) };
+    }
 }
 
 /// Process text with Apple Intelligence using a separate system prompt
@@ -81,6 +98,38 @@ pub fn process_text_with_system_prompt(
     unsafe { free_apple_llm_response(response_ptr) };
 
     result
+}
+
+/// Latency-harness variant with explicit mode bits (see the Swift side).
+#[cfg(test)]
+pub fn process_with_mode(
+    system_prompt: &str,
+    user_content: &str,
+    mode: i32,
+) -> Result<String, String> {
+    let system_cstr = CString::new(system_prompt).map_err(|e| e.to_string())?;
+    let user_cstr = CString::new(user_content).map_err(|e| e.to_string())?;
+    let ptr = unsafe {
+        process_text_with_system_prompt_apple_mode(
+            system_cstr.as_ptr(),
+            user_cstr.as_ptr(),
+            500,
+            mode,
+        )
+    };
+    if ptr.is_null() {
+        return Err("null".into());
+    }
+    let out = unsafe {
+        let r = &*ptr;
+        if r.success == 1 && !r.response.is_null() {
+            Ok(CStr::from_ptr(r.response).to_string_lossy().into_owned())
+        } else {
+            Err("failed".into())
+        }
+    };
+    unsafe { free_apple_llm_response(ptr) };
+    out
 }
 
 #[cfg(test)]

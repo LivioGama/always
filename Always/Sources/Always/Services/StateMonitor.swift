@@ -27,6 +27,16 @@ class StateMonitor: ObservableObject {
     /// Most recent speculative (streaming) transcript preview. Set when
     /// a TranscriptChunk arrives; cleared when a new utterance starts.
     @Published var partialTranscript: String = ""
+    /// `partialTranscript` came from `TranscriptionInterimPending`: heard
+    /// before "My Voice" verified the speaker, so it renders DIMMED and the
+    /// listening badge is not raised for it (decision 2026-10-14).
+    @Published var partialUnverified: Bool = false
+    /// The daemon's own word on pause (Paused/Resumed[Quietly] events).
+    /// The overlay follows THIS, not the local `isPaused` prediction: the
+    /// prediction depends on this process's focused-app view and its copy
+    /// of the allowlist, and when either lagged it hid the HUD for the
+    /// whole utterance while the daemon was transcribing (2026-10-14).
+    @Published var daemonPaused: Bool = false
     /// Whether the current active model supports streaming transcription.
     /// Cached from ModelManagerClient to avoid actor isolation issues.
     @Published var currentModelSupportsStreaming: Bool = false
@@ -42,6 +52,11 @@ class StateMonitor: ObservableObject {
     /// using the mic", "audio playing"), nil when no watchdog pause is
     /// active. Drives explanatory copy in the menu/overlay.
     @Published var pauseReason: String? = nil
+
+    /// True while onboarding is visible. Toggles the daemon's setup mode,
+    /// which bypasses per-app pause rules so the user can test voice
+    /// typing during setup without having to add an app to the allowlist.
+    @Published var isSetupMode: Bool = false
 
     private var cancellables = Set<AnyCancellable>()
     private var udsClient: UDSClient
@@ -73,6 +88,10 @@ class StateMonitor: ObservableObject {
     private let transcribingElapsedThreshold: TimeInterval = 5.0
     /// 3× the daemon heartbeat cadence — tolerates two dropped beats.
     private let voiceLeaseSeconds: TimeInterval = 6.0
+    /// An unverified preview with no update for this long is stale (the
+    /// daemon dropped the utterance and said so, or the event was lost).
+    private let unverifiedLeaseSeconds: TimeInterval = 2.5
+    private var unverifiedLeaseWork: DispatchWorkItem?
     /// The daemon re-emits TranscribingStarted every ~2s while a
     /// transcription is genuinely in flight (speculation waits and the
     /// blocking fallback both heartbeat), so 4 missed beats means the
@@ -218,6 +237,22 @@ class StateMonitor: ObservableObject {
         udsClient.sendCommand("TogglePause")
     }
 
+    /// Toggle daemon setup mode: when enabled, bypasses per-app pause rules
+    /// so recording and pasting work during onboarding even when the focused
+    /// app is Always itself. Used by OnboardingView on appear/disappear.
+    func setSetupMode(enabled: Bool) {
+        isSetupMode = enabled
+        udsClient.sendSetupMode(enabled: enabled)
+        if enabled {
+            // The setup window is the only UI: kill any toast that was
+            // mid-animation and suppress all future HUD surfaces.
+            StatusOverlayController.shared.hideAllForSetup()
+            logger.info("setup mode enabled — per-app pause bypassed, HUD suppressed")
+        } else {
+            logger.info("setup mode disabled — per-app pause restored")
+        }
+    }
+
     /// Predict `isPaused` from master + idle + focused-app allowlist.
     /// Daemon events remain authoritative; this covers optimistic UI.
     /// Recompute the effective pause flag.
@@ -361,10 +396,12 @@ class StateMonitor: ObservableObject {
             $isVoiceActivity.map { _ in () }.eraseToAnyPublisher(),
             $isListeningActive.map { _ in () }.eraseToAnyPublisher(),
             $isPaused.map { _ in () }.eraseToAnyPublisher(),
+            $daemonPaused.map { _ in () }.eraseToAnyPublisher(),
             $isMasterPaused.map { _ in () }.eraseToAnyPublisher(),
             $isIdleAutoPaused.map { _ in () }.eraseToAnyPublisher(),
             $isDaemonConnected.map { _ in () }.eraseToAnyPublisher(),
             $partialTranscript.map { _ in () }.eraseToAnyPublisher(),
+            $partialUnverified.map { _ in () }.eraseToAnyPublisher(),
         ]
         Publishers.MergeMany(inputs)
             .sink { [weak self] _ in
@@ -412,7 +449,10 @@ class StateMonitor: ObservableObject {
     /// decision can be compared against what is already on screen.
     private func desiredOverlayState() -> OverlayState? {
         // Connection lost or any pause-class state active → hidden.
-        if !isDaemonConnected || isMasterPaused || isPaused || isIdleAutoPaused {
+        if !isDaemonConnected || isMasterPaused || daemonPaused || isIdleAutoPaused {
+            if isVoiceActivity || isTranscribing || !partialTranscript.isEmpty {
+                logger.info("overlay_suppressed connected=\(self.isDaemonConnected, privacy: .public) master=\(self.isMasterPaused, privacy: .public) daemonPaused=\(self.daemonPaused, privacy: .public) idle=\(self.isIdleAutoPaused, privacy: .public)")
+            }
             return nil
         }
         // Activity-only model: the overlay represents something happening
@@ -426,6 +466,10 @@ class StateMonitor: ObservableObject {
         // `currentModelSupportsStreaming` render gate is gone: it
         // silently discarded previews the daemon deliberately produced
         // on the cloud backend.
+        // Preview heard before speaker verification: shown at once, dimmed.
+        if partialUnverified && !partialTranscript.isEmpty && !isTranscribing {
+            return .unverifiedPreview(text: partialTranscript)
+        }
         if isTranscribing {
             if !partialTranscript.isEmpty {
                 return .transcribingWithText(text: partialTranscript, isInterim: true)
@@ -489,6 +533,9 @@ class StateMonitor: ObservableObject {
         let desired = desiredOverlayState()
         guard appliedOverlay != .some(desired) else { return }
         appliedOverlay = .some(desired)
+        if desired != nil && isPaused {
+            logger.info("overlay_shown_local_prediction_was_paused bundle=\(FocusedAppMonitor.shared.currentBundleId ?? "nil", privacy: .public) resumed=\(self.resumedBundleIds.count, privacy: .public)")
+        }
         if let desired {
             StatusOverlayController.shared.show(state: desired)
         } else {
@@ -539,6 +586,20 @@ class StateMonitor: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + voiceLeaseSeconds, execute: work)
     }
 
+    /// Unverified previews carry no lifecycle events of their own (no
+    /// VoiceActivityDetected until verification), so they expire unless
+    /// refreshed.
+    private func armUnverifiedLease() {
+        unverifiedLeaseWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.partialUnverified else { return }
+            self.partialUnverified = false
+            if !self.isVoiceActivity && !self.isTranscribing { self.partialTranscript = "" }
+        }
+        unverifiedLeaseWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + unverifiedLeaseSeconds, execute: work)
+    }
+
     private func cancelVoiceLease() {
         voiceLeaseWork?.cancel()
         voiceLeaseWork = nil
@@ -581,12 +642,14 @@ class StateMonitor: ObservableObject {
                 self?.isInitialSync = false
             }
         case .paused:
+            daemonPaused = true
             let changed = !isPaused
             isPaused = true
             if changed {
                 StatusOverlayController.shared.flash(state: .paused)
             }
         case .resumed:
+            daemonPaused = false
             let changed = isPaused
             isPaused = false
             if changed {
@@ -597,8 +660,10 @@ class StateMonitor: ObservableObject {
             // change (mouse window switch, Mission Control) where
             // the user already knows what they did.
             isPaused = true
+            daemonPaused = true
         case .resumedQuietly:
             isPaused = false
+            daemonPaused = false
         case .autoEnterEnabled:
             let changed = !isAutoEnter
             isAutoEnter = true
@@ -636,10 +701,20 @@ class StateMonitor: ObservableObject {
             // contract.  A valid preview proves the transcription is still
             // active, so it must also keep the HUD lease alive.
             if let text = event.data?["text"], !text.isEmpty {
+                partialUnverified = false
+                unverifiedLeaseWork?.cancel()
                 partialTranscript = text
                 armTranscribingLease()
                 updateOverlay()
             }
+        case .transcriptionInterimPending:
+            if let text = event.data?["text"], !text.isEmpty {
+                partialUnverified = true
+                partialTranscript = text
+                armUnverifiedLease()
+            }
+        case .voiceLevel, .transcriptRejected:
+            break
         case .transcriptFinal:
             // The phrase is fully done. Force-clear the ongoing state
             // so the "Listening" overlay disappears immediately —
@@ -648,6 +723,7 @@ class StateMonitor: ObservableObject {
             isTranscribing = false
             isVoiceActivity = false
             partialTranscript = ""
+            partialUnverified = false
             cancelVoiceLease()
             cancelTranscribingLease()
             stopTranscribingTicker()
@@ -673,7 +749,10 @@ class StateMonitor: ObservableObject {
             // Fresh utterance start (not a mid-utterance heartbeat):
             // drop any stale partial from the previous one so the badge
             // opens clean instead of flashing old words.
-            if !isVoiceActivity && !isTranscribing {
+            // Exception: the dimmed unverified preview of THIS utterance —
+            // VoiceActivityDetected is exactly the verification moment, and
+            // the daemon re-sends the same text as verified right after.
+            if !isVoiceActivity && !isTranscribing && !partialUnverified {
                 partialTranscript = ""
             }
             isVoiceActivity = true
@@ -682,6 +761,12 @@ class StateMonitor: ObservableObject {
             NSLog("Always: VoiceActivityDetected -> overlay")
         case .voiceActivityEnded:
             if isVoiceActivity { isVoiceActivity = false }
+            if partialUnverified {
+                // Rejected / abandoned before verification: drop the dimmed text.
+                partialUnverified = false
+                partialTranscript = ""
+                unverifiedLeaseWork?.cancel()
+            }
             cancelVoiceLease()
             NSLog("Always: VoiceActivityEnded -> hide overlay")
         case .transcriptionFiltered:
@@ -691,6 +776,7 @@ class StateMonitor: ObservableObject {
             isTranscribing = false
             isVoiceActivity = false
             partialTranscript = ""
+            partialUnverified = false
             cancelVoiceLease()
             cancelTranscribingLease()
             let reason = event.data?["reason"] ?? ""

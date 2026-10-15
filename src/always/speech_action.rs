@@ -46,6 +46,10 @@ pub enum SpeechAction {
     Rejected { reason: String },
     /// Whisper hallucination detector rejected the text.
     Hallucinated { reason: String },
+    /// Acoustic evidence says the speech was not in the dictation language
+    /// (e.g. Nepali to family transcribed as "And a baggy?"). Never pasted,
+    /// never auto-Entered — kept recoverable in the rejected ring.
+    ForeignSpeech { reason: String },
     /// Accepted — daemon should copy + paste this final text.
     Paste { text: String },
 }
@@ -148,6 +152,20 @@ pub fn classify_transcription(
 ) -> SpeechAction {
     if in_cooldown(now, last_process, cfg.cooldown_ms) {
         return SpeechAction::InCooldown;
+    }
+
+    // Out-of-language speech, judged from engine ACOUSTIC evidence (not the
+    // words), so — unlike the content filters below — it applies to local
+    // backends too. Backends that report no evidence are unaffected.
+    if cfg.filter_enabled
+        && let Some(reason) = crate::always::hallucination::foreign_speech(
+            transcription,
+            cfg.foreign_speech_confidence_enforce,
+        )
+    {
+        return SpeechAction::ForeignSpeech {
+            reason: reason.to_string(),
+        };
     }
 
     // Deterministic CONTENT filtering (hard phrase filter + hallucination
@@ -346,6 +364,7 @@ mod tests {
             timeout_secs: 30,
             silence_secs: 2.0,
             adaptive_silence_enabled: true,
+            hesitation_silence_secs: crate::always::config::DEFAULT_HESITATION_SILENCE_SECS,
             speaker_gate_enabled: false,
             speaker_gate_threshold: crate::always::config::DEFAULT_SPEAKER_GATE_THRESHOLD,
             auto_enter: false,
@@ -371,6 +390,7 @@ mod tests {
             transcript_stream_enabled: false,
             audible_status_sound: crate::always::status_sound::StatusSoundSetting::default(),
             stt_live_preview: true,
+            foreign_speech_confidence_enforce: false,
             mic_conflict_exclusion_bundles: Vec::new(),
         }
     }
@@ -381,6 +401,7 @@ mod tests {
             duration: 1.0,
             language: "en".to_string(),
             segments: vec![],
+            ..Default::default()
         }
     }
 
@@ -503,6 +524,108 @@ mod tests {
             ),
             other => panic!("expected verbatim Paste on local, got {:?}", other),
         }
+    }
+
+    /// The 2026-10-14 bug: Nepali to mom → "And a baggy?" was pasted AND
+    /// auto-Entered on the Apple backend. It must classify as ForeignSpeech
+    /// (handled as a recoverable reject — never pasted, never Entered).
+    #[test]
+    fn classify_apple_backend_rejects_foreign_speech() {
+        let mut cfg = test_config();
+        cfg.transcriber_backend = crate::stt_dispatch::TranscriberBackendChoice::Apple;
+        let mut tr = empty_transcription("And a baggy?");
+        tr.evidence.live_stream = crate::stt::LiveStreamOutcome::NoWords;
+        let now = Instant::now();
+        let action = classify_transcription(
+            &cfg,
+            "And a baggy?",
+            &tr,
+            now,
+            now - Duration::from_secs(10),
+        );
+        assert!(
+            matches!(action, SpeechAction::ForeignSpeech { .. }),
+            "got {action:?}"
+        );
+
+        // Same utterance with the evidence of real English → pasted.
+        let mut ok = empty_transcription("And a bag, please.");
+        ok.evidence.live_stream = crate::stt::LiveStreamOutcome::Heard;
+        ok.evidence.confidence = Some(0.91);
+        let action = classify_transcription(
+            &cfg,
+            "And a bag, please.",
+            &ok,
+            now,
+            now - Duration::from_secs(10),
+        );
+        assert!(
+            matches!(action, SpeechAction::Paste { .. }),
+            "got {action:?}"
+        );
+
+        // Cooldown still wins first; filter_enabled=false disables the gate.
+        let action = classify_transcription(&cfg, "And a baggy?", &tr, now, now);
+        assert_eq!(action, SpeechAction::InCooldown);
+        cfg.filter_enabled = false;
+        let action = classify_transcription(
+            &cfg,
+            "And a baggy?",
+            &tr,
+            now,
+            now - Duration::from_secs(10),
+        );
+        assert!(
+            matches!(action, SpeechAction::Paste { .. }),
+            "got {action:?}"
+        );
+    }
+
+    /// Rule 1 (low confidence) is log-only by default: still pasted.
+    /// With `foreign_speech_confidence_enforce` it rejects.
+    #[test]
+    fn classify_low_confidence_is_log_only_unless_enforced() {
+        let mut cfg = test_config();
+        cfg.transcriber_backend = crate::stt_dispatch::TranscriberBackendChoice::Apple;
+        let text = "Amma, kana, kanugyu, makali, hilo, ai, chuhe.";
+        let mut tr = empty_transcription(text);
+        tr.evidence.live_stream = crate::stt::LiveStreamOutcome::Heard;
+        tr.evidence.confidence = Some(0.152); // measured, synthetic Nepali
+        let now = Instant::now();
+        let last = now - Duration::from_secs(10);
+        assert!(!cfg.foreign_speech_confidence_enforce);
+        let action = classify_transcription(&cfg, text, &tr, now, last);
+        assert!(
+            matches!(action, SpeechAction::Paste { .. }),
+            "got {action:?}"
+        );
+        cfg.foreign_speech_confidence_enforce = true;
+        let action = classify_transcription(&cfg, text, &tr, now, last);
+        assert!(
+            matches!(action, SpeechAction::ForeignSpeech { .. }),
+            "got {action:?}"
+        );
+    }
+
+    /// Local backend stays raw verbatim for real speech: the foreign gate
+    /// only acts on acoustic evidence, never on content.
+    #[test]
+    fn classify_local_backend_stutter_with_confident_evidence_still_pastes() {
+        let cfg = local_config();
+        let mut tr = empty_transcription(LOST_STUTTER_TEXT);
+        tr.evidence.confidence = Some(0.62);
+        let now = Instant::now();
+        let action = classify_transcription(
+            &cfg,
+            LOST_STUTTER_TEXT,
+            &tr,
+            now,
+            now - Duration::from_secs(10),
+        );
+        assert!(
+            matches!(action, SpeechAction::Paste { .. }),
+            "got {action:?}"
+        );
     }
 
     #[test]

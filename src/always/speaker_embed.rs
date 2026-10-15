@@ -357,7 +357,10 @@ mod tests {
     #[test]
     fn too_short_utterance_errors() {
         let Some(e) = embedder_or_skip() else { return };
-        let short = synth_voice(1, 0.3);
+        // Just under MIN_EMBED_SAMPLES (0.3 s since the floor was lowered
+        // from 0.5 s — this test still used 0.3 s and had gone stale).
+        let short = synth_voice(1, 0.25);
+        assert!(short.len() < MIN_EMBED_SAMPLES);
         assert!(e.embed(&short).is_err());
     }
 

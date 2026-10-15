@@ -27,6 +27,19 @@ public func processTextWithSystemPrompt(
     return responsePtr
 }
 
+@_cdecl("process_text_with_system_prompt_apple_mode")
+public func processTextWithSystemPromptMode(
+    _ systemPrompt: UnsafePointer<CChar>,
+    _ userContent: UnsafePointer<CChar>,
+    maxTokens: Int32,
+    mode: Int32
+) -> UnsafeMutablePointer<AppleLLMResponse> {
+    processTextWithSystemPrompt(systemPrompt, userContent, maxTokens: maxTokens)
+}
+
+@_cdecl("apple_intelligence_prewarm")
+public func appleIntelligencePrewarm(_ systemPrompt: UnsafePointer<CChar>) {}
+
 @_cdecl("free_apple_llm_response")
 public func freeAppleLLMResponse(_ response: UnsafeMutablePointer<AppleLLMResponse>?) {
     guard let response = response else { return }

@@ -135,6 +135,9 @@ enum OverlayState: Equatable, Hashable {
     case autoEnterOff
     case transcribing
     case transcribingWithText(text: String, isInterim: Bool)
+    /// Live preview heard before "My Voice" verified the speaker — shown
+    /// immediately, dimmed (decision 2026-10-14).
+    case unverifiedPreview(text: String)
     case processing
     case voiceActivity
     case filtered(reason: String)
@@ -170,12 +173,21 @@ enum OverlayState: Equatable, Hashable {
     /// mic") instead of the generic Paused badge.
     case pausedExternal(reason: String)
 
+    /// Provisional text of the utterance in progress.
+    var isLivePreviewText: Bool {
+        switch self {
+        case .transcribingWithText(_, let isInterim): return isInterim
+        case .unverifiedPreview: return true
+        default: return false
+        }
+    }
+
     /// Persistent HUD states that should appear instantly (no fade-in).
     var isInstantShow: Bool {
         switch self {
         case .voiceActivity, .transcribing, .transcribingElapsed, .autoEnterCountdown:
             return true
-        case .transcribingWithText:
+        case .transcribingWithText, .unverifiedPreview:
             return true
         default:
             return false
@@ -192,7 +204,8 @@ enum OverlayState: Equatable, Hashable {
     /// re-emission.
     var preemptsFlash: Bool {
         switch self {
-        case .voiceActivity, .transcribing, .transcribingWithText, .transcribingElapsed:
+        case .voiceActivity, .transcribing, .transcribingWithText, .transcribingElapsed,
+             .unverifiedPreview:
             return true
         default:
             return false
@@ -207,6 +220,7 @@ enum OverlayState: Equatable, Hashable {
         case .autoEnterOff: return "Auto-Enter Off"
         case .transcribing: return "Transcribing"
         case .transcribingWithText(let text, _): return text
+        case .unverifiedPreview(let text): return text
         case .processing: return "Processing"
         case .voiceActivity: return "Listening"
         case .filtered(let reason): return reason.isEmpty ? "Filtered" : "Filtered · \(reason)"
@@ -235,6 +249,7 @@ enum OverlayState: Equatable, Hashable {
         case .autoEnterOff: return "circle"
         case .transcribing: return "waveform.circle.fill"
         case .transcribingWithText: return "waveform.circle.fill"
+        case .unverifiedPreview: return "waveform"
         case .processing: return "waveform.circle"
         case .voiceActivity: return "waveform"
         case .filtered: return "xmark.octagon.fill"
@@ -262,6 +277,7 @@ enum OverlayState: Equatable, Hashable {
         case .autoEnterOff: return .systemGray
         case .transcribing: return .systemPurple
         case .transcribingWithText: return .systemPurple
+        case .unverifiedPreview: return .systemGray
         case .processing: return .systemBlue
         case .voiceActivity: return .systemRed
         case .filtered: return .systemPink
@@ -580,6 +596,8 @@ class StatusOverlayView: NSView {
         fatalError("init(coder:) not implemented")
     }
 
+    private var lastStateWasLivePreview = false
+
     private static let waveStates: Set<OverlayState> = [.voiceActivity, .processing, .transcribing]
 
     private func applyState() {
@@ -591,8 +609,18 @@ class StatusOverlayView: NSView {
             // newest words visible, and the panel height fits what is shown.
             let layout = OverlayHUDSizing.layout(forText: state.rawValue)
             label.stringValue = layout.display
-            if heightConstraint?.constant != layout.height {
-                heightConstraint?.constant = layout.height
+            // Live preview text is revised constantly (the recognizers
+            // rewrite earlier words); letting the panel shrink and regrow
+            // on every revision made it jump. While one utterance's preview
+            // is on screen the height only grows.
+            var height = layout.height
+            if state.isLivePreviewText, let current = heightConstraint?.constant,
+               lastStateWasLivePreview {
+                height = max(height, current)
+            }
+            lastStateWasLivePreview = state.isLivePreviewText
+            if heightConstraint?.constant != height {
+                heightConstraint?.constant = height
                 invalidateIntrinsicContentSize()
             }
         }
@@ -601,12 +629,18 @@ class StatusOverlayView: NSView {
         if case .transcribingWithText(_, let isInterim) = state {
             // Interim text: slightly lower opacity to indicate it's provisional
             label.alphaValue = isInterim ? 0.75 : 1.0
+        } else if case .unverifiedPreview = state {
+            // Not yet verified as the user's voice: clearly dimmed.
+            label.alphaValue = 0.4
         } else {
             label.alphaValue = 1.0
         }
 
         var shouldShowWave = StatusOverlayView.waveStates.contains(state)
         if case .transcribingWithText = state {
+            shouldShowWave = true
+        }
+        if case .unverifiedPreview = state {
             shouldShowWave = true
         }
 
@@ -1243,6 +1277,11 @@ class StatusOverlayController {
     /// Everything else defers until the flash completes so the user
     /// actually sees the toggle confirmation.
     func show(state: OverlayState) {
+        // Setup mode: the onboarding window is the only UI. No HUD.
+        guard !StateMonitor.shared.isSetupMode else {
+            window?.hide()
+            return
+        }
         // Hidden mode: the user opted out of the HUD entirely.
         guard OverlayDisplayMode.current != .hidden else {
             window?.hide()
@@ -1265,6 +1304,11 @@ class StatusOverlayController {
     /// notifications like Pause/Resume or Auto-Enter on/off toggles.
     /// Always lasts the full `duration` regardless of voice activity.
     func flash(state: OverlayState, duration: TimeInterval = 1.5, forceVisible: Bool = false) {
+        // Setup mode: no pause/resume/filtered toasts over the setup window.
+        guard !StateMonitor.shared.isSetupMode else {
+            window?.hide()
+            return
+        }
         guard forceVisible || OverlayDisplayMode.current != .hidden else {
             window?.hide()
             return
@@ -1307,6 +1351,8 @@ class StatusOverlayController {
     /// Phase 1 (0-2s): Show full overlay with idle state
     /// Phase 2 (2s+): Hide main overlay, animate corner widget with play button
     func showIdleTimeoutAnimation(seconds: Int) {
+        // Setup mode: the setup window speaks for itself; no idle HUD.
+        guard !StateMonitor.shared.isSetupMode else { return }
         // Hidden mode: skip the HUD phase but keep the corner resume
         // widget — it's a functional control, not a status flash.
         guard OverlayDisplayMode.current != .hidden else {
@@ -1338,6 +1384,8 @@ class StatusOverlayController {
 
     /// Show the persistent corner widget for manual resume during idle timeout.
     private func showIdleResumeWidget() {
+        // Setup mode: no corner widget — nothing to resume from onboarding.
+        guard !StateMonitor.shared.isSetupMode else { return }
         if idleResumeWindow == nil {
             overlayLogger.info("creating idle resume widget")
             idleResumeWindow = IdleResumeWindow()
@@ -1391,6 +1439,15 @@ class StatusOverlayController {
         }
         cancelPendingHide()
         cancelIdleAnimation()
+        window?.hide()
+        idleResumeWindow?.hide()
+    }
+
+    /// Tear down every HUD surface immediately, including an in-flight
+    /// flash. Called when onboarding opens — the setup window must be the
+    /// only UI, and whatever toast was mid-animation is now noise.
+    func hideAllForSetup() {
+        cancelPendingHide()
         window?.hide()
         idleResumeWindow?.hide()
     }

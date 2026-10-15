@@ -81,6 +81,20 @@ pub struct Preferences {
     /// detection (apps that hold the mic but shouldn't pause Always,
     /// e.g. screen recorders). Default: ScreenFlow + CleanShotX.
     pub mic_conflict_exclusion_bundles: Option<String>,
+    /// Postprocess mode: "fast" (deterministic corrector), "apple" /
+    /// "groq" (fast corrector + non-blocking LLM), or "off". NULL = derive
+    /// from the legacy `postprocess_enabled` + `postprocess_provider`
+    /// (see `postprocess::resolve_mode`).
+    pub postprocess_mode: Option<String>,
+    /// Echo-cancelled capture (`always-capture`, SPEC §3). NULL = on.
+    /// Kill switch: `always config set capture_aec false` (restart applies).
+    pub capture_aec: Option<bool>,
+    /// Foreign-speech gate, low-confidence rule: when true, an utterance
+    /// whose mean Apple word confidence is below 0.40 is NOT pasted (kept
+    /// recoverable). Default off = log-only (`foreign_speech_would_reject`)
+    /// while the cut is tuned on real data. The "live recognizer heard no
+    /// words" rule is always enforced.
+    pub foreign_speech_confidence_enforce: Option<bool>,
 }
 
 pub fn open() -> Result<Connection> {
@@ -340,6 +354,29 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN postprocess_provider TEXT;")?;
     }
 
+    let has_postprocess_mode = conn
+        .prepare("SELECT postprocess_mode FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_postprocess_mode {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN postprocess_mode TEXT;")?;
+    }
+
+    let has_capture_aec = conn
+        .prepare("SELECT capture_aec FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_capture_aec {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN capture_aec INTEGER;")?;
+    }
+
+    let has_foreign_speech_confidence_enforce = conn
+        .prepare("SELECT foreign_speech_confidence_enforce FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_foreign_speech_confidence_enforce {
+        conn.execute_batch(
+            "ALTER TABLE preferences ADD COLUMN foreign_speech_confidence_enforce INTEGER;",
+        )?;
+    }
+
     let has_mic_conflict_exclusion_bundles = conn
         .prepare("SELECT mic_conflict_exclusion_bundles FROM preferences LIMIT 0")
         .is_ok();
@@ -380,7 +417,7 @@ fn encode_plaintext_groq_key(conn: &Connection) -> Result<()> {
 
 pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
     let mut stmt = conn.prepare(
-        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream, stt_adaptive_silence, speaker_gate_enabled, speaker_gate_threshold, audible_status_sound, stt_live_preview, auto_learn_corrections, correction_model, postprocess_provider, mic_conflict_exclusion_bundles FROM preferences WHERE id = 1",
+        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream, stt_adaptive_silence, speaker_gate_enabled, speaker_gate_threshold, audible_status_sound, stt_live_preview, auto_learn_corrections, correction_model, postprocess_provider, mic_conflict_exclusion_bundles, postprocess_mode, capture_aec, foreign_speech_confidence_enforce FROM preferences WHERE id = 1",
     )?;
     let result = stmt.query_row([], |row| {
         Ok(Preferences {
@@ -419,6 +456,9 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             correction_model: row.get(32)?,
             postprocess_provider: row.get(33)?,
             mic_conflict_exclusion_bundles: row.get(34)?,
+            postprocess_mode: row.get(35)?,
+            capture_aec: row.get::<_, Option<i64>>(36)?.map(|v| v != 0),
+            foreign_speech_confidence_enforce: row.get::<_, Option<i64>>(37)?.map(|v| v != 0),
         })
     });
     match result {
@@ -469,6 +509,9 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "correction_model",
         "postprocess_provider",
         "mic_conflict_exclusion_bundles",
+        "postprocess_mode",
+        "capture_aec",
+        "foreign_speech_confidence_enforce",
     ];
     if !valid_keys.contains(&key) {
         anyhow::bail!(
@@ -550,6 +593,8 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         | "transcript_stream"
         | "stt_adaptive_silence"
         | "stt_live_preview"
+        | "capture_aec"
+        | "foreign_speech_confidence_enforce"
         | "speaker_gate_enabled" => {
             if !matches!(value, "true" | "false" | "1" | "0") {
                 anyhow::bail!("{key} must be one of: true, false, 1, 0");
@@ -596,7 +641,13 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
             // the single source of truth for the wire format.
             let _: crate::stt_dispatch::TranscriberBackendChoice = value
                 .parse()
-                .context("transcriber_backend must be 'groq' or 'local:<model_id>'")?;
+                .context("transcriber_backend must be 'groq', 'apple' or 'local:<model_id>'")?;
+        }
+        "postprocess_mode" => {
+            let _: crate::always::postprocess::PostprocessMode =
+                value.parse().map_err(|e: String| {
+                    anyhow::anyhow!("postprocess_mode must be fast, apple, groq or off: {e}")
+                })?;
         }
         "postprocess_provider" => {
             let parsed: Result<crate::always::config::PostprocessProvider, _> = value.parse();
@@ -642,6 +693,8 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         | "transcript_stream"
         | "stt_adaptive_silence"
         | "stt_live_preview"
+        | "capture_aec"
+        | "foreign_speech_confidence_enforce"
         | "speaker_gate_enabled" => {
             if matches!(value, "true" | "1") {
                 "1".to_string()
@@ -780,5 +833,38 @@ mod audible_status_sound_tests {
         let err = set_preference(&conn, "audible_status_sound", "silent").unwrap_err();
 
         assert!(err.to_string().contains("off, low, medium, high"));
+    }
+}
+
+#[cfg(test)]
+mod foreign_speech_confidence_enforce_tests {
+    use super::{get_preferences, migrate, set_preference};
+    use rusqlite::Connection;
+
+    #[test]
+    fn defaults_unset_and_round_trips_bool() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(
+            get_preferences(&conn)
+                .unwrap()
+                .foreign_speech_confidence_enforce,
+            None
+        );
+        set_preference(&conn, "foreign_speech_confidence_enforce", "true").unwrap();
+        assert_eq!(
+            get_preferences(&conn)
+                .unwrap()
+                .foreign_speech_confidence_enforce,
+            Some(true)
+        );
+        set_preference(&conn, "foreign_speech_confidence_enforce", "0").unwrap();
+        assert_eq!(
+            get_preferences(&conn)
+                .unwrap()
+                .foreign_speech_confidence_enforce,
+            Some(false)
+        );
+        assert!(set_preference(&conn, "foreign_speech_confidence_enforce", "maybe").is_err());
     }
 }
