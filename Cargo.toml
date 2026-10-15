@@ -99,7 +99,7 @@ libc = "0.2"
 x11 = { version = "2.21", optional = true }
 # Local-model registry support (ports Handy's downloader). `sha2`/`tar`/`flate2`
 # for verify+extract, `futures-util` for streaming download bodies.
-sha2 = "0.10"
+sha2 = "0.11"
 tar = "0.4"
 flate2 = "1"
 futures-util = "0.3"
