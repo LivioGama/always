@@ -17,24 +17,15 @@ This guide covers platform-specific installation, permissions, and troubleshooti
 
 ### Installation
 
-Always ships as a **signed and notarized DMG** for macOS.
-
-#### Homebrew (Recommended)
+Install with one command (Apple Silicon):
 
 ```bash
-# Add the tap
-brew tap liviogama/also
-
-# Install
-brew install --cask also
+curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash
 ```
 
-#### Manual Install
+The script downloads the latest release from [GitHub Releases](https://github.com/LivioGama/always/releases/latest) and installs `Always.app`. To install by hand, download `always-vX.Y.Z-aarch64-apple-darwin.tar.gz` and its `.sha256` from the same page, check it with `shasum -a 256 -c`, and unpack it.
 
-1. Download the latest `.dmg` from [GitHub Releases](https://github.com/LivioGama/also/releases/latest).
-2. Open the DMG file.
-3. Drag `Always.app` into your `Applications` folder.
-4. Launch from `Applications` or Spotlight (`⌘ + Space`, type "Always").
+Launch from `Applications` or Spotlight (`⌘ + Space`, type "Always").
 
 ### Permissions
 
@@ -64,13 +55,11 @@ macOS may show: *"Always.app" needs to be opened to continue.*
 
 ```bash
 # Gatekeeper override — only if you downloaded from the web
-xattr -d com.apple.quarantine /Applications/Also.app
+xattr -d com.apple.quarantine /Applications/Always.app
 
-# Re-notarize check (should pass automatically)
-codesign --verify --deep --strict /Applications/Also.app
-
-# If already notarized, you should see:
-# /Applications/Also.app: valid on disk
+# Signature check (the app is ad-hoc signed, not notarized)
+codesign --verify --deep --strict /Applications/Always.app
+# Prints nothing on success; a failure names the broken file
 ```
 
 ### First Launch Workflow
@@ -85,10 +74,10 @@ codesign --verify --deep --strict /Applications/Also.app
 
 | Issue | Fix |
 |---|---|
-| "Always" is damaged and can't be opened | Run `xattr -d com.apple.quarantine /Applications/Also.app` in Terminal |
+| "Always" is damaged and can't be opened | Run `xattr -d com.apple.quarantine /Applications/Always.app` in Terminal |
 | Microphone access denied | Re-check permissions in System Settings → Privacy & Security |
 | Overlay doesn't appear | Grant Accessibility permission; check System Settings → Privacy & Security → Screen Recording |
-| App quits immediately | Check `~/Library/Logs/Also/` for crash logs |
+| App quits immediately | Check `~/Library/Logs/Always/` for crash logs |
 
 ---
 
@@ -96,47 +85,53 @@ codesign --verify --deep --strict /Applications/Also.app
 
 ### Installation
 
-Always ships as a **DEB package** for Debian-based distributions and an **RPM** for Fedora/RHEL.
+Install with one command (x86_64 and aarch64):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash
+```
+
+Or install a package from [GitHub Releases](https://github.com/LivioGama/always/releases/latest). Packages are published as `.tar.gz`, `.deb` and `.rpm` for `x86_64` and `aarch64`.
 
 #### Debian / Ubuntu
 
 ```bash
-# Download the latest release
-wget https://github.com/LivioGama/also/releases/latest/download/also_0.0.1_amd64.deb
+# Download a release (replace vX.Y.Z with the release tag)
+wget https://github.com/LivioGama/always/releases/latest/download/always-vX.Y.Z-x86_64-unknown-linux-gnu.deb
 
-# Install (this places the daemon binary, desktop file, and systemd service)
-sudo apt install ./also_0.0.1_amd64.deb
+# Install (this places the daemon binary and the systemd user service)
+sudo apt install ./always-vX.Y.Z-x86_64-unknown-linux-gnu.deb
 ```
 
 #### Fedora / RHEL
 
 ```bash
-# Download the latest release
-wget https://github.com/LivioGama/also/releases/latest/download/also-0.0.1-x86_64.rpm
+# Download a release (replace vX.Y.Z with the release tag)
+wget https://github.com/LivioGama/always/releases/latest/download/always-vX.Y.Z-x86_64-unknown-linux-gnu.rpm
 
 # Install
-sudo dnf install ./also-0.0.1-x86_64.rpm
+sudo dnf install ./always-vX.Y.Z-x86_64-unknown-linux-gnu.rpm
 ```
 
 ### systemd Service
 
-The DEB/RPM packages install a systemd service for the Always daemon:
+The DEB/RPM packages install a systemd **user** service for the Always daemon
+(`/usr/lib/systemd/user/always-daemon.service`, source
+`scripts/release/always-daemon.service`, runs `always run`). The one-line
+installer does the same for a tarball install under `~/.config/systemd/user/`.
 
 ```bash
-# Start the daemon now
-sudo systemctl start also-daemon
-
-# Enable auto-start on boot
-sudo systemctl enable also-daemon
+# Start the daemon now and enable auto-start on login
+systemctl --user enable --now always-daemon.service
 
 # Check status
-systemctl --user status also-daemon
+systemctl --user status always-daemon
 
 # View logs
-journalctl --user -u also-daemon -f
+journalctl --user -u always-daemon -f
 ```
 
-The daemon runs as the **current user** (via `--user` scope), so no root privileges are needed at runtime. The `sudo` is only required for the initial service enable/start.
+The daemon runs as the **current user** (via `--user` scope), so no root privileges are needed at runtime. Installing the package needs `sudo`; enabling the service does not.
 
 ### Audio Configuration
 
@@ -162,10 +157,10 @@ systemctl --user status pulseaudio
 For direct microphone access (required on some minimal setups without PulseAudio/PipeWire):
 
 ```bash
-# The package installs /etc/udev/rules.d/99-also-microphone.rules automatically.
+# The package installs /etc/udev/rules.d/99-always-microphone.rules automatically.
 # If missing, create it manually:
 
-sudo tee /etc/udev/rules.d/99-also-microphone.rules > /dev/null << 'EOF'
+sudo tee /etc/udev/rules.d/99-always-microphone.rules > /dev/null << 'EOF'
 # Always daemon — allow the current user to access USB/midi audio interfaces
 SUBSYSTEM=="snd", GROUP="audio", MODE="0660"
 SUBSYSTEM=="sound", GROUP="audio", MODE="0660"
@@ -176,7 +171,7 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
 
-**Note:** The `also` user must be in the `audio` group:
+**Note:** The `always` user must be in the `audio` group:
 
 ```bash
 sudo usermod -aG audio $USER
@@ -185,13 +180,13 @@ sudo usermod -aG audio $USER
 
 ### First Launch Workflow
 
-1. **Install the DEB/RPM package.**
-2. **Start the daemon:** `sudo systemctl --user enable --now also-daemon`
+1. **Install** with the one-liner or the DEB/RPM package.
+2. **Start the daemon:** `systemctl --user enable --now always-daemon.service`
 3. **Configure your audio input** — verify with `arecord -l`.
 4. **Set a Groq API key** in the CLI or settings:
 
    ```bash
-   also config set groq_api_key sk-your-key-here
+   always config set groq_api_key sk-your-key-here
    ```
 
 5. **Start dictating** — the daemon runs in the background and types at your cursor.
@@ -200,7 +195,7 @@ sudo usermod -aG audio $USER
 
 | Issue | Fix |
 |---|---|
-| Daemon fails to start | Check `journalctl --user -u also-daemon -n 50` for errors |
+| Daemon fails to start | Check `journalctl --user -u always-daemon -n 50` for errors |
 | No audio input detected | Verify with `arecord -l`; ensure PipeWire/PulseAudio is running |
 | Permission denied on mic | Add user to `audio` group; reload udev rules |
 | Paste doesn't work | Install `xclip` or `wl-clipboard` (for Wayland) |
@@ -212,27 +207,17 @@ sudo usermod -aG audio $USER
 
 ### Installation
 
-Always ships as an **MSI installer** for Windows 10 1909+ and Windows 11.
-
-#### Manual Install
-
-1. Download the latest `.msi` from [GitHub Releases](https://github.com/LivioGama/also/releases/latest).
-2. **Right-click → Run as Administrator** (required for microphone and input access).
-3. Follow the installation wizard.
-4. Launch Always from the Start menu.
-
-#### PowerShell (One-liner)
+Install from PowerShell (Windows 10 1909+ and Windows 11):
 
 ```powershell
-# Download and install silently
-$msi = "https://github.com/LivioGama/also/releases/latest/download/also-0.0.1-x64.msi"
-Invoke-WebRequest -Uri $msi -OutFile "$env:TEMP/also.msi"
-Start-Process msiexec.exe -ArgumentList "/i `"$env:TEMP/also.msi`" /quiet /norestart" -Wait
+irm https://raw.githubusercontent.com/LivioGama/always/main/scripts/install.ps1 | iex
 ```
+
+To install by hand, download `always-vX.Y.Z-x86_64-pc-windows-msvc.zip` and its `.sha256` from [GitHub Releases](https://github.com/LivioGama/always/releases/latest), check the hash with `Get-FileHash`, and unzip it.
 
 ### Admin Requirements
 
-Running the MSI with Administrator privileges is required to:
+Running Always with Administrator privileges is required to:
 
 - Grant the Always service access to the microphone device.
 - Install the global hotkey registration (requires kernel-level keyboard hook).
@@ -258,7 +243,7 @@ Ensure Always.exe is toggled ON
 
 ### First Launch Workflow
 
-1. **Install** the MSI as Administrator.
+1. **Install** with the PowerShell one-liner above.
 2. **Launch Always** from the Start menu.
 3. **Grant permissions** when prompted by Windows.
 4. **Enroll your voice** — record three short samples in **Settings → My Voice**.
@@ -273,7 +258,7 @@ Ensure Always.exe is toggled ON
 | Microphone access denied | Check Settings → Privacy → Microphone |
 | Hotkeys don't work | Ensure Always is running as Administrator |
 | Paste doesn't work | Install a clipboard manager or check Windows clipboard history |
-| Antivirus blocks the app | Add Always to your AV exclusions; the MSI is signed with a trusted cert |
+| Antivirus blocks the app | Add Always to your AV exclusions; builds are not code-signed yet, so SmartScreen or your AV may flag them |
 
 ---
 
@@ -285,13 +270,13 @@ Always stores API keys in the OS keychain, never in plaintext config files.
 
 ```bash
 # Set your Groq API key (stored securely)
-also config set groq_api_key sk-groq-your-key-here
+always config set groq_api_key sk-groq-your-key-here
 
 # Verify it's set
-also config show groq_api_key
+always config show groq_api_key
 
 # Reset it
-also config reset groq_api_key
+always config reset groq_api_key
 ```
 
 ### Local Model Download
@@ -300,28 +285,28 @@ For offline transcription, download a model:
 
 ```bash
 # List available models
-also models list
+always models list
 
 # Download a model (e.g., Parakeet)
-also models download parakeet-ctc-1.1b
+always models download parakeet-ctc-1.1b
 
 # Switch to local mode
-also config set stt_backend local
-also config set stt_model parakeet-ctc-1.1b
+always config set stt_backend local
+always config set stt_model parakeet-ctc-1.1b
 ```
 
 ### Log Files
 
-- **macOS:** `~/Library/Logs/Also/`
-- **Linux:** `~/.local/state/also/` or `journalctl --user -u also-daemon`
-- **Windows:** `%LOCALAPPDATA%/Also/logs/`
+- **macOS:** `~/Library/Logs/Always/`
+- **Linux:** `~/.local/state/always/` or `journalctl --user -u always-daemon`
+- **Windows:** `%LOCALAPPDATA%/Always/logs/`
 
 ### Verbose Logging
 
 ```bash
 # Enable verbose output for debugging
-also config set log_level debug
+always config set log_level debug
 
 # Reset to default
-also config set log_level info
+always config set log_level info
 ```

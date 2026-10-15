@@ -594,7 +594,11 @@ fn simulate_cmd_c() -> Result<()> {
 
 /// Read the current clipboard contents as UTF-8 via `pbpaste`.
 pub fn read_clipboard() -> Result<String> {
+    // Pin a UTF-8 locale: under the daemon's C-locale environment pbpaste
+    // emits MacRoman bytes for non-ASCII text, which then decodes as mojibake.
     let output = std::process::Command::new("pbpaste")
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8")
         .output()
         .context("spawn pbpaste")?;
     if !output.status.success() {

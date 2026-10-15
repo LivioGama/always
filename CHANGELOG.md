@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-15
+
+The first public release, installable on macOS, Linux and Windows with one command. It also ships everything listed under 0.0.2 below, which was never published on its own.
+
+### Added
+- **install:** one command installs Always: `curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash` on macOS and Linux, `irm https://raw.githubusercontent.com/LivioGama/always/main/scripts/install.ps1 | iex` on Windows. It picks the build for your platform and verifies its SHA-256 before installing. ([#108](https://github.com/LivioGama/always/pull/108))
+- **release:** every release now ships macOS arm64, Linux x86_64 and aarch64 (tar.gz, deb, rpm) and Windows x86_64 builds, each with a `.sha256` checksum and a build provenance attestation you can check with `gh attestation verify`. ([#108](https://github.com/LivioGama/always/pull/108))
+
+### Changed
+- **website:** a redesigned landing page with a live dictation demo, a to-scale timeline of one sentence, and the install command for your operating system. ([#108](https://github.com/LivioGama/always/pull/108))
+
+### Removed
+- **install:** the DMG download and Homebrew cask instructions are gone; install with the one-line installer or the release archives. The macOS app is ad-hoc signed and not notarized, and the installer-delivered app opens without a quarantine prompt. ([#108](https://github.com/LivioGama/always/pull/108))
+
+### Fixed
+- **audio:** a capture helper that dies on startup is now always detected, so Always falls back to the plain recorder instead of sometimes listening to nothing. ([#108](https://github.com/LivioGama/always/pull/108))
+- **my voice:** first-time voice enrollment now shows "Preparing voice model…" until recording has really started, and the speaker model downloads in the background at startup, so you no longer speak into a silent wait that ends in "not enough speech captured". ([#108](https://github.com/LivioGama/always/pull/108))
+- **clipboard:** curly quotes, dashes, accents and other non-ASCII text are no longer pasted as mojibake ("it‚Äôs") when the daemon runs without a UTF-8 locale. ([#108](https://github.com/LivioGama/always/pull/108))
+- **windows:** the daemon builds on Windows again, clipboard read and write work there, and the administrator check reports correctly. ([#108](https://github.com/LivioGama/always/pull/108))
+
 ## [0.0.2] - 2026-10-15
 
 ### Fixed

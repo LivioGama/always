@@ -1,0 +1,26 @@
+# Always -- always-on voice dictation daemon (systemd USER unit).
+#
+# Shipped by the .deb/.rpm in /usr/lib/systemd/user/ and by scripts/install-always.sh
+# (tarball install) in ~/.config/systemd/user/ with ExecStart rewritten to the
+# installed path.
+#
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now always-daemon.service
+#   journalctl --user -u always-daemon -f
+
+[Unit]
+Description=Always - always-on voice dictation daemon
+Documentation=https://github.com/LivioGama/always
+After=graphical-session.target pipewire.service pulseaudio.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/always run
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+NoNewPrivileges=yes
+SyslogIdentifier=always
+
+[Install]
+WantedBy=default.target

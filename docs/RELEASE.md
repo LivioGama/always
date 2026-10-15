@@ -1,145 +1,128 @@
 # Cutting a Release
 
-End-to-end release flow for the `always` daemon + Mac app. Most of this
-runs in CI on tag push; a few prerequisites must exist as repository
-secrets.
+How `always` is released and what a release contains. The procedure itself is
+owned by the **release skill**: [`.agents/skills/release/SKILL.md`](../.agents/skills/release/SKILL.md)
+(rule: [`.agents/rules/release.md`](../.agents/rules/release.md)). This page
+is the reference for the pipeline and the assets; do not improvise the steps
+from it.
 
-## Required GitHub repository secrets
+Users install with a one-line script, or download raw packages from the
+releases page. There are no disk images, no Homebrew cask, no Apple
+notarization and no MSI: the macOS app is ad-hoc signed, and Windows ships as
+a `.zip`.
 
-| Secret | Purpose |
-|--------|---------|
-| `MAC_CERT_P12_BASE64` | Apple Developer ID Application cert exported as `.p12`, base64-encoded. |
-| `MAC_CERT_PASSWORD` | Password used when exporting the `.p12`. |
-| `KEYCHAIN_PASSWORD` | Random string used to lock the temporary CI keychain. |
-| `APPLE_ID` | Apple ID email for notarization. |
-| `APPLE_TEAM_ID` | Apple Developer Team ID (e.g. `ZV4JCJ669Y`). |
-| `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password from appleid.apple.com. |
-| `HOMEBREW_TAP_TOKEN` | Fine-grained PAT with `contents:write` on `LivioGama/homebrew-tap`. |
-| `SPARKLE_ED_PRIVATE_KEY` | Private EdDSA key used by Sparkle's `sign_update` when generating `appcast.xml`. |
+## How users install
 
-CI coverage upload also uses `CODECOV_TOKEN`. It is intentionally not a
-release preflight secret because the Codecov upload is non-blocking
-(`fail_ci_if_error: false`).
+| OS | Command |
+|----|---------|
+| macOS / Linux | `curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh \| bash` |
+| Windows | `irm https://raw.githubusercontent.com/LivioGama/always/main/scripts/install.ps1 \| iex` |
 
-## Release procedure
+`scripts/install-always.sh` and `scripts/install.ps1` are thin wrappers that
+fetch `install.sh` / `install.ps1` from the latest release. Those two scripts
+(sources: `scripts/release/install.sh`, `scripts/release/install.ps1`) are
+published as release assets, resolve `releases/latest`, download the
+`always-<tag>-<target>.*` asset and its `.sha256`, verify the checksum, then
+install. Publishing a release is what ships an update. The website
+(`docs/index.html`) picks the right command for the visitor's OS.
 
-1. **Bump version**
-   * Edit `Cargo.toml` `version`.
-   * Move the `[Unreleased]` block in `CHANGELOG.md` under a new
-     `## [vX.Y.Z] - YYYY-MM-DD` heading.
-   * Commit on `develop`, open PR to `main`, merge.
+## Release assets
 
-2. **Tag**
-   ```bash
-   git tag -s vX.Y.Z -m "always vX.Y.Z"
-   git push origin vX.Y.Z
-   ```
-   Use a signed tag (`-s`) so the release artifacts trace back to a
-   verifiable commit author.
+Names are a stable contract shared by the installers and the website:
+`always-<tag>-<target>.{tar.gz,deb,rpm,zip}`, each with a `.sha256` sibling
+(for example `always-v0.1.0-aarch64-apple-darwin.tar.gz` and
+`always-v0.1.0-aarch64-apple-darwin.tar.gz.sha256`).
 
-3. **CI runs `release.yml` automatically.** It:
-   * Builds the Apple Silicon macOS daemon (`aarch64-apple-darwin`).
-   * Codesigns + notarizes the Swift app via `Always/build.sh`.
-   * Builds a DMG with a `/Applications` symlink.
-   * Generates a CycloneDX SBOM.
-   * Signs the DMG with `cosign` (keyless OIDC).
-   * Builds + tarballs the Linux CLI daemon.
-   * Computes `SHA256SUMS`.
-   * Drafts a GitHub Release with all artifacts.
-   * Opens an auto-PR to `LivioGama/homebrew-tap` to bump the formula.
-   * Generates SLSA Level 3 provenance via the
-     `slsa-framework/slsa-github-generator` reusable workflow.
+| Target | Assets |
+|--------|--------|
+| `aarch64-apple-darwin` | `.tar.gz` (contains `Always.app`, ad-hoc signed) |
+| `x86_64-unknown-linux-gnu` | `.tar.gz`, `.deb`, `.rpm` |
+| `aarch64-unknown-linux-gnu` | `.tar.gz`, `.deb`, `.rpm` |
+| `x86_64-pc-windows-msvc` | `.zip` |
 
-4. **Verify the draft release** before publishing:
-   ```bash
-   # Cosign verification (replace with the real cert identity)
-   cosign verify-blob \
-     --certificate-identity 'https://github.com/LivioGama/always/.github/workflows/release.yml@refs/tags/vX.Y.Z' \
-     --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-     --signature always-X.Y.Z.dmg.sig \
-     --certificate always-X.Y.Z.dmg.pem \
-     always-X.Y.Z.dmg
+Also published: `install.sh`, `install.ps1` and `always-<tag>.intoto.jsonl`
+(the SLSA build-provenance bundle, checkable with `gh attestation verify`).
+The `.deb` and `.rpm` install the systemd **user** unit
+`scripts/release/always-daemon.service` (runs `always run`) into
+`/usr/lib/systemd/user/`.
 
-   # SLSA provenance
-   slsa-verifier verify-artifact \
-     --provenance-path always-X.Y.Z.intoto.jsonl \
-     --source-uri github.com/LivioGama/always \
-     --source-tag vX.Y.Z \
-     always-X.Y.Z.dmg
-   ```
+## Branches and flow
 
-5. **Publish the GitHub Release.** This makes the appcast.xml visible
-   to Sparkle clients; existing installations will see an update prompt
-   on next launch (or after `feedURL` poll interval).
+1. Work lands on `develop`. User-visible changes carry a changelog fragment in
+   `.github/changelog.d/` (never bullets under `## [Unreleased]`).
+2. `.agents/skills/release/prepare.sh x.y.z` on a `release-x.y.z` branch cut
+   from `develop`: one version across every manifest, fragments folded into
+   `CHANGELOG.md`, lockfiles, `scripts/release/check-release.sh`.
+3. Pull request `release-x.y.z` into `main`. `main` is protected; merge with a
+   **merge commit** (never squash or rebase).
+4. Tag `vX.Y.Z` on that merge commit and push it. The tag triggers
+   `release.yml`.
+5. Back-merge `main` into `develop`.
 
-## Sparkle EdDSA key rotation
+## Pipeline (`.github/workflows/release.yml`)
 
-The Sparkle update feed is signed with an EdDSA private key kept in the
-`SPARKLE_ED_PRIVATE_KEY` repo secret. Rotate by:
+| Job | What it does |
+|-----|--------------|
+| `verify` | Tag is on `main`; `check-release.sh` (tag equals every version file, CHANGELOG heading present, lockfiles fresh); `cargo deny check` |
+| `test` | The `ci.yml` test suite on macOS |
+| `assets` | Calls `release-build.yml`: builds macOS arm64, Linux x86_64 and aarch64, Windows x86_64; writes a `.sha256` per asset; attests build provenance; stages the `release-assets` artifact |
+| `release` | Publishes a non-draft GitHub Release; body is the CHANGELOG section |
+| `smoke` | Installs the published release with the real installers on Ubuntu (deb, tar.gz), Fedora (rpm), macOS arm64 and Windows, and runs `always --version` |
 
-1. Generate a fresh keypair with `bin/sparkle-generate_keys` from the
-   Sparkle distribution.
-2. Update `SPARKLE_ED_PRIVATE_KEY` in repo secrets.
-3. Update the `SUPublicEDKey` value in `Always/Info.plist`.
-4. Cut a release; existing installs will refuse the new appcast (the
-   stored public key won't match the new signature) and prompt the user
-   to download the new release manually. Plan rotations alongside major
-   releases.
-
-## Local dry-run
-
-The release workflow can be exercised locally with `act` or `nektos/act`,
-but the most useful manual validation is:
+`workflow_dispatch` of `release.yml` on a **branch** is a dry run: it checks
+and builds, smoke-tests the built assets through a local `file://` URL, and
+publishes nothing (assets stay in the `release-assets` workflow artifact):
 
 ```bash
-# Run all local release-readiness gates (CI checks, docs, app bundle,
-# codesign verification, and DMG smoke test).
+gh workflow run release.yml --ref release-x.y.z
+```
+
+## Secrets
+
+None. The workflows use only the built-in `GITHUB_TOKEN` (plus OIDC for the
+provenance attestation). There is no Apple signing identity, notarization
+credential, Homebrew tap token or update-feed key.
+
+CI coverage upload uses `CODECOV_TOKEN`; it is not a release prerequisite
+(`fail_ci_if_error: false`).
+
+## Verifying a release
+
+```bash
+V=vX.Y.Z; D=$(mktemp -d); cd "$D"
+gh release download "$V" --repo LivioGama/always
+shasum -a 256 -c ./*.sha256
+gh attestation verify always-$V-aarch64-apple-darwin.tar.gz --repo LivioGama/always
+```
+
+The release skill lists the full verification (every asset, installers,
+provenance). A browser-downloaded macOS archive carries the quarantine flag;
+clear it with `xattr -dr com.apple.quarantine Always.app` (the installer does
+not need this).
+
+## Local checks
+
+```bash
+# Version and changelog consistency, as the verify job runs it
+scripts/release/check-release.sh --report
+
+# Local gates (fmt, clippy, tests, audit, deny, docs, Linux build, macOS app)
 ./scripts/verify-release-readiness.sh local
 
-# Check that required GitHub release secrets are present.
-./scripts/verify-release-readiness.sh secrets
-
-# Verify all release-only secrets are present in the current shell.
-MAC_CERT_P12_BASE64=... \
-MAC_CERT_PASSWORD=... \
-KEYCHAIN_PASSWORD=... \
-APPLE_ID=... \
-APPLE_TEAM_ID=... \
-APPLE_APP_SPECIFIC_PASSWORD=... \
-HOMEBREW_TAP_TOKEN=... \
-SPARKLE_ED_PRIVATE_KEY=... \
-  ./scripts/release-preflight.sh
-
-# Drive the existing build script with notarization disabled to catch
-# pure build failures.
-ALWAYS_BUILD_PROFILE=release ./Always/build.sh
-
-# Build the Linux artifact:
+# Build the Linux artifact in Docker
 docker build -t always:linux -f Dockerfile .
 docker run --rm always:linux always --version
 ```
-
-## Notarization timeouts
-
-`xcrun notarytool submit --wait --timeout 30m` is used in the workflow.
-If notarization stalls, the failure is recoverable:
-
-1. Find the submission UUID in the workflow log.
-2. Run `xcrun notarytool log <uuid> --apple-id ... --team-id ...` for
-   diagnostic JSON.
-3. Re-run the failed job from the GitHub Actions UI. The DMG + signing
-   are deterministic so the second run produces a byte-identical artifact.
 
 ## Pulling a release
 
 If you need to retract a release after publication:
 
-1. Mark the GitHub Release as a **pre-release** rather than deleting —
-   users who already downloaded the DMG would otherwise still trust the
-   matching cosign signature. Pre-releases are not picked up by Sparkle
-   by default.
-2. Open a CHANGELOG entry under `[Unreleased]` documenting the
-   retraction.
+1. Mark the GitHub Release as a **pre-release** rather than deleting it. The
+   installers read `releases/latest`, which skips pre-releases, so new
+   installs fall back to the previous release.
+2. Record the retraction in a changelog fragment.
+3. Fix forward with the next patch release; published assets are not replaced.
 
 ## crates.io status
 

@@ -14,7 +14,11 @@
 //! The report holds every broadcast event with its wall time plus each
 //! `RecordResult`; latency/WER are computed from it outside the test.
 
-#[cfg(test)]
+// These replays drive Apple STT (`apple_stt` / `stt_apple`, compiled only on
+// macOS aarch64), `/usr/bin/say` and the Parakeet preview helper, so they
+// exist only where those do. Without this gate the lib tests do not compile on
+// Linux.
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 #[allow(clippy::field_reassign_with_default)] // env-driven replay knobs
 mod tests {
     use std::io::{BufRead, Write};

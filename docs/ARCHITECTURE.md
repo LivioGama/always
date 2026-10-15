@@ -189,7 +189,7 @@ Tauri v2 provides a unified abstraction layer:
 | **Overlay** | Native WebView window | X11/Wayland window | Native window |
 | **Keychain** | Keychain (keyring) | libsecret (keyring) | CNG (keyring) |
 | **Tray** | tauri::TrayIcon | tauri::TrayIcon | tauri::TrayIcon |
-| **Updates** | Sparkle (future) | Manual / Flatpak | Windows Update (future) |
+| **Updates** | Reinstall via `install-always.sh` (no auto-update yet) | Package manager / reinstall via `install-always.sh` | Reinstall via `install.ps1` (no auto-update yet) |
 
 ---
 
@@ -242,9 +242,9 @@ cargo tauri build --target x86_64-pc-windows-msvc  # Windows
 
 | Platform | Format | Notes |
 |---|---|---|
-| macOS | `.dmg` (signed & notarized) | Sparkle auto-update wiring |
-| Linux | `.deb` / `.rpm` | systemd service included |
-| Windows | `.msi` | Administrator install recommended |
+| macOS | `.tar.gz` (arm64) + install script | Ad-hoc signed, not notarized |
+| Linux | `.tar.gz` / `.deb` / `.rpm` (x86_64, aarch64) | systemd service included |
+| Windows | `.zip` (x86_64) + `install.ps1` | Administrator install recommended |
 
 ---
 

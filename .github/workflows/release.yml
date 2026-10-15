@@ -1,344 +1,365 @@
 name: Release
 
+# Release model (same shape as the Pixel project's, adapted for this repo's
+# develop -> main branching; see .agents/skills/release/SKILL.md):
+#
+#   tag vX.Y.Z on main  ->  verify -> assets -> release -> smoke
+#
+#   verify   tag == Cargo version (lockstep with every other version file),
+#            tag is on main, CHANGELOG section exists, cargo deny
+#   test     the ci.yml test suite on macOS
+#   assets   release-build.yml: macOS arm64 / Linux x86_64+aarch64 / Windows
+#            builds, checksums, build-provenance attestation
+#   release  publishes a NON-draft GitHub Release; body = the CHANGELOG section
+#   smoke    installs from the published release on macOS, Linux and Windows
+#
+# Manual dispatch on a BRANCH is a DRY RUN: verify (version/changelog checks
+# are reported, not enforced), assets, then smoke against the built assets via
+# a local file:// base URL. No release is created; the assets stay available as
+# the `release-assets` workflow artifact. (Dispatching on a tag ref behaves
+# like a tag push.)
+#
+# No Apple Developer account: the macOS app is ad-hoc signed, NOT notarized.
+# curl does not set com.apple.quarantine, so the installer-delivered app opens.
+# No Homebrew cask (decision: installer scripts and packages only).
+
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Version tag to build (e.g. v1.0.0)'
-        required: true
 
-env:
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-
+# Build jobs only need to read the checkout. Write access is granted to the
+# release job alone, which creates the GitHub release.
 permissions:
-  contents: write       # create GitHub Release + upload assets
-  id-token: write       # cosign keyless OIDC + SLSA provenance
+  contents: read
+
+# Same value as ci.yml: rust-cache hashes every CARGO_* variable into its key.
+env:
+  CARGO_TERM_COLOR: always
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  build-mac:
-    name: Build + sign + notarize macOS bundle
-    # macOS 26 runner = Xcode 26 SDK. The Apple STT (SpeechAnalyzer) and
-    # Apple Intelligence (FoundationModels) bridges need it; on macos-14's
-    # Xcode 15 SDK build.rs silently compiles their stubs and the shipped
-    # app reports "Apple STT not available in this build".
-    runs-on: macos-26
+  # Gate: nothing is built or published unless the tag names the version every
+  # manifest declares and the tests pass on the tagged commit.
+  verify:
+    name: Verify tag and tests
+    runs-on: ubuntu-24.04
     outputs:
-      version: ${{ steps.version.outputs.value }}
-      release_sha: ${{ steps.release-ref.outputs.sha }}
-      dmg_sha256: ${{ steps.dmg.outputs.sha256 }}
-      dmg_subject: ${{ steps.dmg.outputs.subject }}
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-          ref: ${{ env.RELEASE_TAG }}
-
-      - name: Resolve version
-        id: version
-        run: echo "value=$(grep '^version' Cargo.toml | head -1 | cut -d'\"' -f2)" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve release commit
-        id: release-ref
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-      - name: Release secrets preflight
-        env:
-          MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
-          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
-        run: ./scripts/release-preflight.sh
+          # The job never pushes: do not leave the token in .git/config.
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          targets: aarch64-apple-darwin
+          toolchain: stable
 
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-release-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build daemon (macOS arm64)
+      - name: Resolve the release tag
+        id: tag
         run: |
-          cargo build --release --locked --target aarch64-apple-darwin
-          file target/aarch64-apple-darwin/release/always
-          # Never ship the SDK stubs (see runs-on above).
-          if grep -aq 'SDK requirement not met' target/aarch64-apple-darwin/release/always; then
-            echo "::error::daemon was built with the Apple STT / Apple Intelligence stubs (SDK too old)"
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+            tag="v${version}-dryrun"
+            echo "::notice::DRY RUN on $GITHUB_REF_NAME: assets only, nothing is published (tag label $tag)"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Tag must be on main
+        if: github.ref_type == 'tag'
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::tag $GITHUB_REF_NAME ($GITHUB_SHA) is not on main; release tags are cut from main's release merge commit"
             exit 1
           fi
 
-      # No x86_64 macOS daemon: ort-sys ships no prebuilt ONNX Runtime for
-      # x86_64-apple-darwin, so that build always failed, and the app
-      # bundle only ever embedded the arm64 daemon.
-
-      - name: Import signing certificate
-        id: cert
+      # Tag = Cargo.toml version = every other version file, the CHANGELOG has
+      # the `## [x.y.z]` heading and an empty Unreleased, lockfiles are fresh.
+      # On a dry run the same checks run but only report.
+      - name: Release consistency
         env:
-          MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
-          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          set -euo pipefail
-          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          echo "$MAC_CERT_P12_BASE64" | base64 -d > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" \
-            -k "$KEYCHAIN_PATH" -P "$MAC_CERT_PASSWORD" \
-            -T /usr/bin/codesign -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple: \
-            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          USER_KEYCHAINS=()
-          while IFS= read -r keychain; do
-            USER_KEYCHAINS+=("$keychain")
-          done < <(security list-keychains -d user | tr -d '"')
-          security list-keychains -d user -s "$KEYCHAIN_PATH" "${USER_KEYCHAINS[@]}"
-          rm "$RUNNER_TEMP/cert.p12"
-          # SHA-1 of the first valid codesigning identity (column 2 of
-          # `  1) <SHA1> "Developer ID Application: …"`). BSD grep on macOS
-          # has no -P, which left this empty before.
-          MAC_CERT_IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk '/\)/ {print $2; exit}')
-          if [ -z "$MAC_CERT_IDENTITY" ]; then
-            echo "::error::no codesigning identity in the imported certificate"
-            exit 1
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            scripts/release/check-release.sh "$TAG"
+          else
+            scripts/release/check-release.sh --report
           fi
-          echo "MAC_CERT_IDENTITY=$MAC_CERT_IDENTITY" >> "$GITHUB_OUTPUT"
 
-      - name: Code sign daemon binaries
-        env:
-          MAC_CERT_IDENTITY: ${{ steps.cert.outputs.MAC_CERT_IDENTITY }}
-        run: |
-          codesign --force --sign "${MAC_CERT_IDENTITY}" \
-            target/aarch64-apple-darwin/release/always
-
-      - name: Upload daemon binaries
-        uses: actions/upload-artifact@v4
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
-          name: daemon-binaries
-          path: |
-            target/aarch64-apple-darwin/release/always
+          tool: cargo-deny
 
-      - name: Build + codesign + notarize Swift app
-        env:
-          ALWAYS_NOTARIZE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          ALWAYS_NOTARIZE_APPLE_ID: ${{ secrets.APPLE_ID }}
-          ALWAYS_NOTARIZE_APP_PWD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          ALWAYS_BUILD_PROFILE: release
-          ALWAYS_SWIFT_CONFIGURATION: release
-          ALWAYS_DAEMON_PATH: ${{ github.workspace }}/target/aarch64-apple-darwin/release/always
-        run: |
-          cd Always
-          ./build.sh
-          # Verify post-notarization. Both checks must pass — staple is what
-          # makes the app gatekeeper-clean offline; spctl is what the
-          # OS actually evaluates at first launch. We run them only AFTER
-          # build.sh's notarize+staple step so the ticket is embedded.
-          codesign -dv --verbose=2 Always.app
-          spctl -a -t exec -vv Always.app
+      # CI runs cargo-deny only on dependency changes, while RustSec keeps
+      # publishing advisories: an advisory published since then stops the
+      # release here, before anything is built.
+      - name: Dependency policy (cargo deny check)
+        run: cargo deny check
 
-      - name: Build DMG
-        id: dmg
-        run: |
-          set -euo pipefail
-          DMG="always-${{ steps.version.outputs.value }}.dmg"
-          mkdir -p target/dmg-staging
-          cp -R Always/Always.app target/dmg-staging/
-          ln -s /Applications target/dmg-staging/Applications || true
-          hdiutil create -ov -volname "Always ${{ steps.version.outputs.value }}" \
-            -srcfolder target/dmg-staging -format UDZO "$DMG"
-          SHA=$(shasum -a 256 "$DMG" | awk '{print $1}')
-          echo "$SHA  $DMG" > "$DMG.sha256"
-          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
-          echo "subject=$SHA  $DMG" >> "$GITHUB_OUTPUT"
-
-      - name: Generate SBOM (CycloneDX)
-        run: |
-          cargo install cargo-cyclonedx --locked
-          cargo cyclonedx --format json --output-pattern bom -- --locked
-          mv bom.json always-${{ steps.version.outputs.value }}.cdx.json
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
-
-      - name: Sign artifacts (cosign keyless)
-        run: |
-          cosign sign-blob --yes \
-            --output-signature always-${{ steps.version.outputs.value }}.dmg.sig \
-            --output-certificate always-${{ steps.version.outputs.value }}.dmg.pem \
-            always-${{ steps.version.outputs.value }}.dmg
-
-      - name: Install Sparkle tooling
-        # `sign_update` ships in the Sparkle distribution. Brew installs the
-        # full Sparkle.app which includes the binary in its Resources dir.
-        run: |
-          brew install --cask sparkle
-          SPARKLE_BIN="$(find /Applications /opt/homebrew/Caskroom -name sign_update -type f 2>/dev/null | head -1)"
-          dirname "$SPARKLE_BIN" >> "$GITHUB_PATH"
-
-      - name: Generate signed appcast.xml
-        env:
-          ALWAYS_VERSION: ${{ steps.version.outputs.value }}
-          ALWAYS_DMG_PATH: always-${{ steps.version.outputs.value }}.dmg
-          ALWAYS_RELEASE_NOTES_URL: https://github.com/${{ github.repository }}/releases/tag/${{ env.RELEASE_TAG }}
-          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          # Materialize the private key from the secret to a tmp file the
-          # Sparkle tooling can read.
-          KEY_PATH="$RUNNER_TEMP/sparkle_ed_private.key"
-          echo "$SPARKLE_ED_PRIVATE_KEY" > "$KEY_PATH"
-          chmod 600 "$KEY_PATH"
-          export SPARKLE_ED_PRIVATE_KEY_PATH="$KEY_PATH"
-          ./scripts/generate-appcast.sh
-          rm "$KEY_PATH"
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-release
-          path: |
-            always-${{ steps.version.outputs.value }}.dmg
-            always-${{ steps.version.outputs.value }}.dmg.sha256
-            always-${{ steps.version.outputs.value }}.dmg.sig
-            always-${{ steps.version.outputs.value }}.dmg.pem
-            always-${{ steps.version.outputs.value }}.cdx.json
-            appcast.xml
-
-  build-linux:
-    name: Build Linux daemon (CLI-only)
-    runs-on: ubuntu-latest
-    outputs:
-      tarball_sha256: ${{ steps.pkg.outputs.sha256 }}
-      tarball_subject: ${{ steps.pkg.outputs.subject }}
+  # The same tests ci.yml runs, on the platform that ships the app. (The Linux
+  # lib tests do not compile on a real Linux host: src/always/replay_tests.rs
+  # uses the macOS-only apple_stt / stt_apple modules ungated.)
+  test:
+    name: Tests (macOS)
+    runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install ALSA + SQLite headers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libasound2-dev libsqlite3-dev pkg-config
-
-      - name: Build release
-        run: cargo build --release --no-default-features --features linux --locked
-
-      - name: Package tarball
-        id: pkg
-        run: |
-          set -euo pipefail
-          VERSION="${RELEASE_TAG#v}"
-          NAME="always-${VERSION}-linux-x86_64.tar.gz"
-          tar -C target/release -czf "$NAME" always
-          SHA=$(shasum -a 256 "$NAME" | awk '{print $1}')
-          echo "$SHA  $NAME" > "$NAME.sha256"
-          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
-          echo "subject=$SHA  $NAME" >> "$GITHUB_OUTPUT"
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          name: linux-release
-          path: |
-            always-*-linux-x86_64.tar.gz
-            always-*-linux-x86_64.tar.gz.sha256
+          toolchain: stable
 
-  publish:
-    name: Publish GitHub Release
-    runs-on: ubuntu-latest
-    needs: [build-mac, build-linux]
-    steps:
-      - uses: actions/checkout@v4
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          shared-key: release-test-macos
+          save-if: false
 
-      - name: Download macOS artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: macos-release
+      - name: Test
+        env:
+          # kaldi-fbank-rust-kautism bundles C++14 code (see ci.yml).
+          CXXFLAGS: -std=c++14
+        run: cargo test --locked --bins --lib --tests -- --skip macos_overlay
 
-      - name: Download Linux artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: linux-release
-
-      - name: Generate consolidated SHA256SUMS
-        run: |
-          shasum -a 256 always-*.dmg always-*.tar.gz \
-            always-*.cdx.json > SHA256SUMS
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          draft: true
-          files: |
-            always-*.dmg
-            always-*.dmg.sha256
-            always-*.dmg.sig
-            always-*.dmg.pem
-            always-*.cdx.json
-            always-*.tar.gz
-            always-*.tar.gz.sha256
-            appcast.xml
-            SHA256SUMS
-
-  homebrew:
-    name: Bump Homebrew tap
-    runs-on: ubuntu-latest
-    needs: [build-mac, publish]
-    steps:
-      - name: Open auto-PR against LivioGama/homebrew-tap
-        uses: dawidd6/action-homebrew-bump-formula@v7
-        with:
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          tap: LivioGama/homebrew-tap
-          formula: always
-          tag: ${{ env.RELEASE_TAG }}
-          revision: ${{ needs.build-mac.outputs.release_sha }}
-
-  slsa-subjects:
-    name: Prepare SLSA subjects
-    runs-on: ubuntu-latest
-    needs: [build-mac, build-linux]
-    outputs:
-      base64_subjects: ${{ steps.subjects.outputs.base64_subjects }}
-    steps:
-      - name: Encode sha256sum subjects
-        id: subjects
-        run: |
-          SUBJECTS="$(printf '%s\n%s\n' \
-            "${{ needs.build-mac.outputs.dmg_subject }}" \
-            "${{ needs.build-linux.outputs.tarball_subject }}")"
-          echo "base64_subjects=$(printf '%s' "$SUBJECTS" | base64 -w0)" >> "$GITHUB_OUTPUT"
-
-  slsa:
-    name: SLSA Level 3 provenance
-    needs: [build-mac, build-linux, slsa-subjects]
+  assets:
+    name: Build and attest
+    needs: [verify, test]
     permissions:
+      contents: read
       id-token: write
-      contents: write
-      actions: read
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+      attestations: write
+    uses: ./.github/workflows/release-build.yml
     with:
-      base64-subjects: ${{ needs.slsa-subjects.outputs.base64_subjects }}
-      upload-assets: true
+      tag: ${{ needs.verify.outputs.tag }}
+
+  release:
+    name: Publish release
+    needs: [verify, assets]
+    # Dry run (branch dispatch): assets stay as workflow artifacts only.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    # Publication only: the signing permissions stay with release-build.yml.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # The files release-build.yml built and attested: archives, packages,
+      # their .sha256, install.sh, install.ps1 and the provenance bundle.
+      - name: Download the release assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-assets
+          path: assets
+
+      # The release body is the tag's section of CHANGELOG.md (Keep a
+      # Changelog: from "## [X.Y.Z]" to the next "## " heading).
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          awk -v v="$VERSION" '
+            /^## \[/ { inside = index($0, "## [" v "]") == 1 }
+            inside && index($0, "## [" v "]") != 1 { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::warning::no '## [${VERSION}]' section in CHANGELOG.md; the release body falls back to a link"
+            echo "See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}/CHANGELOG.md)." > release-notes.md
+          fi
+          echo "--- release-notes.md ---"
+          cat release-notes.md
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body_path: release-notes.md
+          fail_on_unmatched_files: true
+          # install.sh / install.ps1 ship with the release, not from a branch:
+          # main moves ahead of the latest release, and the documented
+          # one-liners read releases/latest/download/, so they always run the
+          # script of the release they install.
+          files: |
+            assets/always-*.tar.gz
+            assets/always-*.zip
+            assets/always-*.deb
+            assets/always-*.rpm
+            assets/always-*.sha256
+            assets/always-*.intoto.jsonl
+            assets/install.sh
+            assets/install.ps1
+
+  # Post-publish smoke test: installs what was just published (real release) or
+  # what was just built (dry run, via file://), with the real installer scripts,
+  # on each platform's own runner, and checks `always --version`.
+  # A failure after publication cannot unpublish: it says the next patch is due.
+  smoke:
+    name: Smoke ${{ matrix.name }}
+    needs: [verify, assets, release]
+    # `release` is skipped on a dry run; run anyway unless something failed.
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ${{ matrix.os }}
+    # A branch dry run has no Windows asset while the Windows build is broken.
+    continue-on-error: ${{ matrix.kind == 'windows' && github.ref_type != 'tag' }}
+    strategy:
+      # One broken platform must not hide the state of the others.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux x86_64 / deb
+            os: ubuntu-24.04
+            kind: docker
+            image: ubuntu:24.04
+            method: auto
+          - name: linux x86_64 / tar.gz
+            os: ubuntu-24.04
+            kind: docker
+            image: ubuntu:24.04
+            method: tar
+          - name: linux x86_64 / rpm
+            os: ubuntu-24.04
+            kind: docker
+            image: fedora:42
+            method: auto
+          - name: linux aarch64 / deb
+            os: ubuntu-24.04-arm
+            kind: docker
+            image: ubuntu:24.04
+            method: auto
+          - name: linux aarch64 / rpm
+            os: ubuntu-24.04-arm
+            kind: docker
+            image: fedora:42
+            method: auto
+          - name: macOS arm64
+            os: macos-15
+            kind: macos
+          - name: windows x86_64
+            os: windows-latest
+            kind: windows
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.verify.outputs.tag }}
+      IS_RELEASE: ${{ github.ref_type == 'tag' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # Dry run: the built assets, installed from a local directory.
+      - name: Download the built assets (dry run)
+        if: env.IS_RELEASE != 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-assets
+          path: assets
+
+      # Real release: verify the provenance of what was published before
+      # running any of it (the command SECURITY.md would give users).
+      - name: Verify provenance of the published release
+        if: env.IS_RELEASE == 'true' && matrix.kind != 'windows'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/published" && cd "$RUNNER_TEMP/published"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'install.sh' --pattern 'install.ps1' --pattern '*.intoto.jsonl' --pattern '*.sha256' \
+            --pattern 'always-*.tar.gz' --pattern 'always-*.zip' --pattern 'always-*.deb' --pattern 'always-*.rpm'
+          for subject in always-*.tar.gz always-*.zip always-*.deb always-*.rpm install.sh install.ps1; do
+            gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-build.yml" \
+              --source-ref "$GITHUB_REF" --deny-self-hosted-runners
+            gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" \
+              --bundle "always-$TAG.intoto.jsonl" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-build.yml" \
+              --source-ref "$GITHUB_REF" --deny-self-hosted-runners
+          done
+          shasum -a 256 -c ./*.sha256
+
+      - name: Linux (container)
+        if: matrix.kind == 'docker'
+        env:
+          IMAGE: ${{ matrix.image }}
+          METHOD: ${{ matrix.method }}
+        run: |
+          set -euo pipefail
+          if [ "$IS_RELEASE" = true ]; then
+            # The documented one-liner, byte for byte, against the published release.
+            mount_args=()
+            env_args=(-e "ALWAYS_VERSION=$TAG")
+            cmd='curl -fsSL "https://github.com/'"$GITHUB_REPOSITORY"'/releases/download/'"$TAG"'/install.sh" | bash'
+          else
+            mount_args=(-v "$PWD/assets:/assets:ro" -v "$PWD/scripts:/scripts:ro")
+            env_args=(-e "ALWAYS_VERSION=$TAG" -e ALWAYS_BASE_URL=file:///assets)
+            cmd='bash /scripts/install-always.sh'
+          fi
+          docker run --rm "${mount_args[@]}" "${env_args[@]}" \
+            -e ALWAYS_METHOD="$METHOD" -e ALWAYS_SYSTEMD=0 -e CMD="$cmd" \
+            "$IMAGE" \
+            sh -c '
+              set -eu
+              if command -v apt-get >/dev/null; then
+                apt-get update -qq && apt-get install -y -qq curl ca-certificates bash >/dev/null
+                # A tarball install brings no dependencies (the deb declares
+                # them, and must pull libasound itself): provide the ALSA
+                # runtime the way the installer tells a tar user to.
+                [ "$ALWAYS_METHOD" != tar ] || apt-get install -y -qq libasound2t64 >/dev/null
+              else
+                dnf install -y -q curl ca-certificates bash >/dev/null
+                [ "$ALWAYS_METHOD" != tar ] || dnf install -y -q alsa-lib >/dev/null
+              fi
+              bash -c "$CMD"
+              command -v always >/dev/null || export PATH="$HOME/.local/bin:$PATH"
+              always --version
+            '
+
+      - name: macOS
+        if: matrix.kind == 'macos'
+        run: |
+          set -euo pipefail
+          export HOME="$RUNNER_TEMP/home"
+          mkdir -p "$HOME"
+          export ALWAYS_APP_DIR="$HOME/Applications" ALWAYS_NO_LAUNCH=1 ALWAYS_VERSION="$TAG"
+          if [ "$IS_RELEASE" = true ]; then
+            curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/install.sh" | bash
+          else
+            ALWAYS_BASE_URL="file://$PWD/assets" bash scripts/install-always.sh
+          fi
+          codesign --verify --deep --strict "$ALWAYS_APP_DIR/Always.app"
+          test -x "$ALWAYS_APP_DIR/Always.app/Contents/MacOS/always-daemon"
+          "$ALWAYS_APP_DIR/Always.app/Contents/MacOS/always-daemon" --version
+
+      - name: Windows
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:ALWAYS_VERSION = $env:TAG
+          $env:ALWAYS_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'Always'
+          $env:ALWAYS_NO_PATH = '1'
+          if ($env:IS_RELEASE -eq 'true') {
+            $f = Join-Path $env:RUNNER_TEMP 'install.ps1'
+            Invoke-WebRequest -UseBasicParsing -OutFile $f -Uri "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:TAG/install.ps1"
+            Get-Content -Raw $f | Invoke-Expression
+          } else {
+            $env:ALWAYS_BASE_URL = (Resolve-Path assets).Path
+            Get-Content -Raw scripts/release/install.ps1 | Invoke-Expression
+          }
+          & (Join-Path $env:ALWAYS_INSTALL_DIR 'always.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'installed always.exe failed to run' }

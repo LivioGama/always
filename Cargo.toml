@@ -1,6 +1,6 @@
 [package]
 name = "always"
-version = "0.0.2"
+version = "0.1.0"
 edition = "2024"
 description = "Always — the first speech-to-text software designed to be always on and free your hands from the affordance"
 license = "AGPL-3.0-only"
@@ -88,7 +88,7 @@ strsim = "0.11"
 parking_lot = "0.12"
 thiserror = "1"
 rand = "0.8"
-uuid = { version = "~1.26", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 tracing-appender = "0.2"
@@ -130,10 +130,12 @@ transcribe-rs = { version = "=0.3.12", features = ["whisper-metal", "onnx"], opt
 # Automatically available when targeting Windows.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
-    "Win32_Storage_FileSystem",
     "Win32_Security",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_DataExchange",
     "Win32_System_Memory",
+    "Win32_System_Ole",
     "Win32_System_Threading",
     "Win32_Media_Audio",
     "Win32_System_Com",
@@ -166,3 +168,35 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# ── Linux packaging (.deb / .rpm) ──────────────────────────────────────────
+# Built by .github/workflows/release.yml with:
+#   cargo deb --no-build --no-strip           (cargo-deb)
+#   cargo generate-rpm                        (cargo-generate-rpm)
+# Both ship the daemon CLI plus a systemd *user* unit; neither starts the
+# service on install (a dictation daemon needs the user's session).
+[package.metadata.deb]
+name = "always"
+maintainer = "Livio Gamassia <hello@omni3.ai>"
+section = "sound"
+priority = "optional"
+depends = "$auto"
+extended-description = "Always-on voice dictation daemon (CLI). Run `always run`, or enable the user service: systemctl --user enable --now always-daemon.service"
+assets = [
+    ["target/release/always", "usr/bin/always", "755"],
+    ["scripts/release/always-daemon.service", "usr/lib/systemd/user/always-daemon.service", "644"],
+    ["LICENSE", "usr/share/doc/always/copyright", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "always"
+summary = "Always-on voice dictation daemon"
+assets = [
+    { source = "target/release/always", dest = "/usr/bin/always", mode = "755" },
+    { source = "scripts/release/always-daemon.service", dest = "/usr/lib/systemd/user/always-daemon.service", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/always/LICENSE", mode = "644", doc = true },
+]
+auto-req = "disabled"
+
+[package.metadata.generate-rpm.requires]
+alsa-lib = "*"

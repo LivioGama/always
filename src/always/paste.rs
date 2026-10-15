@@ -13,70 +13,6 @@
 
 use anyhow::{Context, Result};
 
-// ─── Windows API bindings ────────────────────────────────────────────────
-//
-// Used by `WindowsClipboard`, `write_clipboard_text`, `paste_via_sendinput`,
-// and the Windows-specific `press_return`.  All gated behind
-// `target_os = "windows"`.
-
-#[cfg(target_os = "windows")]
-mod win32 {
-    pub use windows::Win32::Foundation::{
-        CloseHandle, HANDLE, HMODULE, PROC_THREAD_ATTRIBUTE_LIST,
-    };
-    pub use windows::Win32::Storage::FileSystem::{
-        EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
-    };
-    pub use windows::Win32::System::Memory::{
-        GHND, GlobalAlloc, GlobalFree, GlobalLock, GlobalUnlock,
-    };
-    pub use windows::Win32::UI::WindowsAndMessaging::{
-        CF_UNICODETEXT, CloseClipboard, GetForegroundWindow, GetModuleFileNameExW,
-        GetWindowThreadProcessId, OpenProcess, lstrlenW,
-    };
-    pub use windows::core::PCWSTR;
-
-    // ─── Win32 structs & constants ───────────────────────────────────────
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct INPUT {
-        pub type_: u32,
-        pub II: INPUT_6,
-    }
-
-    #[repr(C)]
-    pub union INPUT_6 {
-        pub ki: KEYBDINPUT,
-    }
-
-    #[repr(C)]
-    pub struct KEYBDINPUT {
-        pub wVk: u16,
-        pub wScan: u16,
-        pub dwFlags: u32,
-        pub time: u32,
-        pub dwExtraInfo: usize,
-    }
-
-    pub const INPUT_KEYBOARD: u32 = 1;
-    pub const KEYEVENTF_KEYUP: u32 = 0x0002;
-
-    // Virtual key codes
-    pub const VK_CONTROL: u16 = 0x11;
-    pub const VK_V: u16 = 0x56;
-    pub const VK_RETURN: u16 = 0x0D;
-
-    // Process access rights
-    pub const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-
-    // Global memory allocation flags
-    pub const GMEM_MOVEABLE: u32 = 0x0002;
-
-    // lstrlenW
-    pub use windows::Win32::UI::Shell::lstrlenW;
-}
-
 /// Clipboard + simulated-paste capability.
 ///
 /// All implementations must be `Send + Sync` so the daemon can hand a
@@ -124,11 +60,11 @@ pub struct WindowsClipboard;
 #[cfg(target_os = "windows")]
 impl ClipboardProvider for WindowsClipboard {
     fn copy(&self, text: &str) -> Result<()> {
-        write_clipboard_text(text)
+        win32::write_clipboard_text(text)
     }
 
     fn paste(&self, auto_enter: bool) -> Result<()> {
-        paste_via_sendinput(auto_enter)
+        win32::paste_via_sendinput(auto_enter)
     }
 }
 
@@ -172,6 +108,9 @@ pub fn copy_to_clipboard(text: String) -> Result<()> {
     if native_pasteboard_write(&text) {
         return Ok(());
     }
+    #[cfg(target_os = "windows")]
+    return win32::write_clipboard_text(&text);
+    #[cfg(not(target_os = "windows"))]
     copy_via_subprocess(text)
 }
 
@@ -269,6 +208,7 @@ fn native_pasteboard_write(text: &str) -> bool {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn copy_via_subprocess(text: String) -> Result<()> {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
@@ -282,6 +222,15 @@ fn copy_via_subprocess(text: String) -> Result<()> {
     };
 
     let mut command = Command::new(copy_cmd);
+    // Force a UTF-8 locale for the clipboard tool. pbcopy decodes its stdin
+    // bytes via CFStringGetSystemEncoding(); under the launchd-spawned daemon
+    // environment (no LANG/LC_*/__CF_USER_TEXT_ENCODING) that is MacRoman, so
+    // every non-ASCII transcript ("it’s", "—", "…") landed on the pasteboard
+    // as literal mojibake ("it‚Äôs"). LANG alone is sufficient but LC_ALL
+    // overrides a stray POSIX LC_* inherited from a non-GUI launch.
+    command
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8");
     if cfg!(target_os = "linux") {
         command.args(["-selection", "clipboard", "-in"]);
     }
@@ -428,8 +377,7 @@ pub fn paste_text(auto_enter: bool) -> Result<()> {
     if no_paste_env() {
         return Ok(());
     }
-    use win32_keyboard::paste_via_sendinput as paste_via_sendinput_inner;
-    paste_via_sendinput_inner(auto_enter)
+    win32::paste_via_sendinput(auto_enter)
 }
 
 // ─── Linux paste_text ───────────────────────────────────────────────────
@@ -533,6 +481,7 @@ pub fn paste(text: &str, auto_enter: bool) -> Result<()> {
 /// Non-text flavors (images, RTF, file URLs) on the prior clipboard are
 /// not captured and therefore not restored — plain-text round-trip is the
 /// high-value case for an always-on dictation daemon.
+#[cfg(not(target_os = "windows"))]
 pub fn read_clipboard_text() -> Result<String> {
     let (cmd, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
         ("pbpaste", &[])
@@ -543,6 +492,11 @@ pub fn read_clipboard_text() -> Result<String> {
     };
     let output = std::process::Command::new(cmd)
         .args(args)
+        // pbpaste ENCODES the pasteboard string to stdout via the system
+        // encoding — under a C/POSIX locale that emits MacRoman bytes, which
+        // the UTF-8 decode below then turns into mojibake. Pin UTF-8.
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8")
         .output()
         .with_context(|| format!("spawn {cmd}"))?;
     if !output.status.success() {
@@ -635,35 +589,7 @@ pub fn press_return() -> Result<()> {
     if no_paste_env() {
         return Ok(());
     }
-    use std::ptr;
-
-    // Return down
-    unsafe {
-        let mut enter_down = std::mem::zeroed::<INPUT>();
-        enter_down.II.ki.wVk = 0x0D; // VK_RETURN
-        enter_down.II.ki.dwFlags = 0;
-        SendInput(
-            1,
-            &mut enter_down as *mut INPUT,
-            std::mem::size_of::<INPUT>() as i32,
-        );
-    }
-
-    std::thread::sleep(std::time::Duration::from_millis(5));
-
-    // Return up
-    unsafe {
-        let mut enter_up = std::mem::zeroed::<INPUT>();
-        enter_up.II.ki.wVk = 0x0D;
-        enter_up.II.ki.dwFlags = KEYEVENTF_KEYUP;
-        SendInput(
-            1,
-            &mut enter_up as *mut INPUT,
-            std::mem::size_of::<INPUT>() as i32,
-        );
-    }
-
-    Ok(())
+    win32::press_return()
 }
 
 #[cfg(target_os = "linux")]
@@ -742,321 +668,223 @@ fn post_ydotool_key<const N: usize>(args: [&str; N]) -> Result<()> {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// Windows clipboard + keyboard bindings (Win32 API)
+// Windows clipboard + keyboard bindings (Win32 API, `windows` crate 0.62)
 // ════════════════════════════════════════════════════════════════════════
 
-/// Windows clipboard: write `text` to the system clipboard via `SetClipboardData`.
-///
-/// Opens the clipboard, empties it, allocates a `GHND`-flagged global handle,
-/// copies the UTF-16LE encoded text, and closes the clipboard.
-#[cfg(target_os = "windows")]
-fn write_clipboard_text(text: &str) -> Result<()> {
-    use std::ptr;
-
-    unsafe {
-        // Open the clipboard; fail if another process owns it.
-        if OpenClipboard(ptr::null_mut()) == 0 {
-            anyhow::bail!("OpenClipboard failed");
-        }
-
-        // Clear the clipboard first.
-        EmptyClipboard();
-
-        // Convert text to UTF-16LE (including null terminator).
-        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-        let byte_len = wide.len() * std::mem::size_of::<u16>();
-
-        // Allocate a global handle with the GHND flag (moveable + zero-init).
-        let hglob = GlobalAlloc(GHND as usize, byte_len);
-        if hglob.is_null() {
-            CloseClipboard();
-            anyhow::bail!("GlobalAlloc failed");
-        }
-
-        // Lock the handle, copy the data, unlock.
-        let ptr = GlobalLock(hglob) as *mut u8;
-        if ptr.is_null() {
-            GlobalFree(hglob);
-            CloseClipboard();
-            anyhow::bail!("GlobalLock failed");
-        }
-        std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr, byte_len);
-        GlobalUnlock(hglob);
-
-        // Place the handle on the clipboard as CF_UNICODETEXT.
-        SetClipboardData(CF_UNICODETEXT as usize, hglob as *mut std::ffi::c_void);
-
-        // Close the clipboard — SetClipboardData transfers ownership
-        // of hglob to the system, so we must NOT Free it.
-        CloseClipboard();
-    }
-    Ok(())
-}
-
-/// Read the current clipboard text via the Win32 API.
-#[cfg(target_os = "windows")]
-fn read_clipboard_via_api() -> Result<String> {
-    use std::ptr;
-
-    unsafe {
-        if OpenClipboard(ptr::null_mut()) == 0 {
-            anyhow::bail!("OpenClipboard failed");
-        }
-
-        let handle = GetClipboardData(CF_UNICODETEXT as usize);
-        if handle.is_null() {
-            // Clipboard doesn't contain CF_UNICODETEXT — close and bail.
-            CloseClipboard();
-            anyhow::bail!("Clipboard does not contain text");
-        }
-
-        let lock = GlobalLock(handle);
-        if lock.is_null() {
-            CloseClipboard();
-            anyhow::bail!("GlobalLock failed");
-        }
-
-        let len = lstrlenW(lock as *const u16);
-        let wide_slice = std::slice::from_raw_parts(lock as *const u16, len as usize);
-        let s = String::from_utf16_lossy(wide_slice);
-
-        GlobalUnlock(handle);
-        CloseClipboard();
-
-        Ok(s)
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn is_terminal_window_class(_class_name: &str) -> bool {
-    // On Windows, we check the focused window process name instead of class.
-    // Terminals: ConHost (conhost.exe), WindowsTerminal (WindowsTerminal.exe),
-    // wt.exe, wt-pipe, etc. This is handled in the caller.
-    // We fall back to assuming non-terminal to be safe.
-    false
-}
-
-/// Determine whether the currently focused window on Windows is a terminal.
-///
-/// Checks the top-level foreground window's process name.
-#[cfg(target_os = "windows")]
-fn focused_window_is_terminal() -> bool {
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.is_null() {
-            return false;
-        }
-
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, &mut pid);
-
-        if pid == 0 {
-            return false;
-        }
-
-        // Open the process to query its name.
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle.is_null() {
-            return false;
-        }
-
-        let mut buffer: [u16; 260] = [0; 260];
-        let len = GetModuleFileNameExW(
-            handle,
-            ptr::null_mut(),
-            buffer.as_mut_ptr(),
-            buffer.len() as u32,
-        );
-        CloseHandle(handle);
-
-        if len == 0 {
-            return false;
-        }
-
-        // Extract just the file name from the full path.
-        let path = String::from_utf16_lossy(&buffer[..len as usize]);
-        let file_name = path.rsplit('\\').next().unwrap_or("").to_ascii_lowercase();
-
-        matches!(
-            file_name.as_str(),
-            "conhost.exe"
-                | "windowsterminal.exe"
-                | "wt.exe"
-                | "wt-pipe.exe"
-                | "iterm.exe"
-                | "mintty.exe"
-                | "alacritty.exe"
-                | "ghostty.exe"
-                | "kitty.exe"
-                | "wezterm-gui.exe"
-                | "tabby.exe"
-                | "hyper.exe"
-                | "terminology.exe"
-                | "st.exe"
-                | "foot"
-                | "alacritty"
-        )
-    }
-}
-
-/// Windows-specific key-event helpers via `SendInput`.
+/// Win32 helpers behind `WindowsClipboard` and the Windows `paste_text` /
+/// `press_return`. Compiled only on Windows.
 #[cfg(target_os = "windows")]
 mod win32 {
-    pub use win32_keyboard::*;
-}
+    use anyhow::{Context, Result};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, HGLOBAL, HWND};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GHND, GlobalAlloc, GlobalLock, GlobalUnlock};
+    use windows::Win32::System::Ole::CF_UNICODETEXT;
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
+        VIRTUAL_KEY, VK_CONTROL, VK_RETURN, VK_V,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    use windows::core::PWSTR;
 
-#[cfg(target_os = "windows")]
-mod win32_keyboard {
-    use std::ptr;
+    /// Keeps the clipboard open for the lifetime of the guard and closes it
+    /// on every exit path (including early `?` returns).
+    struct ClipboardGuard;
 
-    /// Simulate Ctrl+V via SendInput.
+    impl ClipboardGuard {
+        fn open() -> Result<Self> {
+            // `None` associates the open clipboard with the current task.
+            unsafe { OpenClipboard(None) }.context("OpenClipboard failed")?;
+            Ok(Self)
+        }
+    }
+
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            let _ = unsafe { CloseClipboard() };
+        }
+    }
+
+    /// Write `text` to the system clipboard as `CF_UNICODETEXT`.
     ///
-    /// Sends a controlled sequence of keyboard events: Ctrl-down → V-down → V-up → Ctrl-up,
-    /// with brief sleeps between each to ensure the OS and target app process the events
-    /// in the correct order.  After the paste, optionally sends a Return keypress when
-    /// `auto_enter` is true.
+    /// Opens the clipboard, empties it, allocates a `GHND` (moveable +
+    /// zero-initialised) global block, copies the UTF-16LE text including
+    /// its NUL terminator, and hands the block to the system.
+    pub fn write_clipboard_text(text: &str) -> Result<()> {
+        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        let byte_len = std::mem::size_of_val(wide.as_slice());
+
+        let _clipboard = ClipboardGuard::open()?;
+        unsafe {
+            EmptyClipboard().context("EmptyClipboard failed")?;
+
+            let hglobal = GlobalAlloc(GHND, byte_len).context("GlobalAlloc failed")?;
+            let dst = GlobalLock(hglobal) as *mut u16;
+            if dst.is_null() {
+                // Ownership never moved to the system, so release it here.
+                let _ = windows::Win32::Foundation::GlobalFree(Some(hglobal));
+                anyhow::bail!("GlobalLock failed");
+            }
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), dst, wide.len());
+            // GlobalUnlock reports an error when the lock count reaches zero;
+            // that is the expected outcome here.
+            let _ = GlobalUnlock(hglobal);
+
+            // On success the system owns the block, so it must NOT be freed.
+            if let Err(err) = SetClipboardData(u32::from(CF_UNICODETEXT.0), Some(HANDLE(hglobal.0)))
+            {
+                let _ = windows::Win32::Foundation::GlobalFree(Some(hglobal));
+                return Err(err).context("SetClipboardData failed");
+            }
+        }
+        Ok(())
+    }
+
+    /// Read the current clipboard text (`CF_UNICODETEXT`).
+    pub fn read_clipboard_text() -> Result<String> {
+        let _clipboard = ClipboardGuard::open()?;
+        unsafe {
+            let handle = GetClipboardData(u32::from(CF_UNICODETEXT.0))
+                .context("Clipboard does not contain text")?;
+            let hglobal = HGLOBAL(handle.0);
+            let lock = GlobalLock(hglobal) as *const u16;
+            if lock.is_null() {
+                anyhow::bail!("GlobalLock failed");
+            }
+            let mut len = 0usize;
+            while *lock.add(len) != 0 {
+                len += 1;
+            }
+            let text = String::from_utf16_lossy(std::slice::from_raw_parts(lock, len));
+            let _ = GlobalUnlock(hglobal);
+            Ok(text)
+        }
+    }
+
+    fn key_event(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    fn send_key(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) {
+        let input = [key_event(vk, flags)];
+        unsafe {
+            SendInput(&input, std::mem::size_of::<INPUT>() as i32);
+        }
+    }
+
+    fn sleep_ms(ms: u64) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+
+    /// Simulate a single Return keypress via `SendInput`.
+    pub fn press_return() -> Result<()> {
+        send_key(VK_RETURN, KEYBD_EVENT_FLAGS(0));
+        sleep_ms(5);
+        send_key(VK_RETURN, KEYEVENTF_KEYUP);
+        Ok(())
+    }
+
+    /// Simulate Ctrl+V via `SendInput`: Ctrl-down, V-down, V-up, Ctrl-up,
+    /// with brief sleeps so the target app processes the events in order.
+    /// Optionally follows with Return when `auto_enter` is set.
     pub fn paste_via_sendinput(auto_enter: bool) -> Result<()> {
-        use std::ptr;
-
-        // Ctrl key down
-        unsafe {
-            let mut ctrl_down = std::mem::zeroed::<INPUT>();
-            ctrl_down.II.ki.wVk = 0x11; // VK_CONTROL
-            ctrl_down.II.ki.dwFlags = 0;
-            SendInput(
-                1,
-                &mut ctrl_down as *mut INPUT,
-                std::mem::size_of::<INPUT>() as i32,
-            );
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        // 'V' key down
-        unsafe {
-            let mut v_down = std::mem::zeroed::<INPUT>();
-            v_down.II.ki.wVk = 0x56; // VK_V
-            v_down.II.ki.dwFlags = 0;
-            SendInput(
-                1,
-                &mut v_down as *mut INPUT,
-                std::mem::size_of::<INPUT>() as i32,
-            );
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(5));
-
-        // 'V' key up
-        unsafe {
-            let mut v_up = std::mem::zeroed::<INPUT>();
-            v_up.II.ki.wVk = 0x56;
-            v_up.II.ki.dwFlags = KEYEVENTF_KEYUP;
-            SendInput(
-                1,
-                &mut v_up as *mut INPUT,
-                std::mem::size_of::<INPUT>() as i32,
-            );
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        // Ctrl key up
-        unsafe {
-            let mut ctrl_up = std::mem::zeroed::<INPUT>();
-            ctrl_up.II.ki.wVk = 0x11;
-            ctrl_up.II.ki.dwFlags = KEYEVENTF_KEYUP;
-            SendInput(
-                1,
-                &mut ctrl_up as *mut INPUT,
-                std::mem::size_of::<INPUT>() as i32,
-            );
-        }
+        send_key(VK_CONTROL, KEYBD_EVENT_FLAGS(0));
+        sleep_ms(10);
+        send_key(VK_V, KEYBD_EVENT_FLAGS(0));
+        sleep_ms(5);
+        send_key(VK_V, KEYEVENTF_KEYUP);
+        sleep_ms(10);
+        send_key(VK_CONTROL, KEYEVENTF_KEYUP);
 
         if auto_enter {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-
-            // Return down
-            unsafe {
-                let mut enter_down = std::mem::zeroed::<INPUT>();
-                enter_down.II.ki.wVk = 0x0D; // VK_RETURN
-                enter_down.II.ki.dwFlags = 0;
-                SendInput(
-                    1,
-                    &mut enter_down as *mut INPUT,
-                    std::mem::size_of::<INPUT>() as i32,
-                );
-            }
-
-            std::thread::sleep(std::time::Duration::from_millis(5));
-
-            // Return up
-            unsafe {
-                let mut enter_up = std::mem::zeroed::<INPUT>();
-                enter_up.II.ki.wVk = 0x0D;
-                enter_up.II.ki.dwFlags = KEYEVENTF_KEYUP;
-                SendInput(
-                    1,
-                    &mut enter_up as *mut INPUT,
-                    std::mem::size_of::<INPUT>() as i32,
-                );
-            }
+            sleep_ms(50);
+            press_return()?;
         }
-
         Ok(())
     }
 
-    /// Simulate a single Return key via SendInput.
-    pub fn press_return() -> Result<()> {
+    /// Whether the foreground window belongs to a known terminal emulator,
+    /// judged by the owning process's executable name.
+    #[allow(dead_code)]
+    pub fn focused_window_is_terminal() -> bool {
         unsafe {
-            // Return down
-            let mut enter_down = std::mem::zeroed::<INPUT>();
-            enter_down.II.ki.wVk = 0x0D;
-            enter_down.II.ki.dwFlags = 0;
-            SendInput(
-                1,
-                &mut enter_down as *mut INPUT,
-                std::mem::size_of::<INPUT>() as i32,
+            let hwnd: HWND = GetForegroundWindow();
+            if hwnd.0.is_null() {
+                return false;
+            }
+
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == 0 {
+                return false;
+            }
+
+            let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+                return false;
+            };
+
+            let mut buffer = [0u16; 260];
+            let mut len = buffer.len() as u32;
+            let queried = QueryFullProcessImageNameW(
+                process,
+                PROCESS_NAME_WIN32,
+                PWSTR(buffer.as_mut_ptr()),
+                &mut len,
             );
+            let _ = CloseHandle(process);
+            if queried.is_err() || len == 0 {
+                return false;
+            }
+
+            let path = String::from_utf16_lossy(&buffer[..len as usize]);
+            let file_name = path.rsplit('\\').next().unwrap_or("").to_ascii_lowercase();
+
+            matches!(
+                file_name.as_str(),
+                "conhost.exe"
+                    | "windowsterminal.exe"
+                    | "wt.exe"
+                    | "wt-pipe.exe"
+                    | "iterm.exe"
+                    | "mintty.exe"
+                    | "alacritty.exe"
+                    | "ghostty.exe"
+                    | "kitty.exe"
+                    | "wezterm-gui.exe"
+                    | "tabby.exe"
+                    | "hyper.exe"
+                    | "terminology.exe"
+                    | "st.exe"
+                    | "foot"
+                    | "alacritty"
+            )
         }
-
-        std::thread::sleep(std::time::Duration::from_millis(5));
-
-        // Return up
-        unsafe {
-            let mut enter_up = std::mem::zeroed::<INPUT>();
-            enter_up.II.ki.wVk = 0x0D;
-            enter_up.II.ki.dwFlags = KEYEVENTF_KEYUP;
-            SendInput(
-                1,
-                &mut enter_up as *mut INPUT,
-                std::mem::size_of::<INPUT>() as i32,
-            );
-        }
-
-        Ok(())
     }
 }
-
-#[cfg(target_os = "windows")]
-pub use win32_keyboard::{
-    paste_via_sendinput as paste_via_sendinput_fn, press_return as press_return_win,
-};
 
 // ─── Clipboard change-count helpers ─────────────────────────────────────
 
-/// Read the current clipboard text via `pbpaste`.
-///
-/// Mirrors `correction::read_clipboard` (the Cmd+C capture path already
-/// uses this exact pattern). Used to snapshot the user's clipboard before
-/// we overwrite it with a transcript so it can be restored afterwards.
-///
-/// NOTE: this preserves only the **string** flavor of the pasteboard.
-/// Non-text flavors (images, RTF, file URLs) on the prior clipboard are
-/// not captured and therefore not restored — plain-text round-trip is the
-/// high-value case for an always-on dictation daemon.
+/// Read the current clipboard text (Windows: `CF_UNICODETEXT` via Win32).
 #[cfg(target_os = "windows")]
 pub fn read_clipboard_text() -> Result<String> {
-    read_clipboard_via_api()
+    win32::read_clipboard_text()
 }
 
 /// `NSPasteboard.general.changeCount` — a counter the pasteboard server
