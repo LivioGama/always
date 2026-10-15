@@ -6,7 +6,8 @@ name: Release
 #   tag vX.Y.Z on main  ->  verify -> assets -> release -> smoke
 #
 #   verify   tag == Cargo version (lockstep with every other version file),
-#            tag is on main, CHANGELOG section exists, cargo deny, tests
+#            tag is on main, CHANGELOG section exists, cargo deny
+#   test     the ci.yml test suite on macOS
 #   assets   release-build.yml: macOS arm64 / Linux x86_64+aarch64 / Windows
 #            builds, checksums, build-provenance attestation
 #   release  publishes a NON-draft GitHub Release; body = the CHANGELOG section
@@ -61,17 +62,6 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          shared-key: release-verify
-          save-if: false
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev libssl-dev pkg-config g++
-
       - name: Resolve the release tag
         id: tag
         run: |
@@ -118,12 +108,37 @@ jobs:
       - name: Dependency policy (cargo deny check)
         run: cargo deny check
 
+  # The same tests ci.yml runs, on the platform that ships the app. (The Linux
+  # lib tests do not compile on a real Linux host: src/always/replay_tests.rs
+  # uses the macOS-only apple_stt / stt_apple modules ungated.)
+  test:
+    name: Tests (macOS)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-test-macos
+          save-if: false
+
       - name: Test
-        run: cargo test --locked --no-default-features --features linux,cpal --lib --bins -- --skip macos
+        env:
+          # kaldi-fbank-rust-kautism bundles C++14 code (see ci.yml).
+          CXXFLAGS: -std=c++14
+        run: cargo test --locked --bins --lib --tests -- --skip macos_overlay
 
   assets:
     name: Build and attest
-    needs: verify
+    needs: [verify, test]
     permissions:
       contents: read
       id-token: write
