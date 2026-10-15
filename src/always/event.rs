@@ -401,6 +401,12 @@ pub enum DaemonEvent {
     SttFallbackEngaged {
         model: String,
     },
+    /// "My Voice" enrollment accepted for `step`, but the daemon is still
+    /// preparing (speaker model download/load). Recording has NOT begun;
+    /// the GUI must not show "speak now" until `VoiceEnrollmentStarted`.
+    VoiceEnrollmentPreparing {
+        step: String,
+    },
     /// "My Voice" enrollment recording started for `step`
     /// (`normal` | `lower` | `louder`). The daemon is now capturing the
     /// user's guided sample.
@@ -1162,6 +1168,12 @@ impl EventBroadcaster {
         self.send(DaemonEvent::LongRecordingWarning {
             elapsed_secs,
             cap_secs,
+        });
+    }
+
+    pub fn voice_enrollment_preparing(&self, step: &str) {
+        self.send(DaemonEvent::VoiceEnrollmentPreparing {
+            step: step.to_string(),
         });
     }
 

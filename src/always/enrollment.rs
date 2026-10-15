@@ -114,9 +114,11 @@ fn record_and_store(_cfg: &AlwaysConfig, _step: EnrollStep) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn record_and_store(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
-    // Model download happens lazily on the FIRST enrollment (26.5 MB).
-    // Do it before announcing the recording so the UI's "speak now"
-    // cue never fires while we're still fetching.
+    // The model is normally prefetched at daemon startup; if that hasn't
+    // finished (or failed) the download happens here. Tell the UI we are
+    // preparing so it shows a waiting state instead of "speak now", and
+    // announce the recording only once we are really about to record.
+    event::global_broadcaster().voice_enrollment_preparing(step.as_str());
     speaker_embed::ensure_model().context("speaker model unavailable")?;
     let embedder = speaker_embed::global().context("speaker embedding engine failed to load")?;
 

@@ -114,6 +114,7 @@ enum DaemonEventType: String, Codable {
     // "My Voice" enrollment lifecycle (v10). Started/SampleCaptured/
     // Failed carry only string fields, so they decode through the
     // loose `data` dict; Level and ProfileStatus need typed payloads.
+    case voiceEnrollmentPreparing = "VoiceEnrollmentPreparing"
     case voiceEnrollmentStarted = "VoiceEnrollmentStarted"
     case voiceEnrollmentLevel = "VoiceEnrollmentLevel"
     case voiceEnrollmentSampleCaptured = "VoiceEnrollmentSampleCaptured"

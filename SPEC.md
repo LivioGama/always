@@ -433,6 +433,16 @@ television, meeting audio and music are ignored.
 **Enrollment** records three passes (normal, lower, louder), each needing 5 s of
 voice. Each pass is stored as its own embedding, plus their combined average.
 
+**Enrollment readiness.** The speaker model (26.5 MB, SHA-256 checked) is
+prefetched in a background thread at every daemon start, whatever the gate or
+enrolled state, so the first enrollment normally starts at once. If it is still
+missing when a recording is requested, the daemon announces `VoiceEnrollmentPreparing`
+and the UI shows "Preparing voice model…"; "Listening — speak now" appears only
+after `VoiceEnrollmentStarted`, i.e. when the mic is really being read. The 45 s
+recording window starts then, not at the click. The onboarding Record button is
+disabled while the daemon is disconnected, as in Settings. Unknown events are
+ignored by both ends, so an older GUI or daemon simply skips `VoiceEnrollmentPreparing`.
+
 **Scoring:** an utterance's embedding is compared against the enrolled profile;
 above the threshold, it is the user.
 

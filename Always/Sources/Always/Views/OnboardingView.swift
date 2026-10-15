@@ -71,6 +71,7 @@ struct OnboardingView: View {
 
     @State private var step: Step = .welcome
     @ObservedObject private var enrollment: VoiceEnrollmentClient = .shared
+    @ObservedObject private var stateMonitor: StateMonitor = .shared
     @ObservedObject private var narrator: OnboardingNarrator = .shared
     @ObservedObject private var speech: SpeechModelSetup = .shared
 
@@ -570,7 +571,9 @@ struct OnboardingView: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(s.title).font(.body.weight(.medium))
-                Text(isRecording ? "Listening — keep talking…" : s.prompt)
+                Text(isRecording
+                    ? (enrollment.isPreparing ? "Preparing voice model…" : "Listening — keep talking…")
+                    : s.prompt)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -578,14 +581,18 @@ struct OnboardingView: View {
             Spacer()
 
             if isRecording {
-                ProgressView(value: enrollment.progress)
-                    .frame(width: 60)
+                if enrollment.isPreparing {
+                    ProgressView().controlSize(.small)
+                } else {
+                    ProgressView(value: enrollment.progress)
+                        .frame(width: 60)
+                }
                 Button("Cancel") { enrollment.cancelRecording() }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
             } else {
                 Button(recorded ? "Re-record" : "Record") { enrollment.record(s) }
-                    .disabled(otherRecording)
+                    .disabled(!stateMonitor.isDaemonConnected || otherRecording)
                     .controlSize(.small)
             }
         }

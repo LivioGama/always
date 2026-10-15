@@ -135,7 +135,9 @@ struct MyVoicePanel: View {
                     }
                     ProgressView(value: client.progress)
                         .controlSize(.small)
-                    Text(client.progress > 0
+                    Text(client.isPreparing
+                        ? "Preparing voice model… (first run can take a minute)"
+                        : client.progress > 0
                         ? "Keep speaking… \(Int(client.progress * 100))%"
                         : "Listening — start speaking now.")
                         .font(.caption2)

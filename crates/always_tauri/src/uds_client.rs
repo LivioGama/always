@@ -105,6 +105,7 @@ pub enum DaemonEvent {
     TranscriptionFailed { kind: String, message: String },
     SttFallbackEngaged { model: String },
 
+    VoiceEnrollmentPreparing { step: String },
     VoiceEnrollmentStarted { step: String },
     VoiceEnrollmentLevel { energy: f64, voiced_ms: u32, target_ms: u32 },
     VoiceEnrollmentSampleCaptured { step: String },

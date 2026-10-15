@@ -89,6 +89,31 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         });
     }
 
+    // Prefetch the speaker model at every start, whatever the gate or
+    // enrolled state, so the FIRST "My Voice" enrollment never waits on a
+    // 26 MB download. Background, best-effort, SHA-256 verified inside
+    // ensure_model (no-op when already present). Skipped when the self-heal
+    // refetch above already started the download (no two writers on the
+    // same .part file).
+    let already_refetching = should_refetch_speaker_model(
+        cfg.speaker_gate_enabled,
+        crate::always::voiceprint::is_enrolled(),
+        crate::always::speaker_embed::model_present(),
+    );
+    if already_refetching {
+        // download in flight from the self-heal thread
+    } else if !crate::always::speaker_embed::model_present() {
+        std::thread::spawn(|| {
+            tracing::info!("speaker_model_prefetch_started");
+            match crate::always::speaker_embed::ensure_model() {
+                Ok(_) => tracing::info!("speaker_model_prefetch_done"),
+                Err(e) => tracing::warn!(error = %e, "speaker_model_prefetch_failed"),
+            }
+        });
+    } else {
+        tracing::info!("speaker_model_prefetch_already_present");
+    }
+
     // Create shared config early so UDS server can start immediately
     let active_cfg: ActiveConfig = Arc::new(RwLock::new(cfg.clone()));
 

@@ -64,6 +64,11 @@ final class VoiceEnrollmentClient: ObservableObject {
     /// `record(_:)`, confirmed by `VoiceEnrollmentStarted`, cleared on
     /// captured/failed.
     @Published var recordingStep: Step? = nil
+    /// True from `record(_:)` until the daemon confirms with
+    /// `VoiceEnrollmentStarted` — the daemon may still be fetching or
+    /// loading the speaker model, so the mic is NOT yet listening and the
+    /// UI must not say "speak now".
+    @Published var isPreparing: Bool = false
     /// Live mic level 0…1-ish while recording (RMS, same scale as the
     /// daemon's energy thresholds — normal speech lands ~0.002–0.05,
     /// so the meter view rescales).
@@ -147,6 +152,7 @@ final class VoiceEnrollmentClient: ObservableObject {
     func record(_ step: Step) {
         lastError = nil
         recordingStep = step
+        isPreparing = true
         level = 0
         progress = 0
         StateMonitor.shared.sendCommandWithData(
@@ -157,6 +163,7 @@ final class VoiceEnrollmentClient: ObservableObject {
     func cancelRecording() {
         StateMonitor.shared.sendCommand("CancelVoiceEnrollment")
         recordingStep = nil
+        isPreparing = false
         level = 0
         progress = 0
     }
@@ -198,9 +205,16 @@ final class VoiceEnrollmentClient: ObservableObject {
                     statusRequestTime = nil
                 }
             }
+        case .voiceEnrollmentPreparing:
+            if let raw = event.data?["step"], let step = Step(rawValue: raw) {
+                recordingStep = step
+                isPreparing = true
+                lastError = nil
+            }
         case .voiceEnrollmentStarted:
             if let raw = event.data?["step"], let step = Step(rawValue: raw) {
                 recordingStep = step
+                isPreparing = false
                 lastError = nil
             }
         case .voiceEnrollmentLevel:
@@ -219,10 +233,12 @@ final class VoiceEnrollmentClient: ObservableObject {
                 saveCachedStatus()
             }
             recordingStep = nil
+            isPreparing = false
             level = 0
             progress = 0
         case .voiceEnrollmentFailed:
             recordingStep = nil
+            isPreparing = false
             level = 0
             progress = 0
             let message = event.data?["message"] ?? "recording failed"
