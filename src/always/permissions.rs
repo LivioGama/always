@@ -129,74 +129,37 @@ fn probe_mic_linux() -> MicStatus {
     }
 }
 
-/// Probe microphone availability on Windows via the Core Audio API.
+/// Probe microphone availability on Windows via the Core Audio (MMDevice) API.
+///
+/// Returns `Available` when the default capture endpoint can be resolved,
+/// `NotPresent` otherwise (no capture device, or the audio subsystem is down).
 #[cfg(target_os = "windows")]
 fn probe_mic_windows() -> MicStatus {
     use windows::Win32::Media::Audio::{
-        CLSID_MMDeviceEnumerator, CoCreateInstance, EDataFlow, ERole,
-        IMMDeviceEnumerator_GetDefaultAudioEndpoint,
+        IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eConsole,
     };
-    use windows::core::{GUID, IID};
-
-    // IID_IMMDeviceEnumerator
-    const IID_IMMDeviceEnumerator: GUID = GUID::from_values(
-        0xbcde0395,
-        0xe52f,
-        0x467c,
-        [0x8e, 0x3d, 0xc4, 0x57, 0x92, 0x91, 0x69, 0x2e],
-    );
-
-    // IID_IAudioEndpointVolume
-    const IID_IAudioEndpointVolume: GUID = GUID::from_values(
-        0x5cdf2d2,
-        0xa1,
-        0x409f,
-        [0x89, 0x59, 0x7d, 0x06, 0xd3, 0x63, 0xb5, 0x8b],
-    );
-
-    // CheckTokenMembership → is admin → may have mic access
-    if !is_admin() {
-        // Non-admin users might still have mic access; probe it.
-        // But first try the simple E_PROP_ID_RESOLUTION path.
-        return probe_mic_windows_simple();
-    }
-
-    probe_mic_windows_simple()
-}
-
-/// Simple Windows mic probe: try to create an endpoint enumerator.
-/// Returns Available if successful, NotPresent otherwise.
-#[cfg(target_os = "windows")]
-fn probe_mic_windows_simple() -> MicStatus {
-    use windows::Win32::Media::Audio::{
-        CLSID_MMDeviceEnumerator, CoCreateInstance, EDataFlow, ERole,
-        IMMDeviceEnumerator_GetDefaultAudioEndpoint,
+    use windows::Win32::System::Com::{
+        CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     };
-    use windows::core::{GUID, IID, PWSTR};
 
-    const IID_IMMDeviceEnumerator: GUID = GUID::from_values(
-        0xbcde0395,
-        0xe52f,
-        0x467c,
-        [0x8e, 0x3d, 0xc4, 0x57, 0x92, 0x91, 0x69, 0x2e],
-    );
-
-    // Try to create the enumerator — if it succeeds, the audio subsystem is alive.
     unsafe {
-        let mut enumerator: *mut std::ffi::c_void = std::ptr::null_mut();
-        let hr = CoCreateInstance(
-            &CLSID_MMDeviceEnumerator,
-            None,
-            windows::Win32::Foundation::CLSCTX_ALL,
-            &IID_IMMDeviceEnumerator,
-            &mut enumerator as *mut *mut std::ffi::c_void as *mut _,
-        );
-        if hr.is_ok() && !enumerator.is_null() {
-            std::mem::drop(std::ptr::NonNull::new(enumerator));
-            MicStatus::Available
-        } else {
-            MicStatus::NotPresent
+        // Balance every successful init (S_OK and S_FALSE) with an uninit;
+        // a failure such as RPC_E_CHANGED_MODE means the thread already has
+        // COM initialised in another mode, which is fine to use as-is.
+        let com_initialised = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
+
+        let status =
+            match CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .and_then(|enumerator| enumerator.GetDefaultAudioEndpoint(eCapture, eConsole))
+            {
+                Ok(_) => MicStatus::Available,
+                Err(_) => MicStatus::NotPresent,
+            };
+
+        if com_initialised {
+            CoUninitialize();
         }
+        status
     }
 }
 
@@ -287,38 +250,29 @@ fn is_admin_unix() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-/// Windows admin check: query the primary access token for the
-/// Administrators group via `CheckTokenMembership`.
+/// Windows admin check via `CheckTokenMembership`.
 ///
-/// Returns `true` when the current process token has the built-in
-/// Administrators SID as a member (either directly or through
-/// group membership).
+/// Builds the built-in Administrators SID (`S-1-5-32-544`) and asks whether
+/// the calling security context is a member (directly or via group
+/// membership). Passing no token uses the process token.
 #[cfg(target_os = "windows")]
 fn is_admin_windows() -> bool {
-    use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::Security::{
-        AllocateAndInitializeSid, CheckTokenMembership, FreeSid, SECURITY_NT_AUTHORITY,
-        SID_IDENTIFIER_AUTHORITY,
+        AllocateAndInitializeSid, CheckTokenMembership, FreeSid, PSID, SECURITY_NT_AUTHORITY,
     };
-    use windows::Win32::Security::{SecurityImpersonation, TokenAccessInformation, TokenPrimary};
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows::core::BOOL;
+
+    // SECURITY_BUILTIN_DOMAIN_RID and DOMAIN_ALIAS_RID_ADMINS.
+    const SECURITY_BUILTIN_DOMAIN_RID: u32 = 0x20;
+    const DOMAIN_ALIAS_RID_ADMINS: u32 = 0x220;
 
     unsafe {
-        // Open the current process token.
-        let mut token: windows::Win32::Foundation::HANDLE = std::ptr::null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TokenAccessInformation, &mut token).is_err() {
-            return false;
-        }
-
-        // Build the built-in Administrators SID (S-1-5-32-544).
-        let mut authority = std::mem::zeroed::<SID_IDENTIFIER_AUTHORITY>();
-        authority.Value[5] = 5; // SECURITY_NT_AUTHORITY
-        let mut sid = std::ptr::null_mut();
-        let result = AllocateAndInitializeSid(
-            &mut authority,
-            2,  // 2 sub-authorities
-            5,  // SECURITY_BUILTIN_DOMAIN_RID
-            32, // DOMAIN_ALIAS_RID_ADMINS
+        let mut sid = PSID::default();
+        if AllocateAndInitializeSid(
+            &SECURITY_NT_AUTHORITY,
+            2,
+            SECURITY_BUILTIN_DOMAIN_RID,
+            DOMAIN_ALIAS_RID_ADMINS,
             0,
             0,
             0,
@@ -326,22 +280,15 @@ fn is_admin_windows() -> bool {
             0,
             0,
             &mut sid,
-        );
+        )
+        .is_err()
+        {
+            return false;
+        }
 
-        let is_admin = if result.as_bool() && !sid.is_null() {
-            let mut is_member: windows::Win32::Foundation::BOOLEAN = 0;
-            let ok = CheckTokenMembership(
-                std::ptr::null_mut(), // default security context
-                sid,
-                &mut is_member,
-            );
-            FreeSid(sid);
-            ok.as_bool() && is_member != 0
-        } else {
-            false
-        };
-
-        CloseHandle(token);
-        is_admin
+        let mut is_member = BOOL(0);
+        let checked = CheckTokenMembership(None, sid, &mut is_member);
+        FreeSid(sid);
+        checked.is_ok() && is_member.as_bool()
     }
 }
