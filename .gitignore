@@ -38,3 +38,6 @@ scripts/launch-smoke/AlwaysSmoke.app/
 scripts/launch-smoke/events.jsonl
 scripts/launch-smoke/daemon.out
 scripts/launch-smoke/tts.aiff
+
+# Cargo build output in any (nested) crate, e.g. src-tauri/target, crates/*/target
+target/
