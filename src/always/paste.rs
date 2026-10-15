@@ -288,7 +288,9 @@ fn copy_via_subprocess(text: String) -> Result<()> {
     // every non-ASCII transcript ("it’s", "—", "…") landed on the pasteboard
     // as literal mojibake ("it‚Äôs"). LANG alone is sufficient but LC_ALL
     // overrides a stray POSIX LC_* inherited from a non-GUI launch.
-    command.env("LANG", "en_US.UTF-8").env("LC_ALL", "en_US.UTF-8");
+    command
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8");
     if cfg!(target_os = "linux") {
         command.args(["-selection", "clipboard", "-in"]);
     }
