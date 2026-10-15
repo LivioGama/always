@@ -165,11 +165,34 @@ class StateMonitor: ObservableObject {
             .store(in: &cancellables)
     }
 
+    /// Once the daemon's updater reports `UpdateProgress{installing}`, the
+    /// verified installer quits the daemon and the app on purpose and relaunches
+    /// the new bundle. The daemon vanishing is then expected, so the watchdog
+    /// must not race the installer by respawning a daemon from the old bundle.
+    /// Time-boxed so a failed installer never leaves the app daemon-less.
+    private var respawnSuppressedUntil: Date?
+
+    func suppressDaemonRespawn(for seconds: TimeInterval) {
+        respawnSuppressedUntil = Date().addingTimeInterval(seconds)
+    }
+
+    /// End the suppression early or on timeout. If the daemon is gone,
+    /// bring it back now — the UDS respawn request is a one-shot latch per
+    /// outage and was already consumed while suppressed.
+    func resumeDaemonRespawn() {
+        respawnSuppressedUntil = nil
+        if !isDaemonConnected { respawnDaemonIfNeeded() }
+    }
+
     /// Force-restart daemon. Kills any stale process first, then starts
     /// fresh. This is the nuclear option — used when the watchdog has
     /// given up on reconnecting, meaning the old daemon is truly broken.
     private func respawnDaemonIfNeeded() {
         guard !respawnInFlight, !isBootstrapping else { return }
+        if let until = respawnSuppressedUntil, until > Date() {
+            logger.info("Daemon respawn suppressed — the updater's installer is restarting the app")
+            return
+        }
         respawnInFlight = true
         logger.warning("Force-restarting daemon (stale process suspected)")
         Task { [weak self] in

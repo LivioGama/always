@@ -120,6 +120,14 @@ enum DaemonEventType: String, Codable {
     case voiceEnrollmentSampleCaptured = "VoiceEnrollmentSampleCaptured"
     case voiceEnrollmentFailed = "VoiceEnrollmentFailed"
     case voiceProfileStatus = "VoiceProfileStatus"
+    // Daemon updater (SPEC §12a). Additive, protocol version unchanged:
+    // every `data` value is a string, so they decode through the loose
+    // `[String: String]` path. Consumed by `UpdateService` (see
+    // `Models/UpdateState.swift` for the field meanings).
+    case updateAvailable = "UpdateAvailable"
+    case updateCheckDone = "UpdateCheckDone"
+    case updateProgress = "UpdateProgress"
+    case updateFailed = "UpdateFailed"
 }
 
 // Event data structures

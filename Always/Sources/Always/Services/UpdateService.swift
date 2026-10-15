@@ -1,299 +1,175 @@
-import Foundation
-import Sparkle
+import AppKit
 import Combine
+import Foundation
 import os.log
 
-/// Wraps a Sparkle `SPUUpdater` with a custom `SPUUserDriver` that
-/// publishes state to SwiftUI instead of showing Sparkle's standard
-/// update window. This gives an inline update checker in the About
-/// panel — status text, progress bar, install button — inspired by
-/// Handy's Tauri-based update checker.
+/// Thin UI layer over the daemon's updater (SPEC §12a). The daemon checks
+/// GitHub Releases, verifies the minisign signatures and runs the installer;
+/// this service only forwards the user's two requests (`CheckForUpdates`,
+/// `InstallUpdate`) and renders the daemon's answers as one `UpdateState`.
 ///
-/// State machine:
-///   idle → checking → (updateAvailable | upToDate | error)
-///   updateAvailable → downloading → extracting → readyToInstall → installing → installed
-///
-/// Requires `SUFeedURL` + `SUPublicEDKey` keys in Info.plist.
+/// Same shape as `VoiceEnrollmentClient`: a global singleton that subscribes
+/// to `Notification.Name.daemonEvent` and sends commands through
+/// `StateMonitor.shared`. It is touched at launch so the `UpdateAvailable`
+/// frame in the daemon's connect burst is never missed.
+@MainActor
 final class UpdateService: ObservableObject {
     static let shared = UpdateService()
 
+    /// `DaemonCommand` unit variants (`src/always/event.rs`), sent as
+    /// `{"type":"<name>"}` — the only two update commands there are.
+    private enum Command {
+        static let check = "CheckForUpdates"
+        static let install = "InstallUpdate"
+    }
+
+    /// A check normally answers in well under a second.
+    private static let checkTimeout: TimeInterval = 20
+    /// How long the installer gets to quit and replace this app before the
+    /// GUI assumes it failed and resumes normal behaviour.
+    private static let handoffTimeout: TimeInterval = 120
+
     private let logger = Logger(subsystem: "com.always.app", category: "updates")
-    private let driver: InlineUpdateDriver?
-    private let updater: SPUUpdater?
 
-    @Published var canCheckForUpdates: Bool = false
-    @Published private(set) var checkState: UpdateCheckState = .idle
+    @Published private(set) var model = UpdateModel()
+    @Published private(set) var isDaemonConnected = false
 
-    private var stateCancellable: AnyCancellable?
+    var state: UpdateState { model.state }
+    /// Newest known release newer than this build, if any.
+    var offer: UpdateOffer? { model.offer }
+
+    private var observer: NSObjectProtocol?
+    private var cancellables = Set<AnyCancellable>()
+    private var checkTimeoutTask: Task<Void, Never>?
+    private var handoffTimeoutTask: Task<Void, Never>?
 
     private init() {
-        let host = Bundle.main
-        // Dev builds never self-update: Sparkle would replace the dev
-        // bundle with a production release mid-debugging.
-        guard !AppInstance.isDev else {
-            self.driver = nil
-            self.updater = nil
-            logger.info("Sparkle disabled for dev instance")
-            return
-        }
-        guard Self.hasUsablePublicKey(in: host) else {
-            self.driver = nil
-            self.updater = nil
-            logger.warning("Sparkle disabled because SUPublicEDKey is missing or still uses the placeholder")
-            return
+        observer = NotificationCenter.default.addObserver(
+            forName: .daemonEvent,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let event = note.object as? DaemonEvent else { return }
+            MainActor.assumeIsolated {
+                self?.handle(event)
+            }
         }
 
-        let driver = InlineUpdateDriver()
-        self.driver = driver
-        let updater = SPUUpdater(
-            hostBundle: host,
-            applicationBundle: host,
-            userDriver: driver,
-            delegate: nil
-        )
-        self.updater = updater
-
-        do {
-            try updater.start()
-            logger.info("Sparkle updater started; feed=\(self.feedDescription, privacy: .public)")
-        } catch {
-            logger.error("Sparkle start failed: \(error.localizedDescription, privacy: .public)")
-        }
-
-        self.canCheckForUpdates = updater.canCheckForUpdates
-        updater.publisher(for: \.canCheckForUpdates)
+        StateMonitor.shared.$isDaemonConnected
+            .removeDuplicates()
             .receive(on: DispatchQueue.main)
-            .assign(to: &$canCheckForUpdates)
-
-        // Forward driver state to our published property.
-        driver.$state
-            .receive(on: DispatchQueue.main)
-            .assign(to: &$checkState)
+            .sink { [weak self] connected in
+                self?.connectionChanged(connected)
+            }
+            .store(in: &cancellables)
     }
 
-    /// User-initiated check ("Check for Updates…" menu item or About button).
-    func checkForUpdates() {
-        guard let updater else {
-            logger.warning("Sparkle update check skipped because updater is not configured")
-            return
-        }
-        updater.checkForUpdates()
-    }
+    // MARK: Derived UI state
 
-    /// Install the currently-available update (triggers download if not
-    /// yet downloaded, then install + relaunch).
-    func installUpdate() {
-        driver?.installUpdate()
-    }
-
-    /// Dismiss the current update notification (user declined).
-    func dismissUpdate() {
-        driver?.dismissUpdate()
-    }
-
-    private static func hasUsablePublicKey(in bundle: Bundle) -> Bool {
-        guard let key = bundle.object(forInfoDictionaryKey: "SUPublicEDKey") as? String else {
-            return false
-        }
-        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        return !trimmed.isEmpty && trimmed != "REPLACE_WITH_BASE64_EDDSA_PUBLIC_KEY"
-    }
-
-    private var feedDescription: String {
-        let url = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String
-        return url ?? "<no SUFeedURL configured>"
-    }
-}
-
-// MARK: - Inline update state
-
-/// Published state for the inline update checker UI.
-enum UpdateCheckState: Equatable {
-    case idle
-    case checking
-    case upToDate
-    case updateAvailable(version: String, releaseNotes: String?)
-    case downloading(progress: Double)       // 0.0–1.0
-    case extracting(progress: Double)         // 0.0–1.0
-    case readyToInstall
-    case installing
-    case installed
-    case error(String)
-}
-
-// MARK: - Custom SPUUserDriver
-
-/// Implements Sparkle's `SPUUserDriver` protocol to publish update
-/// state to SwiftUI instead of showing a separate window. Every method
-/// is called on the main thread per the protocol contract.
-private final class InlineUpdateDriver: NSObject, SPUUserDriver, ObservableObject {
-
-    @Published private(set) var state: UpdateCheckState = .idle
-
-    // Closures stored to call back into Sparkle at the right moment.
-    private var updateFoundReply: ((SPUUserUpdateChoice) -> Void)?
-    private var readyToInstallReply: ((SPUUserUpdateChoice) -> Void)?
-    private var downloadCancellation: (() -> Void)?
-    private var checkCancellation: (() -> Void)?
-
-    // Track download bytes for progress.
-    private var expectedContentLength: UInt64 = 0
-    private var downloadedBytes: UInt64 = 0
-
-    // MARK: - Permission request (one-time, auto-allow)
-
-    func show(
-        _ request: SPUUpdatePermissionRequest,
-        reply: @escaping (SUUpdatePermissionResponse) -> Void
-    ) {
-        // Auto-allow automatic update checks — the user can disable in
-        // Settings if they want. No prompt needed.
-        let response = SUUpdatePermissionResponse(automaticUpdateChecks: true, sendSystemProfile: false)
-        reply(response)
-    }
-
-    // MARK: - Update check
-
-    func showUserInitiatedUpdateCheck(cancellation: @escaping () -> Void) {
-        checkCancellation = cancellation
-        DispatchQueue.main.async { self.state = .checking }
-    }
-
-    func showUpdateNotFoundWithError(
-        _ error: Error,
-        acknowledgement: @escaping () -> Void
-    ) {
-        checkCancellation = nil
-        DispatchQueue.main.async { self.state = .upToDate }
-        acknowledgement()
-    }
-
-    func showUpdaterError(
-        _ error: Error,
-        acknowledgement: @escaping () -> Void
-    ) {
-        checkCancellation = nil
-        DispatchQueue.main.async {
-            self.state = .error(error.localizedDescription)
-        }
-        acknowledgement()
-    }
-
-    // MARK: - Update found
-
-    func showUpdateFound(
-        with appcastItem: SUAppcastItem,
-        state: SPUUserUpdateState,
-        reply: @escaping (SPUUserUpdateChoice) -> Void
-    ) {
-        checkCancellation = nil
-        let version = appcastItem.versionString
-        let notes = appcastItem.itemDescription
-
-        // Store the reply — the UI calls installUpdate() or dismissUpdate()
-        // which invokes it with the right choice.
-        updateFoundReply = reply
-
-        DispatchQueue.main.async {
-            self.state = .updateAvailable(version: version, releaseNotes: notes)
+    private var isBusy: Bool {
+        switch state {
+        case .checking, .installing: return true
+        default: return false
         }
     }
 
-    func showUpdateReleaseNotes(with downloadData: SPUDownloadData) {
-        // Could publish release notes HTML here if we wanted a notes view.
-        // For now, the appcast item description is already shown.
-    }
+    var canCheck: Bool { isDaemonConnected && !isBusy }
 
-    func showUpdateReleaseNotesFailedToDownloadWithError(_ error: Error) {
-        // Non-critical — the version string is still shown.
-    }
-
-    // MARK: - Download
-
-    func showDownloadInitiated(cancellation: @escaping () -> Void) {
-        downloadCancellation = cancellation
-        downloadedBytes = 0
-        expectedContentLength = 0
-        DispatchQueue.main.async { self.state = .downloading(progress: 0) }
-    }
-
-    func showDownloadDidReceiveExpectedContentLength(_ expectedContentLength: UInt64) {
-        self.expectedContentLength = expectedContentLength
-    }
-
-    func showDownloadDidReceiveData(ofLength length: UInt64) {
-        downloadedBytes += length
-        let progress: Double = expectedContentLength > 0
-            ? Double(downloadedBytes) / Double(expectedContentLength)
-            : 0
-        DispatchQueue.main.async { self.state = .downloading(progress: progress) }
-    }
-
-    func showDownloadDidStartExtractingUpdate() {
-        downloadCancellation = nil
-        DispatchQueue.main.async { self.state = .extracting(progress: 0) }
-    }
-
-    func showExtractionReceivedProgress(_ progress: Double) {
-        DispatchQueue.main.async { self.state = .extracting(progress: progress) }
-    }
-
-    // MARK: - Install
-
-    func showReady(toInstallAndRelaunch reply: @escaping (SPUUserUpdateChoice) -> Void) {
-        readyToInstallReply = reply
-        DispatchQueue.main.async { self.state = .readyToInstall }
-    }
-
-    func showInstallingUpdate(
-        withApplicationTerminated applicationTerminated: Bool,
-        retryTerminatingApplication: @escaping () -> Void
-    ) {
-        DispatchQueue.main.async { self.state = .installing }
-    }
-
-    func showUpdateInstalledAndRelaunched(
-        _ relaunched: Bool,
-        acknowledgement: @escaping () -> Void
-    ) {
-        DispatchQueue.main.async { self.state = .installed }
-        acknowledgement()
-    }
-
-    func dismissUpdateInstallation() {
-        updateFoundReply = nil
-        readyToInstallReply = nil
-        downloadCancellation = nil
-        checkCancellation = nil
-        DispatchQueue.main.async { self.state = .idle }
-    }
-
-    // MARK: - User actions (called from SwiftUI)
-
-    func installUpdate() {
-        // If we have a pending "update found" reply, accept it.
-        if let reply = updateFoundReply {
-            updateFoundReply = nil
-            reply(.install)
-            return
-        }
-        // If we have a pending "ready to install" reply, accept it.
-        if let reply = readyToInstallReply {
-            readyToInstallReply = nil
-            reply(.install)
-            return
+    /// Install is possible only when the daemon said so (`can_apply`).
+    var canInstall: Bool {
+        guard isDaemonConnected, offer?.canApply == true else { return false }
+        switch state {
+        case .available, .failed: return true
+        default: return false
         }
     }
 
-    func dismissUpdate() {
-        if let reply = updateFoundReply {
-            updateFoundReply = nil
-            reply(.dismiss)
+    // MARK: Commands (UI → daemon)
+
+    /// "Check now": runs one GitHub check even when the background check is
+    /// switched off (`update_check=false`) — the user asked.
+    func checkNow() {
+        guard canCheck else { return }
+        model.beginCheck()
+        StateMonitor.shared.sendCommand(Command.check)
+        armCheckTimeout()
+    }
+
+    /// "Install update": the daemon downloads, verifies and starts the
+    /// installer, answering with `UpdateProgress` / `UpdateFailed`.
+    func installNow() {
+        guard canInstall, model.beginInstall() else { return }
+        StateMonitor.shared.sendCommand(Command.install)
+    }
+
+    // MARK: Events (daemon → UI)
+
+    private func handle(_ daemonEvent: DaemonEvent) {
+        guard let event = UpdateEvent(daemonEvent) else { return }
+        logger.info("update event: \(daemonEvent.type.rawValue, privacy: .public)")
+        let before = model.state
+        model.apply(event)
+        stateChanged(from: before)
+    }
+
+    private func connectionChanged(_ connected: Bool) {
+        isDaemonConnected = connected
+        guard !connected else { return }
+        let before = model.state
+        model.daemonDisconnected()
+        stateChanged(from: before)
+    }
+
+    private func stateChanged(from before: UpdateState) {
+        let after = model.state
+        if after != .checking { checkTimeoutTask?.cancel() }
+
+        let wasHandoff = before == .installing(.handoff)
+        let isHandoff = after == .installing(.handoff)
+        if isHandoff && !wasHandoff { beginHandoff() }
+        if wasHandoff && !isHandoff { endHandoff() }
+    }
+
+    // MARK: Installer handoff
+
+    /// The verified installer is about to quit this app. Let that quit go
+    /// through (`applicationShouldTerminate` refuses background quits with no
+    /// window) so the app tears down cleanly, and keep the watchdog from
+    /// respawning the daemon the installer is deliberately stopping.
+    private func beginHandoff() {
+        logger.info("installer started — expecting this app and the daemon to quit")
+        AppDelegate.userInitiatedQuit = true
+        StateMonitor.shared.suppressDaemonRespawn(for: Self.handoffTimeout)
+        handoffTimeoutTask?.cancel()
+        handoffTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.handoffTimeout * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.handoffExpired()
         }
-        if let reply = readyToInstallReply {
-            readyToInstallReply = nil
-            reply(.dismiss)
+    }
+
+    private func handoffExpired() {
+        logger.error("installer did not replace the app within \(Self.handoffTimeout, privacy: .public)s")
+        let before = model.state
+        model.handoffTimedOut()
+        stateChanged(from: before)
+    }
+
+    private func endHandoff() {
+        handoffTimeoutTask?.cancel()
+        handoffTimeoutTask = nil
+        AppDelegate.userInitiatedQuit = false
+        StateMonitor.shared.resumeDaemonRespawn()
+    }
+
+    private func armCheckTimeout() {
+        checkTimeoutTask?.cancel()
+        checkTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.checkTimeout * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            let before = self.model.state
+            self.model.checkTimedOut()
+            self.stateChanged(from: before)
         }
-        DispatchQueue.main.async { self.state = .idle }
     }
 }

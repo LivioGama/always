@@ -258,7 +258,7 @@ enum OverlayState: Equatable, Hashable {
         case .autoEnterCountdown: return "return"
         case .idleAutoPaused: return "moon.zzz.fill"
         case .lowMicrophoneVolume: return "speaker.slash.fill"
-        case .grammarCorrected: return "sparkles"
+        case .grammarCorrected: return "wand.and.stars"
         case .transcriptionFailed: return "exclamationmark.triangle.fill"
         case .sttFallback: return "wifi.slash"
         case .pauseScope(_, let paused): return paused ? "pause.fill" : "play.fill"

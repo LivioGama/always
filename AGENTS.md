@@ -79,7 +79,7 @@ Two Always identities coexist on this machine:
 | State dir | `~/Library/Application Support/always` | `~/Library/Application Support/always-dev` |
 | Socket | `~/Library/Caches/Always/always.sock` | `~/Library/Caches/Always/always-dev.sock` |
 | URL scheme | `always://` | `always-dev://` |
-| Sparkle | on | off |
+| Self-update (daemon `always update`) | on | off |
 
 **The user dictates through the production app while agents work. Any command
 that kills it cuts the user's voice mid-sentence. Therefore:**
