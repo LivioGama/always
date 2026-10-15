@@ -9,7 +9,7 @@
 #   1. every version file below declares X.Y.Z (lockstep);
 #   2. CHANGELOG.md has a `## [X.Y.Z]` heading and `## [Unreleased]` holds no
 #      bullet (entries live in .github/changelog.d/ until the cut);
-#   3. each Cargo.lock is fresh for its manifest (`cargo update --locked`).
+#   3. the root Cargo.lock is fresh for its manifest (`cargo update --locked`).
 set -eu
 
 MODE=enforce
@@ -81,16 +81,17 @@ fi
 
 LOCKLOG="$(mktemp)"
 trap 'rm -f "$LOCKLOG"' EXIT
-for m in $CARGO_MANIFESTS; do
-    [ -f "$m" ] || continue
-    dir="$(dirname "$m")"
-    [ -f "$dir/Cargo.lock" ] || continue
-    if ! cargo update --workspace --locked --quiet --manifest-path "$m" 2>"$LOCKLOG"; then
-        echo "check-release: $dir/Cargo.lock is stale for $m:" >&2
-        cat "$LOCKLOG" >&2
-        FAIL=1
-    fi
-done
+# Only the root lockfile is built `--locked` by CI and the release; the Tauri
+# crates' lockfiles are not maintained by cargo here (see prepare.sh).
+# A throwaway target dir keeps cargo's scratch files out of the tracked tree.
+CARGO_TARGET_DIR="$(mktemp -d)"
+export CARGO_TARGET_DIR
+if ! cargo update --workspace --locked --quiet --manifest-path Cargo.toml 2>"$LOCKLOG"; then
+    echo "check-release: Cargo.lock is stale for Cargo.toml:" >&2
+    cat "$LOCKLOG" >&2
+    FAIL=1
+fi
+rm -rf "$CARGO_TARGET_DIR"
 
 if [ "$FAIL" -ne 0 ]; then exit 1; fi
 echo "check-release: all checks passed for $TAG"

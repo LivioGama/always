@@ -22,7 +22,8 @@
 # 4. the fragments are folded into a new `## [x.y.z] - DATE` under a kept,
 #    empty `## [Unreleased]`, grouped by section and led by `_highlights.md`
 #    when there is one, and deleted;
-# 5. `cargo update --workspace` refreshes each Cargo.lock for the members only;
+# 5. `cargo update --workspace` refreshes the root Cargo.lock for the members
+#    only; the Tauri crates' lockfiles get just their own version entry set;
 # 6. the fragments this run released are listed next to the pull requests
 #    merged into develop since the last tag, so each user-visible one can be
 #    matched to an entry by eye, then commits in no merged PR. The inventory is
@@ -306,9 +307,16 @@ if [ -n "$LAST_TAG" ]; then
     [ -n "$NWO" ] || incomplete_inventory "empty canonical repository"
     SINCE="$(git log -1 --format=%cI "$LAST_TAG")"
     PR_LIMIT=1000
-    PRS="$(gh pr list --repo "$NWO" --state merged --base "$WORK_BRANCH" --search "merged:>$SINCE" --limit "$PR_LIMIT" \
-        --json number,title,mergeCommit --jq '.[] | "\(.mergeCommit.oid) #\(.number) \(.title)"')" \
-        || incomplete_inventory "cannot list merged PRs in $NWO"
+    # PRs merged into develop, plus any merged straight into main (a hotfix, or
+    # a bot PR opened before dependabot targeted develop).
+    PRS=""
+    for branch in "$WORK_BRANCH" main; do
+        found="$(gh pr list --repo "$NWO" --state merged --base "$branch" --search "merged:>$SINCE" --limit "$PR_LIMIT" \
+            --json number,title,mergeCommit --jq '.[] | "\(.mergeCommit.oid) #\(.number) \(.title)"')" \
+            || incomplete_inventory "cannot list merged PRs into $branch in $NWO"
+        PRS="${PRS}${PRS:+
+}${found}"
+    done
     PR_COUNT="$(printf '%s\n' "$PRS" | awk 'NF { n++ } END { print n + 0 }')"
     [ "$PR_COUNT" -lt "$PR_LIMIT" ] || incomplete_inventory "PR search reached its $PR_LIMIT limit; paginate the inventory before cutting"
     # GitHub may already know merges newer than this candidate or on a
@@ -432,10 +440,23 @@ for fragment in .github/changelog.d/*.md; do
     rm -f "$fragment"
 done
 
-for m in $CARGO_MANIFESTS; do
-    if [ -f "$(dirname "$m")/Cargo.lock" ]; then
-        cargo update --workspace --quiet --manifest-path "$m"
-    fi
+# Root lockfile: let cargo refresh it for the workspace members only. Tracked
+# */target/ directories exist in this repo, so keep cargo's own scratch files
+# (.rustc_info.json) out of the tree with a throwaway target dir.
+CARGO_TARGET_DIR="$(mktemp -d)"
+export CARGO_TARGET_DIR
+cargo update --workspace --quiet --manifest-path Cargo.toml
+rm -rf "$CARGO_TARGET_DIR"
+unset CARGO_TARGET_DIR
+
+# The Tauri crates' lockfiles are not part of CI (their `cargo update` rewrites
+# thousands of lines), so only the crate's own `version` entry is edited, which
+# is all the prepare-only scope allows.
+for m in crates/always_tauri/Cargo.toml src-tauri/Cargo.toml; do
+    lock="$(dirname "$m")/Cargo.lock"
+    [ -f "$lock" ] || continue
+    crate="$(sed -n 's/^name *= *"\([^"]*\)".*/\1/p' "$m" | head -n 1)"
+    perl -0pi -e 's/(\[\[package\]\]\nname = "'"$crate"'"\nversion = ")[^"]*"/${1}'"$VERSION"'"/' "$lock"
 done
 
 echo "prepare.sh: $FRAGMENT_COUNT changelog entr$( [ "$FRAGMENT_COUNT" -eq 1 ] && printf 'y' || printf 'ies' ) released as $VERSION ($DATE):"
