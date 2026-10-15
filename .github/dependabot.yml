@@ -30,6 +30,14 @@ updates:
       serde-stack:
         patterns:
           - "serde*"
+      # Catch-all, listed last: a dependency joins the FIRST group it matches,
+      # so the named stacks above keep priority. Majors stay separate PRs.
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "*"
 
   # ── npm (Tauri GUI) ────────────────────────────────────────────────────────
   - package-ecosystem: "npm"
@@ -59,6 +67,13 @@ updates:
         patterns:
           - "vite*"
           - "@vitejs*"
+      # Catch-all, listed last (first matching group wins). Majors stay separate.
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "*"
 
   # ── GitHub Actions ─────────────────────────────────────────────────────────
   - package-ecosystem: "github-actions"
@@ -76,6 +91,14 @@ updates:
     commit-message:
       prefix: "deps(actions)"
       include: "scope"
+    groups:
+      # Majors stay separate PRs.
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "*"
 
   # ── Swift (Always app) ─────────────────────────────────────────────────────
   - package-ecosystem: "swift"
@@ -93,3 +116,11 @@ updates:
     commit-message:
       prefix: "deps(spm)"
       include: "scope"
+    groups:
+      # Majors stay separate PRs.
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "*"

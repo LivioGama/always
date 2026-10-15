@@ -1,10 +1,21 @@
 name: CodeQL
 
 on:
+  # Pushes: main only. develop is covered by its PRs (below) and the weekly
+  # scheduled run, which GitHub always runs on the default branch (develop).
   push:
-    branches: [main, develop]
+    branches: [main]
+  # PRs: only when something CodeQL analyses can change — Swift sources
+  # (Always, swift, capture, preview-asr) or the workflows (`actions` language).
+  # CodeQL is not a required check, so a workflow-level filter is safe here.
   pull_request:
     branches: [main, develop]
+    paths:
+      - 'Always/**'
+      - 'swift/**'
+      - 'capture/**'
+      - 'preview-asr/**'
+      - '.github/workflows/**'
   schedule:
     # Weekly Monday 06:00 UTC — catch advisories that land between PRs.
     - cron: '0 6 * * 1'

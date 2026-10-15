@@ -952,7 +952,10 @@ Glossary entries in `~/.always/glossary.json`:
 - `weight` — user-curated priority (default 1).
 - `provenance` — where the correction came from: `manual`, `hotkey`, `passive`,
   `llm`, `import`. Optional for backward compatibility — existing entries
-  without this field are left unchanged.
+  without this field are left unchanged. Every entry created by the
+  vocabulary import (first-launch auto-import or `always vocab import`) is
+  written with `"provenance": "import"`, `"mistranscriptions": []` and
+  `"frequency": 100`.
 
 ### Hot reload
 
@@ -960,6 +963,68 @@ The glossary is loaded with modification-time-gated reloads. Writing to
 `glossary.json` (via `apply_pairs_to_glossary`, `bump_frequency`, or external
 edit) invalidates the in-memory cache, and the next access reloads from disk.
 No daemon restart is needed for new corrections to take effect.
+
+### Vocabulary auto-import (first launch)
+
+Always seeds the glossary from words the user already owns, once, so it spells
+their vocabulary correctly from day one.
+
+- **When it runs.** On daemon start, if the one-time marker file
+  `vocab_auto_import.json` does not exist in the per-instance config dir
+  (`~/Library/Application Support/always/`; the dev app uses `always-dev/`, so
+  each instance imports once). It runs in its own background thread, started
+  after the UDS server is accepting connections — it never delays audio or the
+  GUI connection. macOS only: on Linux and Windows it is a no-op (those
+  platforms have no matching sources, and `always vocab import` remains
+  available there on request).
+- **Once.** The marker is written only after the import succeeded, holding
+  counts and a timestamp (no term text). Later starts find it and do nothing.
+  A failed import (for example a corrupt `glossary.json`) writes no marker and
+  is retried on the next start; a repeated import only adds terms that are
+  still missing, so retrying is harmless.
+- **Sources** (all read locally and read-only; nothing is sent anywhere):
+  1. installed application names — the `.app` bundles directly inside
+     `/Applications` and `~/Applications`, name without the `.app` suffix
+     (non-bundles such as `.DS_Store`, `.localized`, `Utilities` and hidden
+     names are skipped);
+  2. macOS Text Replacements — the `with` side of every pair;
+  3. Wispr Flow — the `Dictionary` table of
+     `~/Library/Application Support/Wispr Flow/flow.sqlite`: the `replacement`
+     when set, otherwise the `phrase`; soft-deleted rows and text-expansion
+     snippets are skipped. Wispr Flow counts as present when its database or
+     its app bundle (either Applications folder) exists;
+  4. SuperWhisper — its Vocabulary list and Replacements, plus mined
+     transcript terms. The explicit part comes from
+     `<SuperWhisper folder>/superwhisper/settings/settings.json` (the folder is
+     the `appFolderDirectory` of the `com.superduper.superwhisper` defaults
+     domain when set, otherwise `~/Documents`): every `vocabulary` string and
+     the `with` value of each `replacements` entry, uncapped. The mined part
+     is statistical outlier words from the transcripts of its 5000 most
+     recent recordings (ordered by `recording.datetime`), capped at 200.
+     SuperWhisper counts as present when its app bundle or its
+     `settings.json` exists. All of it is counted under `superwhisper`;
+  5. MacWhisper Replacements, and the legacy Dragon seed list when Dragon is
+     installed.
+- **Merge rules.** Only terms missing from the glossary are added (compared
+  case-insensitively); existing entries — including hand-tuned
+  `mistranscriptions`, `frequency` and `weight` — are never modified. New
+  entries carry `provenance: "import"`. When nothing is new the file is not
+  rewritten. An unreadable or non-array `glossary.json` is left untouched and
+  the import fails rather than replacing the user's entries.
+- **Atomic write.** The glossary is written to a temporary file in the same
+  directory and renamed over `glossary.json`, so a concurrent reader (a
+  correction being applied) or a crash never sees a half-written file.
+- **Takes effect without a restart.** After the write the in-process glossary
+  cache is invalidated and the next access reloads from disk (see Hot reload);
+  an import run from the CLI is picked up by the daemon through the
+  modification-time check.
+- **Logging.** One structured event, `vocab_auto_import`, with per-source
+  counts only: `app_names`, `wispr_flow`, `superwhisper`, `text_replacements`,
+  `macwhisper`, `other`, `unique_terms`, `added`. Term text is never logged —
+  Wispr Flow and SuperWhisper words are the user's own data.
+- **Manual re-run.** `always vocab import` runs the same code path on demand,
+  ignores the marker, and works on every platform; use it after installing
+  Wispr Flow or SuperWhisper later.
 
 ### Auto-learning toggle
 

@@ -10,9 +10,9 @@ The always-on dictation app. No push-to-talk, no window to open — just talk.
 
 [![Latest release](https://img.shields.io/github/v/release/LivioGama/always?label=release&color=22d3ee)](https://github.com/LivioGama/always/releases/latest)
 [![License: AGPL-3.0](https://img.shields.io/github/license/LivioGama/always?color=blue)](LICENSE)
-[![macOS 14+ · Apple Silicon](https://img.shields.io/badge/macOS-14%2B%20%C2%B7%20Apple%20Silicon-000000?logo=apple&logoColor=white)](#-macos)
-[![Linux · x86_64 · arm64](https://img.shields.io/badge/Linux-x86__64%20%C2%B7%20arm64-FCC624?logo=linux&logoColor=black)](#-linux)
-[![Windows 10 · 11](https://img.shields.io/badge/Windows-10%20%C2%B7%2011-0078D6)](#-windows)
+[![macOS 14+ · Apple Silicon](https://img.shields.io/badge/macOS-14%2B%20%C2%B7%20Apple%20Silicon-000000?logo=apple&logoColor=white)](#-install)
+[![Linux · x86_64 · arm64](https://img.shields.io/badge/Linux-x86__64%20%C2%B7%20arm64-FCC624?logo=linux&logoColor=black)](#-install)
+[![Windows 10 · 11](https://img.shields.io/badge/Windows-10%20%C2%B7%2011-0078D6)](#-install)
 
 **[Website](https://liviogama.github.io/always/)** · **[Download](https://github.com/LivioGama/always/releases/latest)** · [Install](#-install) · [Features](#-features) · [Shortcuts](#-shortcuts) · [Privacy](#-privacy)
 
@@ -37,6 +37,10 @@ It's less a speech-to-text tool than an idea: your hands should be free, speakin
 ## 🎯 Features
 
 > Everything below is the macOS app. On Linux and Windows, Always runs as a background daemon you drive from the command line — see [Install](#-install).
+
+### 📖 Day one, it already knows your words
+
+The first time you open Always, before you've said a single word, it quietly reads the names of the apps on your Mac, your macOS Text Replacements, and the dictionaries you spent months building in **Wispr Flow** and **SuperWhisper** — and makes them its own. So the very first time you say "Notion", "Kubernetes" or that client's name you once taught Wispr Flow, it comes out right. Switching costs you nothing you already taught another app.
 
 ### 🗣️ Hands-free
 
@@ -81,96 +85,69 @@ Change them in **Settings → Shortcuts**. Keyboard shortcuts are macOS-only; on
 
 ## 🚀 Install
 
-|  |  macOS | 🐧 Linux | 🪟 Windows |
-|:--|:--|:--|:--|
-| **You get** | The full app — menu bar, settings, guided setup | The `always` daemon + CLI | The `always` daemon + CLI |
-| **Requires** | macOS 14+ on Apple Silicon | glibc 2.39+ (Ubuntu 24.04+, Debian 13+, Fedora 40+), x86_64 or arm64 | Windows 10 or 11, x64 |
-| **Speech engine** | Apple on-device (macOS 26+) or Groq | Groq ([free API key](https://console.groq.com/keys)) | Groq ([free API key](https://console.groq.com/keys)) |
-
-###  macOS
+** macOS** (14+, Apple Silicon) and **🐧 Linux** (x86_64 or arm64, glibc 2.39+):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash
 ```
 
-This installs **Always.app** in `/Applications` and opens it. The first launch walks you through the rest:
+**🪟 Windows** (10 or 11, x64):
 
-1. **Permissions** — Microphone, Accessibility (to type into other apps) and, on macOS 26+, Speech Recognition. Each has a button that opens the right prompt.
-2. **Speech model** — on macOS 26+, Apple's on-device model downloads in the background, with progress.
-3. **My Voice** *(optional)* — three short samples.
-4. **Where to type** — pick the apps Always types into. Every other app stays paused until you turn it on with <kbd>⌃⌥P</kbd> or from the menu bar (*Resume Always for …*).
+```powershell
+irm https://raw.githubusercontent.com/LivioGama/always/main/scripts/install.ps1 | iex
+```
 
-On macOS 14–25, or to use the cloud: add a [Groq API key](https://console.groq.com/keys) in **Settings → Models** and choose **Use Groq (Remote)**.
+On macOS you get the full app, and its first launch walks you through everything. On Linux and Windows you get the `always` daemon and CLI: add a [free Groq key](https://console.groq.com/keys) and start it (details below).
+
+### 🤖 Let your agent install it
+
+Paste this into Claude Code, Codex or any coding agent with a shell:
+
+```text
+Install Always (https://github.com/LivioGama/always) for me: follow the
+"For AI agents" section of its README, then tell me what you did and
+what is left for me to click.
+```
 
 <details>
-<summary><b>Manual download or build from source</b></summary>
+<summary><b>After you install · manual downloads · build from source</b></summary>
 
 <br>
 
-**Manual download** — grab `always-vX.Y.Z-aarch64-apple-darwin.tar.gz` and its `.sha256` from [Releases](https://github.com/LivioGama/always/releases/latest).
+** macOS, first launch**
 
-**Build from source** — needs Rust and Xcode 26 (older SDKs build without on-device Apple speech). No Homebrew, no SoX: everything Always needs ships inside the app.
+1. Grant **Microphone**, **Accessibility** (to type into other apps) and, on macOS 26+, **Speech Recognition**. Each has a button that opens the right prompt.
+2. On macOS 26+, Apple's on-device speech model downloads in the background. No account, no API key.
+3. *Optional:* record three short samples for **My Voice**.
+4. Pick the apps Always types into. Every other app stays paused until you turn it on with <kbd>⌃⌥P</kbd>.
 
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust
-git clone https://github.com/LivioGama/always.git && cd always
-cargo build --release --bin always
-ALWAYS_BUILD_PROFILE=release ALWAYS_SWIFT_CONFIGURATION=release ./Always/build.sh   # installs /Applications/Always.app
-```
+On macOS 14–25, or to use the cloud: add a Groq key in **Settings → Models** and choose **Use Groq (Remote)**.
 
-</details>
-
-### 🐧 Linux
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/install-always.sh | bash
-```
-
-The installer picks the `.deb`, `.rpm` or tarball for your machine. Then save your Groq key and start the daemon:
+**🐧 Linux**
 
 ```bash
 always config set groq_api_key <your-groq-key>
 systemctl --user enable --now always-daemon.service
 ```
 
-<details>
-<summary><b>Install a package manually</b></summary>
-
-<br>
-
-```bash
-V=0.1.0   # the latest release, without the "v"
-
-# Debian / Ubuntu
-wget https://github.com/LivioGama/always/releases/download/v$V/always-v$V-x86_64-unknown-linux-gnu.deb
-sudo apt install ./always-v$V-x86_64-unknown-linux-gnu.deb
-
-# Fedora / RHEL
-wget https://github.com/LivioGama/always/releases/download/v$V/always-v$V-x86_64-unknown-linux-gnu.rpm
-sudo dnf install ./always-v$V-x86_64-unknown-linux-gnu.rpm
-```
-
-On arm64, replace `x86_64` with `aarch64`. A `.tar.gz` is published too.
-
-</details>
-
-### 🪟 Windows
+**🪟 Windows:** allow microphone access (**Settings → Privacy & security → Microphone → Let desktop apps access your microphone**), then in a new terminal:
 
 ```powershell
-irm https://raw.githubusercontent.com/LivioGama/always/main/scripts/install.ps1 | iex
+always config set groq_api_key <your-groq-key>
+always run
 ```
 
-This installs `always.exe` in `%LOCALAPPDATA%\Programs\Always` and adds it to your `PATH` — no admin rights needed. Then:
+**Manual downloads:** every installer and package (`.tar.gz`, `.deb`, `.rpm`, `.zip`), each with its `.sha256`, is on [Releases](https://github.com/LivioGama/always/releases/latest).
 
-1. Allow microphone access: **Settings → Privacy & security → Microphone → Let desktop apps access your microphone**.
-2. In a new terminal:
+**Build from source (macOS):** needs Rust and Xcode 26 (older SDKs build without on-device Apple speech). No Homebrew, no SoX: everything Always needs ships inside the app.
 
-   ```powershell
-   always config set groq_api_key <your-groq-key>
-   always run
-   ```
+```bash
+git clone https://github.com/LivioGama/always.git && cd always
+cargo build --release --bin always
+ALWAYS_BUILD_PROFILE=release ALWAYS_SWIFT_CONFIGURATION=release ./Always/build.sh   # installs /Applications/Always.app
+```
 
-Prefer a manual download? Grab `always-vX.Y.Z-x86_64-pc-windows-msvc.zip` and its `.sha256` from [Releases](https://github.com/LivioGama/always/releases/latest).
+</details>
 
 ---
 
@@ -201,6 +178,21 @@ On macOS, everything lives in one Settings window, opened from the menu bar:
 - **Your voiceprint stays local** — in `~/Library/Application Support/always/voiceprint.json`, never uploaded.
 - **Transcripts stay out of the logs** in release builds, unless you opt in with `ALWAYS_LOG_TRANSCRIPTS=1`.
 - **Your API key** is stored in Always's local database (not the Keychain) or read from `GROQ_API_KEY`, and is never written to logs.
+
+---
+
+## 🤖 For AI agents
+
+If you are an AI agent setting Always up for a user, do this, in order. Only install it if the user asked you to.
+
+1. **Check first.** macOS: `ls /Applications/Always.app`. Linux and Windows: `always --version`. If it is already installed, skip to step 5.
+2. **Check the machine.** macOS needs 14+ on Apple Silicon (`sw_vers -productVersion`, and `uname -m` prints `arm64`). Linux needs glibc 2.39+ (`ldd --version`) on x86_64 or arm64. Windows needs 10 or 11 on x64. If the machine doesn't qualify, stop and tell the user why.
+3. **Install** with the one-liner for the OS from [Install](#-install). On macOS and Windows it needs no admin rights; on Linux, installing the package may ask for `sudo`.
+4. **Finish setup.**
+   - **macOS:** the installer opens Always. Tell the user the first-launch window asks for Microphone, Accessibility and (macOS 26+) Speech Recognition, and that only they can grant these.
+   - **Linux and Windows:** ask the user for their Groq API key (free at https://console.groq.com/keys) and run `always config set groq_api_key <key>`. Then start it: on Linux `systemctl --user enable --now always-daemon.service`; on Windows `always run` in a new terminal.
+5. **Verify** with `always status` (on macOS: `/Applications/Always.app/Contents/MacOS/always-daemon status`). It must print `Always-on daemon running`. Report what it printed, and do not claim success otherwise.
+6. **Tell the user** they can start talking, and that on macOS Always only types into the apps they picked during setup (<kbd>⌃⌥P</kbd> adds the current one).
 
 ---
 

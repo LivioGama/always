@@ -14,10 +14,68 @@ env:
   CARGO_TERM_COLOR: always
 
 # ─── PR checks ────────────────────────────────────────────────────────────────
+#
+# The four jobs below (Rust checks, Swift, Tauri GUI (check), Docker (Linux
+# build + test)) are REQUIRED status checks on `main` by name. Rules that keep
+# them safe, do not break them:
+#   * never add `paths:` / `paths-ignore:` to the workflow triggers — a whole
+#     workflow skipped by a filter leaves required checks "Pending" and blocks
+#     merging. Filtering is done per job (via `changes`) instead; a job skipped
+#     by `if:` reports "Success".
+#   * keep each job's `name:` exactly as is — the ruleset matches on it.
+#   * pushes to `main` and PRs into `main` ALWAYS run every job. Docs-only
+#     skipping applies to `develop` only, and fails open: if `changes` fails,
+#     every job runs.
+#   * the `!cancelled()` in each `if:` is deliberate — without a status-check
+#     function a job whose `needs` failed is skipped, which would report
+#     "Success" without running the check.
 
 jobs:
+  # ─── Change detection ─────────────────────────────────────────────────────
+  # `code` is 'true' when ANY changed file is not docs-only. Docs-only means
+  # Markdown anywhere, docs/**, LICENSE and changelog fragments. Nothing under
+  # src/, tests/, benches/, build.rs, crates/ or the Swift/GUI trees reads those
+  # files (no include_str!/include_bytes!/fs read of any .md or docs/ file), and
+  # the Docker build context already excludes *.md and docs/. (LICENSE is
+  # packaged by cargo-deb/generate-rpm, but only in release-build.yml.)
+  #
+  # `predicate-quantifier: every` makes the negated patterns act as exclusions:
+  # a file counts only if it matches '**' AND every '!' pattern.
+  #
+  # Skipped for main-bound runs (they run everything regardless), so the
+  # release path never depends on this job.
+  changes:
+    name: Detect changes
+    if: ${{ github.ref != 'refs/heads/main' && github.base_ref != 'main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      # Needed for `push` events, where the filter diffs `before..HEAD` with git.
+      # (Pull requests use the REST API and need `pull-requests: read`.)
+      - uses: actions/checkout@v4
+
+      - name: Filter changed files
+        id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!docs/**'
+              - '!LICENSE'
+              - '!.github/changelog.d/**'
+
   rust-checks:
     name: Rust checks
+    needs: changes
+    if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.base_ref == 'main' || needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     runs-on: macos-14
     env:
       # kaldi-fbank-rust-kautism bundles C++14 code; newer runners invoke
@@ -35,7 +93,9 @@ jobs:
         with:
           shared-keys: |
             rust-checks
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Save from develop (the default branch): every PR and main can
+          # restore default-branch caches, so one writer warms them all.
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       # ── Formatting ──────────────────────────────────────────────────────────
       - name: Check formatting
@@ -75,8 +135,13 @@ jobs:
       - name: Generate coverage (lcov)
         run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
 
+      # Coverage is informational: a Codecov network outage (e.g. the
+      # uploader download timing out) must not fail a required check, nor
+      # skip the cargo deny gate below.
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
+        continue-on-error: true
+        timeout-minutes: 3
         with:
           files: lcov.info
           fail_ci_if_error: false
@@ -105,22 +170,18 @@ jobs:
 
   tauri-check:
     name: Tauri GUI (check)
-    runs-on: macos-14
+    needs: changes
+    if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.base_ref == 'main' || needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    # Only runs `tsc` on always-gui (pure JS toolchain, platform-independent
+    # lockfile) — no Rust or macOS needed, so use the cheaper Linux runner.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
 
       - name: Install Node.js
         uses: actions/setup-node@v7
         with:
           node-version: 20
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-keys: |
-            tauri-check
 
       - name: Cache npm dependencies
         uses: actions/cache@v4
@@ -144,6 +205,8 @@ jobs:
 
   docker-linux:
     name: Docker (Linux build + test)
+    needs: changes
+    if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.base_ref == 'main' || needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -160,6 +223,8 @@ jobs:
 
   swift:
     name: Swift
+    needs: changes
+    if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.base_ref == 'main' || needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4

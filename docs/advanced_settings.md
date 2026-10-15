@@ -324,19 +324,24 @@ want a low-effort feedback loop, turn on passive capture and skim
 
 ## Vocabulary auto-import — what actually works
 
-`always vocab import` scans installed sources and writes the union of
-detected terms into `~/.always/glossary.json`. The hardcoded "starter
-pack" word lists that polluted earlier versions have been removed —
+Always runs this import for you **once, on first launch** (macOS): in the
+background, it merges your installed app names, macOS Text Replacements and
+your Wispr Flow and SuperWhisper vocabulary into `~/.always/glossary.json`,
+and records that it has done so. `always vocab import` runs the same import
+on demand — for example after installing Wispr Flow or SuperWhisper later. It
+scans installed sources and writes the union of detected terms into the
+glossary. New entries are marked `"provenance": "import"`. The hardcoded
+"starter pack" word lists that polluted earlier versions have been removed —
 every term that lands in your glossary now comes from real user data.
 
 | Source | Detection | Reads user vocab? | What gets imported |
 |--------|:---:|:---:|---|
 | **macOS Text Replacements** | ✅ always on macOS | ✅ **real** | Reads `NSGlobalDomain → NSUserDictionaryReplacementItems` via `defaults export` + `plutil -extract … json`. Imports the **`with`** value of every entry (the canonical phrase the user wants typed). UTF-8 / curly quotes / emojis / accents preserved. |
-| **SuperWhisper** | ✅ checks `/Applications/superwhisper.app` | ✅ **real** | Opens `~/Library/Application Support/superwhisper/database/superwhisper.sqlite` read-only and runs Z-score statistical outlier extraction on the `recording_fts.result` corpus (capped at 5000 most-recent transcripts). Captures the technical terms you've actually been dictating. |
+| **SuperWhisper** | ✅ checks `/Applications/superwhisper.app` **or** its `settings.json` | ✅ **real** | Two parts. **Your explicit words:** reads `superwhisper/settings/settings.json` in SuperWhisper's data folder (the folder chosen in its settings, else `~/Documents`) and imports every entry of your **Vocabulary** list plus the `with` side of each **Replacement** — all of them, no cap. **Mined terms:** opens `~/Library/Application Support/superwhisper/database/superwhisper.sqlite` read-only and runs Z-score statistical outlier extraction on the `recording_fts.result` corpus (capped at the 5000 most-recent transcripts) to catch technical terms you keep dictating. |
 | **MacWhisper** | ✅ checks `/Applications/MacWhisper.app` | ✅ **real** (when present) | Reads the user's "Replacements" list from `~/Library/Containers/com.dipped.MacWhisper/Data/…/replacements.json` (or the matching `.plist`). Imports the `replace`/`to`/`with` value of each entry. |
-| **Wispr Flow** | ✅ checks `/Applications/Wispr Flow.app` | ❌ cloud-hosted | Detection only. Wispr Flow stores the user's custom dictionary on their servers; we won't authenticate against their cloud to scrape it. |
+| **Wispr Flow** | ✅ checks `/Applications/Wispr Flow.app`, `~/Applications/Wispr Flow.app` **or** its local database | ✅ **real** | Reads the `Dictionary` table of `~/Library/Application Support/Wispr Flow/flow.sqlite` (Wispr's local copy of your dictionary) read-only. Imports the `replacement` when set, otherwise the `phrase`; entries you deleted and text-expansion snippets are skipped. Nothing is sent to or fetched from Wispr's servers. |
 | **Dragon NaturallySpeaking** | ✅ checks `/Applications/Dragon` | ⚠️ legacy | Returns a small list of common IT terms (Dragon's `.dvc` vocabulary files are not yet parsed). Kept for back-compat. |
-| **Installed apps** | ✅ macOS / Linux | ✅ **real** | Every installed `.app` / binary name in `/Applications` and `~/Applications` becomes a glossary entry for Whisper biasing ("Linear", "Notion", "Cursor"). Bare imported app names do not trigger local acoustic rewrites unless you later teach a wrong form or bump-confirm the term. |
+| **Installed apps** | ✅ macOS / Linux | ✅ **real** | On macOS, the name of every `.app` bundle in `/Applications` and `~/Applications` (without `.app`; folders and files such as `Utilities` or `.DS_Store` are skipped) becomes a glossary entry for Whisper biasing ("Linear", "Notion", "Cursor"). On Linux, `.desktop` entries. Bare imported app names do not trigger local acoustic rewrites unless you later teach a wrong form or bump-confirm the term. |
 
 Sources that **used to be listed** and have been removed because their
 "extraction" was a hardcoded generic-vocabulary list with no real user
