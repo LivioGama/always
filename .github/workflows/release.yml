@@ -316,8 +316,13 @@ jobs:
               set -eu
               if command -v apt-get >/dev/null; then
                 apt-get update -qq && apt-get install -y -qq curl ca-certificates bash >/dev/null
+                # A tarball install brings no dependencies (the deb declares
+                # them, and must pull libasound itself): provide the ALSA
+                # runtime the way the installer tells a tar user to.
+                [ "$ALWAYS_METHOD" != tar ] || apt-get install -y -qq libasound2t64 >/dev/null
               else
                 dnf install -y -q curl ca-certificates bash >/dev/null
+                [ "$ALWAYS_METHOD" != tar ] || dnf install -y -q alsa-lib >/dev/null
               fi
               bash -c "$CMD"
               command -v always >/dev/null || export PATH="$HOME/.local/bin:$PATH"

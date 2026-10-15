@@ -224,8 +224,14 @@ install_tar() {
   mkdir -p "$bindir"
   install -m 755 "$src/bin/always" "$bindir/always"
   ok "Installed ${bindir}/always"
-  "$bindir/always" --version </dev/null >/dev/null 2>&1 \
-    || warn "${bindir}/always did not start. It needs glibc 2.39 or newer (Ubuntu 24.04+, Fedora 40+, Debian 13+)."
+  # The .deb/.rpm declare their dependencies; a tarball install cannot.
+  if command -v ldd >/dev/null 2>&1 && ldd "$bindir/always" 2>&1 | grep -q 'not found'; then
+    warn "Missing shared libraries for ${bindir}/always:"
+    ldd "$bindir/always" 2>&1 | grep 'not found' >&2 || true
+    warn "Install the ALSA runtime: 'sudo apt install libasound2t64' (Debian/Ubuntu) or 'sudo dnf install alsa-lib' (Fedora)."
+  elif ! "$bindir/always" --version </dev/null >/dev/null 2>&1; then
+    warn "${bindir}/always did not start. It needs glibc 2.39 or newer (Ubuntu 24.04+, Fedora 40+, Debian 13+)."
+  fi
   case ":$PATH:" in
     *":$bindir:"*) ;;
     *) warn "${bindir} is not on your PATH. Add: export PATH=\"${bindir}:\$PATH\"" ;;
