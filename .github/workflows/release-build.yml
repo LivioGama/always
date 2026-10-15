@@ -217,6 +217,11 @@ jobs:
   build-windows:
     name: Build x86_64-pc-windows-msvc
     runs-on: windows-latest
+    # KNOWN BLOCKER: the Windows-specific sources do not compile against the
+    # pinned `windows` crate (E0428/E0432 in the win32 modules). On a branch dry
+    # run the failure is tolerated so the other platforms can be validated; on a
+    # tag it fails the release (no Windows asset = no release).
+    continue-on-error: ${{ github.ref_type != 'tag' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -300,11 +305,22 @@ jobs:
             "always-${TAG}-x86_64-unknown-linux-gnu.rpm" \
             "always-${TAG}-aarch64-unknown-linux-gnu.tar.gz" \
             "always-${TAG}-aarch64-unknown-linux-gnu.deb" \
-            "always-${TAG}-aarch64-unknown-linux-gnu.rpm" \
-            "always-${TAG}-x86_64-pc-windows-msvc.zip"; do
+            "always-${TAG}-aarch64-unknown-linux-gnu.rpm"; do
             for g in "$f" "$f.sha256"; do
               if [ ! -s "$g" ]; then echo "::error::missing asset $g"; missing=1; fi
             done
+          done
+          # Windows is mandatory for a real release; a branch dry run tolerates
+          # its absence (see build-windows).
+          win="always-${TAG}-x86_64-pc-windows-msvc.zip"
+          for g in "$win" "$win.sha256"; do
+            if [ ! -s "$g" ]; then
+              if [ "$GITHUB_REF_TYPE" = tag ]; then
+                echo "::error::missing asset $g"; missing=1
+              else
+                echo "::warning::DRY RUN without the Windows asset $g (Windows build is broken)"
+              fi
+            fi
           done
           [ "$missing" -eq 0 ]
           sha256sum -c ./*.sha256

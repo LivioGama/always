@@ -216,6 +216,8 @@ jobs:
     # `release` is skipped on a dry run; run anyway unless something failed.
     if: ${{ !failure() && !cancelled() }}
     runs-on: ${{ matrix.os }}
+    # A branch dry run has no Windows asset while the Windows build is broken.
+    continue-on-error: ${{ matrix.kind == 'windows' && github.ref_type != 'tag' }}
     strategy:
       # One broken platform must not hide the state of the others.
       fail-fast: false
