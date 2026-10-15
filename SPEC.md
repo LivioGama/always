@@ -1365,8 +1365,7 @@ user's choice wins.
 ## 12a. Updates
 
 One updater, inside the `always` daemon binary, on macOS, Linux and Windows.
-It replaces Sparkle (removed). GitHub Releases of `LivioGama/always` is the
-only channel. It **notifies; it never installs on its own.**
+GitHub Releases of `LivioGama/always` is the only channel. It **notifies; it never installs on its own.**
 
 **U1 — Signed bytes only.** Every byte that gets installed is covered by a
 minisign signature that verifies against the public key compiled into the

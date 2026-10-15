@@ -1,4 +1,4 @@
-//! Cross-platform self-update (SPEC §12a). Replaces Sparkle.
+//! Cross-platform self-update (SPEC §12a).
 //!
 //! * [`release`] — ask GitHub whether a newer release exists.
 //! * [`verify`]  — minisign check against the key compiled into the binary.

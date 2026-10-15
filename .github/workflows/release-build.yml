@@ -76,7 +76,7 @@ jobs:
           path: |
             Always/.build
             preview-asr/.build
-          key: swiftpm-release-${{ runner.os }}-${{ hashFiles('Always/Package.resolved', 'preview-asr/Package.resolved') }}
+          key: swiftpm-release-${{ runner.os }}-${{ hashFiles('preview-asr/Package.resolved') }}
           restore-keys: |
             swiftpm-release-${{ runner.os }}-
 
