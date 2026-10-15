@@ -1153,6 +1153,12 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             pause::recompute_effective();
             tracing::info!(enabled, "setup_mode_toggled");
         }
+        DaemonCommand::CheckForUpdates | DaemonCommand::InstallUpdate => {
+            // Contract-only commit: the command is accepted (so an app built
+            // against SPEC §12a never sees a parse failure) but the updater
+            // behind it lands in the next commit.
+            tracing::info!("update_command_received_updater_not_wired");
+        }
     }
 }
 
