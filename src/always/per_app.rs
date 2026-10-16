@@ -248,11 +248,21 @@ pub fn set_app_paused_override(bundle_id: &str, paused: Option<bool>) -> anyhow:
     if entry.paused.is_none() && entry.auto_enter.is_none() && entry.auto_enter_delay_ms.is_none() {
         overrides.remove(bundle_id);
     }
-    let json = serde_json::to_string(&overrides)?;
-    let conn = crate::db::open()?;
-    crate::db::set_preference(&conn, "per_app_settings_json", &json)?;
-    invalidate_cache();
-    Ok(())
+    // Unit tests must never write the user's real preferences DB: keep
+    // the edit in the in-memory cache that `set_cache_for_test` seeded.
+    #[cfg(test)]
+    {
+        set_cache_for_test(overrides);
+        Ok(())
+    }
+    #[cfg(not(test))]
+    {
+        let json = serde_json::to_string(&overrides)?;
+        let conn = crate::db::open()?;
+        crate::db::set_preference(&conn, "per_app_settings_json", &json)?;
+        invalidate_cache();
+        Ok(())
+    }
 }
 
 /// Resolve effective auto-enter delay (ms).

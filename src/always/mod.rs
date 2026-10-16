@@ -39,6 +39,7 @@ pub mod mic_watcher;
 pub mod notification;
 pub mod paste;
 pub mod pause;
+pub mod pause_commands;
 pub mod per_app;
 pub mod permissions;
 pub mod postprocess;

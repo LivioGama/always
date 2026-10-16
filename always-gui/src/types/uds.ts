@@ -341,6 +341,7 @@ type UnitEventType =
 
 export type DaemonCommandType =
   | "TogglePause"
+  | "Resume"
   | "ToggleAutoEnter"
   | "SetAutoEnter"
   | "SetConsumeMode"
@@ -370,6 +371,10 @@ export type DaemonCommandType =
 
 export interface TogglePauseCommand {
   type: "TogglePause";
+}
+
+export interface ResumeCommand {
+  type: "Resume";
 }
 
 export interface ToggleAutoEnterCommand {
@@ -481,6 +486,7 @@ export interface GetVoiceProfileStatusCommand {
 
 export type DaemonCommand =
   | TogglePauseCommand
+  | ResumeCommand
   | ToggleAutoEnterCommand
   | SetAutoEnterCommand
   | SetConsumeModeCommand

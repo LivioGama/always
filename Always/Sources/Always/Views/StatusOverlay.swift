@@ -1397,31 +1397,17 @@ class StatusOverlayController {
     }
 
     /// Called when user clicks the play button in the idle resume widget.
+    /// Sends the explicit, idempotent `Resume` over the live UDS link —
+    /// it used to spawn `always-daemon toggle-pause`, a TOGGLE that, with
+    /// master off (idle / mic-conflict pause), turned master ON: Play
+    /// paused everywhere instead of resuming (v0.1.0 field report).
     private func handleIdleResumeClicked() {
-        // Send toggle-pause command to resume (unpause) the daemon. The
-        // bundled daemon is `always-daemon` (not `always`) — the GUI is
-        // `Always`, and on case-insensitive APFS a binary named `always`
-        // would collide with the GUI binary, so build.sh writes the
-        // daemon to `always-daemon`. Resolve via Bundle.main so we don't
-        // hardcode the install location either.
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let daemonURL = Bundle.main.bundleURL
-                .appendingPathComponent("Contents/MacOS/always-daemon")
-            let task = Process()
-            task.executableURL = daemonURL
-            task.arguments = ["toggle-pause"]
-            do {
-                try task.run()
-                task.waitUntilExit()
+        StateMonitor.shared.resumeListening()
+    }
 
-                // Hide the widget after successful unpause
-                DispatchQueue.main.async {
-                    self?.idleResumeWindow?.hide()
-                }
-            } catch {
-                overlayLogger.error("toggle-pause command failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }
+    /// Dismiss the idle pill (listening resumed by any path).
+    func hideIdleResumeWidget() {
+        idleResumeWindow?.hide()
     }
 
     /// Cancel any in-flight idle animation.
