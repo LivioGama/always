@@ -378,7 +378,10 @@ mod tests {
         assert!(!out.effective, "per-app chord resumes over music");
 
         pause::set_audio_output_paused(true);
-        assert!(!toggle_global().effective, "global toggle resumes over music");
+        assert!(
+            !toggle_global().effective,
+            "global toggle resumes over music"
+        );
 
         pause::set_audio_output_paused(true);
         assert!(!resume().effective, "pill Play resumes over music");
