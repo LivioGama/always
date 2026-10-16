@@ -18,6 +18,10 @@ on:
   pull_request_target:
     types: [opened, reopened, edited, labeled, unlabeled]
 
+concurrency:
+  group: pr-gate-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   pull-requests: write
   issues: write
@@ -34,17 +38,20 @@ jobs:
           PR_GATE_HMAC: ${{ secrets.PR_GATE_HMAC }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_STATE: ${{ github.event.pull_request.state }}
-          PR_BODY: ${{ github.event.pull_request.body }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
           AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
-          LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
           set -euo pipefail
           marker='<!-- pr-gate-guard -->'
+
+          # Events may be queued out of order; evaluate the current PR, not the event.
+          current_pr="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}")"
+          PR_STATE="$(jq -r '.state' <<< "${current_pr}")"
+          PR_BODY="$(jq -r '.body // ""' <<< "${current_pr}")"
+          LABELS_JSON="$(jq -c '[.labels[].name]' <<< "${current_pr}")"
 
           if [ "${PR_STATE}" != "open" ]; then
             echo "PR #${PR_NUMBER} is ${PR_STATE}; nothing to do."; exit 0

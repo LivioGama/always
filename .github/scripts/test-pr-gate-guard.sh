@@ -13,7 +13,11 @@ mkdir "$tmp/bin"
 cat > "$tmp/bin/gh" <<'S'
 #!/usr/bin/env bash
 echo "gh $*" >> "$GH_LOG"
-if [ "$1" = api ] && [ -n "${EXISTING_COMMENT:-}" ]; then echo "$EXISTING_COMMENT"; fi
+if [ "$1" = api ] && [ "$2" = "repos/$REPO/pulls/$PR_NUMBER" ]; then
+  jq -n --arg state "${CURRENT_STATE-$PR_STATE}" --arg body "${CURRENT_BODY-$PR_BODY}" \
+    --argjson labels "${CURRENT_LABELS_JSON-$LABELS_JSON}" \
+    '{state: $state, body: $body, labels: [$labels[] | {name: .}]}'
+elif [ "$1" = api ] && [ -n "${EXISTING_COMMENT:-}" ]; then echo "$EXISTING_COMMENT"; fi
 exit 0
 S
 chmod +x "$tmp/bin/gh"
@@ -33,7 +37,7 @@ run() {
   grep -q 'pr close' "$tmp/gh.log" && closed=yes
   grep -q 'pr comment' "$tmp/gh.log" && commented=yes
   local got=pass; [ "$closed" = yes ] && got=close
-  if [ "$got" = "$expect" ]; then echo "ok   $name (rc=$rc closed=$closed commented=$commented)"
+  if [[ "$got" = "$expect" && ( "$expect" = close && "$rc" -eq 1 || "$expect" = pass && "$rc" -eq 0 ) ]]; then echo "ok   $name (rc=$rc closed=$closed commented=$commented)"
   else echo "FAIL $name: want $expect got $got (rc=$rc)"; cat "$tmp/out"; fails=$((fails+1)); fi
 }
 
@@ -52,6 +56,13 @@ run "bypass label"               pass  LABELS_JSON='["x","pr-gate-bypass"]'
 run "fork PR not gated"          pass  HEAD_REPO=someone/r
 run "bot author not gated"       pass  AUTHOR_TYPE=Bot
 run "closed PR skipped"          pass  PR_STATE=closed
+run "bypass added after opened"  pass  CURRENT_LABELS_JSON='["pr-gate-bypass"]'
+run "bypass restored after removal" pass LABELS_JSON='[]' CURRENT_LABELS_JSON='["pr-gate-bypass"]'
+run "bypass removed since event" close LABELS_JSON='["pr-gate-bypass"]' CURRENT_LABELS_JSON='[]'
+run "signed since event"         pass  CURRENT_BODY="$good"
+run "signature removed since event" close PR_BODY="$good" CURRENT_BODY=""
+run "closed since event"         pass  CURRENT_STATE=closed
+run "reopened since event"       close PR_STATE=closed CURRENT_STATE=open
 run "empty secret fails open"    pass  PR_GATE_HMAC=
 run "no duplicate comment"       close EXISTING_COMMENT='<!-- pr-gate-guard --> earlier'
 grep -q 'pr comment' "$tmp/gh.log" && { echo "FAIL duplicate comment posted"; fails=$((fails+1)); } || echo "ok   no second comment when marker exists"
