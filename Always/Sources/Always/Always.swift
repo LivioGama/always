@@ -186,6 +186,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        OverlayDisplayMode.registerDefault()
         cliService = CLIService()
         NSLog("Always: MenuBarExtra installed")
 
