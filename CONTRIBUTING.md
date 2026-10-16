@@ -41,6 +41,7 @@ cargo test
 - Use `cargo clippy` for linting
 - All warnings must be addressed before merging
 - Add tests for new functionality
+- PRs from maintainers' branches in this repo are opened through `pr-gate` (see CLAUDE.md); pull requests from external forks are unaffected.
 - Document public APIs with rustdoc comments
 
 ### Swift
