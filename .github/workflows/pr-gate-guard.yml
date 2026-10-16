@@ -16,7 +16,7 @@ name: pr-gate guard
 
 on:
   pull_request_target:
-    types: [opened, reopened, edited, labeled]
+    types: [opened, reopened, edited, labeled, unlabeled]
 
 permissions:
   pull-requests: write
