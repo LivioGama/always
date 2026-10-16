@@ -14,6 +14,14 @@ enum OnboardingAppCandidates {
 
     static let limit = 10
 
+    /// Finder display name without a trailing ".app". Only the suffix goes:
+    /// an app whose name merely contains ".app" (e.g. "Foo.app Tools.app")
+    /// keeps it.
+    static func strippingAppSuffix(_ displayName: String) -> String {
+        guard displayName.hasSuffix(".app"), displayName.count > ".app".count else { return displayName }
+        return String(displayName.dropLast(".app".count))
+    }
+
     /// Apps people dictate into, most likely first. Offered when running OR
     /// installed. Slack in a browser (app.slack.com) is covered by turning
     /// on that browser — the allowlist is per app.

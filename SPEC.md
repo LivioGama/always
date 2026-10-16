@@ -1209,6 +1209,30 @@ Two steps:
 2. **My Voice.** The three enrollment recordings, inline. Always skippable —
    "Skip for now" and "Finish without it" both complete setup.
 
+**Last page: apps to turn voice typing on in.** The final "You're all set"
+page lists apps to turn voice typing on in, because Always pastes only into apps
+on the allowlist and every other app stays paused. The list is chosen by how
+likely you are to dictate into the app, not alphabetically:
+
+1. likely dictation targets that are **running** (Slack, Messages, ChatGPT,
+   Claude, Cursor, VS Code, Zed, Chrome, Safari, Arc, Dia, Firefox, Mail,
+   Notes, Notion, WhatsApp, Teams, Discord, Telegram), in that fixed order;
+2. likely targets that are **installed but not running**, in the same order;
+3. any other running regular (Dock) app, A→Z.
+
+The list is capped at **10**, and the chosen apps are then *shown* A→Z. An app
+appears once even if it is both running and installed. Never offered: Always
+itself (every known bundle id), Finder, System Settings, Activity Monitor, and
+password managers and keychain tools (Passwords, Keychain Access, 1Password,
+Bitwarden). A browser stands in for web apps — Slack in a browser is covered by
+turning that browser on, since the allowlist is per app. Every checkbox starts
+**unchecked** unless that app is already resumed; ticking one resumes Always in
+it, unticking pauses it again. With nothing to list the page says to open the
+app and use "Resume Always for …" in the menu bar. ❓ The "installed" check
+only looks up the likely-target bundle ids, so an installed app outside that
+list never appears unless it is running; this is read from the code, not
+exercised on a machine with every target installed.
+
 **Completion is a recorded fact, not an inference.** It was previously derived
 from "is a Groq API key saved?", which was wrong in both directions: a user
 running a local model has no key and was re-shown the welcome window on every

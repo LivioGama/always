@@ -7,9 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- **onboarding:** the last setup page offers the apps you are likely to dictate into — Slack, Messages, ChatGPT, Claude, Cursor, browsers, Mail, Notes and more — whether they are running or only installed, instead of the first eight running apps A→Z, which left Slack off on a busy Mac. Password managers are never offered.
-
 ## [0.1.0] - 2026-10-15
 
 The first public release, installable on macOS, Linux and Windows with one command. It also ships everything listed under 0.0.2 below, which was never published on its own.

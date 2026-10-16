@@ -72,8 +72,8 @@ struct OnboardingAppAllowlist: View {
             }
         let installed = OnboardingAppCandidates.likelyTargets.compactMap { id -> OnboardingAppCandidates.App? in
             guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { return nil }
-            let name = FileManager.default.displayName(atPath: url.path)
-                .replacingOccurrences(of: ".app", with: "")
+            let name = OnboardingAppCandidates.strippingAppSuffix(
+                FileManager.default.displayName(atPath: url.path))
             return .init(bundleId: id, name: name)
         }
         let icons = Dictionary(

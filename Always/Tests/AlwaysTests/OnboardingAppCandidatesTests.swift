@@ -79,6 +79,14 @@ final class OnboardingAppCandidatesTests: XCTestCase {
         XCTAssertEqual(result.map(\.name), ["Notes", "Slack", "Terminal"])
     }
 
+    func testOnlyATrailingAppSuffixIsStripped() {
+        XCTAssertEqual(OnboardingAppCandidates.strippingAppSuffix("Slack.app"), "Slack")
+        XCTAssertEqual(OnboardingAppCandidates.strippingAppSuffix("Slack"), "Slack")
+        XCTAssertEqual(OnboardingAppCandidates.strippingAppSuffix("Foo.app Tools.app"), "Foo.app Tools")
+        XCTAssertEqual(OnboardingAppCandidates.strippingAppSuffix("My.application"), "My.application")
+        XCTAssertEqual(OnboardingAppCandidates.strippingAppSuffix(".app"), ".app")
+    }
+
     /// The real path on this Mac: running + installed apps from NSWorkspace.
     func testLiveListOnThisMac() {
         let apps = OnboardingAppAllowlist.runningApps()
