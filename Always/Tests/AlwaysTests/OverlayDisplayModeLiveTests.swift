@@ -103,4 +103,38 @@ final class OverlayDisplayModeLiveTests: XCTestCase {
         XCTAssertEqual(hud?.frame, before)
         UserDefaults.standard.removeObject(forKey: "always.test.unrelated")
     }
+
+    // MARK: First-install default (#128)
+
+    private func scratchDefaults() -> (UserDefaults, String) {
+        let suite = "always.test.overlay.\(UUID().uuidString)"
+        return (UserDefaults(suiteName: suite)!, suite)
+    }
+
+    func testFreshInstallDefaultsToNormal() {
+        let (d, suite) = scratchDefaults()
+        defer { d.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(OverlayDisplayMode.current(in: d), .normal)
+        OverlayDisplayMode.registerDefault(in: d)
+        XCTAssertEqual(d.string(forKey: OverlayDisplayMode.defaultsKey), "normal")
+    }
+
+    func testRegisteredDefaultNeverOverridesTheUsersChoice() {
+        let (d, suite) = scratchDefaults()
+        defer { d.removePersistentDomain(forName: suite) }
+        d.set("compact", forKey: OverlayDisplayMode.defaultsKey)
+        OverlayDisplayMode.registerDefault(in: d)
+        XCTAssertEqual(OverlayDisplayMode.current(in: d), .compact)
+    }
+
+    func testSavedHiddenStaysHiddenAndMissingBecomesNormal() {
+        let (d, suite) = scratchDefaults()
+        defer { d.removePersistentDomain(forName: suite) }
+        OverlayDisplayMode.registerDefault(in: d)
+        XCTAssertEqual(OverlayDisplayMode.current(in: d), .normal, "missing → Normal")
+        d.set("hidden", forKey: OverlayDisplayMode.defaultsKey)
+        OverlayDisplayMode.registerDefault(in: d)  // every launch registers again
+        XCTAssertEqual(OverlayDisplayMode.current(in: d), .hidden, "saved Hidden must survive launch")
+        XCTAssertEqual(d.string(forKey: OverlayDisplayMode.defaultsKey), "hidden")
+    }
 }

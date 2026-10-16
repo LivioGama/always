@@ -121,10 +121,23 @@ enum OverlayDisplayMode: String, CaseIterable, Identifiable {
 
     static let defaultsKey = "overlayDisplayMode"
 
+    /// Normal unless the user picked otherwise (issue #128).
+    static let defaultMode: OverlayDisplayMode = .normal
+
     static var current: OverlayDisplayMode {
-        OverlayDisplayMode(
-            rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? ""
-        ) ?? .normal
+        current(in: .standard)
+    }
+
+    static func current(in defaults: UserDefaults) -> OverlayDisplayMode {
+        OverlayDisplayMode(rawValue: defaults.string(forKey: defaultsKey) ?? "") ?? defaultMode
+    }
+
+    /// Make Normal the registered default so every reader (`current`, the
+    /// Settings `@AppStorage`) agrees before anything is saved. Applies only
+    /// when no mode is saved: a user's saved choice (Hidden included) is
+    /// never overwritten (issue #128).
+    static func registerDefault(in defaults: UserDefaults = .standard) {
+        defaults.register(defaults: [defaultsKey: defaultMode.rawValue])
     }
 }
 
@@ -1237,6 +1250,7 @@ class StatusOverlayController {
     private var appliedDisplayMode = OverlayDisplayMode.current
 
     private init() {
+        OverlayDisplayMode.registerDefault()
         // Settings → Status Overlay writes UserDefaults in this process; apply
         // the switch to whatever is on screen now, not at the next show.
         spaceObservers.append(
