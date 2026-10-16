@@ -76,9 +76,11 @@ final class OverlayDisplayModeLiveTests: XCTestCase {
         XCTAssertTrue(hudVisible)
 
         setMode(.hidden)
-        drain(0.4)
+        // Normal hide path: I2's 600 ms minimum-visible hold (SPEC §2) still
+        // applies, plus the 0.15 s fade.
+        drain(0.9)
 
-        XCTAssertFalse(hudVisible, "Hidden must take the indicator away at once")
+        XCTAssertFalse(hudVisible, "Hidden must remove the indicator already on screen")
     }
 
     func testBackToNormalRestoresFullSize() throws {

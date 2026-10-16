@@ -909,18 +909,6 @@ class StatusOverlayWindow: NSPanel {
         fadeOut(duration: 0.15)
     }
 
-    /// Hide now, skipping `minimumVisible`: for the user switching the HUD
-    /// to Hidden, where holding it on screen would contradict the choice.
-    func dismissNow() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.pendingHide?.cancel()
-            self.pendingHide = nil
-            self.shownAt = nil
-            self.fadeOut(duration: 0.15)
-        }
-    }
-
     /// Shortest time the overlay stays on screen once shown.
     ///
     /// `StateMonitor.updateOverlay()` re-evaluates on EVERY published
@@ -1301,7 +1289,8 @@ class StatusOverlayController {
         StateMonitor.shared.invalidateAppliedOverlay()
         if mode == .hidden {
             cancelPendingHide()
-            window?.dismissNow()
+            // Normal hide path: invariant I2's 600 ms minimum still holds.
+            window?.hide()
             return
         }
         if let window, window.isVisible, window.alphaValue > 0,

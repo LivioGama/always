@@ -1,0 +1,1 @@
+**status overlay:** switching Settings → Status Overlay between Normal, Compact and Hidden now changes the indicator already on screen instead of waiting for the next one, and the setting says where the indicator appears.

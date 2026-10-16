@@ -7,9 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- **status overlay:** switching Settings → Status Overlay between Normal, Compact and Hidden now changes the indicator already on screen, instead of waiting for the next one (or a restart). Picking Normal or Compact shows a short preview, and the setting now says where the indicator appears: centred near the bottom of the screen your pointer is on, above the Dock. A fresh install starts at Normal; a mode you saved is always kept. ([#128](https://github.com/LivioGama/always/issues/128))
-
 ## [0.1.0] - 2026-10-15
 
 The first public release, installable on macOS, Linux and Windows with one command. It also ships everything listed under 0.0.2 below, which was never published on its own.

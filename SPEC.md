@@ -306,8 +306,13 @@ Idle-paused · Low mic volume · correction confirmations.
   off-screen. Text taller than the cap is head-truncated — a leading "…"
   replaces the oldest words so the words just spoken stay visible. Compact
   mode remains a fixed single truncated line.
-- Hidden entirely when paused, disconnected, or when the user selects the hidden
-  display mode.
+- **Display mode applies live.** Settings → Status Overlay offers Normal,
+  Compact and Hidden; the default is Normal. A change takes effect at once, no
+  restart: the indicator already on screen is re-rendered in the new size, and
+  choosing Hidden removes it through the normal hide path, so invariant I2's
+  600 ms minimum on-screen time still holds. The indicator is still hidden
+  when paused or disconnected. It sits centred near the bottom of the screen
+  under the pointer, just above the Dock.
 - **Live feedback preempts transient confirmations.** Brief confirmation
   flashes (Pause/Resume, Auto-Enter toggles, low-mic volume, offline
   fallback — 1.5 s to 4 s) normally run their full duration, but if the user
