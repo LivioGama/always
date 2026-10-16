@@ -5,6 +5,11 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+  # Used by pr-gate to run the real CI on a merge-preview branch
+  # (pr-gate/precheck/<id>) before it opens the PR. No inputs: the ref the run
+  # is dispatched on is the code under test. No workflow-level `paths:` here
+  # either (see the note below).
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -63,6 +68,11 @@ jobs:
         id: filter
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
+          # workflow_dispatch has no PR/`before` payload: diff the dispatched
+          # branch against develop explicitly (the action would default to the
+          # repo default branch, which is develop). Left empty for PRs, where
+          # the action ignores `base` and warns if it is set.
+          base: ${{ github.event_name == 'workflow_dispatch' && 'develop' || '' }}
           predicate-quantifier: every
           filters: |
             code:

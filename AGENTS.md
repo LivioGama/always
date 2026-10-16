@@ -42,6 +42,18 @@ Kill switch for debugging the guard: `PIXEL_TARGETS_GUARD=0`.
 
 # Always Project Rules
 
+## Opening pull requests
+
+PRs in this repo are opened by `pr-gate`, which reviews and fixes the branch,
+runs the real CI on a merge-preview branch, then opens the PR with a signature
+marker. `.github/workflows/pr-gate-guard.yml` closes PRs without a valid one.
+
+- Never run `gh pr create` or the GitHub MCP `create_pull_request` directly.
+  Run `pr-gate submit` (the `gh` shim does this automatically).
+- Release PRs (`release-x.y.z` -> `main`) are exempt; the `release` skill opens
+  them directly.
+- Maintainers can override with the `pr-gate-bypass` label (then reopen).
+
 ## 🚨 `SPEC.md` is normative — keep it in sync with the code
 
 `SPEC.md` describes the behaviour this product is supposed to have. It is the

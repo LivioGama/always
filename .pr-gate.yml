@@ -1,0 +1,32 @@
+# pr-gate repo config (schema: RepoConfig in pr-gate src/shared/contract.ts).
+checks:
+  - name: rustfmt
+    run: cargo fmt --all -- --check
+act:
+  - workflow: .github/workflows/ci.yml
+    job: tauri-check
+    advisory: true
+remoteCi:
+  workflow: ci.yml
+  timeoutMin: 40
+maxCiAttempts: 3
+review:
+  maxRounds: 6
+  instructions: |
+    Repo-specific review guidance (see CLAUDE.md):
+    - SPEC.md is normative. Any behaviour change (default, threshold, timing,
+      state machine, anything a user can perceive) must update SPEC.md in the
+      same commit. The section 2 invariants are inviolable: a change that breaks
+      one is a blocker no matter what else it improves.
+    - Never change behaviour that was not asked for. Flag unrequested changes to
+      thresholds, timings, defaults or paste behaviour as blockers.
+    - Every new DaemonEvent variant must be handled in the overlay's exhaustive
+      match (src/overlay/state.rs, built with --features overlay); the default
+      build will not catch a missing arm.
+    - The Rust daemon and the Swift app ship together: a change to src/*.rs or
+      Always/Sources/*.swift that alters the UDS event contract must update both
+      sides.
+    - No secrets, tokens or raw transcript text in logs (transcripts only behind
+      should_log_transcripts()).
+    - CI/dev-tooling-only changes do not belong in SPEC.md and need no changelog
+      fragment; user-visible changes need .github/changelog.d/<slug>.<section>.md.

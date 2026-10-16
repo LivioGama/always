@@ -1,0 +1,83 @@
+name: pr-gate guard
+
+# PRs in this repo are opened by `pr-gate` (an agent that reviews, fixes and
+# runs the real CI on a merge-preview branch before opening the PR). It signs
+# every PR body with `<!-- pr-gate:v1 sig=<hmac> -->`; this workflow recomputes
+# the signature with the PR_GATE_HMAC secret and closes PRs that lack a valid
+# one. Contract: HMAC-SHA256(PR_GATE_HMAC, "<owner/name>#<head branch>").
+#
+# SECURITY: `pull_request_target` runs with a write token in the context of the
+# base branch. This workflow therefore NEVER checks out or executes PR code, and
+# never interpolates PR-controlled text (title, body, branch name) into the
+# script: everything reaches the script through `env:` only.
+#
+# Logic is inline (no checkout); .github/scripts/test-pr-gate-guard.sh extracts
+# the `run:` block below and exercises it against a stubbed `gh`.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, edited, labeled]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  guard:
+    name: pr-gate signature
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify pr-gate signature
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_GATE_HMAC: ${{ secrets.PR_GATE_HMAC }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_STATE: ${{ github.event.pull_request.state }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
+          AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          marker='<!-- pr-gate-guard -->'
+
+          if [ "${PR_STATE}" != "open" ]; then
+            echo "PR #${PR_NUMBER} is ${PR_STATE}; nothing to do."; exit 0
+          fi
+          if [ "${HEAD_REPO}" != "${BASE_REPO}" ]; then
+            echo "Fork PR (${HEAD_REPO}); external contributions are not gated."; exit 0
+          fi
+          if [ "${AUTHOR_TYPE}" = "Bot" ]; then
+            echo "Bot author; not gated."; exit 0
+          fi
+          if [[ "${HEAD_REF}" =~ ^release- && "${BASE_REF}" == "main" ]]; then
+            echo "Release PR (${HEAD_REF} -> main); exempt."; exit 0
+          fi
+          if printf '%s' "${LABELS_JSON}" | jq -e 'index("pr-gate-bypass")' >/dev/null; then
+            echo "Label pr-gate-bypass present; not gated."; exit 0
+          fi
+          if [ -z "${PR_GATE_HMAC}" ]; then
+            echo "::warning::PR_GATE_HMAC secret is empty; failing open (PR not checked)."; exit 0
+          fi
+
+          want="$(printf '%s' "${REPO}#${HEAD_REF}" | openssl dgst -sha256 -hmac "${PR_GATE_HMAC}" | awk '{print $NF}')"
+          got="$(printf '%s' "${PR_BODY}" | grep -oE '<!-- pr-gate:v1 sig=[0-9a-f]{64} -->' | head -n1 | sed -E 's/.*sig=([0-9a-f]{64}).*/\1/' || true)"
+
+          if [ -n "${got}" ] && [ "${got}" = "${want}" ]; then
+            echo "Valid pr-gate signature."; exit 0
+          fi
+
+          echo "::error::PR #${PR_NUMBER} has a missing or invalid pr-gate signature."
+
+          existing="$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate --jq '.[].body' || true)"
+          if ! printf '%s' "${existing}" | grep -qF "${marker}"; then
+            gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${marker}
+          PRs in this repo are opened by pr-gate. Run \`pr-gate submit\` (or \`gh pr create\` with the pr-gate shim). Maintainers can add the \`pr-gate-bypass\` label and reopen to override."
+          fi
+          gh pr close "${PR_NUMBER}" --repo "${REPO}"
+          exit 1
