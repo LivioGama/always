@@ -3615,12 +3615,14 @@ mod tests {
     }
 
     /// The error text each pasting backend raises when a call fails:
-    /// Apple On-Device (SpeechTranscriber timeout) and Parakeet V3 (local
-    /// engine). Both reach the chunk / tail recovery the same way.
+    /// Apple On-Device (SpeechTranscriber timeout), Parakeet V3 (local
+    /// engine) and Groq (retries exhausted — where Livio hit #126). All
+    /// reach the chunk / tail recovery the same way.
     #[cfg(target_os = "macos")]
-    const BACKEND_FAILURES: [(&str, &str); 2] = [
+    const BACKEND_FAILURES: [(&str, &str); 3] = [
         ("apple", "Apple STT failed: speech recognition timed out"),
         ("parakeet_v3", "parakeet transcribe failed: inference error"),
+        ("groq", "Groq rate-limited the request after 3 attempts"),
     ];
 
     #[cfg(target_os = "macos")]
