@@ -698,6 +698,51 @@ final class AlwaysTests: XCTestCase {
         XCTAssertNil(event.data, "Hello payload should not collapse into the string-data dict")
     }
 
+    /// Daemon's answer to a model switch that failed to load (Parakeet v3
+    /// stuck on "Loading…"): backend + error reach the Models tab.
+    func testActiveTranscriberFailedDecodes() throws {
+        let json = #"{"type":"ActiveTranscriberFailed","data":{"backend":"local:parakeet-tdt-0.6b-v3","error":"loading local engine: file missing"}}"#
+        let event = try JSONDecoder().decode(DaemonEvent.self, from: json.data(using: .utf8)!)
+        XCTAssertEqual(event.type, .activeTranscriberFailed)
+        XCTAssertEqual(event.data?["backend"], "local:parakeet-tdt-0.6b-v3")
+        XCTAssertEqual(event.data?["error"], "loading local engine: file missing")
+        XCTAssertEqual(ModelManagerClient.errorKey(forBackend: "local:parakeet-tdt-0.6b-v3"), "parakeet-tdt-0.6b-v3")
+        XCTAssertEqual(ModelManagerClient.errorKey(forBackend: "apple"), "apple")
+    }
+
+    /// A load that finishes after the 120 s give-up message must not leave
+    /// the row showing "active" next to a stale error.
+    @MainActor
+    func testActiveTranscriberChangedClearsStaleSwitchError() throws {
+        let client = ModelManagerClient.shared
+        client.errors["apple"] = "Didn't finish loading. Try again, or pick another model."
+        try post(#"{"type":"ActiveTranscriberChanged","data":{"backend":"apple"}}"#)
+        XCTAssertNil(client.errors["apple"])
+        XCTAssertEqual(client.activeBackend, "apple")
+        XCTAssertNil(client.loadingBackend)
+    }
+
+    /// Picking X, Y, X inside the window: the first X's timer must not cut
+    /// the second X attempt short; only the latest attempt's timer fires.
+    @MainActor
+    func testSwitchTimeoutOnlyFiresForLatestAttempt() async throws {
+        let client = ModelManagerClient.shared
+        client.errors.removeAll()
+        client.loadingBackend = nil
+        client.switchTimeout = 0.4
+        defer { client.switchTimeout = 120 }
+        client.setActive(backend: "local:x")
+        try await Task.sleep(nanoseconds: 250_000_000)
+        client.setActive(backend: "local:y")
+        client.setActive(backend: "local:x")
+        // t=0.5s: past the first timer (0.4s), before the latest (0.65s).
+        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(client.loadingBackend, "local:x", "stale timer fired")
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertNil(client.loadingBackend)
+        XCTAssertNotNil(client.errors["x"])
+    }
+
     func testHelloEventRoundTripsThroughCodable() throws {
         let original = DaemonEvent(type: .hello, helloVersion: 1)
         let encoded = try JSONEncoder().encode(original)

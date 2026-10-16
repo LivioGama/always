@@ -698,6 +698,16 @@ offline; the cloud backend is faster to start and needs an API key.
 - A local model may be armed as fallback for the cloud backend; failures fall
   back silently but are logged.
 - Switching models takes effect on the next utterance.
+- A switch loads the new engine before the config names it, and never under
+  the config lock the main loop reads, so a slow load does not block dictation.
+  Engine rebuilds (a switch, a language change) run one at a time.
+- Every `SetActiveTranscriber` request ends with `ActiveTranscriberChanged`
+  naming the backend now running — no-ops and failures included.
+- A failed load first sends `ActiveTranscriberFailed { backend, error }` and
+  leaves the previous backend active, so a retry really retries. The Models tab
+  shows the error on that row.
+- If the daemon never answers, "Loading…" gives up after 120 s with a message
+  on the row; a late success clears that message.
 
 **Streaming models available:** `moonshine-tiny-streaming-en`,
 `moonshine-small-streaming-en`, `moonshine-medium-streaming-en`, `nemotron-3.5-asr-streaming-0.6b`.
@@ -826,7 +836,8 @@ recognition. Requires no API key and never uploads audio on macOS 26+.
 - In the Settings → Models tab, the Apple on-device option appears at the top of
   the model list (above downloaded/available models and broken-model diagnostics).
   Selecting it sends `SetActiveTranscriber { "backend": "apple" }`, the active
-  row is badged, and the same loading spinner is shown while the daemon confirms.
+  row is badged, and the same loading spinner is shown until the daemon
+  answers (success, failure or no-op; 120 s give-up, see above).
 - `Always.app/Contents/Info.plist` declares `NSSpeechRecognitionUsageDescription`
   so the bundled `always-daemon` can request macOS speech-recognition permission.
   The first transcription attempt triggers a TCC prompt; without this key the
