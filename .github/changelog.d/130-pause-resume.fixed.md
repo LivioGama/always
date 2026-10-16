@@ -1,0 +1,1 @@
+**pause:** the idle pill's Play button and the per-app shortcut now resume listening instead of pausing everywhere, idle no longer stacks on top of another pause, and a reconnecting GUI shows an active mic-conflict or audio-output pause.

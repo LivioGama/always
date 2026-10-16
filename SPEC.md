@@ -308,6 +308,9 @@ Idle-paused · Low mic volume · correction confirmations.
   mode remains a fixed single truncated line.
 - Hidden entirely when paused, disconnected, or when the user selects the hidden
   display mode.
+- **The idle pill** (shown when idle auto-pause fires) hides on any resume,
+  whichever control caused it. Its Play button sends `Resume`, which lifts the
+  pause and never pauses (§7).
 - **Live feedback preempts transient confirmations.** Brief confirmation
   flashes (Pause/Resume, Auto-Enter toggles, low-mic volume, offline
   fallback — 1.5 s to 4 s) normally run their full duration, but if the user
@@ -525,13 +528,27 @@ and swaps the live keyboard listener's combo set without a restart.
 | Per-app | Focused app is on the paused list | Focus moves to an allowed app |
 | Mic conflict | Another app holds the microphone | Mic free for ~3 s (§7.1) |
 | Audio output | System audio is playing | Playback stops |
-| Idle | No voice for `idle_pause_secs` | Voice detected again |
+| Idle | No voice for `idle_pause_secs` while Always is otherwise listening (never set while another pause is active — its clock restarts instead) | Voice detected again, or an explicit user resume |
 | No GUI | Daemon lost its last client | A client connects |
 
 **Rules:**
-- Any active source suppresses capture. The explicit global resume clears all of
-  them at once — including the idle auto-pause, so pressing the master chord
-  after an idle timeout resumes immediately without needing a separate action.
+- Any active source suppresses capture.
+- **An explicit user resume** (global chord, idle pill Play, `Resume` or
+  `TogglePause` over UDS, CLI, tray) clears master, idle, audio-output and
+  mic-conflict at once, and never pauses. A global toggle resumes whenever any
+  of those is active, and only otherwise sets master. The watchdogs re-arm on
+  their next transition, so the user can force dictation while music plays or
+  another app holds the mic. This is a deliberate user override of the
+  watchdogs; I7 still holds: when another app takes the mic Always stops
+  immediately, and it is the user who resumes. After each control press the
+  daemon re-broadcasts the authoritative `Paused` / `Resumed` state so a GUI
+  that predicted wrongly is corrected.
+- **Per-app chord** (for the focused app): if the app is effectively paused
+  (not on the allowlist, or idle / audio-output / mic-conflict active), it is
+  added to the allowlist if absent and idle / watchdog pauses are lifted; if it
+  is listening, it is removed from the allowlist; while master is on, the chord
+  edits the allowlist only. Allowlist edits from Settings / Onboarding
+  (`SetAppPaused`) are plain edits and never lift idle or watchdog pauses.
 - On resume, audio queued by the recorder during the suppressed period is
   **discarded** (I6). The recorder never stops, so its buffer holds several
   seconds of exactly the audio Always was meant to ignore.

@@ -499,12 +499,19 @@ fn handle_master_pause_hotkey() {
         *last = Some(std::time::Instant::now());
     }
 
+    let was_master = pause::is_master_paused();
     let crate::always::pause_commands::Outcome {
         effective,
         changed,
         master,
     } = crate::always::pause_commands::toggle_global();
-    event::global_broadcaster().pause_scope_toggled("master", None, master);
+    // The "Paused/Resumed everywhere" flash describes the MASTER switch. A
+    // press that only lifted idle / a watchdog pause left master untouched
+    // (off → off): saying "Resumed everywhere" would be wrong, so that press
+    // keeps just the plain Resumed flash `toggle_global` already sent.
+    if master != was_master {
+        event::global_broadcaster().pause_scope_toggled("master", None, master);
+    }
     if let Ok(log_path) = always_config::configured_log_path()
         && let Ok(mut logger) = log::Logger::open(&log_path)
     {

@@ -424,7 +424,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
 
     // The Hello frame MUST be first so version-mismatched clients can
     // disconnect before reading state they may not understand.
-    let initial_events = vec![
+    let mut initial_events = vec![
         DaemonEvent::Hello {
             version: crate::always::event::PROTOCOL_VERSION,
         },
@@ -435,22 +435,28 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         DaemonEvent::ResumedAppsChanged {
             bundles: resumed_bundles,
         },
-        // Active watchdog sources, so a (re)connecting GUI predicts with
-        // them instead of guessing "listening" over a live mic conflict.
-        DaemonEvent::PauseSourceChanged {
-            source: "mic_conflict".into(),
-            paused: pause::is_mic_conflict_paused(),
-            detail: None,
-        },
-        DaemonEvent::PauseSourceChanged {
-            source: "audio_output".into(),
-            paused: pause::is_audio_output_paused(),
-            detail: None,
-        },
-        // Effective state LAST: the GUI recomputes a local prediction on
-        // MasterPauseChanged / ResumedAppsChanged, so sending the truth
-        // first let that prediction overwrite it (icon showed "listening"
-        // while the daemon was idle- or mic-paused).
+    ];
+    // Active watchdog sources, so a (re)connecting GUI predicts with them
+    // instead of guessing "listening" over a live mic conflict. Only ACTIVE
+    // ones: `paused:false` for an inactive source would make the GUI drop a
+    // live one (`pauseSource = paused ? source : null`).
+    for (source, active) in [
+        ("mic_conflict", pause::is_mic_conflict_paused()),
+        ("audio_output", pause::is_audio_output_paused()),
+    ] {
+        if active {
+            initial_events.push(DaemonEvent::PauseSourceChanged {
+                source: source.into(),
+                paused: true,
+                detail: None,
+            });
+        }
+    }
+    initial_events.extend([
+        // Effective state AFTER the above: the GUI recomputes a local
+        // prediction on MasterPauseChanged / ResumedAppsChanged, so sending
+        // the truth first let that prediction overwrite it (icon showed
+        // "listening" while the daemon was idle- or mic-paused).
         if is_paused {
             DaemonEvent::Paused
         } else {
@@ -466,9 +472,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         DaemonEvent::ActiveTranscriberChanged {
             backend: active_backend,
         },
-    ];
-
-    let mut initial_events = initial_events;
+    ]);
     // Daemon-side tap health (Input Monitoring): a startup broadcast would
     // be lost (no clients yet), so each client gets the current status in
     // its initial burst.
@@ -908,8 +912,8 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             // effective state. Broadcasting is gated on `changed` so
             // setting an override for a non-focused app doesn't spam
             // the UDS bus.
-            // Resuming the focused app is a resume press: it also lifts
-            // idle / watchdog pauses (see `pause_commands::set_app_paused`).
+            // Plain allowlist editing: does not lift idle / watchdog pauses
+            // (see `pause_commands::set_app_paused`).
             match crate::always::pause_commands::set_app_paused(&bundle_id, paused) {
                 Ok(out) => {
                     tracing::info!(

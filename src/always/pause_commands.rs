@@ -193,26 +193,27 @@ pub fn per_app_chord(bundle: &str) -> anyhow::Result<(Outcome, bool)> {
     ))
 }
 
-/// `SetAppPaused` from a GUI. Resuming the FOCUSED app is a resume press
-/// ("Resume Always for X"), so it also clears idle / watchdog pauses;
-/// any other write is plain allowlist editing.
+/// `SetAppPaused` from a GUI (Settings / Onboarding allowlist checkboxes).
+/// Plain allowlist editing: it recomputes the effective state and nothing
+/// else. It must NOT lift idle / audio-output / mic-conflict pauses — only
+/// the explicit resume controls (chords, idle pill, `Resume` /
+/// `TogglePause`, CLI, tray) do that.
 pub fn set_app_paused(bundle: &str, paused: Option<bool>) -> anyhow::Result<Outcome> {
     per_app::set_app_paused_override(bundle, paused)?;
-    let resume_here = paused == Some(false) && pause::current_app().as_deref() == Some(bundle);
-    let (effective, changed, cleared) = if resume_here && !pause::is_master_paused() {
-        clear_overridable_sources(true)
-    } else {
-        let (e, c) = pause::recompute_effective();
-        (e, c, Cleared::default())
-    };
-    if !effective {
-        pause::mark_voice_seen();
+    let (effective, changed) = pause::recompute_effective();
+    // Same gating as before the shared module: only a real transition is
+    // broadcast, so editing a non-focused app does not spam the bus.
+    if changed {
+        if effective {
+            pause::dictation_buffer_clear();
+            global_broadcaster().paused();
+        } else {
+            pause::mark_voice_seen();
+            global_broadcaster().resumed();
+        }
     }
+    // Always re-send the allowlist so every client sees the same snapshot.
     global_broadcaster().resumed_apps_changed(per_app::resumed_apps());
-    announce_cleared(cleared);
-    if changed || resume_here {
-        announce_effective(effective, changed);
-    }
     Ok(Outcome {
         effective,
         changed,
@@ -437,17 +438,34 @@ mod tests {
         assert!(!effective && changed);
     }
 
+    /// Allowlist edits from Settings / Onboarding are not resume presses:
+    /// they must leave idle / watchdog pauses alone, focused app or not.
     #[test]
-    fn menu_resume_focused_app_clears_auto_pauses() {
+    fn set_app_paused_leaves_idle_and_watchdog_pauses() {
         let _g = setup(false);
         pause::set_idle_auto_paused(true);
+        pause::set_audio_output_paused(true);
+        pause::set_mic_conflict_paused(true);
         pause::recompute_effective();
         let out = set_app_paused(APP, Some(false)).expect("override write");
-        assert!(!out.effective);
-        // Editing a non-focused app is plain allowlist editing.
-        pause::set_idle_auto_paused(true);
-        pause::recompute_effective();
+        assert!(out.effective, "an allowlist edit must not resume");
+        assert!(pause::is_idle_auto_paused());
+        assert!(pause::is_audio_output_paused());
+        assert!(pause::is_mic_conflict_paused());
+        assert!(per_app::is_app_resumed(APP), "the edit itself still lands");
+
         let out = set_app_paused("com.other", Some(false)).expect("override write");
-        assert!(out.effective, "editing another app is not a resume press");
+        assert!(out.effective);
+        assert!(pause::is_idle_auto_paused());
+    }
+
+    /// An allowlist edit that is the only thing pausing the focused app
+    /// still resumes it (the effective state follows the allowlist).
+    #[test]
+    fn set_app_paused_allowlisting_focused_app_resumes_when_nothing_else_pauses() {
+        let _g = setup(false);
+        assert!(pause::is_paused(), "unlisted focused app is paused");
+        let out = set_app_paused(APP, Some(false)).expect("override write");
+        assert!(!out.effective && out.changed);
     }
 }
