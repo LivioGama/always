@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **history:** Settings → History is no longer empty on a normal install. It read pasted text out of the diagnostic log, which never holds transcript text outside dev builds; the daemon now keeps a local history file (`~/Library/Application Support/always/history.jsonl`) that the tab reads, and **Delete All** clears it.
+
 ## [0.1.0] - 2026-10-15
 
 The first public release, installable on macOS, Linux and Windows with one command. It also ships everything listed under 0.0.2 below, which was never published on its own.
