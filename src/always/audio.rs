@@ -464,7 +464,7 @@ static AEC_PREF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 /// unit starts and again when it stops (an audible cut), logs Audio IO
 /// Overloads at both edges, and ducks every other app to −15 dB for ~2 s,
 /// then −4 dB for as long as it runs — even at the minimum ducking level.
-/// It never cancelled other processes' audio either. `capture_aec true`
+/// `capture_aec true`
 /// still opts in (the helper is then started with `--vp`).
 pub fn set_aec_pref(enabled: Option<bool>) {
     AEC_PREF.store(
@@ -1622,8 +1622,8 @@ mod tests {
         super::CAPTURE_HELPER_FAILED.store(false, Ordering::Relaxed);
         super::CAPTURE_PLAIN_FAILED.store(false, Ordering::Relaxed);
 
-        let mut rec = super::RecChild::spawn_from(Some(script.clone()), false)
-            .expect("plain helper starts");
+        let mut rec =
+            super::RecChild::spawn_from(Some(script.clone()), false).expect("plain helper starts");
         let mut buf = [0u8; super::FRAME_BYTES];
         assert_eq!(rec.read_frame(&mut buf).expect("read"), super::FRAME_BYTES);
         drop(rec);
@@ -1645,7 +1645,8 @@ mod tests {
         let Some(path) = super::locate_capture_helper() else {
             panic!("always-capture not built (capture/build.sh)");
         };
-        let mut rec = super::RecChild::spawn_capture_helper(&path, &["--vp"]).expect("helper starts");
+        let mut rec =
+            super::RecChild::spawn_capture_helper(&path, &["--vp"]).expect("helper starts");
         let mut buf = [0u8; super::FRAME_BYTES];
         // Discard start-up burst, then time 100 frames (3.0 s of audio).
         for _ in 0..10 {

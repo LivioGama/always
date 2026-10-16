@@ -23,7 +23,7 @@
 // ~2 s and then holds them at 0.631 (−4 dB) for as long as it runs — even at
 // duckingLevel .min. A plain (`--no-vp`) helper caused none of these. User
 // report (v0.1.0): micro-cuts / crackling in music and on a speaker while
-// Always ran. VPIO also never cancelled other processes' audio.
+// Always ran.
 //
 // Usage: always-capture [--vp] [--no-vp] [--aec-always] [--agc] [--duck]
 //   --vp     voice-processing echo canceller (opt-in, see above)

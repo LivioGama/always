@@ -479,7 +479,7 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                     prefs.postprocess_provider.as_deref(),
                 )
             );
-            println!("capture_aec: {}", prefs.capture_aec.unwrap_or(true));
+            println!("capture_aec: {}", prefs.capture_aec.unwrap_or(false));
             println!("update_check: {}", prefs.update_check.unwrap_or(true));
             #[cfg(target_os = "macos")]
             println!(

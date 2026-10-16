@@ -86,8 +86,8 @@ pub struct Preferences {
     /// from the legacy `postprocess_enabled` + `postprocess_provider`
     /// (see `postprocess::resolve_mode`).
     pub postprocess_mode: Option<String>,
-    /// Echo-cancelled capture (`always-capture`, SPEC §3). NULL = on.
-    /// Kill switch: `always config set capture_aec false` (restart applies).
+    /// Echo-cancelled capture (`always-capture`, SPEC §3). NULL = off.
+    /// Opt in: `always config set capture_aec true` (restart applies).
     pub capture_aec: Option<bool>,
     /// Foreign-speech gate, low-confidence rule: when true, an utterance
     /// whose mean Apple word confidence is below 0.40 is NOT pasted (kept
