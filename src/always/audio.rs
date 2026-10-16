@@ -451,33 +451,55 @@ pub fn find_rec() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// Pref `capture_aec` (applied at config load). Default on.
-static AEC_PREF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Pref `capture_aec` (applied at config load). Default OFF.
+static AEC_PREF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Apply the `capture_aec` preference (NULL/None = on — the user confirmed
-/// dictation over a playing video works with it, 2026-10-14). Takes effect
-/// at the next recorder spawn. Status cues are rendered through the
-/// helper's own voice-processing output while it runs (see
-/// `capture_cue_send`), so its ducking of other audio cannot silence them.
+/// Apply the `capture_aec` preference (NULL/None = OFF). Takes effect at
+/// the next recorder spawn.
+///
+/// Off by default since 2026-10-16 (v0.1.0 user report: micro-cuts and
+/// crackling in Apple Music / on a speaker while Always ran). The
+/// voice-processing (VPIO) canceller changes what every app plays: measured
+/// on a MacBook Air, coreaudiod restarts the OUTPUT device's IO when the
+/// unit starts and again when it stops (an audible cut), logs Audio IO
+/// Overloads at both edges, and ducks every other app to −15 dB for ~2 s,
+/// then −4 dB for as long as it runs — even at the minimum ducking level.
+/// It never cancelled other processes' audio either. `capture_aec true`
+/// still opts in (the helper is then started with `--vp`).
 pub fn set_aec_pref(enabled: Option<bool>) {
     AEC_PREF.store(
-        enabled.unwrap_or(true),
+        enabled.unwrap_or(false),
         std::sync::atomic::Ordering::Relaxed,
     );
 }
 
-/// Acoustic echo cancellation against the Mac's own output (default ON,
-/// see `set_aec_pref`).
+/// Voice-processing echo cancellation (opt-in, see `set_aec_pref`).
 /// Env `ALWAYS_AEC` overrides the pref either way (`0/false/off`,
 /// `1/true/on`); an explicit `ALWAYS_CAPTURE_BIN` (tests, replay) implies on.
 pub fn aec_enabled() -> bool {
-    match std::env::var("ALWAYS_AEC").as_deref() {
-        Ok("0") | Ok("false") | Ok("off") => return false,
-        Ok("1") | Ok("true") | Ok("on") => return true,
+    aec_decision(
+        std::env::var("ALWAYS_AEC").ok().as_deref(),
+        std::env::var_os("ALWAYS_CAPTURE_BIN").is_some(),
+        AEC_PREF.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// [`aec_enabled`] with its inputs explicit (env `ALWAYS_AEC`, whether
+/// `ALWAYS_CAPTURE_BIN` is set, the pref).
+fn aec_decision(env_aec: Option<&str>, capture_bin_set: bool, pref: bool) -> bool {
+    match env_aec {
+        Some("0") | Some("false") | Some("off") => return false,
+        Some("1") | Some("true") | Some("on") => return true,
         _ => {}
     }
-    std::env::var_os("ALWAYS_CAPTURE_BIN").is_some()
-        || AEC_PREF.load(std::sync::atomic::Ordering::Relaxed)
+    capture_bin_set || pref
+}
+
+/// Capture-helper arguments: the voice-processing canceller only when echo
+/// cancellation was asked for, otherwise plain capture. Plain is explicit
+/// (`--no-vp`), never implied by an empty argument list.
+fn capture_helper_args(aec: bool) -> &'static [&'static str] {
+    if aec { &["--vp"] } else { &["--no-vp"] }
 }
 
 /// Locate the capture helper: `ALWAYS_CAPTURE_BIN`, then next to the
@@ -598,8 +620,9 @@ pub(crate) fn note_capture_helper_line_for_test(line: &str) {
 #[cfg(target_os = "macos")]
 impl RecChild {
     /// Spawn the recorder. Order:
-    /// 1. the capture helper with echo cancellation (AEC on, helper healthy);
-    /// 2. the same helper in plain mode (`--no-vp`) — AEC off, or VPIO
+    /// 1. the capture helper with echo cancellation (`--vp`) — only when
+    ///    AEC was opted into (off by default, see `set_aec_pref`);
+    /// 2. the same helper in plain mode (`--no-vp`) — the default, or VPIO
     ///    unavailable on this Mac/device;
     /// 3. SoX `rec`, only if it happens to be installed (dev machines).
     ///
@@ -617,7 +640,7 @@ impl RecChild {
     fn spawn_from(helper: Option<PathBuf>, aec: bool) -> Result<Self> {
         if let Some(helper) = helper.as_deref() {
             if aec && !CAPTURE_HELPER_FAILED.load(Ordering::Relaxed) {
-                match Self::spawn_capture_helper(helper, &[]) {
+                match Self::spawn_capture_helper(helper, capture_helper_args(true)) {
                     Ok(rec) => return Ok(rec),
                     Err(error) => {
                         CAPTURE_HELPER_FAILED.store(true, Ordering::Relaxed);
@@ -626,7 +649,7 @@ impl RecChild {
                 }
             }
             if !CAPTURE_PLAIN_FAILED.load(Ordering::Relaxed) {
-                match Self::spawn_capture_helper(helper, &["--no-vp"]) {
+                match Self::spawn_capture_helper(helper, capture_helper_args(false)) {
                     Ok(rec) => return Ok(rec),
                     Err(error) => {
                         CAPTURE_PLAIN_FAILED.store(true, Ordering::Relaxed);
@@ -1557,6 +1580,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// v0.1.0 report (micro-cuts / crackling in music while Always ran): the
+    /// voice-processing canceller restarts the output device's IO and ducks
+    /// every other app, so it must never run unless asked for. Unset pref
+    /// = off; only an explicit opt-in (pref, `ALWAYS_AEC=1`, a test
+    /// `ALWAYS_CAPTURE_BIN`) turns it on, and `ALWAYS_AEC=0` always wins.
+    #[test]
+    fn echo_cancellation_is_opt_in() {
+        use super::aec_decision as d;
+        assert!(!d(None, false, false), "default: no VPIO");
+        assert!(d(None, false, true), "pref opt-in");
+        assert!(d(Some("1"), false, false), "env opt-in");
+        assert!(!d(Some("0"), true, true), "env kill switch wins");
+        assert!(d(None, true, false), "test helper implies on");
+        assert_eq!(super::capture_helper_args(false), &["--no-vp"]);
+        assert_eq!(super::capture_helper_args(true), &["--vp"]);
+    }
+
+    /// Default (AEC off): the helper is started ONCE, in plain mode, with
+    /// an explicit `--no-vp` — never first as a voice-processing unit
+    /// (which alone restarts the output device's IO: a cut in the user's
+    /// music). Stand-in helper records its arguments.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn default_spawn_is_plain_helper_without_vpio() {
+        use std::sync::atomic::Ordering;
+        let dir = std::env::temp_dir().join(format!("always-cap-default-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-capture");
+        let argv = dir.join("argv");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$1\" in --no-vp) exec /usr/bin/yes ;; *) exit 4 ;; esac\n",
+                argv.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        super::CAPTURE_HELPER_FAILED.store(false, Ordering::Relaxed);
+        super::CAPTURE_PLAIN_FAILED.store(false, Ordering::Relaxed);
+
+        let mut rec = super::RecChild::spawn_from(Some(script.clone()), false)
+            .expect("plain helper starts");
+        let mut buf = [0u8; super::FRAME_BYTES];
+        assert_eq!(rec.read_frame(&mut buf).expect("read"), super::FRAME_BYTES);
+        drop(rec);
+        assert_eq!(
+            std::fs::read_to_string(&argv).unwrap(),
+            "--no-vp\n",
+            "exactly one spawn, plain"
+        );
+        assert!(!super::CAPTURE_HELPER_FAILED.load(Ordering::Relaxed));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Live: the real echo-cancelling helper delivers 16 kHz mono s16 at
     /// real-time rate. Needs microphone access; run with --ignored.
     #[cfg(target_os = "macos")]
@@ -1566,7 +1645,7 @@ mod tests {
         let Some(path) = super::locate_capture_helper() else {
             panic!("always-capture not built (capture/build.sh)");
         };
-        let mut rec = super::RecChild::spawn_capture_helper(&path, &[]).expect("helper starts");
+        let mut rec = super::RecChild::spawn_capture_helper(&path, &["--vp"]).expect("helper starts");
         let mut buf = [0u8; super::FRAME_BYTES];
         // Discard start-up burst, then time 100 frames (3.0 s of audio).
         for _ in 0..10 {

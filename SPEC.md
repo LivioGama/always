@@ -93,6 +93,18 @@ The GUI spawns the daemon and talks to it over a Unix domain socket at
 `~/Library/Caches/always/always.sock`. Messages are newline-delimited JSON; the
 daemon broadcasts events, the GUI sends commands.
 
+**Always never changes what the Mac plays (2026-10-16, v0.1.0 user report:
+micro-cuts / crackling in Apple Music and on a speaker while Always ran).**
+The voice-processing (VPIO) echo canceller is OFF by default: the daemon
+starts `always-capture --no-vp` (plain mic) unless `capture_aec` is set true
+(or `ALWAYS_AEC=1`), and the helper itself runs VPIO only with `--vp` /
+`ALWAYS_CAPTURE_AEC=vp`. Measured on a MacBook Air (macOS 27, built-in
+speakers): starting a VPIO unit makes coreaudiod restart the OUTPUT device's
+IO (and again when it stops) with Audio IO Overloads at both edges, and duck
+every other app to 0.178 (−15 dB) for ~2 s, then 0.631 (−4 dB) while it runs
+— at `duckingLevel = .min`. The plain helper caused no output restart and no
+ducking. VPIO also never cancelled other processes' audio. The paragraphs
+below describe the VPIO path, now opt-in.
 **Echo-cancelled capture (2026-10-14, user request: "When a YouTube video is
 playing she does not hear me at all — I should never have to pause a video to
 dictate").** When the bundled `always-capture` helper is present, it is the
