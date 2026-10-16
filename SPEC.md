@@ -93,6 +93,24 @@ The GUI spawns the daemon and talks to it over a Unix domain socket at
 `~/Library/Caches/always/always.sock`. Messages are newline-delimited JSON; the
 daemon broadcasts events, the GUI sends commands.
 
+**Always never changes what the Mac plays (2026-10-16, v0.1.0 user report:
+micro-cuts / crackling in Apple Music and on a speaker while Always ran).**
+The voice-processing (VPIO) echo canceller is OFF by default: the daemon
+starts `always-capture --no-vp` (plain mic) unless `capture_aec` is set true
+(or `ALWAYS_AEC=1`), and the helper itself runs VPIO only with `--vp` /
+`ALWAYS_CAPTURE_AEC=vp`. Measured on a MacBook Air (macOS 27, built-in
+speakers): starting a VPIO unit makes coreaudiod restart the OUTPUT device's
+IO (and again when it stops) with Audio IO Overloads at both edges, and duck
+every other app to 0.178 (−15 dB) for ~2 s, then 0.631 (−4 dB) while it runs
+— at `duckingLevel = .min`. The plain helper caused no output restart and no
+ducking. **Trade-off (owner decision, 2026-10-16):** with VPIO off, sound
+playing from the Mac's own speakers reaches the microphone again (measured
+below: playback put 100 % of frames above the speech floor, vs 0 % through
+VPIO), so dictating over a playing video now relies on the speaker gate and
+the audio-output pause instead of cancellation, and status cues are no
+longer cancelled out of the mic. Users who want the 2026-10-14 behaviour opt
+in with `always config set capture_aec true`. The paragraphs below describe
+the VPIO path, now opt-in.
 **Echo-cancelled capture (2026-10-14, user request: "When a YouTube video is
 playing she does not hear me at all — I should never have to pause a video to
 dictate").** When the bundled `always-capture` helper is present, it is the
@@ -101,9 +119,11 @@ process, spawned by the daemon), but captured through Apple's voice-processing
 I/O, which subtracts the Mac's own audio output from the microphone before the
 daemon's VAD, speaker gate and recognizers see it. Other apps' audio is not
 ducked (`duckingLevel = .min`) and VPIO's AGC is off, so energy thresholds stay
-calibrated to the raw mic. **Default ON** (the user confirmed dictation over a playing video works
-with it, 2026-10-14). Kill switch: `always config set capture_aec false`
-(applied at the next daemon start); env `ALWAYS_AEC=0/1` overrides.
+calibrated to the raw mic. **Opt-in since 2026-10-16** (it was default ON
+from 2026-10-14, when the user confirmed dictation over a playing video works
+with it; see above for why it changed). Enable: `always config set
+capture_aec true` (applied at the next daemon start); env `ALWAYS_AEC=0/1`
+overrides.
 **Echo canceller only while something plays (2026-10-14, user request:
 "optimise the fuck out of it… voice is badly lagging").** The canceller only
 has work when the Mac is producing sound, so while no other process runs audio
@@ -130,7 +150,8 @@ the daemon process were inaudible in production while the helper ran, so
 **while the helper runs, status cues are rendered through the helper's own
 voice-processing output** (`play <file>` on its stdin) — the unit never
 ducks its own output, and it is the echo reference, so cues never reach the
-mic. With plain `rec` (or if the helper's cue channel fails) cues play
+mic. (In plain mode — the default since 2026-10-16 — the helper still plays
+the cues but nothing cancels them out of the mic.) With plain `rec` (or if the helper's cue channel fails) cues play
 in-process as before. ❓ Residual ducking of other apps' audio at `.min`
 could not be measured here: while any voice-processing unit runs, even
 another process's raw `rec` capture of the speakers is strongly attenuated
@@ -1286,7 +1307,7 @@ Stored in the daemon's database, editable from Settings and the CLI
 | `postprocess_mode` | unset → migrated (§9 item 6) | `fast` · `apple` · `groq` · `off` |
 | `postprocess_enabled` | true | Legacy; only read to migrate `postprocess_mode` when unset |
 | `transcript_stream` | true | Append accepted utterances to `~/.always/transcripts.jsonl` |
-| `capture_aec` | true | Echo-cancelled capture via `always-capture` (§3); false = plain `rec` |
+| `capture_aec` | false (unset = off) | Echo-cancelled (VPIO) capture via `always-capture` (§3); false = plain helper (`--no-vp`) |
 | `audible_status_sound` | off | Sound cues (off/low/medium/high; see §10.1) |
 | `per_app_settings_json` | — | Per-application pause rules |
 | `update_check` | true | Background GitHub release check (§12a); `ALWAYS_UPDATE_CHECK=0` also disables it |

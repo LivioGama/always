@@ -1,0 +1,1 @@
+**capture:** Always no longer cuts, crackles or ducks the music and calls playing on your Mac. Echo cancellation is now opt-in (`always config set capture_aec true`); without it, dictating over a video playing from the speakers relies on the speaker gate.
