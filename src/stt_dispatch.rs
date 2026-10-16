@@ -472,10 +472,13 @@ fn build_groq(cfg: &AlwaysConfig) -> Result<Arc<dyn Transcriber>> {
                  select a downloaded local model in Settings → Models."
             )
         })?;
-    let t = Arc::new(GroqTranscriber::new(key));
+    let groq = GroqTranscriber::new(key).with_language(&cfg.lang);
+    let language = groq.language().unwrap_or("auto").to_string();
+    let t = Arc::new(groq);
     tracing::info!(
         backend = "groq",
         model = crate::stt::GROQ_MODEL_NAME,
+        language,
         "transcriber_ready"
     );
     Ok(t)

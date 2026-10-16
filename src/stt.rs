@@ -243,7 +243,25 @@ fn backoff_with_jitter(attempt: u32) -> Duration {
     Duration::from_millis(base + jitter)
 }
 
-fn build_form(audio_data: Vec<u8>) -> Result<blocking_multipart::Form, anyhow::Error> {
+/// Whisper `language` field for the user's configured language: a bare ISO
+/// code (`fr-FR` → `fr`), or `None` for `auto`/unset so Whisper detects it.
+/// Forcing `en` on a French speaker made Whisper garble his speech.
+#[must_use]
+pub fn whisper_language(lang: &str) -> Option<String> {
+    let code = lang
+        .trim()
+        .split(['-', '_'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    (!code.is_empty() && code != "auto" && code.chars().all(|c| c.is_ascii_alphabetic()))
+        .then_some(code)
+}
+
+fn build_form(
+    audio_data: Vec<u8>,
+    language: Option<&str>,
+) -> Result<blocking_multipart::Form, anyhow::Error> {
     // Whisper's `prompt` field is intentionally NOT used. It was tried
     // historically and produced "I have an idea" → "I have an IntelliJ
     // IDEA" because the bias listed every app on disk. Voice-to-text
@@ -257,9 +275,11 @@ fn build_form(audio_data: Vec<u8>) -> Result<blocking_multipart::Form, anyhow::E
                 .mime_str("audio/wav")?,
         )
         .text("model", WHISPER_MODEL)
-        .text("response_format", "verbose_json")
-        .text("language", "en");
-    Ok(form)
+        .text("response_format", "verbose_json");
+    Ok(match language {
+        Some(lang) => form.text("language", lang.to_string()),
+        None => form,
+    })
 }
 
 /// Transcribe audio via Groq Whisper.
@@ -276,6 +296,15 @@ pub fn transcribe_from_bytes(
     audio_data: Vec<u8>,
     api_key: &str,
 ) -> Result<TranscriptionResult, SttError> {
+    transcribe_from_bytes_in(audio_data, api_key, Some("en"))
+}
+
+/// [`transcribe_from_bytes`] in `language` (`None` = Whisper auto-detect).
+pub fn transcribe_from_bytes_in(
+    audio_data: Vec<u8>,
+    api_key: &str,
+    language: Option<&str>,
+) -> Result<TranscriptionResult, SttError> {
     if let Some(remaining_ms) = circuit_block_remaining_ms() {
         return Err(SttError::Unavailable { remaining_ms });
     }
@@ -290,7 +319,7 @@ pub fn transcribe_from_bytes(
 
     for attempt in 0..MAX_ATTEMPTS {
         // Multipart bodies cannot be cheaply replayed, so rebuild per attempt.
-        let form = match build_form(audio_data.clone()) {
+        let form = match build_form(audio_data.clone(), language) {
             Ok(f) => f,
             Err(e) => {
                 record_failure();
@@ -440,19 +469,34 @@ pub trait Transcriber: Send + Sync {
 /// circuit-breaker behavior.
 pub struct GroqTranscriber {
     api_key: String,
+    language: Option<String>,
 }
 
 impl GroqTranscriber {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
+            language: Some("en".to_string()),
         }
+    }
+
+    /// Transcribe in the user's language (`cfg.lang`); `auto` lets Whisper
+    /// detect it. See [`whisper_language`].
+    #[must_use]
+    pub fn with_language(mut self, lang: &str) -> Self {
+        self.language = whisper_language(lang);
+        self
+    }
+
+    #[must_use]
+    pub fn language(&self) -> Option<&str> {
+        self.language.as_deref()
     }
 }
 
 impl Transcriber for GroqTranscriber {
     fn transcribe_from_bytes(&self, audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
-        transcribe_from_bytes(audio, &self.api_key)
+        transcribe_from_bytes_in(audio, &self.api_key, self.language.as_deref())
     }
 
     fn transcribe_streaming(
@@ -476,6 +520,24 @@ impl Transcriber for GroqTranscriber {
 #[cfg(test)]
 mod stt_unit_tests {
     use super::*;
+
+    #[test]
+    fn whisper_language_follows_the_user() {
+        assert_eq!(whisper_language("fr"), Some("fr".into()));
+        assert_eq!(whisper_language("fr-FR"), Some("fr".into()));
+        assert_eq!(whisper_language("en_GB"), Some("en".into()));
+        assert_eq!(whisper_language("auto"), None);
+        assert_eq!(whisper_language(""), None);
+        assert_eq!(GroqTranscriber::new("k").language(), Some("en"));
+        assert_eq!(
+            GroqTranscriber::new("k").with_language("fr").language(),
+            Some("fr")
+        );
+        assert_eq!(
+            GroqTranscriber::new("k").with_language("auto").language(),
+            None
+        );
+    }
 
     /// The circuit-breaker counters are process-global atomics; the two
     /// tests below interleave under the parallel test runner and trip
