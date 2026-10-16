@@ -5,7 +5,7 @@ checks:
 act:
   - workflow: .github/workflows/ci.yml
     job: tauri-check
-    advisory: true
+    advisory: false
 remoteCi:
   workflow: ci.yml
   timeoutMin: 40
