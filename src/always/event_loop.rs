@@ -1018,6 +1018,9 @@ fn handle_speech(
                 processed: &final_text,
                 energy,
             });
+            // Settings → History reads this store, not the tracing log:
+            // release logs carry no transcript text (privacy).
+            crate::always::history::append(text, &final_text);
             // Reference point for `pre_paste_ms` below: everything between
             // here and the clipboard write (merge, dedupe, stream append,
             // pause checks) should be near-instant — unexplained
