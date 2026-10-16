@@ -869,6 +869,14 @@ Between transcription and the keyboard:
 1. **Hallucination filter** — rejects the known failure modes of speech models:
    empty output, "thank you"/"bye" family, subtitle credits, repeated tokens,
    gibberish, low-confidence segments.
+   Groq backend only. Script mixing is judged by Unicode script, not ASCII: Latin
+   with diacritics is ONE script ("déjà", "Ça", "naïve" are ordinary words). The
+   user's scripts are Latin plus the script of `lang` (plus the engine-reported
+   language's script only when `lang` is `auto`). A single garbled token (two
+   scripts in one word, or a mid-word case flip carrying non-ASCII, e.g.
+   "ünkLöß") is removed and the rest is pasted. The utterance is rejected when it
+   holds only such tokens, when they are ≥ 25% of the words of a short utterance
+   (< 80 chars), or when it is mostly in a script that is not the user's.
 2. **Vocabulary bias** — the user's glossary is sent to the model as a hint so
    domain terms transcribe correctly. **The hint must never reach the user's
    text**: these models echo their prompt back, especially on short or quiet
@@ -1263,7 +1271,7 @@ Stored in the daemon's database, editable from Settings and the CLI
 
 | Key | Default | Meaning |
 |---|---|---|
-| `lang` | `auto` | Dictation language |
+| `lang` | `auto` | Dictation language. Groq sends it as Whisper's `language` (bare ISO code, `fr-FR` → `fr`); `auto` resolves to the system locale's language (as the Apple recognizer does), `en` if unknown. Before 2026-10-16 Groq was always sent `en`. |
 | `stt_energy_threshold` | 0.012 | Speech energy floor |
 | `hear_energy_threshold` | 0.001 | Wake-on-voice floor |
 | `silero_threshold` | 0.4 | VAD speech probability |

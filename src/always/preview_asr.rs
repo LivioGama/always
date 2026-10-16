@@ -498,26 +498,47 @@ pub fn lang_is_english(lang: &str) -> bool {
 }
 
 fn system_locale_is_english() -> bool {
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        // The daemon is spawned by the GUI without a shell environment, so
-        // LANG is unreliable; ask the same preference the Speech framework's
-        // `Locale.current` reads.
-        let out = Command::new("/usr/bin/defaults")
-            .args(["read", "-g", "AppleLocale"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .to_ascii_lowercase()
-            });
-        match out {
-            Some(l) => l.starts_with("en"),
-            None => std::env::var("LANG").is_ok_and(|l| l.to_ascii_lowercase().starts_with("en")),
-        }
-    })
+    system_locale_language().is_some_and(|l| l == "en")
+}
+
+/// Language subtag of a locale identifier (`fr_FR` → `fr`, `en-US` →
+/// `en`, `zh-Hans_CN` → `zh`, `fr_FR@rg=chzzzz` → `fr`), lowercased.
+/// `None` for anything that does not start with a 2-3 letter code
+/// (`C`, `POSIX`, empty).
+fn language_of_locale(locale: &str) -> Option<String> {
+    let tag = locale
+        .trim()
+        .split(['_', '-', '.', '@'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    ((2..=3).contains(&tag.len()) && tag.chars().all(|c| c.is_ascii_lowercase())).then_some(tag)
+}
+
+/// The system locale's language (`fr` on a French-locale Mac) — the same
+/// locale the Apple recognizer uses for `lang = auto`. `None` when it
+/// cannot be resolved. Cached for the process: it is read once.
+pub fn system_locale_language() -> Option<String> {
+    static CACHED: OnceLock<Option<String>> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            // The daemon is spawned by the GUI without a shell environment,
+            // so LANG is unreliable; ask the same preference the Speech
+            // framework's `Locale.current` reads.
+            let out = Command::new("/usr/bin/defaults")
+                .args(["read", "-g", "AppleLocale"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+            match out {
+                Some(l) => language_of_locale(&l),
+                None => std::env::var("LANG")
+                    .ok()
+                    .and_then(|l| language_of_locale(&l)),
+            }
+        })
+        .clone()
 }
 
 static GLOBAL: OnceLock<Option<Arc<PreviewAsr>>> = OnceLock::new();
@@ -814,5 +835,18 @@ mod tests {
         assert!(lang_is_english("EN-us"));
         assert!(!lang_is_english("fr"));
         assert!(!lang_is_english("es"));
+    }
+
+    #[test]
+    fn locale_language_extraction() {
+        assert_eq!(language_of_locale("en_US\n"), Some("en".into()));
+        assert_eq!(language_of_locale("fr_FR"), Some("fr".into()));
+        assert_eq!(language_of_locale("pt-BR"), Some("pt".into()));
+        assert_eq!(language_of_locale("zh-Hans_CN"), Some("zh".into()));
+        assert_eq!(language_of_locale("fr_FR@rg=chzzzz"), Some("fr".into()));
+        assert_eq!(language_of_locale("fr_CH.UTF-8"), Some("fr".into()));
+        assert_eq!(language_of_locale("C"), None);
+        assert_eq!(language_of_locale("POSIX"), None);
+        assert_eq!(language_of_locale(""), None);
     }
 }

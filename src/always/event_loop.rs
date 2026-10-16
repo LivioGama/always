@@ -652,6 +652,7 @@ fn recover_rejected(cfg: &AlwaysConfig, rt: &Handle, transcriber: &Arc<dyn Trans
     };
     *PASTE_CTX.lock().unwrap_or_else(|p| p.into_inner()) = Some((cfg.clone(), rt.clone()));
     let transcriber = Arc::clone(transcriber);
+    let lang = cfg.lang.clone();
     std::thread::Builder::new()
         .name("rejected-stt".into())
         .spawn(move || {
@@ -659,9 +660,9 @@ fn recover_rejected(cfg: &AlwaysConfig, rt: &Handle, transcriber: &Arc<dyn Trans
             let result = crate::always::audio::create_wav_bytes_i16_mono_16k(&stash.samples)
                 .ok()
                 .and_then(|wav| transcriber.transcribe_from_bytes(wav).ok());
-            let hallucinated = result
-                .as_ref()
-                .is_some_and(|r| crate::always::hallucination::is_hallucination(r).is_some());
+            let hallucinated = result.as_ref().is_some_and(|r| {
+                crate::always::hallucination::is_hallucination_in(r, &lang).is_some()
+            });
             let text = result
                 .map(|r| r.text.trim().to_string())
                 .unwrap_or_default();
