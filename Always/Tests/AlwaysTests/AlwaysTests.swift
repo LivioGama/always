@@ -698,6 +698,18 @@ final class AlwaysTests: XCTestCase {
         XCTAssertNil(event.data, "Hello payload should not collapse into the string-data dict")
     }
 
+    /// Daemon's answer to a model switch that failed to load (Parakeet v3
+    /// stuck on "Loading…"): backend + error reach the Models tab.
+    func testActiveTranscriberFailedDecodes() throws {
+        let json = #"{"type":"ActiveTranscriberFailed","data":{"backend":"local:parakeet-tdt-0.6b-v3","error":"loading local engine: file missing"}}"#
+        let event = try JSONDecoder().decode(DaemonEvent.self, from: json.data(using: .utf8)!)
+        XCTAssertEqual(event.type, .activeTranscriberFailed)
+        XCTAssertEqual(event.data?["backend"], "local:parakeet-tdt-0.6b-v3")
+        XCTAssertEqual(event.data?["error"], "loading local engine: file missing")
+        XCTAssertEqual(ModelManagerClient.errorKey(forBackend: "local:parakeet-tdt-0.6b-v3"), "parakeet-tdt-0.6b-v3")
+        XCTAssertEqual(ModelManagerClient.errorKey(forBackend: "apple"), "apple")
+    }
+
     func testHelloEventRoundTripsThroughCodable() throws {
         let original = DaemonEvent(type: .hello, helloVersion: 1)
         let encoded = try JSONEncoder().encode(original)

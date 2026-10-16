@@ -98,6 +98,9 @@ enum DaemonEventType: String, Codable {
     case modelExtractionCompleted = "ModelExtractionCompleted"
     case modelExtractionFailed = "ModelExtractionFailed"
     case activeTranscriberChanged = "ActiveTranscriberChanged"
+    /// A backend switch failed to load. `data` = {backend, error}; always
+    /// followed by `ActiveTranscriberChanged` naming the backend still running.
+    case activeTranscriberFailed = "ActiveTranscriberFailed"
     /// Speech was heard but energy was too low — mic input volume may need raising.
     case lowMicrophoneVolume = "LowMicrophoneVolume"
     /// Async grammar correction silently replaced the pasted text.

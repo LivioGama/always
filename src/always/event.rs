@@ -386,6 +386,14 @@ pub enum DaemonEvent {
     ActiveTranscriberChanged {
         backend: String,
     },
+    /// A requested backend switch failed to load (missing/corrupt model
+    /// files, engine error). Always followed by `ActiveTranscriberChanged`
+    /// naming the backend still running, so the GUI drops its "Loading…"
+    /// and shows `error` on the row instead.
+    ActiveTranscriberFailed {
+        backend: String,
+        error: String,
+    },
     /// Transcription failed (e.g. Groq API error: bad key, quota, or
     /// network). Surfaced to the GUI as a red error overlay so the user
     /// isn't left on a stuck "Processing…". `kind` is a stable machine tag
@@ -618,6 +626,12 @@ impl DaemonEvent {
             DaemonEvent::ModelExtractionFailed { model_id, error } => {
                 cap_field(error).map(|error| DaemonEvent::ModelExtractionFailed {
                     model_id: model_id.clone(),
+                    error,
+                })
+            }
+            DaemonEvent::ActiveTranscriberFailed { backend, error } => {
+                cap_field(error).map(|error| DaemonEvent::ActiveTranscriberFailed {
+                    backend: backend.clone(),
                     error,
                 })
             }

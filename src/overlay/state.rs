@@ -410,6 +410,7 @@ impl OverlayStateReducer {
                 error: _,
             }
             | DaemonEvent::ActiveTranscriberChanged { backend: _ }
+            | DaemonEvent::ActiveTranscriberFailed { .. }
             | DaemonEvent::SttFallbackEngaged { model: _ }
             | DaemonEvent::VoiceEnrollmentPreparing { .. }
             | DaemonEvent::VoiceEnrollmentStarted { .. }

@@ -166,7 +166,29 @@ final class ModelManagerClient: ObservableObject {
     /// immediately — cleared when `ActiveTranscriberChanged` confirms.
     func setActive(backend: String) {
         loadingBackend = backend
+        errors.removeValue(forKey: Self.errorKey(forBackend: backend))
         StateMonitor.shared.sendCommandWithData("SetActiveTranscriber", ["backend": backend])
+        // Safety net: the daemon answers every switch (success, no-op or
+        // failure), but a daemon that died mid-load never will. Never leave
+        // "Loading…" spinning with no way out.
+        let attempt = backend
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.switchTimeout) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.loadingBackend == attempt else { return }
+                self.loadingBackend = nil
+                self.errors[Self.errorKey(forBackend: attempt)] =
+                    "Didn't finish loading. Try again, or pick another model."
+            }
+        }
+    }
+
+    /// How long "Loading…" may spin before the row gives up and says so.
+    static let switchTimeout: TimeInterval = 120
+
+    /// Row key for a backend's error: the model id for `local:<id>`, the
+    /// backend itself otherwise (`apple`, `groq`).
+    nonisolated static func errorKey(forBackend backend: String) -> String {
+        backend.hasPrefix("local:") ? String(backend.dropFirst("local:".count)) : backend
     }
 
     // MARK: Event handler (daemon → UI)
@@ -262,6 +284,13 @@ final class ModelManagerClient: ObservableObject {
                 installing.remove(err.model_id)
                 verifying.remove(err.model_id)
                 errors[err.model_id] = err.error
+            }
+        case .activeTranscriberFailed:
+            if let backend = event.data?["backend"] {
+                let error = event.data?["error"] ?? "Model failed to load"
+                if loadingBackend == backend { loadingBackend = nil }
+                errors[Self.errorKey(forBackend: backend)] = error
+                logger.error("switch to \(backend, privacy: .public) failed: \(error, privacy: .public)")
             }
         case .activeTranscriberChanged:
             if let payload = event.activeTranscriber {

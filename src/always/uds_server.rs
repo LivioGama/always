@@ -1197,28 +1197,16 @@ fn set_language(ctx: &ModelCommandCtx, lang: &str) {
 /// DB, and emit [`DaemonEvent::ActiveTranscriberChanged`] so connected
 /// UDS clients refresh their active-model badge.
 fn switch_active_backend(ctx: &ModelCommandCtx, choice: TranscriberBackendChoice) {
-    // Selecting the backend that is already active is free. Without this
-    // guard it is anything but: each call rebuilds the transcriber, which
-    // for a local model means loading ONNX sessions from disk, and each
-    // success broadcasts `ActiveTranscriberChanged` — which the GUI's
-    // model picker observes, re-emitting the selection and driving the
-    // whole cycle again. Measured on a single user-initiated switch: ten
-    // `SetActiveTranscriber` commands and ten full transcriber rebuilds
-    // inside one second, which is the stall the user sees as the app
-    // freezing after picking a model.
-    //
-    // Idempotence here fixes it at the source regardless of how the UI
-    // binding behaves.
-    if ctx.cfg.read().transcriber_backend == choice {
-        tracing::debug!(backend = %choice, "uds_set_active_transcriber_noop");
-        return;
-    }
-
-    let mut new_cfg = ctx.cfg.write();
-    new_cfg.transcriber_backend = choice.clone();
-    match build_transcriber(&new_cfg, &ctx.registry) {
-        Ok(transcriber) => {
-            *ctx.active.write() = transcriber;
+    let outcome = switch_backend_with(&ctx.cfg, &choice, |cfg| {
+        build_transcriber(cfg, &ctx.registry)
+    });
+    let active_now = ctx.cfg.read().transcriber_backend.to_string();
+    match &outcome {
+        SwitchOutcome::Noop => {
+            tracing::debug!(backend = %choice, "uds_set_active_transcriber_noop");
+        }
+        SwitchOutcome::Switched(transcriber) => {
+            *ctx.active.write() = Arc::clone(transcriber);
             // Persist so the next daemon start uses the same choice.
             if let Ok(conn) = crate::db::open() {
                 let value = choice.to_string();
@@ -1226,15 +1214,84 @@ fn switch_active_backend(ctx: &ModelCommandCtx, choice: TranscriberBackendChoice
                     tracing::warn!(error = %e, "persist_transcriber_backend_failed");
                 }
             }
-            global_broadcaster().send(DaemonEvent::ActiveTranscriberChanged {
-                backend: choice.to_string(),
-            });
             tracing::info!(backend = %choice, "uds_set_active_transcriber");
         }
-        Err(e) => {
-            tracing::error!(backend = %choice, error = %e, "build_new_transcriber_failed");
+        SwitchOutcome::Failed(error) => {
+            tracing::error!(backend = %choice, error = %error, "build_new_transcriber_failed");
         }
     }
+    for event in switch_events(&choice, &active_now, &outcome) {
+        global_broadcaster().send(event);
+    }
+}
+
+/// Result of a backend switch request.
+enum SwitchOutcome<T> {
+    /// Already the active backend — nothing rebuilt.
+    Noop,
+    /// The new engine built and is now the configured backend.
+    Switched(T),
+    /// The new engine failed to build; the config still names the backend
+    /// that was active before, which keeps running.
+    Failed(String),
+}
+
+/// Switch `cfg` to `choice`, building the engine with `build`.
+///
+/// The build (for a local model: loading ONNX sessions from disk and a
+/// warm-up decode, seconds on a cold disk) runs on a CLONE of the config,
+/// never under the config write lock — the main loop reads that config
+/// every utterance, so holding it froze dictation for the whole load.
+/// The config only names `choice` once the engine exists: a failed build
+/// leaves it on the backend that is still actually running, so a retry is
+/// a real retry instead of a silent "already active" no-op.
+///
+/// Selecting the backend that is already active is free (no rebuild):
+/// rebuilding on every echo was a measured ten-rebuilds-in-one-second
+/// stall when the GUI's picker re-emitted its selection.
+fn switch_backend_with<T>(
+    cfg: &ActiveConfig,
+    choice: &TranscriberBackendChoice,
+    build: impl FnOnce(&crate::always::AlwaysConfig) -> Result<T>,
+) -> SwitchOutcome<T> {
+    let mut candidate = {
+        let current = cfg.read();
+        if current.transcriber_backend == *choice {
+            return SwitchOutcome::Noop;
+        }
+        current.clone()
+    };
+    candidate.transcriber_backend = choice.clone();
+    match build(&candidate) {
+        Ok(t) => {
+            cfg.write().transcriber_backend = choice.clone();
+            SwitchOutcome::Switched(t)
+        }
+        Err(e) => SwitchOutcome::Failed(format!("{e:#}")),
+    }
+}
+
+/// What the GUI is told about a switch. EVERY outcome ends with the
+/// backend that is active now: the Models tab shows "Loading…" from the
+/// click until an `ActiveTranscriberChanged` arrives, so an outcome that
+/// sent nothing (a no-op, a failed load) left that spinner on forever.
+/// A failure first says why, so the row shows the error instead.
+fn switch_events<T>(
+    choice: &TranscriberBackendChoice,
+    active_now: &str,
+    outcome: &SwitchOutcome<T>,
+) -> Vec<DaemonEvent> {
+    let mut events = Vec::with_capacity(2);
+    if let SwitchOutcome::Failed(error) = outcome {
+        events.push(DaemonEvent::ActiveTranscriberFailed {
+            backend: choice.to_string(),
+            error: error.clone(),
+        });
+    }
+    events.push(DaemonEvent::ActiveTranscriberChanged {
+        backend: active_now.to_string(),
+    });
+    events
 }
 
 /// Hot-reload fields the main loop reads from [`AlwaysConfig`] each
@@ -1553,4 +1610,114 @@ fn best_token_match(haystack: &str, needle: &str) -> Option<(String, usize)> {
 /// Send an event to all connected clients
 pub fn send_event(event: DaemonEvent) {
     global_broadcaster().send(event);
+}
+
+#[cfg(test)]
+mod switch_backend_tests {
+    use super::*;
+    use parking_lot::RwLock;
+
+    fn cfg_on(choice: TranscriberBackendChoice) -> ActiveConfig {
+        Arc::new(RwLock::new(crate::always::AlwaysConfig {
+            transcriber_backend: choice,
+            ..Default::default()
+        }))
+    }
+
+    fn parakeet() -> TranscriberBackendChoice {
+        "local:parakeet-tdt-0.6b-v3".parse().unwrap()
+    }
+
+    fn backends(events: &[DaemonEvent]) -> Vec<String> {
+        events
+            .iter()
+            .map(|e| match e {
+                DaemonEvent::ActiveTranscriberChanged { backend } => format!("changed:{backend}"),
+                DaemonEvent::ActiveTranscriberFailed { backend, error } => {
+                    format!("failed:{backend}:{error}")
+                }
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// Ludwig (16 Oct): Parakeet v3 "Use" stuck on "Loading…". A failed
+    /// load must say why AND re-announce the backend still running, and
+    /// must not leave the config claiming the model that failed.
+    #[test]
+    fn failed_load_reports_error_and_keeps_previous_backend() {
+        let cfg = cfg_on(TranscriberBackendChoice::Groq);
+        let outcome: SwitchOutcome<()> =
+            switch_backend_with(&cfg, &parakeet(), |_| anyhow::bail!("onnx: file missing"));
+        assert!(matches!(outcome, SwitchOutcome::Failed(_)));
+        assert_eq!(
+            cfg.read().transcriber_backend,
+            TranscriberBackendChoice::Groq
+        );
+        let active = cfg.read().transcriber_backend.to_string();
+        assert_eq!(
+            backends(&switch_events(&parakeet(), &active, &outcome)),
+            vec![
+                "failed:local:parakeet-tdt-0.6b-v3:onnx: file missing".to_string(),
+                "changed:groq".to_string()
+            ]
+        );
+        // A retry is a real retry, not an "already active" no-op.
+        let retry: SwitchOutcome<()> = switch_backend_with(&cfg, &parakeet(), |_| Ok(()));
+        assert!(matches!(retry, SwitchOutcome::Switched(())));
+        assert_eq!(cfg.read().transcriber_backend, parakeet());
+    }
+
+    #[test]
+    fn failed_event_wire_shape_matches_gui() {
+        let e = DaemonEvent::ActiveTranscriberFailed {
+            backend: "local:parakeet-tdt-0.6b-v3".into(),
+            error: "file missing".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"type":"ActiveTranscriberFailed","data":{"backend":"local:parakeet-tdt-0.6b-v3","error":"file missing"}}"#
+        );
+    }
+
+    #[test]
+    fn noop_still_confirms_so_the_spinner_clears() {
+        let cfg = cfg_on(parakeet());
+        let mut built = false;
+        let outcome: SwitchOutcome<()> = switch_backend_with(&cfg, &parakeet(), |_| {
+            built = true;
+            Ok(())
+        });
+        assert!(!built, "already-active backend must not rebuild");
+        assert_eq!(
+            backends(&switch_events(
+                &parakeet(),
+                &parakeet().to_string(),
+                &outcome
+            )),
+            vec!["changed:local:parakeet-tdt-0.6b-v3".to_string()]
+        );
+    }
+
+    #[test]
+    fn build_runs_without_holding_the_config_lock() {
+        let cfg = cfg_on(TranscriberBackendChoice::Groq);
+        let probe = Arc::clone(&cfg);
+        let outcome: SwitchOutcome<()> = switch_backend_with(&cfg, &parakeet(), |candidate| {
+            assert_eq!(candidate.transcriber_backend, parakeet());
+            // The main loop must still be able to read AND write the live
+            // config while the engine loads.
+            assert!(probe.try_write().is_some(), "config locked during load");
+            Ok(())
+        });
+        assert!(matches!(outcome, SwitchOutcome::Switched(())));
+        assert_eq!(
+            backends(&switch_events(
+                &parakeet(),
+                &parakeet().to_string(),
+                &outcome
+            )),
+            vec!["changed:local:parakeet-tdt-0.6b-v3".to_string()]
+        );
+    }
 }
