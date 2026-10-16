@@ -60,25 +60,36 @@ struct OnboardingAppAllowlist: View {
         )
     }
 
-    /// Regular (Dock) apps currently running, minus Always itself and
-    /// system apps nobody dictates into.
-    private static func runningApps() -> [AppEntry] {
-        let skip: Set<String> = [
-            FocusedAppMonitor.ownBundleId,
-            "com.apple.finder",
-            "com.apple.systempreferences",
-            "com.apple.ActivityMonitor",
-        ]
-        var seen = Set<String>()
-        return NSWorkspace.shared.runningApplications
+    /// Apps worth offering: the ones you are likely to dictate into
+    /// (Slack, chat, browsers, editors — running or merely installed) first,
+    /// then whatever else is running. See `OnboardingAppCandidates`.
+    static func runningApps() -> [AppEntry] {
+        let running = NSWorkspace.shared.runningApplications
             .filter { $0.activationPolicy == .regular }
-            .compactMap { app -> AppEntry? in
-                guard let id = app.bundleIdentifier, !skip.contains(id), seen.insert(id).inserted
-                else { return nil }
-                return AppEntry(bundleId: id, name: app.localizedName ?? id, icon: app.icon)
+            .compactMap { app -> OnboardingAppCandidates.App? in
+                guard let id = app.bundleIdentifier else { return nil }
+                return .init(bundleId: id, name: app.localizedName ?? id)
             }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-            .prefix(8)
-            .map { $0 }
+        let installed = OnboardingAppCandidates.likelyTargets.compactMap { id -> OnboardingAppCandidates.App? in
+            guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { return nil }
+            let name = FileManager.default.displayName(atPath: url.path)
+                .replacingOccurrences(of: ".app", with: "")
+            return .init(bundleId: id, name: name)
+        }
+        let icons = Dictionary(
+            NSWorkspace.shared.runningApplications.compactMap { app in
+                app.bundleIdentifier.map { ($0, app.icon) }
+            },
+            uniquingKeysWith: { first, _ in first })
+        return OnboardingAppCandidates.rank(
+            running: running, installed: installed,
+            exclude: Set(SingleInstanceGuard.knownBundleIDs + [FocusedAppMonitor.ownBundleId, "com.always.v3.dev"])
+        ).map { app in
+            let runningIcon: NSImage? = icons[app.bundleId] ?? nil
+            let icon = runningIcon ?? NSWorkspace.shared
+                .urlForApplication(withBundleIdentifier: app.bundleId)
+                .map { NSWorkspace.shared.icon(forFile: $0.path) }
+            return AppEntry(bundleId: app.bundleId, name: app.name, icon: icon)
+        }
     }
 }
