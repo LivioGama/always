@@ -93,6 +93,24 @@ The GUI spawns the daemon and talks to it over a Unix domain socket at
 `~/Library/Caches/always/always.sock`. Messages are newline-delimited JSON; the
 daemon broadcasts events, the GUI sends commands.
 
+**Always never changes what the Mac plays (2026-10-16, v0.1.0 user report:
+micro-cuts / crackling in Apple Music and on a speaker while Always ran).**
+The voice-processing (VPIO) echo canceller is OFF by default: the daemon
+starts `always-capture --no-vp` (plain mic) unless `capture_aec` is set true
+(or `ALWAYS_AEC=1`), and the helper itself runs VPIO only with `--vp` /
+`ALWAYS_CAPTURE_AEC=vp`. Measured on a MacBook Air (macOS 27, built-in
+speakers): starting a VPIO unit makes coreaudiod restart the OUTPUT device's
+IO (and again when it stops) with Audio IO Overloads at both edges, and duck
+every other app to 0.178 (−15 dB) for ~2 s, then 0.631 (−4 dB) while it runs
+— at `duckingLevel = .min`. The plain helper caused no output restart and no
+ducking. **Trade-off (owner decision, 2026-10-16):** with VPIO off, sound
+playing from the Mac's own speakers reaches the microphone again (measured
+below: playback put 100 % of frames above the speech floor, vs 0 % through
+VPIO), so dictating over a playing video now relies on the speaker gate and
+the audio-output pause instead of cancellation, and status cues are no
+longer cancelled out of the mic. Users who want the 2026-10-14 behaviour opt
+in with `always config set capture_aec true`. The paragraphs below describe
+the VPIO path, now opt-in.
 **Echo-cancelled capture (2026-10-14, user request: "When a YouTube video is
 playing she does not hear me at all — I should never have to pause a video to
 dictate").** When the bundled `always-capture` helper is present, it is the
@@ -101,9 +119,11 @@ process, spawned by the daemon), but captured through Apple's voice-processing
 I/O, which subtracts the Mac's own audio output from the microphone before the
 daemon's VAD, speaker gate and recognizers see it. Other apps' audio is not
 ducked (`duckingLevel = .min`) and VPIO's AGC is off, so energy thresholds stay
-calibrated to the raw mic. **Default ON** (the user confirmed dictation over a playing video works
-with it, 2026-10-14). Kill switch: `always config set capture_aec false`
-(applied at the next daemon start); env `ALWAYS_AEC=0/1` overrides.
+calibrated to the raw mic. **Opt-in since 2026-10-16** (it was default ON
+from 2026-10-14, when the user confirmed dictation over a playing video works
+with it; see above for why it changed). Enable: `always config set
+capture_aec true` (applied at the next daemon start); env `ALWAYS_AEC=0/1`
+overrides.
 **Echo canceller only while something plays (2026-10-14, user request:
 "optimise the fuck out of it… voice is badly lagging").** The canceller only
 has work when the Mac is producing sound, so while no other process runs audio
@@ -130,7 +150,8 @@ the daemon process were inaudible in production while the helper ran, so
 **while the helper runs, status cues are rendered through the helper's own
 voice-processing output** (`play <file>` on its stdin) — the unit never
 ducks its own output, and it is the echo reference, so cues never reach the
-mic. With plain `rec` (or if the helper's cue channel fails) cues play
+mic. (In plain mode — the default since 2026-10-16 — the helper still plays
+the cues but nothing cancels them out of the mic.) With plain `rec` (or if the helper's cue channel fails) cues play
 in-process as before. ❓ Residual ducking of other apps' audio at `.min`
 could not be measured here: while any voice-processing unit runs, even
 another process's raw `rec` capture of the speakers is strongly attenuated
@@ -313,6 +334,9 @@ Idle-paused · Low mic volume · correction confirmations.
   600 ms minimum on-screen time still holds. The indicator is still hidden
   when paused or disconnected. It sits centred near the bottom of the screen
   under the pointer, just above the Dock.
+- **The idle pill** (shown when idle auto-pause fires) hides on any resume,
+  whichever control caused it. Its Play button sends `Resume`, which lifts the
+  pause and never pauses (§7).
 - **Live feedback preempts transient confirmations.** Brief confirmation
   flashes (Pause/Resume, Auto-Enter toggles, low-mic volume, offline
   fallback — 1.5 s to 4 s) normally run their full duration, but if the user
@@ -530,13 +554,27 @@ and swaps the live keyboard listener's combo set without a restart.
 | Per-app | Focused app is on the paused list | Focus moves to an allowed app |
 | Mic conflict | Another app holds the microphone | Mic free for ~3 s (§7.1) |
 | Audio output | System audio is playing | Playback stops |
-| Idle | No voice for `idle_pause_secs` | Voice detected again |
+| Idle | No voice for `idle_pause_secs` while Always is otherwise listening (never set while another pause is active — its clock restarts instead) | Voice detected again, or an explicit user resume |
 | No GUI | Daemon lost its last client | A client connects |
 
 **Rules:**
-- Any active source suppresses capture. The explicit global resume clears all of
-  them at once — including the idle auto-pause, so pressing the master chord
-  after an idle timeout resumes immediately without needing a separate action.
+- Any active source suppresses capture.
+- **An explicit user resume** (global chord, idle pill Play, `Resume` or
+  `TogglePause` over UDS, CLI, tray) clears master, idle, audio-output and
+  mic-conflict at once, and never pauses. A global toggle resumes whenever any
+  of those is active, and only otherwise sets master. The watchdogs re-arm on
+  their next transition, so the user can force dictation while music plays or
+  another app holds the mic. This is a deliberate user override of the
+  watchdogs; I7 still holds: when another app takes the mic Always stops
+  immediately, and it is the user who resumes. After each control press the
+  daemon re-broadcasts the authoritative `Paused` / `Resumed` state so a GUI
+  that predicted wrongly is corrected.
+- **Per-app chord** (for the focused app): if the app is effectively paused
+  (not on the allowlist, or idle / audio-output / mic-conflict active), it is
+  added to the allowlist if absent and idle / watchdog pauses are lifted; if it
+  is listening, it is removed from the allowlist; while master is on, the chord
+  edits the allowlist only. Allowlist edits from Settings / Onboarding
+  (`SetAppPaused`) are plain edits and never lift idle or watchdog pauses.
 - On resume, audio queued by the recorder during the suppressed period is
   **discarded** (I6). The recorder never stops, so its buffer holds several
   seconds of exactly the audio Always was meant to ignore.
@@ -703,6 +741,16 @@ offline; the cloud backend is faster to start and needs an API key.
 - A local model may be armed as fallback for the cloud backend; failures fall
   back silently but are logged.
 - Switching models takes effect on the next utterance.
+- A switch loads the new engine before the config names it, and never under
+  the config lock the main loop reads, so a slow load does not block dictation.
+  Engine rebuilds (a switch, a language change) run one at a time.
+- Every `SetActiveTranscriber` request ends with `ActiveTranscriberChanged`
+  naming the backend now running — no-ops and failures included.
+- A failed load first sends `ActiveTranscriberFailed { backend, error }` and
+  leaves the previous backend active, so a retry really retries. The Models tab
+  shows the error on that row.
+- If the daemon never answers, "Loading…" gives up after 120 s with a message
+  on the row; a late success clears that message.
 
 **Streaming models available:** `moonshine-tiny-streaming-en`,
 `moonshine-small-streaming-en`, `moonshine-medium-streaming-en`, `nemotron-3.5-asr-streaming-0.6b`.
@@ -831,7 +879,8 @@ recognition. Requires no API key and never uploads audio on macOS 26+.
 - In the Settings → Models tab, the Apple on-device option appears at the top of
   the model list (above downloaded/available models and broken-model diagnostics).
   Selecting it sends `SetActiveTranscriber { "backend": "apple" }`, the active
-  row is badged, and the same loading spinner is shown while the daemon confirms.
+  row is badged, and the same loading spinner is shown until the daemon
+  answers (success, failure or no-op; 120 s give-up, see above).
 - `Always.app/Contents/Info.plist` declares `NSSpeechRecognitionUsageDescription`
   so the bundled `always-daemon` can request macOS speech-recognition permission.
   The first transcription attempt triggers a TCC prompt; without this key the
@@ -846,6 +895,14 @@ Between transcription and the keyboard:
 1. **Hallucination filter** — rejects the known failure modes of speech models:
    empty output, "thank you"/"bye" family, subtitle credits, repeated tokens,
    gibberish, low-confidence segments.
+   Groq backend only. Script mixing is judged by Unicode script, not ASCII: Latin
+   with diacritics is ONE script ("déjà", "Ça", "naïve" are ordinary words). The
+   user's scripts are Latin plus the script of `lang` (plus the engine-reported
+   language's script only when `lang` is `auto`). A single garbled token (two
+   scripts in one word, or a mid-word case flip carrying non-ASCII, e.g.
+   "ünkLöß") is removed and the rest is pasted. The utterance is rejected when it
+   holds only such tokens, when they are ≥ 25% of the words of a short utterance
+   (< 80 chars), or when it is mostly in a script that is not the user's.
 2. **Vocabulary bias** — the user's glossary is sent to the model as a hint so
    domain terms transcribe correctly. **The hint must never reach the user's
    text**: these models echo their prompt back, especially on short or quiet
@@ -1214,6 +1271,30 @@ Two steps:
 2. **My Voice.** The three enrollment recordings, inline. Always skippable —
    "Skip for now" and "Finish without it" both complete setup.
 
+**Last page: apps to turn voice typing on in.** The final "You're all set"
+page lists apps to turn voice typing on in, because Always pastes only into apps
+on the allowlist and every other app stays paused. The list is chosen by how
+likely you are to dictate into the app, not alphabetically:
+
+1. likely dictation targets that are **running** (Slack, Messages, ChatGPT,
+   Claude, Cursor, VS Code, Zed, Chrome, Safari, Arc, Dia, Firefox, Mail,
+   Notes, Notion, WhatsApp, Teams, Discord, Telegram), in that fixed order;
+2. likely targets that are **installed but not running**, in the same order;
+3. any other running regular (Dock) app, A→Z.
+
+The list is capped at **10**, and the chosen apps are then *shown* A→Z. An app
+appears once even if it is both running and installed. Never offered: Always
+itself (every known bundle id), Finder, System Settings, Activity Monitor, and
+password managers and keychain tools (Passwords, Keychain Access, 1Password,
+Bitwarden). A browser stands in for web apps — Slack in a browser is covered by
+turning that browser on, since the allowlist is per app. Every checkbox starts
+**unchecked** unless that app is already resumed; ticking one resumes Always in
+it, unticking pauses it again. With nothing to list the page says to open the
+app and use "Resume Always for …" in the menu bar. ❓ The "installed" check
+only looks up the likely-target bundle ids, so an installed app outside that
+list never appears unless it is running; this is read from the code, not
+exercised on a machine with every target installed.
+
 **Completion is a recorded fact, not an inference.** It was previously derived
 from "is a Groq API key saved?", which was wrong in both directions: a user
 running a local model has no key and was re-shown the welcome window on every
@@ -1240,7 +1321,7 @@ Stored in the daemon's database, editable from Settings and the CLI
 
 | Key | Default | Meaning |
 |---|---|---|
-| `lang` | `auto` | Dictation language |
+| `lang` | `auto` | Dictation language. Groq sends it as Whisper's `language` (bare ISO code, `fr-FR` → `fr`); `auto` resolves to the system locale's language (as the Apple recognizer does), `en` if unknown. Before 2026-10-16 Groq was always sent `en`. |
 | `stt_energy_threshold` | 0.012 | Speech energy floor |
 | `hear_energy_threshold` | 0.001 | Wake-on-voice floor |
 | `silero_threshold` | 0.4 | VAD speech probability |
@@ -1255,7 +1336,7 @@ Stored in the daemon's database, editable from Settings and the CLI
 | `postprocess_mode` | unset → migrated (§9 item 6) | `fast` · `apple` · `groq` · `off` |
 | `postprocess_enabled` | true | Legacy; only read to migrate `postprocess_mode` when unset |
 | `transcript_stream` | true | Append accepted utterances to `~/.always/transcripts.jsonl` |
-| `capture_aec` | true | Echo-cancelled capture via `always-capture` (§3); false = plain `rec` |
+| `capture_aec` | false (unset = off) | Echo-cancelled (VPIO) capture via `always-capture` (§3); false = plain helper (`--no-vp`) |
 | `audible_status_sound` | off | Sound cues (off/low/medium/high; see §10.1) |
 | `per_app_settings_json` | — | Per-application pause rules |
 | `update_check` | true | Background GitHub release check (§12a); `ALWAYS_UPDATE_CHECK=0` also disables it |

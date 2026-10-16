@@ -15,8 +15,11 @@
 //! Failure policy: **speech is never lost.** A chunk's audio is retained
 //! in memory until its transcription succeeds; a chunk that fails all
 //! retries gets one synchronous retry at finalize, and if that also fails
-//! its WAV is written to `~/.always/failed-chunks/` with a placeholder in
-//! the joined text.
+//! its WAV is written to `~/.always/failed-chunks/` and the chunk is left
+//! out of the joined text — counted in `failed_chunks` so the paste path
+//! can cue the loss and hold back auto-Enter. No marker text ever enters
+//! the transcript: it would be pasted into the user's app (2026-10-16,
+//! a user got a literal `[audio saved: chunk 2]` in his message).
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -33,6 +36,23 @@ use crate::stt::{Transcriber, TranscriptionResult};
 const FINALIZE_POLL_MS: u64 = 10;
 /// Heartbeat cadence for the GUI's transcribing lease during finalize.
 const HEARTBEAT_SECS: u64 = 2;
+/// Floor of the per-chunk wait at finalize before the chunk is retried.
+const FINALIZE_MIN_WAIT_SECS: f64 = 10.0;
+
+#[cfg(test)]
+thread_local! {
+    /// Test override of [`FINALIZE_MIN_WAIT_SECS`] (finalize runs on the
+    /// test's own thread, so parallel tests are unaffected).
+    static TEST_MIN_WAIT_SECS: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+fn finalize_min_wait_secs() -> f64 {
+    #[cfg(test)]
+    if let Some(secs) = TEST_MIN_WAIT_SECS.with(|c| c.get()) {
+        return secs;
+    }
+    FINALIZE_MIN_WAIT_SECS
+}
 
 #[cfg(test)]
 static TEST_PAUSE_AFTER_RAW_PUBLISH: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>> =
@@ -67,9 +87,11 @@ struct ChunkText {
 
 pub struct ChunkedTranscript {
     /// Committed chunks joined in flush order (single spaces). Empty when
-    /// every chunk failed.
+    /// every chunk failed. Never contains a placeholder for a failed chunk.
     pub text: String,
     pub chunk_count: usize,
+    /// Chunks whose words are missing from `text` (audio spilled to the
+    /// failed-chunks dir instead).
     pub failed_chunks: usize,
     /// Per committed chunk `(acoustic confidence, words)`, for
     /// [`weighted_confidence`]. Chunks that recognized no words are left
@@ -460,7 +482,8 @@ impl ChunkAccumulator {
                     // take longer than the user keeps speaking; waiting for
                     // it before setting `result` made finalize time out and
                     // paste `[audio saved: chunk N]` even though Whisper had
-                    // already returned usable text.
+                    // already returned usable text. (No placeholder is
+                    // pasted any more — the chunk would be missing.)
                     *slot.result.lock() = Some(Ok(ChunkText {
                         raw: raw.clone(),
                         corrected: None,
@@ -533,7 +556,11 @@ impl ChunkAccumulator {
     /// Wait for every committed chunk (oldest first) and join their texts
     /// in flush order. A chunk that failed gets one synchronous retry;
     /// if that fails too its WAV is spilled to `~/.always/failed-chunks/`
-    /// and an `[audio saved: chunk N]` placeholder keeps its position.
+    /// and the chunk is left out of the text (counted in `failed_chunks`).
+    /// A chunk still in flight past its wait budget gets the same retry
+    /// (a local engine — Apple On-Device, Parakeet — that stalled on one
+    /// call usually answers a fresh one), then a last look at the
+    /// straggler's own result before it is given up.
     ///
     /// Emits the GUI transcribing heartbeat while waiting so the overlay
     /// lease can't expire during a long straggler.
@@ -554,7 +581,9 @@ impl ChunkAccumulator {
                 // Audio already dropped == transcription succeeded; the
                 // result is (or is about to be) stored. Tiny wait budget.
                 .unwrap_or(5.0);
-            let max_wait = Duration::from_secs_f64((audio_secs * 0.5).clamp(10.0, 60.0));
+            let min_wait = finalize_min_wait_secs();
+            let max_wait =
+                Duration::from_secs_f64((audio_secs * 0.5).clamp(min_wait, min_wait.max(60.0)));
             let started = Instant::now();
             let mut last_heartbeat = Instant::now();
             let outcome = loop {
@@ -590,19 +619,32 @@ impl ChunkAccumulator {
                         Some(text) => parts.push((text, slot.overlaps_prev)),
                         None => {
                             failed += 1;
-                            parts.push((self.spill_placeholder(slot), false));
+                            self.spill(slot);
                         }
                     }
                 }
                 None => {
-                    // Still in flight past the budget (wedged network,
-                    // open circuit breaker). Do NOT retry concurrently —
-                    // spill so the audio is safe, and let the straggler
-                    // finish into the abandoned slot harmlessly.
+                    // Still in flight past the budget. One fresh attempt;
+                    // the straggler finishes into the slot harmlessly, and
+                    // if it landed meanwhile its text is used.
                     tracing::warn!(chunk = slot.index, "chunk_wait_timeout");
                     scored.push((None, 0));
-                    failed += 1;
-                    parts.push((self.spill_placeholder(slot), false));
+                    let recovered = self.retry_sync(slot, transcriber).or_else(|| {
+                        match slot.result.lock().take() {
+                            Some(Ok(text)) => {
+                                let chosen = text.corrected.unwrap_or(text.raw);
+                                (!chosen.is_empty()).then_some(chosen)
+                            }
+                            _ => None,
+                        }
+                    });
+                    match recovered {
+                        Some(text) => parts.push((text, slot.overlaps_prev)),
+                        None => {
+                            failed += 1;
+                            self.spill(slot);
+                        }
+                    }
                 }
             }
         }
@@ -632,19 +674,17 @@ impl ChunkAccumulator {
         }
     }
 
-    /// Write the chunk's WAV to the failed-chunks dir and return the
-    /// placeholder that keeps its position in the joined transcript.
-    fn spill_placeholder(&self, slot: &ChunkSlot) -> String {
-        let placeholder = format!("[audio saved: chunk {}]", slot.index + 1);
+    /// Write a lost chunk's WAV to the failed-chunks dir so its speech
+    /// stays recoverable. Nothing is added to the transcript.
+    fn spill(&self, slot: &ChunkSlot) {
         let Some(audio_samples) = slot.audio.lock().clone() else {
             // Transcription succeeded but the result was consumed by a
             // racing path — nothing to spill.
-            return placeholder;
+            return;
         };
         if let Some(path) = spill_audio(&audio_samples, &format!("{}", slot.index + 1)) {
             tracing::warn!(chunk = slot.index, path = %path.display(), "chunk_audio_spilled");
         }
-        placeholder
     }
 }
 
@@ -894,11 +934,16 @@ mod tests {
         calls: AtomicUsize,
         texts: Vec<&'static str>,
         fail_calls: Vec<usize>,
+        /// Calls that hang for 3 s before answering (a stalled engine).
+        stall_calls: Vec<usize>,
     }
 
     impl Transcriber for MockTranscriber {
         fn transcribe_from_bytes(&self, _audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.stall_calls.contains(&call) {
+                std::thread::sleep(Duration::from_secs(3));
+            }
             if self.fail_calls.contains(&call) {
                 return Err(SttError::ClientError {
                     status: 500,
@@ -934,6 +979,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             texts,
             fail_calls,
+            stall_calls: vec![],
         })
     }
 
@@ -1035,15 +1081,60 @@ mod tests {
     }
 
     #[test]
-    fn doubly_failed_chunk_spills_placeholder() {
+    fn doubly_failed_chunk_is_spilled_never_a_marker() {
         let rt = rt();
-        // Background AND sync retry fail → placeholder + spilled WAV.
+        // Background AND sync retry fail → spilled WAV, no text at all.
         let t = mock(vec!["unused"], vec![0, 1]);
         let mut acc = ChunkAccumulator::new();
         acc.flush(vec![0i16; 16_000], &t, None, rt.handle());
         let joined = acc.finalize(&t);
-        assert_eq!(joined.text, "[audio saved: chunk 1]");
+        assert_eq!(joined.text, "");
         assert_eq!(joined.failed_chunks, 1);
+    }
+
+    /// 2026-10-16 (user report, long sentence): `[audio saved: chunk 2]`
+    /// was pasted into his message. A lost middle chunk leaves its
+    /// neighbours joined and is only counted.
+    #[test]
+    fn lost_middle_chunk_leaves_no_marker_in_the_paste() {
+        let rt = rt();
+        // Calls: 0 = chunk 1 ok, 1 = chunk 2 fails, 2 = chunk 3 ok,
+        // 3 = chunk 2's sync retry fails.
+        let t = mock(vec!["first part", "unused", "third part"], vec![1, 3]);
+        let mut acc = ChunkAccumulator::new();
+        for _ in 0..3 {
+            acc.flush(vec![0i16; 16_000], &t, None, rt.handle());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let joined = acc.finalize(&t);
+        assert_eq!(joined.text, "first part third part");
+        assert_eq!(joined.chunk_count, 3);
+        assert_eq!(joined.failed_chunks, 1);
+        assert!(!joined.text.contains('['), "{:?}", joined.text);
+    }
+
+    /// A local engine (Apple On-Device / Parakeet) stalls on one chunk
+    /// past the finalize budget: a fresh call recovers its words instead
+    /// of giving the chunk up.
+    #[test]
+    fn stalled_chunk_is_retried_after_the_wait_budget() {
+        let rt = rt();
+        let t: Arc<dyn Transcriber> = Arc::new(MockTranscriber {
+            calls: AtomicUsize::new(0),
+            texts: vec!["unused", "stalled words recovered"],
+            fail_calls: vec![],
+            stall_calls: vec![0],
+        });
+        let mut acc = ChunkAccumulator::new();
+        acc.flush(vec![0i16; 16_000], &t, None, rt.handle());
+        std::thread::sleep(Duration::from_millis(20));
+        TEST_MIN_WAIT_SECS.with(|c| c.set(Some(0.2)));
+        let started = Instant::now();
+        let joined = acc.finalize(&t);
+        TEST_MIN_WAIT_SECS.with(|c| c.set(None));
+        assert_eq!(joined.text, "stalled words recovered");
+        assert_eq!(joined.failed_chunks, 0);
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

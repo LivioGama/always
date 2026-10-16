@@ -2765,6 +2765,7 @@ fn record_with_local_vad(
             transcriber,
             String::new(),
             &crate::stt::TranscriptionResult::default(),
+            false,
             committed_samples,
             speech_energy.max(cfg.energy_threshold),
             speech_end_at,
@@ -2868,6 +2869,8 @@ fn record_with_local_vad(
         .and_then(|r| r.as_ref().ok())
         .and_then(|r| r.evidence.confidence);
 
+    // Set when a chunked utterance's tail could not be transcribed at all.
+    let mut tail_lost = false;
     let (mut result, speculation_used) = if let Some(text) = streaming_final {
         (
             crate::stt::TranscriptionResult {
@@ -2944,12 +2947,23 @@ fn record_with_local_vad(
                     // The tail of a chunked utterance failed: the committed
                     // chunks are already transcribed and must still be pasted.
                     Err(err) => {
+                        // Parakeet rescue first (already decoding, bounded
+                        // wait), then one fresh call to the pasting engine
+                        // — the only recovery for a non-English Apple tail
+                        // or the Parakeet V3 backend, where no rescue runs.
                         let text = recover_failed_chunked_tail(
                             &speech_samples,
                             &anyhow::Error::from(err),
                             chunker.chunk_count(),
-                            |_| tail_rescue.and_then(TailRescue::finish),
+                            |span| {
+                                tail_rescue
+                                    .and_then(TailRescue::finish)
+                                    .filter(|t| !t.trim().is_empty())
+                                    .or_else(|| retry_tail_once(transcriber, span))
+                            },
                         );
+                        tail_lost = text.is_none();
+                        let text = text.unwrap_or_default();
                         (
                             crate::stt::TranscriptionResult {
                                 text,
@@ -2980,6 +2994,7 @@ fn record_with_local_vad(
             transcriber,
             raw,
             &result,
+            tail_lost,
             committed_samples + speech_samples.len(),
             speech_energy.max(cfg.energy_threshold),
             speech_end_at,
@@ -3067,17 +3082,18 @@ fn record_with_local_vad(
 /// 480 already-transcribed characters of the three committed chunks were
 /// discarded with it). The tail audio is saved to the failed-chunks
 /// recovery dir first; `fallback` gets one try at the same span (the
-/// Parakeet helper in production). Its text is returned when it heard
-/// words, otherwise the `[audio saved: chunk N]` placeholder the chunker
-/// uses for a chunk that failed — so the committed chunks are always
-/// assembled and pasted.
+/// Parakeet helper, then a fresh call to the pasting engine, in
+/// production). Its text is returned when it heard words, otherwise
+/// `None`: the tail is left out — never replaced by marker text, which
+/// would be pasted (2026-10-16: a user got `[audio saved: chunk 2]` in his
+/// message) — and the committed chunks are still assembled and pasted.
 #[cfg(target_os = "macos")]
 fn recover_failed_chunked_tail(
     tail: &[i16],
     err: &anyhow::Error,
     committed_chunks: usize,
     fallback: impl FnOnce(&[i16]) -> Option<String>,
-) -> String {
+) -> Option<String> {
     let chunk_no = committed_chunks + 1;
     let saved = crate::always::chunker::spill_audio(tail, &format!("{chunk_no}-tail"));
     let recovered = fallback(tail)
@@ -3088,11 +3104,30 @@ fn recover_failed_chunked_tail(
         committed_chunks,
         tail_secs = tail.len() as f64 / 16_000.0,
         saved = saved.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
-        recovered_by = if recovered.is_some() { "parakeet_preview" } else { "none" },
+        recovered = recovered.is_some(),
         recovered_chars = recovered.as_ref().map_or(0, |t| t.chars().count()),
         "chunked_tail_stt_failed"
     );
-    recovered.unwrap_or_else(|| format!("[audio saved: chunk {chunk_no}]"))
+    recovered
+}
+
+/// One fresh transcription of a failed chunked tail by the pasting engine.
+#[cfg(target_os = "macos")]
+fn retry_tail_once(transcriber: &Arc<dyn Transcriber>, span: &[i16]) -> Option<String> {
+    let wav = audio::create_wav_bytes_i16_mono_16k(span).ok()?;
+    match transcriber.transcribe_from_bytes(wav) {
+        Ok(r) => {
+            tracing::info!(
+                chars = r.text.trim().chars().count(),
+                "chunked_tail_retry_succeeded"
+            );
+            Some(r.text.trim().to_string()).filter(|t| !t.is_empty())
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "chunked_tail_retry_failed");
+            None
+        }
+    }
 }
 
 /// The pasting recognizer's tail pass normally returns well inside this
@@ -3173,8 +3208,13 @@ impl TailRescue {
     }
 }
 
+/// Error text when no part of a chunked dictation could be transcribed
+/// (matched by `event_loop::classify_transcription_error`).
+pub const CHUNKS_LOST_ERROR: &str = "dictation could not be transcribed, audio saved";
+
 /// Assemble a chunked utterance: wait for committed chunks, join them in
 /// flush order, and append the (already transcribed) tail text.
+/// `tail_lost`: the tail's speech could not be transcribed (left out).
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 fn finalize_chunked(
@@ -3182,6 +3222,7 @@ fn finalize_chunked(
     transcriber: &Arc<dyn Transcriber>,
     tail_text: String,
     tail_result: &crate::stt::TranscriptionResult,
+    tail_lost: bool,
     total_samples: usize,
     energy: f64,
     speech_end_at: std::time::Instant,
@@ -3203,12 +3244,21 @@ fn finalize_chunked(
             full_text.push_str(tail);
         }
     }
+    let unrecovered_parts = assembled.failed_chunks + usize::from(tail_lost);
     if full_text.is_empty() {
+        if unrecovered_parts > 0 {
+            // Every part was lost: an error, so the user gets the failure
+            // cue — never a silent drop of a long dictation.
+            return Err(anyhow::anyhow!(
+                "{CHUNKS_LOST_ERROR}: {unrecovered_parts} part(s)"
+            ));
+        }
         return Ok(RecordResult::DroppedNoise { raw: String::new() });
     }
     tracing::info!(
         chunks = assembled.chunk_count,
         failed_chunks = assembled.failed_chunks,
+        tail_lost,
         chars = full_text.chars().count(),
         "chunked_utterance_assembled"
     );
@@ -3234,6 +3284,7 @@ fn finalize_chunked(
         segments: Vec::new(),
         evidence: crate::stt::RecognitionEvidence {
             confidence: crate::always::chunker::weighted_confidence(&confidence_parts),
+            unrecovered_parts,
             ..Default::default()
         },
     };
@@ -3501,7 +3552,7 @@ mod tests {
             fed = span.len();
             Some("  I mean, actually. ".into())
         });
-        assert_eq!(text, "I mean, actually.");
+        assert_eq!(text.as_deref(), Some("I mean, actually."));
         assert_eq!(fed, tail.len(), "the fallback gets the whole failed span");
         let saved = spilled_tails("41-tail");
         assert_eq!(saved.len(), before + 1, "tail audio saved");
@@ -3515,20 +3566,185 @@ mod tests {
         );
     }
 
-    /// No fallback text (helper absent, cold, timed out, or heard nothing):
-    /// the chunker's placeholder keeps the tail's position in the paste.
+    /// Engine scripted per call: `Ok(text)` or `Err(message)` (the exact
+    /// error each local backend raises). Repeats the last entry.
+    #[cfg(target_os = "macos")]
+    struct ScriptedEngine {
+        calls: std::sync::atomic::AtomicUsize,
+        script: Vec<Result<&'static str, &'static str>>,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl crate::stt::Transcriber for ScriptedEngine {
+        fn transcribe_from_bytes(
+            &self,
+            _audio: Vec<u8>,
+        ) -> Result<crate::stt::TranscriptionResult, crate::stt::SttError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.script[call.min(self.script.len() - 1)] {
+                Ok(text) => Ok(crate::stt::TranscriptionResult {
+                    text: text.into(),
+                    ..Default::default()
+                }),
+                Err(msg) => Err(crate::stt::SttError::Other(anyhow::anyhow!(msg))),
+            }
+        }
+
+        fn transcribe_streaming(
+            &self,
+            audio: Vec<u8>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<
+                            crate::stt::StreamingTranscriptionResult,
+                            crate::stt::SttError,
+                        >,
+                    > + Send,
+            >,
+        > {
+            let r = self.transcribe_from_bytes(audio).map(|r| {
+                crate::stt::StreamingTranscriptionResult {
+                    text: r.text,
+                    is_final: true,
+                    is_interim: false,
+                }
+            });
+            Box::pin(futures::stream::once(async move { r }))
+        }
+    }
+
+    /// The error text each pasting backend raises when a call fails:
+    /// Apple On-Device (SpeechTranscriber timeout), Parakeet V3 (local
+    /// engine) and Groq (retries exhausted — where Livio hit #126). All
+    /// reach the chunk / tail recovery the same way.
+    #[cfg(target_os = "macos")]
+    const BACKEND_FAILURES: [(&str, &str); 3] = [
+        ("apple", "Apple STT failed: speech recognition timed out"),
+        ("parakeet_v3", "parakeet transcribe failed: inference error"),
+        ("groq", "Groq rate-limited the request after 3 attempts"),
+    ];
+
+    #[cfg(target_os = "macos")]
+    fn engine(
+        script: Vec<Result<&'static str, &'static str>>,
+    ) -> std::sync::Arc<dyn crate::stt::Transcriber> {
+        std::sync::Arc::new(ScriptedEngine {
+            calls: Default::default(),
+            script,
+        })
+    }
+
+    /// 2026-10-16 user report (long sentence): `[audio saved: chunk 2]` was
+    /// pasted into his message. Chunk 2 fails twice (background + retry)
+    /// and the tail is lost too: the paste holds only the words heard, no
+    /// marker, and the result says two parts are missing (→ no Return,
+    /// overlay cue). Both backends.
     #[cfg(target_os = "macos")]
     #[test]
-    fn failed_chunked_tail_without_fallback_is_a_placeholder() {
+    fn lost_chunk_and_tail_never_paste_a_marker_on_either_backend() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        for (backend, failure) in BACKEND_FAILURES {
+            // Calls: 0 chunk 1, 1 chunk 2 (fails), 2 chunk 2 retry (fails).
+            let t = engine(vec![Ok("Bonjour, voici la première partie"), Err(failure)]);
+            let mut chunker = crate::always::chunker::ChunkAccumulator::new();
+            chunker.flush(vec![0i16; 16_000], &t, None, rt.handle());
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            chunker.flush(vec![0i16; 16_000], &t, None, rt.handle());
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let r = super::finalize_chunked(
+                &chunker,
+                &t,
+                String::new(),
+                &crate::stt::TranscriptionResult::default(),
+                true,
+                48_000,
+                0.05,
+                std::time::Instant::now(),
+                false,
+            )
+            .unwrap();
+            match r {
+                super::RecordResult::Speech {
+                    text,
+                    transcription,
+                    ..
+                } => {
+                    assert_eq!(text, "Bonjour, voici la première partie", "{backend}");
+                    assert!(!text.contains('['), "{backend}: {text:?}");
+                    assert_eq!(transcription.evidence.unrecovered_parts, 2, "{backend}");
+                }
+                _ => panic!("{backend}: heard words were not pasted"),
+            }
+        }
+    }
+
+    /// Nothing at all could be transcribed: an error (→ failure cue), never
+    /// a silent drop and never marker text. Both backends.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn every_part_lost_is_an_error_on_either_backend() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        for (backend, failure) in BACKEND_FAILURES {
+            let t = engine(vec![Err(failure)]);
+            let mut chunker = crate::always::chunker::ChunkAccumulator::new();
+            chunker.flush(vec![0i16; 16_000], &t, None, rt.handle());
+            let r = super::finalize_chunked(
+                &chunker,
+                &t,
+                String::new(),
+                &crate::stt::TranscriptionResult::default(),
+                true,
+                32_000,
+                0.05,
+                std::time::Instant::now(),
+                false,
+            );
+            let err = r.err().unwrap_or_else(|| panic!("{backend}: not an error"));
+            assert!(
+                format!("{err:#}").contains(super::CHUNKS_LOST_ERROR),
+                "{backend}: {err:#}"
+            );
+        }
+    }
+
+    /// A failed tail with no Parakeet rescue (non-English Apple, or the
+    /// Parakeet V3 backend itself) gets one fresh call to the pasting
+    /// engine, and its words are kept. Both backends.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn failed_tail_is_recovered_by_a_fresh_call_on_either_backend() {
+        let tail = vec![700i16; 8_000];
+        for (backend, failure) in BACKEND_FAILURES {
+            let t = engine(vec![Ok("et voilà la fin")]);
+            let err = anyhow::anyhow!(failure);
+            let text = super::recover_failed_chunked_tail(&tail, &err, 1, |span| {
+                None.or_else(|| super::retry_tail_once(&t, span))
+            });
+            assert_eq!(text.as_deref(), Some("et voilà la fin"), "{backend}");
+            let t = engine(vec![Err(failure)]);
+            let text = super::recover_failed_chunked_tail(&tail, &err, 1, |span| {
+                super::retry_tail_once(&t, span)
+            });
+            assert_eq!(text, None, "{backend}: a lost tail is left out");
+        }
+    }
+
+    /// No fallback text (helper absent, cold, timed out, or heard nothing):
+    /// the tail is left out — never a marker string, which would be pasted
+    /// (2026-10-16 user report: `[audio saved: chunk 2]` in his message).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn failed_chunked_tail_without_fallback_is_left_out_not_a_marker() {
         let tail = vec![500i16; 8_000];
         let err = anyhow::anyhow!("speech recognition timed out");
         assert_eq!(
             super::recover_failed_chunked_tail(&tail, &err, 52, |_| None),
-            "[audio saved: chunk 53]"
+            None
         );
         assert_eq!(
             super::recover_failed_chunked_tail(&tail, &err, 52, |_| Some("  ".into())),
-            "[audio saved: chunk 53]"
+            None
         );
         assert!(spilled_tails("53-tail").len() >= 2);
     }

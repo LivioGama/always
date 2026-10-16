@@ -14,8 +14,20 @@
 // polling. Measured 2026-10-14 on the user's MacBook Air (60 s windows, same
 // room): VPIO active 15.1 CPU-s/min, VPIO bypassed 3.0 CPU-s/min.
 //
-// Usage: always-capture [--no-vp] [--aec-always] [--agc] [--duck]
-//   --no-vp  plain capture (no echo cancellation) — measurement baseline
+// 2026-10-16: VPIO is OFF by default — plain mic capture unless `--vp` (or
+// env ALWAYS_CAPTURE_AEC=vp). Starting a voice-processing unit changes what
+// EVERY app plays: measured on a MacBook Air (macOS 27, built-in speakers),
+// coreaudiod restarts the OUTPUT device's IO when the unit starts and again
+// when it stops (an audible cut in Apple Music / Spotify), logs Audio IO
+// Overloads at both edges, ducks every other client to 0.178 (−15 dB) for
+// ~2 s and then holds them at 0.631 (−4 dB) for as long as it runs — even at
+// duckingLevel .min. A plain (`--no-vp`) helper caused none of these. User
+// report (v0.1.0): micro-cuts / crackling in music and on a speaker while
+// Always ran.
+//
+// Usage: always-capture [--vp] [--no-vp] [--aec-always] [--agc] [--duck]
+//   --vp     voice-processing echo canceller (opt-in, see above)
+//   --no-vp  plain capture (no echo cancellation) — the default; wins over --vp
 //   --aec-always  never bypass the echo canceller (pre-2026-10-14 behaviour)
 //   --agc    keep VPIO's automatic gain control on (default off: the daemon's
 //            energy thresholds are calibrated on un-gained mic levels)
@@ -29,7 +41,8 @@ import Foundation
 
 signal(SIGPIPE, SIG_IGN)
 let args = Set(CommandLine.arguments.dropFirst())
-let useVP = !args.contains("--no-vp")
+let useVP = (args.contains("--vp") || ProcessInfo.processInfo.environment["ALWAYS_CAPTURE_AEC"] == "vp")
+    && !args.contains("--no-vp")
 let parentPid = getppid()
 
 func log(_ s: String) {

@@ -182,10 +182,24 @@ pub fn classify_transcription(
             };
         }
 
-        if let Some(reason) = crate::always::hallucination::is_hallucination(transcription) {
+        if let Some(reason) =
+            crate::always::hallucination::is_hallucination_in(transcription, &cfg.lang)
+        {
             return SpeechAction::Hallucinated {
                 reason: reason.to_string(),
             };
+        }
+
+        // One garbled token never costs the sentence: remove just it, keep
+        // the rest of what he said, and log what was removed.
+        let (cleaned, dropped) = crate::always::hallucination::clean_suspicious_words(text);
+        if !dropped.is_empty() && !cleaned.trim().is_empty() {
+            if crate::always::telemetry::should_log_transcripts() {
+                tracing::info!(?dropped, "suspicious_tokens_dropped");
+            } else {
+                tracing::info!(count = dropped.len(), "suspicious_tokens_dropped");
+            }
+            return SpeechAction::Paste { text: cleaned };
         }
     }
 
@@ -524,6 +538,62 @@ mod tests {
             ),
             other => panic!("expected verbatim Paste on local, got {:?}", other),
         }
+    }
+
+    fn groq_config(lang: &str) -> AlwaysConfig {
+        let mut cfg = test_config();
+        cfg.transcriber_backend = crate::stt_dispatch::TranscriberBackendChoice::Groq;
+        cfg.lang = lang.to_string();
+        cfg
+    }
+
+    /// 2026-10-16 (Ludwig, French, Groq Whisper): every accented utterance
+    /// was dropped as "filtered mixed-script word". French must paste
+    /// verbatim whatever app is focused — classification never sees the app.
+    #[test]
+    fn classify_groq_pastes_french_with_accents() {
+        let now = Instant::now();
+        for lang in ["en", "fr", "auto"] {
+            let cfg = groq_config(lang);
+            for text in [
+                "Est-ce que tu peux régénérer la réponse en français ?",
+                "J'ai déjà envoyé le message à l'équipe, ça devrait aller.",
+                "Ouvre ChatGPT et fais-moi un résumé du meeting d'hier.",
+            ] {
+                let mut tr = empty_transcription(text);
+                tr.language = "french".into();
+                tr.duration = 4.0;
+                match classify_transcription(&cfg, text, &tr, now, now - Duration::from_secs(10)) {
+                    SpeechAction::Paste { text: pasted } => assert_eq!(pasted, text),
+                    other => panic!("{text} ({lang}): expected Paste, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn classify_groq_drops_only_the_noise_token() {
+        let cfg = groq_config("fr");
+        let now = Instant::now();
+        let text = "Je t'envoie le résumé ünkLöß demain matin.";
+        let mut tr = empty_transcription(text);
+        tr.duration = 3.0;
+        match classify_transcription(&cfg, text, &tr, now, now - Duration::from_secs(10)) {
+            SpeechAction::Paste { text } => assert_eq!(text, "Je t'envoie le résumé demain matin."),
+            other => panic!("expected Paste without the noise token, got {other:?}"),
+        }
+        // Nothing but noise: still filtered as a hallucination.
+        let junk = "ünkLöß expenseÁê";
+        assert!(matches!(
+            classify_transcription(
+                &cfg,
+                junk,
+                &empty_transcription(junk),
+                now,
+                now - Duration::from_secs(10)
+            ),
+            SpeechAction::Hallucinated { .. }
+        ));
     }
 
     /// The 2026-10-14 bug: Nepali to mom → "And a baggy?" was pasted AND

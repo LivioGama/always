@@ -424,21 +424,43 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
 
     // The Hello frame MUST be first so version-mismatched clients can
     // disconnect before reading state they may not understand.
-    let initial_events = vec![
+    let mut initial_events = vec![
         DaemonEvent::Hello {
             version: crate::always::event::PROTOCOL_VERSION,
         },
         DaemonEvent::ListeningStarted, // Send immediately after Hello
-        if is_paused {
-            DaemonEvent::Paused
-        } else {
-            DaemonEvent::Resumed
-        },
         DaemonEvent::MasterPauseChanged {
             master_paused: is_master_paused,
         },
         DaemonEvent::ResumedAppsChanged {
             bundles: resumed_bundles,
+        },
+    ];
+    // Active watchdog sources, so a (re)connecting GUI predicts with them
+    // instead of guessing "listening" over a live mic conflict. Only ACTIVE
+    // ones: `paused:false` for an inactive source would make the GUI drop a
+    // live one (`pauseSource = paused ? source : null`).
+    for (source, active) in [
+        ("mic_conflict", pause::is_mic_conflict_paused()),
+        ("audio_output", pause::is_audio_output_paused()),
+    ] {
+        if active {
+            initial_events.push(DaemonEvent::PauseSourceChanged {
+                source: source.into(),
+                paused: true,
+                detail: None,
+            });
+        }
+    }
+    initial_events.extend([
+        // Effective state AFTER the above: the GUI recomputes a local
+        // prediction on MasterPauseChanged / ResumedAppsChanged, so sending
+        // the truth first let that prediction overwrite it (icon showed
+        // "listening" while the daemon was idle- or mic-paused).
+        if is_paused {
+            DaemonEvent::Paused
+        } else {
+            DaemonEvent::Resumed
         },
         if is_auto_enter {
             DaemonEvent::AutoEnterEnabled
@@ -450,9 +472,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         DaemonEvent::ActiveTranscriberChanged {
             backend: active_backend,
         },
-    ];
-
-    let mut initial_events = initial_events;
+    ]);
     // Daemon-side tap health (Input Monitoring): a startup broadcast would
     // be lost (no clients yet), so each client gets the current status in
     // its initial burst.
@@ -647,32 +667,27 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
 fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &AtomicBool) {
     match cmd {
         DaemonCommand::TogglePause => {
-            // toggle_pause flips MASTER and returns (effective, changed).
-            // We clear idle BEFORE the toggle so the recompute inside
-            // toggle_pause sees idle=false and produces the correct
-            // effective state. The old order (toggle → set_idle) left
-            // EFFECTIVE_PAUSED stale when master flipped to false while
-            // idle was set — the daemon stayed "effectively paused" even
-            // though every source was cleared.
-            let was_master = pause::is_master_paused();
-            if was_master {
-                pause::set_idle_auto_paused(false);
-                pause::mark_voice_seen();
-            }
-            let (effective, changed) = pause::toggle_pause();
-            let master = pause::is_master_paused();
-            // Master always changed (we just toggled it) — broadcast so
-            // the UI can label the global toggle correctly.
-            global_broadcaster().master_pause_changed(master);
-            if changed {
-                if effective {
-                    pause::dictation_buffer_clear();
-                    global_broadcaster().paused();
-                } else {
-                    global_broadcaster().resumed();
-                }
-            }
-            tracing::info!(master, effective, changed, "uds_toggle_pause");
+            // Same semantics as the master chord: while anything the user
+            // may override is pausing (master, idle, mic conflict, audio
+            // output), a toggle RESUMES. It used to flip master only, so
+            // the idle pill's Play (and the tray / CLI) turned an idle or
+            // mic-conflict pause into "paused everywhere".
+            let out = crate::always::pause_commands::toggle_global();
+            tracing::info!(
+                master = out.master,
+                effective = out.effective,
+                changed = out.changed,
+                "uds_toggle_pause"
+            );
+        }
+        DaemonCommand::Resume => {
+            let out = crate::always::pause_commands::resume();
+            tracing::info!(
+                master = out.master,
+                effective = out.effective,
+                changed = out.changed,
+                "uds_resume"
+            );
         }
         DaemonCommand::ToggleAutoEnter => {
             let new_state = pause::toggle_auto_enter();
@@ -884,9 +899,12 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                     tracing::info!(effective, "audio_output_auto_resumed");
                 }
             } else {
-                // Idle-paused: drop the audio source flag quietly so it
-                // can't strand a pause after idle resume.
+                // Idle-paused: drop the audio source flag (no Resumed —
+                // idle still pauses) so it can't strand a pause after idle
+                // resume. The GUI must still hear the source cleared, or
+                // its prediction keeps "audio playing" forever (#124).
                 let _ = pause::set_audio_output_paused(false);
+                global_broadcaster().pause_source_changed("audio_output", false, None);
             }
         }
         DaemonCommand::SetAppPaused { bundle_id, paused } => {
@@ -894,29 +912,15 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             // effective state. Broadcasting is gated on `changed` so
             // setting an override for a non-focused app doesn't spam
             // the UDS bus.
-            match crate::always::per_app::set_app_paused_override(&bundle_id, paused) {
-                Ok(()) => {
-                    let (effective, changed) = pause::recompute_effective();
-                    if changed {
-                        if effective {
-                            pause::dictation_buffer_clear();
-                            global_broadcaster().paused();
-                        } else {
-                            pause::mark_voice_seen();
-                            global_broadcaster().resumed();
-                        }
-                    }
-                    // Always broadcast the updated allowlist so every
-                    // connected client (Settings UI, menu bar) sees
-                    // the same snapshot without round-tripping
-                    // through the CLI `config show` path.
-                    global_broadcaster()
-                        .resumed_apps_changed(crate::always::per_app::resumed_apps());
+            // Plain allowlist editing: does not lift idle / watchdog pauses
+            // (see `pause_commands::set_app_paused`).
+            match crate::always::pause_commands::set_app_paused(&bundle_id, paused) {
+                Ok(out) => {
                     tracing::info!(
                         bundle = %bundle_id,
                         paused = ?paused,
-                        effective,
-                        changed,
+                        effective = out.effective,
+                        changed = out.changed,
                         "uds_set_app_paused"
                     );
                 }
@@ -1166,11 +1170,19 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
     }
 }
 
+/// Held for the whole of `switch_active_backend` / `set_language`. The engine
+/// build runs outside the config lock (it would freeze dictation), so without
+/// this two UDS clients could interleave — `set_language` snapshotting the
+/// config mid-switch — leaving the config naming backend A while the active
+/// slot holds backend B. The main loop never takes this lock.
+static TRANSCRIBER_REBUILD: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// Update the transcription language live: write `cfg.lang`, persist to the
 /// prefs DB, and rebuild the active transcriber so engines that bake the
 /// language into their decode (Canary, Cohere, SenseVoice) pick it up
 /// without a daemon restart.
 fn set_language(ctx: &ModelCommandCtx, lang: &str) {
+    let _rebuild = TRANSCRIBER_REBUILD.lock();
     {
         let mut cfg = ctx.cfg.write();
         cfg.lang = lang.to_string();
@@ -1197,28 +1209,17 @@ fn set_language(ctx: &ModelCommandCtx, lang: &str) {
 /// DB, and emit [`DaemonEvent::ActiveTranscriberChanged`] so connected
 /// UDS clients refresh their active-model badge.
 fn switch_active_backend(ctx: &ModelCommandCtx, choice: TranscriberBackendChoice) {
-    // Selecting the backend that is already active is free. Without this
-    // guard it is anything but: each call rebuilds the transcriber, which
-    // for a local model means loading ONNX sessions from disk, and each
-    // success broadcasts `ActiveTranscriberChanged` — which the GUI's
-    // model picker observes, re-emitting the selection and driving the
-    // whole cycle again. Measured on a single user-initiated switch: ten
-    // `SetActiveTranscriber` commands and ten full transcriber rebuilds
-    // inside one second, which is the stall the user sees as the app
-    // freezing after picking a model.
-    //
-    // Idempotence here fixes it at the source regardless of how the UI
-    // binding behaves.
-    if ctx.cfg.read().transcriber_backend == choice {
-        tracing::debug!(backend = %choice, "uds_set_active_transcriber_noop");
-        return;
-    }
-
-    let mut new_cfg = ctx.cfg.write();
-    new_cfg.transcriber_backend = choice.clone();
-    match build_transcriber(&new_cfg, &ctx.registry) {
-        Ok(transcriber) => {
-            *ctx.active.write() = transcriber;
+    let _rebuild = TRANSCRIBER_REBUILD.lock();
+    let outcome = switch_backend_with(&ctx.cfg, &choice, |cfg| {
+        build_transcriber(cfg, &ctx.registry)
+    });
+    let active_now = ctx.cfg.read().transcriber_backend.to_string();
+    match &outcome {
+        SwitchOutcome::Noop => {
+            tracing::debug!(backend = %choice, "uds_set_active_transcriber_noop");
+        }
+        SwitchOutcome::Switched(transcriber) => {
+            *ctx.active.write() = Arc::clone(transcriber);
             // Persist so the next daemon start uses the same choice.
             if let Ok(conn) = crate::db::open() {
                 let value = choice.to_string();
@@ -1226,15 +1227,84 @@ fn switch_active_backend(ctx: &ModelCommandCtx, choice: TranscriberBackendChoice
                     tracing::warn!(error = %e, "persist_transcriber_backend_failed");
                 }
             }
-            global_broadcaster().send(DaemonEvent::ActiveTranscriberChanged {
-                backend: choice.to_string(),
-            });
             tracing::info!(backend = %choice, "uds_set_active_transcriber");
         }
-        Err(e) => {
-            tracing::error!(backend = %choice, error = %e, "build_new_transcriber_failed");
+        SwitchOutcome::Failed(error) => {
+            tracing::error!(backend = %choice, error = %error, "build_new_transcriber_failed");
         }
     }
+    for event in switch_events(&choice, &active_now, &outcome) {
+        global_broadcaster().send(event);
+    }
+}
+
+/// Result of a backend switch request.
+enum SwitchOutcome<T> {
+    /// Already the active backend — nothing rebuilt.
+    Noop,
+    /// The new engine built and is now the configured backend.
+    Switched(T),
+    /// The new engine failed to build; the config still names the backend
+    /// that was active before, which keeps running.
+    Failed(String),
+}
+
+/// Switch `cfg` to `choice`, building the engine with `build`.
+///
+/// The build (for a local model: loading ONNX sessions from disk and a
+/// warm-up decode, seconds on a cold disk) runs on a CLONE of the config,
+/// never under the config write lock — the main loop reads that config
+/// every utterance, so holding it froze dictation for the whole load.
+/// The config only names `choice` once the engine exists: a failed build
+/// leaves it on the backend that is still actually running, so a retry is
+/// a real retry instead of a silent "already active" no-op.
+///
+/// Selecting the backend that is already active is free (no rebuild):
+/// rebuilding on every echo was a measured ten-rebuilds-in-one-second
+/// stall when the GUI's picker re-emitted its selection.
+fn switch_backend_with<T>(
+    cfg: &ActiveConfig,
+    choice: &TranscriberBackendChoice,
+    build: impl FnOnce(&crate::always::AlwaysConfig) -> Result<T>,
+) -> SwitchOutcome<T> {
+    let mut candidate = {
+        let current = cfg.read();
+        if current.transcriber_backend == *choice {
+            return SwitchOutcome::Noop;
+        }
+        current.clone()
+    };
+    candidate.transcriber_backend = choice.clone();
+    match build(&candidate) {
+        Ok(t) => {
+            cfg.write().transcriber_backend = choice.clone();
+            SwitchOutcome::Switched(t)
+        }
+        Err(e) => SwitchOutcome::Failed(format!("{e:#}")),
+    }
+}
+
+/// What the GUI is told about a switch. EVERY outcome ends with the
+/// backend that is active now: the Models tab shows "Loading…" from the
+/// click until an `ActiveTranscriberChanged` arrives, so an outcome that
+/// sent nothing (a no-op, a failed load) left that spinner on forever.
+/// A failure first says why, so the row shows the error instead.
+fn switch_events<T>(
+    choice: &TranscriberBackendChoice,
+    active_now: &str,
+    outcome: &SwitchOutcome<T>,
+) -> Vec<DaemonEvent> {
+    let mut events = Vec::with_capacity(2);
+    if let SwitchOutcome::Failed(error) = outcome {
+        events.push(DaemonEvent::ActiveTranscriberFailed {
+            backend: choice.to_string(),
+            error: error.clone(),
+        });
+    }
+    events.push(DaemonEvent::ActiveTranscriberChanged {
+        backend: active_now.to_string(),
+    });
+    events
 }
 
 /// Hot-reload fields the main loop reads from [`AlwaysConfig`] each
@@ -1553,4 +1623,114 @@ fn best_token_match(haystack: &str, needle: &str) -> Option<(String, usize)> {
 /// Send an event to all connected clients
 pub fn send_event(event: DaemonEvent) {
     global_broadcaster().send(event);
+}
+
+#[cfg(test)]
+mod switch_backend_tests {
+    use super::*;
+    use parking_lot::RwLock;
+
+    fn cfg_on(choice: TranscriberBackendChoice) -> ActiveConfig {
+        Arc::new(RwLock::new(crate::always::AlwaysConfig {
+            transcriber_backend: choice,
+            ..Default::default()
+        }))
+    }
+
+    fn parakeet() -> TranscriberBackendChoice {
+        "local:parakeet-tdt-0.6b-v3".parse().unwrap()
+    }
+
+    fn backends(events: &[DaemonEvent]) -> Vec<String> {
+        events
+            .iter()
+            .map(|e| match e {
+                DaemonEvent::ActiveTranscriberChanged { backend } => format!("changed:{backend}"),
+                DaemonEvent::ActiveTranscriberFailed { backend, error } => {
+                    format!("failed:{backend}:{error}")
+                }
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// Ludwig (16 Oct): Parakeet v3 "Use" stuck on "Loading…". A failed
+    /// load must say why AND re-announce the backend still running, and
+    /// must not leave the config claiming the model that failed.
+    #[test]
+    fn failed_load_reports_error_and_keeps_previous_backend() {
+        let cfg = cfg_on(TranscriberBackendChoice::Groq);
+        let outcome: SwitchOutcome<()> =
+            switch_backend_with(&cfg, &parakeet(), |_| anyhow::bail!("onnx: file missing"));
+        assert!(matches!(outcome, SwitchOutcome::Failed(_)));
+        assert_eq!(
+            cfg.read().transcriber_backend,
+            TranscriberBackendChoice::Groq
+        );
+        let active = cfg.read().transcriber_backend.to_string();
+        assert_eq!(
+            backends(&switch_events(&parakeet(), &active, &outcome)),
+            vec![
+                "failed:local:parakeet-tdt-0.6b-v3:onnx: file missing".to_string(),
+                "changed:groq".to_string()
+            ]
+        );
+        // A retry is a real retry, not an "already active" no-op.
+        let retry: SwitchOutcome<()> = switch_backend_with(&cfg, &parakeet(), |_| Ok(()));
+        assert!(matches!(retry, SwitchOutcome::Switched(())));
+        assert_eq!(cfg.read().transcriber_backend, parakeet());
+    }
+
+    #[test]
+    fn failed_event_wire_shape_matches_gui() {
+        let e = DaemonEvent::ActiveTranscriberFailed {
+            backend: "local:parakeet-tdt-0.6b-v3".into(),
+            error: "file missing".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"type":"ActiveTranscriberFailed","data":{"backend":"local:parakeet-tdt-0.6b-v3","error":"file missing"}}"#
+        );
+    }
+
+    #[test]
+    fn noop_still_confirms_so_the_spinner_clears() {
+        let cfg = cfg_on(parakeet());
+        let mut built = false;
+        let outcome: SwitchOutcome<()> = switch_backend_with(&cfg, &parakeet(), |_| {
+            built = true;
+            Ok(())
+        });
+        assert!(!built, "already-active backend must not rebuild");
+        assert_eq!(
+            backends(&switch_events(
+                &parakeet(),
+                &parakeet().to_string(),
+                &outcome
+            )),
+            vec!["changed:local:parakeet-tdt-0.6b-v3".to_string()]
+        );
+    }
+
+    #[test]
+    fn build_runs_without_holding_the_config_lock() {
+        let cfg = cfg_on(TranscriberBackendChoice::Groq);
+        let probe = Arc::clone(&cfg);
+        let outcome: SwitchOutcome<()> = switch_backend_with(&cfg, &parakeet(), |candidate| {
+            assert_eq!(candidate.transcriber_backend, parakeet());
+            // The main loop must still be able to read AND write the live
+            // config while the engine loads.
+            assert!(probe.try_write().is_some(), "config locked during load");
+            Ok(())
+        });
+        assert!(matches!(outcome, SwitchOutcome::Switched(())));
+        assert_eq!(
+            backends(&switch_events(
+                &parakeet(),
+                &parakeet().to_string(),
+                &outcome
+            )),
+            vec!["changed:local:parakeet-tdt-0.6b-v3".to_string()]
+        );
+    }
 }

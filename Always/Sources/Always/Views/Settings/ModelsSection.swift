@@ -242,6 +242,12 @@ struct ModelsSection: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if let error = models.errors["apple"] {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Spacer()
             if models.activeBackend == "apple" {

@@ -386,6 +386,14 @@ pub enum DaemonEvent {
     ActiveTranscriberChanged {
         backend: String,
     },
+    /// A requested backend switch failed to load (missing/corrupt model
+    /// files, engine error). Always followed by `ActiveTranscriberChanged`
+    /// naming the backend still running, so the GUI drops its "Loading…"
+    /// and shows `error` on the row instead.
+    ActiveTranscriberFailed {
+        backend: String,
+        error: String,
+    },
     /// Transcription failed (e.g. Groq API error: bad key, quota, or
     /// network). Surfaced to the GUI as a red error overlay so the user
     /// isn't left on a stuck "Processing…". `kind` is a stable machine tag
@@ -621,6 +629,12 @@ impl DaemonEvent {
                     error,
                 })
             }
+            DaemonEvent::ActiveTranscriberFailed { backend, error } => {
+                cap_field(error).map(|error| DaemonEvent::ActiveTranscriberFailed {
+                    backend: backend.clone(),
+                    error,
+                })
+            }
             _ => None,
         }
     }
@@ -638,6 +652,9 @@ impl DaemonEvent {
 #[serde(tag = "type", content = "data")]
 pub enum DaemonCommand {
     TogglePause,
+    /// Explicit, idempotent "resume listening" (the idle pill's Play):
+    /// clears master, idle and watchdog pauses; never pauses.
+    Resume,
     ToggleAutoEnter,
     /// Set auto-enter on/off to an explicit value (Settings toggle).
     SetAutoEnter {
