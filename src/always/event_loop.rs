@@ -491,7 +491,12 @@ fn classify_transcription_error(err: &anyhow::Error) -> (&'static str, String) {
     // below ("Network error reaching Groq" for an Apple engine timeout,
     // "Transcription failed" for a missing permission), which told a new
     // user nothing they could act on.
-    if s.contains("siri and dictation are disabled") {
+    if s.contains(crate::always::vad::CHUNKS_LOST_ERROR) {
+        (
+            DICTATION_PART_LOST_KIND,
+            "Your dictation couldn't be transcribed — audio saved".to_string(),
+        )
+    } else if s.contains("siri and dictation are disabled") {
         (
             "dictation_disabled",
             "Turn on Dictation: System Settings → Keyboard → Dictation".to_string(),
@@ -705,9 +710,16 @@ pub fn paste_rejected(id: u64) -> bool {
             let merge_previous =
                 pause::dictation_buffer_text().or_else(crate::always::dictation::session_text);
             event::global_broadcaster().transcript_final(entry.text.clone());
-            if let Err(error) =
-                deliver_paste(&cfg, &mut log, &rt, entry.text, merge_previous, false, lat)
-            {
+            if let Err(error) = deliver_paste(
+                &cfg,
+                &mut log,
+                &rt,
+                entry.text,
+                merge_previous,
+                false,
+                lat,
+                0,
+            ) {
                 tracing::warn!(error = %error, "rejected_paste_failed");
             }
         })
@@ -1053,6 +1065,7 @@ fn handle_speech(
                 job_cfg.transcript_stream_enabled = false;
                 let job_rt = rt.clone();
                 let job_text = final_text.clone();
+                let unrecovered_parts = transcription.evidence.unrecovered_parts;
                 let id = crate::always::held::park(
                     &final_text,
                     Box::new(move |released_at: Instant| {
@@ -1079,6 +1092,7 @@ fn handle_speech(
                             merge_previous,
                             false,
                             lat,
+                            unrecovered_parts,
                         ) {
                             tracing::warn!(error = %error, "held_final_paste_failed");
                         }
@@ -1110,6 +1124,7 @@ fn handle_speech(
                 merge_previous,
                 grammar_patch_async,
                 lat,
+                transcription.evidence.unrecovered_parts,
             )
         }
     }
@@ -1134,6 +1149,11 @@ struct PasteLatency {
 /// Shared by an ordinary utterance and a consume-mode final the consumer
 /// handed back with `ReleaseHeld` — one path, so a released final behaves
 /// exactly like one that was never held.
+///
+/// `unrecovered_parts` > 0: part of a long dictation could not be
+/// transcribed (its audio is saved). The words that were heard are still
+/// pasted, but Return is never pressed for an incomplete message and the
+/// loss is cued on the overlay — never as text in the user's app.
 #[allow(clippy::too_many_arguments)]
 fn deliver_paste(
     cfg: &AlwaysConfig,
@@ -1143,6 +1163,7 @@ fn deliver_paste(
     merge_previous: Option<String>,
     grammar_patch_async: bool,
     lat: PasteLatency,
+    unrecovered_parts: usize,
 ) -> Result<()> {
     // Sandbox guard (launch smoke test): never type into the user's apps.
     if std::env::var("ALWAYS_NO_PASTE").as_deref() == Ok("1") {
@@ -1150,7 +1171,15 @@ fn deliver_paste(
             chars = final_text.chars().count(),
             "paste_suppressed_no_paste_env"
         );
-        let _ = (cfg, log, rt, merge_previous, grammar_patch_async, lat);
+        let _ = (
+            cfg,
+            log,
+            rt,
+            merge_previous,
+            grammar_patch_async,
+            lat,
+            unrecovered_parts,
+        );
         return Ok(());
     }
     let merge_active = merge_previous.is_some();
@@ -1375,7 +1404,12 @@ fn deliver_paste(
     // Set when Return was pressed synchronously for THIS paste: the
     // text is sent, so the dictation session must not be re-armed below.
     let mut return_committed = false;
-    if auto_enter_effective && should_auto_enter_for_text(&buffer_text) {
+    if unrecovered_parts > 0 {
+        tracing::warn!(unrecovered_parts, "dictation_pasted_incomplete");
+        event::global_broadcaster()
+            .transcription_failed(DICTATION_PART_LOST_KIND, DICTATION_PART_LOST_MESSAGE);
+    }
+    if should_press_return(auto_enter_effective, &buffer_text, unrecovered_parts) {
         // Hold the merged buffer so the NEXT utterance can
         // append again if it arrives before the countdown
         // fires. Set BEFORE schedule() so even a 0-delay
@@ -1392,7 +1426,12 @@ fn deliver_paste(
             );
         }
     } else {
-        if auto_enter_effective {
+        if auto_enter_effective && unrecovered_parts > 0 {
+            tracing::info!(
+                unrecovered_parts,
+                "auto_enter_suppressed_incomplete_dictation"
+            );
+        } else if auto_enter_effective {
             tracing::info!(
                 text = %buffer_text,
                 words = word_count(&buffer_text),
@@ -1521,6 +1560,22 @@ const AUTO_ENTER_MIN_WORDS: usize = 1;
 
 fn should_auto_enter_for_text(text: &str) -> bool {
     word_count(text) >= AUTO_ENTER_MIN_WORDS
+}
+
+/// Overlay cue (kind / message) when part of a dictation was lost.
+const DICTATION_PART_LOST_KIND: &str = "dictation_part_lost";
+const DICTATION_PART_LOST_MESSAGE: &str =
+    "Part of your dictation couldn't be transcribed — audio saved, not sent";
+
+/// Whether this paste schedules Return. Never for an incomplete dictation
+/// (`unrecovered_parts` > 0): sending a message with a hole in it is worse
+/// than leaving it for the user to finish.
+fn should_press_return(
+    auto_enter_effective: bool,
+    buffer_text: &str,
+    unrecovered_parts: usize,
+) -> bool {
+    auto_enter_effective && unrecovered_parts == 0 && should_auto_enter_for_text(buffer_text)
 }
 
 fn snippet_utterance_for_log(utterance: &str, log_transcripts: bool) -> Option<&str> {
@@ -1848,6 +1903,26 @@ mod tests {
         // Sanity: thresholds are at the documented values.
         assert_eq!(SHORT_UTTERANCE_MAX_WORDS, 2);
         assert_eq!(SHORT_UTTERANCE_MAX_CHARS, 8);
+    }
+
+    /// An incomplete dictation (a lost chunk) is pasted but never
+    /// submitted; a complete one keeps the normal auto-Enter rule.
+    #[test]
+    fn incomplete_dictation_never_presses_return() {
+        use super::should_press_return;
+        assert!(should_press_return(true, "the whole message", 0));
+        assert!(!should_press_return(true, "the whole message", 1));
+        assert!(!should_press_return(true, "the whole message", 3));
+        assert!(!should_press_return(false, "the whole message", 0));
+        assert!(!should_press_return(true, "   ", 0));
+    }
+
+    #[test]
+    fn every_part_lost_is_classified_as_dictation_part_lost() {
+        let err = anyhow::anyhow!("{}: 2 part(s)", crate::always::vad::CHUNKS_LOST_ERROR);
+        let (kind, message) = super::classify_transcription_error(&err);
+        assert_eq!(kind, "dictation_part_lost");
+        assert!(!message.contains('['), "{message}");
     }
 
     #[test]

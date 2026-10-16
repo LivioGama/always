@@ -545,10 +545,8 @@ while True:
                 "tail words missing: {text:?}"
             );
         } else {
-            assert!(
-                text.ends_with("]") && text.contains("[audio saved: chunk "),
-                "tail placeholder missing: {text:?}"
-            );
+            // A lost tail is left out — never marker text in the paste.
+            assert!(!text.contains('['), "marker text pasted: {text:?}");
         }
         let spilled_after = std::fs::read_dir(&spill_dir)
             .map(|d| d.count())
