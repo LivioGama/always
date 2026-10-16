@@ -178,6 +178,10 @@ pub struct RecognitionEvidence {
     /// Final text of the English-only Parakeet preview engine, when it ran
     /// for this utterance (`Some("")` = it ran and heard nothing).
     pub preview_text: Option<String>,
+    /// Parts of a chunked dictation whose speech could not be transcribed
+    /// (audio saved to the failed-chunks dir): the text is incomplete, so
+    /// the paste path cues the loss and does not auto-submit it.
+    pub unrecovered_parts: usize,
 }
 
 /// Streaming transcription result with progressive updates.

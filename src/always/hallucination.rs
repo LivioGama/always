@@ -701,6 +701,7 @@ mod tests {
                 confidence,
                 live_stream,
                 preview_text: preview.map(str::to_string),
+                unrecovered_parts: 0,
             },
             ..Default::default()
         }
