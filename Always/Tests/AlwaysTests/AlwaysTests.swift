@@ -710,6 +710,39 @@ final class AlwaysTests: XCTestCase {
         XCTAssertEqual(ModelManagerClient.errorKey(forBackend: "apple"), "apple")
     }
 
+    /// A load that finishes after the 120 s give-up message must not leave
+    /// the row showing "active" next to a stale error.
+    @MainActor
+    func testActiveTranscriberChangedClearsStaleSwitchError() throws {
+        let client = ModelManagerClient.shared
+        client.errors["apple"] = "Didn't finish loading. Try again, or pick another model."
+        try post(#"{"type":"ActiveTranscriberChanged","data":{"backend":"apple"}}"#)
+        XCTAssertNil(client.errors["apple"])
+        XCTAssertEqual(client.activeBackend, "apple")
+        XCTAssertNil(client.loadingBackend)
+    }
+
+    /// Picking X, Y, X inside the window: the first X's timer must not cut
+    /// the second X attempt short; only the latest attempt's timer fires.
+    @MainActor
+    func testSwitchTimeoutOnlyFiresForLatestAttempt() async throws {
+        let client = ModelManagerClient.shared
+        client.errors.removeAll()
+        client.loadingBackend = nil
+        client.switchTimeout = 0.4
+        defer { client.switchTimeout = 120 }
+        client.setActive(backend: "local:x")
+        try await Task.sleep(nanoseconds: 250_000_000)
+        client.setActive(backend: "local:y")
+        client.setActive(backend: "local:x")
+        // t=0.5s: past the first timer (0.4s), before the latest (0.65s).
+        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(client.loadingBackend, "local:x", "stale timer fired")
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertNil(client.loadingBackend)
+        XCTAssertNotNil(client.errors["x"])
+    }
+
     func testHelloEventRoundTripsThroughCodable() throws {
         let original = DaemonEvent(type: .hello, helloVersion: 1)
         let encoded = try JSONEncoder().encode(original)

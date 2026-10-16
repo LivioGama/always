@@ -1166,11 +1166,19 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
     }
 }
 
+/// Held for the whole of `switch_active_backend` / `set_language`. The engine
+/// build runs outside the config lock (it would freeze dictation), so without
+/// this two UDS clients could interleave — `set_language` snapshotting the
+/// config mid-switch — leaving the config naming backend A while the active
+/// slot holds backend B. The main loop never takes this lock.
+static TRANSCRIBER_REBUILD: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// Update the transcription language live: write `cfg.lang`, persist to the
 /// prefs DB, and rebuild the active transcriber so engines that bake the
 /// language into their decode (Canary, Cohere, SenseVoice) pick it up
 /// without a daemon restart.
 fn set_language(ctx: &ModelCommandCtx, lang: &str) {
+    let _rebuild = TRANSCRIBER_REBUILD.lock();
     {
         let mut cfg = ctx.cfg.write();
         cfg.lang = lang.to_string();
@@ -1197,6 +1205,7 @@ fn set_language(ctx: &ModelCommandCtx, lang: &str) {
 /// DB, and emit [`DaemonEvent::ActiveTranscriberChanged`] so connected
 /// UDS clients refresh their active-model badge.
 fn switch_active_backend(ctx: &ModelCommandCtx, choice: TranscriberBackendChoice) {
+    let _rebuild = TRANSCRIBER_REBUILD.lock();
     let outcome = switch_backend_with(&ctx.cfg, &choice, |cfg| {
         build_transcriber(cfg, &ctx.registry)
     });
