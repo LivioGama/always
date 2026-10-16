@@ -243,24 +243,33 @@ fn backoff_with_jitter(attempt: u32) -> Duration {
     Duration::from_millis(base + jitter)
 }
 
-/// Whisper `language` field for the user's configured language: a bare ISO
-/// code (`fr-FR` → `fr`), or `None` for `auto`/unset so Whisper detects it.
-/// Forcing `en` on a French speaker made Whisper garble his speech.
+/// Whisper `language` field for the user's configured language: a bare
+/// ISO-639-1 code (`fr-FR` → `fr`). `auto`/unset resolves to the system
+/// locale's language — what the Apple recognizer does for `auto` — and to
+/// `en` (the pre-2026-10-16 behaviour) when that is unknown. Anything that
+/// is not a 2-letter code (or `haw`) falls back to `en` rather than being
+/// sent as an invalid value.
 #[must_use]
-pub fn whisper_language(lang: &str) -> Option<String> {
-    let code = lang
-        .trim()
-        .split(['-', '_'])
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    (!code.is_empty() && code != "auto" && code.chars().all(|c| c.is_ascii_alphabetic()))
-        .then_some(code)
+pub fn whisper_language(lang: &str) -> String {
+    resolve_whisper_language(lang, crate::always::preview_asr::system_locale_language())
+}
+
+/// [`whisper_language`] with the system locale's language injected.
+#[must_use]
+pub fn resolve_whisper_language(lang: &str, system_language: Option<String>) -> String {
+    let lang = lang.trim().to_ascii_lowercase();
+    let code = if lang.is_empty() || lang == "auto" {
+        system_language.unwrap_or_default().to_ascii_lowercase()
+    } else {
+        lang.split(['-', '_']).next().unwrap_or("").to_string()
+    };
+    let valid = code == "haw" || (code.len() == 2 && code.chars().all(|c| c.is_ascii_lowercase()));
+    if valid { code } else { "en".to_string() }
 }
 
 fn build_form(
     audio_data: Vec<u8>,
-    language: Option<&str>,
+    language: &str,
 ) -> Result<blocking_multipart::Form, anyhow::Error> {
     // Whisper's `prompt` field is intentionally NOT used. It was tried
     // historically and produced "I have an idea" → "I have an IntelliJ
@@ -275,11 +284,9 @@ fn build_form(
                 .mime_str("audio/wav")?,
         )
         .text("model", WHISPER_MODEL)
-        .text("response_format", "verbose_json");
-    Ok(match language {
-        Some(lang) => form.text("language", lang.to_string()),
-        None => form,
-    })
+        .text("response_format", "verbose_json")
+        .text("language", language.to_string());
+    Ok(form)
 }
 
 /// Transcribe audio via Groq Whisper.
@@ -296,14 +303,15 @@ pub fn transcribe_from_bytes(
     audio_data: Vec<u8>,
     api_key: &str,
 ) -> Result<TranscriptionResult, SttError> {
-    transcribe_from_bytes_in(audio_data, api_key, Some("en"))
+    transcribe_from_bytes_in(audio_data, api_key, "en")
 }
 
-/// [`transcribe_from_bytes`] in `language` (`None` = Whisper auto-detect).
+/// [`transcribe_from_bytes`] in `language` (a Whisper ISO code, see
+/// [`whisper_language`]).
 pub fn transcribe_from_bytes_in(
     audio_data: Vec<u8>,
     api_key: &str,
-    language: Option<&str>,
+    language: &str,
 ) -> Result<TranscriptionResult, SttError> {
     if let Some(remaining_ms) = circuit_block_remaining_ms() {
         return Err(SttError::Unavailable { remaining_ms });
@@ -469,19 +477,19 @@ pub trait Transcriber: Send + Sync {
 /// circuit-breaker behavior.
 pub struct GroqTranscriber {
     api_key: String,
-    language: Option<String>,
+    language: String,
 }
 
 impl GroqTranscriber {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
-            language: Some("en".to_string()),
+            language: "en".to_string(),
         }
     }
 
-    /// Transcribe in the user's language (`cfg.lang`); `auto` lets Whisper
-    /// detect it. See [`whisper_language`].
+    /// Transcribe in the user's language (`cfg.lang`); `auto` resolves to the
+    /// system locale's language. See [`whisper_language`].
     #[must_use]
     pub fn with_language(mut self, lang: &str) -> Self {
         self.language = whisper_language(lang);
@@ -489,14 +497,14 @@ impl GroqTranscriber {
     }
 
     #[must_use]
-    pub fn language(&self) -> Option<&str> {
-        self.language.as_deref()
+    pub fn language(&self) -> &str {
+        &self.language
     }
 }
 
 impl Transcriber for GroqTranscriber {
     fn transcribe_from_bytes(&self, audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
-        transcribe_from_bytes_in(audio, &self.api_key, self.language.as_deref())
+        transcribe_from_bytes_in(audio, &self.api_key, &self.language)
     }
 
     fn transcribe_streaming(
@@ -523,19 +531,28 @@ mod stt_unit_tests {
 
     #[test]
     fn whisper_language_follows_the_user() {
-        assert_eq!(whisper_language("fr"), Some("fr".into()));
-        assert_eq!(whisper_language("fr-FR"), Some("fr".into()));
-        assert_eq!(whisper_language("en_GB"), Some("en".into()));
-        assert_eq!(whisper_language("auto"), None);
-        assert_eq!(whisper_language(""), None);
-        assert_eq!(GroqTranscriber::new("k").language(), Some("en"));
+        let r = |l: &str, sys: Option<&str>| resolve_whisper_language(l, sys.map(String::from));
+        // Explicit codes are sent as given, normalized to the bare code.
+        assert_eq!(r("fr", Some("en")), "fr");
+        assert_eq!(r("fr-FR", None), "fr");
+        assert_eq!(r("en_GB", Some("fr")), "en");
+        assert_eq!(r(" PT-br ", None), "pt");
+        assert_eq!(r("haw", None), "haw");
+        // `auto`/unset follow the system locale, `en` when unknown.
+        assert_eq!(r("auto", Some("fr")), "fr");
+        assert_eq!(r("", Some("de")), "de");
+        assert_eq!(r("Auto", Some("en")), "en");
+        assert_eq!(r("auto", None), "en");
+        // Never an invalid value.
+        assert_eq!(r("xx1", Some("fr")), "en");
+        assert_eq!(r("french", Some("fr")), "en");
+        assert_eq!(r("auto", Some("fil")), "en");
+        assert_eq!(r("auto", Some("")), "en");
+        // Default and builder.
+        assert_eq!(GroqTranscriber::new("k").language(), "en");
         assert_eq!(
             GroqTranscriber::new("k").with_language("fr").language(),
-            Some("fr")
-        );
-        assert_eq!(
-            GroqTranscriber::new("k").with_language("auto").language(),
-            None
+            "fr"
         );
     }
 

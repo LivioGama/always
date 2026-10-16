@@ -298,8 +298,9 @@ async fn open_breaker_degrades_to_local_fallback_instead_of_dropping() {
 }
 
 /// Ludwig (16 Oct): French speaker on Groq Whisper. The user's language is
-/// sent to Whisper (never a hard-coded `en`), `auto` omits the field, and the
-/// accented French that comes back is not filtered as "mixed-script".
+/// sent to Whisper (never a hard-coded `en`), `auto` resolves to the system
+/// locale's language, and the accented French that comes back is not filtered
+/// as "mixed-script".
 #[tokio::test]
 async fn groq_sends_user_language_and_french_survives_filter() {
     use always::stt::Transcriber;
@@ -322,7 +323,7 @@ async fn groq_sends_user_language_and_french_survives_filter() {
             .lock()
             .expect("GROQ_BASE_URL_ENV_LOCK poisoned");
         unsafe { std::env::set_var("ALWAYS_GROQ_BASE_URL", base_url) };
-        let out: Vec<_> = ["fr", "auto"]
+        let out: Vec<_> = ["fr", "fr-FR", "auto"]
             .iter()
             .map(|lang| {
                 always::stt::GroqTranscriber::new("test_key")
@@ -337,15 +338,17 @@ async fn groq_sends_user_language_and_french_survives_filter() {
     .expect("blocking task panicked");
 
     let requests = server.received_requests().await.expect("recording on");
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     let body = |i: usize| String::from_utf8_lossy(&requests[i].body).to_string();
+    let sent =
+        |i: usize, code: &str| body(i).contains(&format!("name=\"language\"\r\n\r\n{code}\r\n"));
+    assert!(sent(0, "fr"), "fr sent as fr");
+    assert!(sent(1, "fr"), "fr-FR normalized to fr");
+    // `auto` is the system locale's language (`en` when unknown) — never
+    // omitted. The pure resolver is covered deterministically in stt.rs.
     assert!(
-        body(0).contains("name=\"language\"\r\n\r\nfr\r\n"),
-        "fr sent"
-    );
-    assert!(
-        !body(1).contains("name=\"language\""),
-        "auto omits language"
+        sent(2, &always::stt::whisper_language("auto")),
+        "auto sends the resolved system language"
     );
 
     for r in results {

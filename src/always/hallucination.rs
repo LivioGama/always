@@ -84,6 +84,8 @@ const HALLUCINATION_PHRASES: &[&str] = &[
     "subtitles by the amara.org community",
     "captions by the amara.org community",
     "transcription by castingwords",
+    // Russian "to be continued", Whisper's outro on silence.
+    "продолжение следует",
 ];
 
 /// Substrings whose mere presence (in the lowercased, whitespace-collapsed text)
@@ -112,6 +114,12 @@ const HALLUCINATION_SUBSTRINGS: &[&str] = &[
     "thank you for listening",
     "see you in the next video",
     "see you next time",
+    // Known credit hallucinations in other languages (lowercase). Whisper
+    // emits these on silence/noise; a real sentence never contains them.
+    "субтитры сделал",
+    "субтитры создавал",
+    "字幕由",
+    "ご視聴ありがとうございました",
 ];
 
 static PHRASE_SET: LazyLock<HashSet<&'static str>> =
@@ -362,19 +370,34 @@ pub fn scripts_for_language(lang: &str) -> &'static [Script] {
 
 /// Scripts that are the user's own for this utterance: Latin always (names,
 /// brands and code are Latin in every language), plus the configured
-/// language's and the engine-reported language's.
+/// language's script. The engine-reported language's script counts ONLY
+/// when the user left the language on `auto`/empty: with an explicit
+/// language the engine's report is not evidence of what he speaks (Whisper
+/// reports "russian" for its own Russian credit hallucinations).
 fn allowed_scripts(user_lang: &str, detected_lang: &str) -> Vec<Script> {
+    let auto = matches!(user_lang.trim().to_ascii_lowercase().as_str(), "" | "auto");
     let mut v = vec![Script::Latin];
-    for s in scripts_for_language(user_lang)
-        .iter()
-        .chain(scripts_for_language(detected_lang))
-    {
+    let detected: &[Script] = if auto {
+        scripts_for_language(detected_lang)
+    } else {
+        &[]
+    };
+    for s in scripts_for_language(user_lang).iter().chain(detected) {
         if !v.contains(s) {
             v.push(*s);
         }
     }
     v
 }
+
+/// An utterance shorter than this (in chars) is judged by the SHARE of its
+/// words that are noise; see [`NOISE_WORD_SHARE`].
+const SHORT_UTTERANCE_CHARS: usize = 80;
+
+/// In a short utterance, noise tokens at or above this share of the words
+/// make the whole utterance noise ("ünkLöß I Nativuchy Dk"); below it only
+/// the tokens are dropped ([`clean_suspicious_words`]).
+const NOISE_WORD_SHARE: f64 = 0.25;
 
 /// Lowercase-then-uppercase inside a word that also carries a non-ASCII
 /// letter — Whisper noise like "ünkLöß" / "expenseÁê". Pure-ASCII camel
@@ -448,12 +471,14 @@ pub fn is_hallucination(result: &TranscriptionResult) -> Option<&'static str> {
 /// `cfg.lang`: a code like `fr`, `fr-FR`, or `auto`/empty when unset). The
 /// user's language decides which scripts are *his*: Latin (with any
 /// diacritics) always is, plus the script of `user_lang` and of the
-/// language the engine reported for this utterance.
+/// language the engine reported for this utterance (only when `user_lang`
+/// is `auto`/empty).
 ///
-/// Words are never a reason to drop the whole utterance one at a time: a
-/// single garbled token is removed by [`clean_suspicious_words`] instead.
-/// Only an utterance with NOTHING but garbled tokens, or one written
-/// mostly in a script that is not his, is rejected here.
+/// A single garbled token never costs the whole utterance: it is removed by
+/// [`clean_suspicious_words`] instead. Rejected here: only garbled tokens,
+/// garbled tokens making up ≥ [`NOISE_WORD_SHARE`] of a short utterance
+/// (< [`SHORT_UTTERANCE_CHARS`] chars), or text written mostly in a script
+/// that is not his.
 pub fn is_hallucination_in(result: &TranscriptionResult, user_lang: &str) -> Option<&'static str> {
     let text = result.text.trim();
     let allowed = allowed_scripts(user_lang, &result.language);
@@ -599,12 +624,19 @@ pub fn is_hallucination_in(result: &TranscriptionResult, user_lang: &str) -> Opt
         .fold((0usize, 0usize), |(l, f), s| {
             (l + 1, f + usize::from(!allowed.contains(&s)))
         });
-    if letters > 0 && text.chars().count() < 80 && foreign as f64 / letters as f64 > 0.3 {
+    let short = text.chars().count() < SHORT_UTTERANCE_CHARS;
+    if letters > 0 && short && foreign as f64 / letters as f64 > 0.3 {
         return Some("mixed-script gibberish");
     }
-    if !text
+    let (total_words, noise_words) = text
         .split_whitespace()
-        .any(|w| suspicious_word(w).is_none())
+        .filter(|w| w.chars().any(char::is_alphanumeric))
+        .fold((0usize, 0usize), |(t, n), w| {
+            (t + 1, n + usize::from(suspicious_word(w).is_some()))
+        });
+    if noise_words > 0
+        && (noise_words == total_words
+            || (short && noise_words as f64 / total_words as f64 >= NOISE_WORD_SHARE))
     {
         return Some("mixed-script word");
     }
@@ -728,14 +760,16 @@ mod tests {
 
     #[test]
     fn rejects_mixed_script_gibberish() {
+        // The canonical garbage: 1 noise token in 4 words (25%) of a short
+        // utterance is noise.
+        assert!(is_hallucination(&make("ünkLöß I Nativuchy Dk")).is_some());
         // Only noise tokens: the whole utterance is noise.
         assert!(is_hallucination(&make("ünkLöß expenseÁê")).is_some());
         assert!(is_hallucination(&make("helloпривет worldмир")).is_some());
         // Mostly a script that is not his (English user): gibberish.
         assert!(is_hallucination(&make("字幕由Amara社区提供")).is_some());
-        // One noise token among real words is not a reason to drop the
-        // utterance — it is removed by clean_suspicious_words instead.
-        assert!(is_hallucination(&make("ünkLöß I Nativuchy Dk")).is_none());
+        // One noise token among enough real words is not a reason to drop
+        // the utterance — clean_suspicious_words removes just the token.
         let (kept, dropped) = clean_suspicious_words("ünkLöß I Nativuchy Dk");
         assert_eq!(kept, "I Nativuchy Dk");
         assert_eq!(dropped, vec!["ünkLöß".to_string()]);
@@ -808,8 +842,44 @@ mod tests {
         assert_eq!(is_hallucination_in(&r, "auto"), None);
         // Same text for an English user with no evidence of Russian: gibberish.
         assert!(is_hallucination_in(&make("Привет, как дела сегодня?"), "en").is_some());
+        // An explicit language is not overridden by what the engine reports:
+        // an English user whose engine says "russian" still gets gibberish.
+        assert!(is_hallucination_in(&r, "en").is_some());
+        assert!(is_hallucination_in(&r, "fr").is_some());
         // Japanese words mix Han and Kana by nature.
         assert_eq!(suspicious_word("日本語です"), None);
+    }
+
+    /// Whisper's non-English credit hallucinations are rejected on `auto`
+    /// even when the engine-reported language makes their script "allowed".
+    #[test]
+    fn rejects_foreign_credit_hallucinations_on_auto() {
+        for (text, language) in [
+            ("Субтитры сделал DimaTorzok", "russian"),
+            ("Продолжение следует...", "russian"),
+            ("ご視聴ありがとうございました", "japanese"),
+            ("字幕由Amara.org社区提供", "chinese"),
+        ] {
+            let mut r = make(text);
+            r.language = language.into();
+            for lang in ["auto", ""] {
+                assert!(is_hallucination_in(&r, lang).is_some(), "{text} ({lang})");
+            }
+            assert!(is_hallucination(&r).is_some(), "{text}");
+        }
+    }
+
+    #[test]
+    fn short_utterance_noise_share() {
+        // 1 of 4 words: rejected; 1 of 10 words: only the token is dropped.
+        assert!(is_hallucination(&make("ünkLöß I Nativuchy Dk")).is_some());
+        assert_eq!(
+            is_hallucination_in(
+                &make("Je vais envoyer le rapport ünkLöß demain matin à Paul."),
+                "fr"
+            ),
+            None
+        );
     }
 
     #[test]

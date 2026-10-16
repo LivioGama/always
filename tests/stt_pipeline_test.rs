@@ -95,15 +95,9 @@ fn hallucination_rejects_known_canned_phrases() {
     // "Bye." spammed on silence.
     assert!(is_hallucination(&make_result("Bye. Bye. Bye.")).is_some());
 
-    // Gibberish that Whisper sometimes emits on noise: nothing but noise
-    // tokens is rejected; one noise token among words is only removed
-    // (`clean_suspicious_words`), never costing the whole utterance.
+    // Mixed-script gibberish that Whisper sometimes emits on noise.
+    assert!(is_hallucination(&make_result("ünkLöß I Nativuchy Dk")).is_some());
     assert!(is_hallucination(&make_result("ünkLöß expenseÁê")).is_some());
-    assert!(is_hallucination(&make_result("ünkLöß I Nativuchy Dk")).is_none());
-    assert_eq!(
-        always::always::hallucination::clean_suspicious_words("ünkLöß I Nativuchy Dk").0,
-        "I Nativuchy Dk"
-    );
 
     // Subtitle credit hallucination.
     assert!(is_hallucination(&make_result("Subtitles by the Amara.org community")).is_some());

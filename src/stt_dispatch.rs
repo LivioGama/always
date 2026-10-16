@@ -473,7 +473,7 @@ fn build_groq(cfg: &AlwaysConfig) -> Result<Arc<dyn Transcriber>> {
             )
         })?;
     let groq = GroqTranscriber::new(key).with_language(&cfg.lang);
-    let language = groq.language().unwrap_or("auto").to_string();
+    let language = groq.language().to_string();
     let t = Arc::new(groq);
     tracing::info!(
         backend = "groq",
