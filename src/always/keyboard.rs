@@ -420,49 +420,33 @@ fn pause_chord_action(current_app: Option<&str>) -> ChordAction {
     }
 }
 
-/// Toggle the per-app allowlist for `bundle`. Adds the bundle as
-/// resumed (override `paused: false`) when it's not yet listed;
-/// removes the override otherwise. Recomputes the effective state and
-/// broadcasts the appropriate UDS events so every connected GUI
-/// surface updates immediately.
+/// Per-app chord for `bundle`: paused here (for any reason) → resume
+/// here (allowlist it, lift idle / watchdog pauses); listening here →
+/// take it off the allowlist. Master on → allowlist toggle only. See
+/// `pause_commands::per_app_plan`.
 #[cfg(target_os = "macos")]
 fn handle_per_app_pause_hotkey(bundle: &str) {
-    use crate::always::per_app;
-    let was_resumed = per_app::is_app_resumed(bundle);
-    let new_paused: Option<bool> = if was_resumed { None } else { Some(false) };
-    if let Err(e) = per_app::set_app_paused_override(bundle, new_paused) {
-        tracing::error!(error = %e, bundle, "hotkey_set_app_paused_failed");
-        return;
-    }
-    let (effective, changed) = pause::recompute_effective();
-    if changed {
-        if effective {
-            pause::dictation_buffer_clear();
-            event::global_broadcaster().paused();
-        } else {
-            pause::mark_voice_seen();
-            event::global_broadcaster().resumed();
+    // Shared with every other pause control: decides by what the user
+    // sees (paused here → resume here), see `pause_commands::per_app_plan`.
+    let (out, now_listed) = match crate::always::pause_commands::per_app_chord(bundle) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, bundle, "hotkey_set_app_paused_failed");
+            return;
         }
-    }
-    event::global_broadcaster().resumed_apps_changed(per_app::resumed_apps());
-    // Scope feedback: tell the GUI exactly what this chord did
-    // ("Resumed in Safari"), independent of the effective-state
-    // events above. `paused` is from the app's perspective: it was
-    // resumed → now paused again, and vice versa.
-    event::global_broadcaster().pause_scope_toggled("app", Some(bundle.to_string()), was_resumed);
+    };
     if let Ok(log_path) = always_config::configured_log_path()
         && let Ok(mut logger) = log::Logger::open(&log_path)
     {
-        // Reuse the existing PauseToggled event so log scrapers don't
-        // need a new variant — `paused` reflects the new effective
-        // state for the focused app.
-        logger.write(log::Event::PauseToggled { paused: effective });
+        logger.write(log::Event::PauseToggled {
+            paused: out.effective,
+        });
     }
     tracing::info!(
         bundle,
-        was_resumed,
-        new_resumed = !was_resumed,
-        effective,
+        now_listed,
+        effective = out.effective,
+        changed = out.changed,
         scope = "app",
         "hotkey_pause_chord"
     );
@@ -515,24 +499,12 @@ fn handle_master_pause_hotkey() {
         *last = Some(std::time::Instant::now());
     }
 
-    let (effective, changed) = if pause::is_any_global_pause() || pause::is_idle_auto_paused() {
-        pause::set_idle_auto_paused(false);
-        pause::mark_voice_seen();
-        pause::clear_global_pauses()
-    } else {
-        pause::set_paused(true)
-    };
-    let master = pause::is_master_paused();
-    event::global_broadcaster().master_pause_changed(master);
+    let crate::always::pause_commands::Outcome {
+        effective,
+        changed,
+        master,
+    } = crate::always::pause_commands::toggle_global();
     event::global_broadcaster().pause_scope_toggled("master", None, master);
-    if changed {
-        if effective {
-            pause::dictation_buffer_clear();
-            event::global_broadcaster().paused();
-        } else {
-            event::global_broadcaster().resumed();
-        }
-    }
     if let Ok(log_path) = always_config::configured_log_path()
         && let Ok(mut logger) = log::Logger::open(&log_path)
     {

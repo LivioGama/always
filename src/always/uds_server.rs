@@ -429,16 +429,32 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
             version: crate::always::event::PROTOCOL_VERSION,
         },
         DaemonEvent::ListeningStarted, // Send immediately after Hello
-        if is_paused {
-            DaemonEvent::Paused
-        } else {
-            DaemonEvent::Resumed
-        },
         DaemonEvent::MasterPauseChanged {
             master_paused: is_master_paused,
         },
         DaemonEvent::ResumedAppsChanged {
             bundles: resumed_bundles,
+        },
+        // Active watchdog sources, so a (re)connecting GUI predicts with
+        // them instead of guessing "listening" over a live mic conflict.
+        DaemonEvent::PauseSourceChanged {
+            source: "mic_conflict".into(),
+            paused: pause::is_mic_conflict_paused(),
+            detail: None,
+        },
+        DaemonEvent::PauseSourceChanged {
+            source: "audio_output".into(),
+            paused: pause::is_audio_output_paused(),
+            detail: None,
+        },
+        // Effective state LAST: the GUI recomputes a local prediction on
+        // MasterPauseChanged / ResumedAppsChanged, so sending the truth
+        // first let that prediction overwrite it (icon showed "listening"
+        // while the daemon was idle- or mic-paused).
+        if is_paused {
+            DaemonEvent::Paused
+        } else {
+            DaemonEvent::Resumed
         },
         if is_auto_enter {
             DaemonEvent::AutoEnterEnabled
@@ -647,32 +663,27 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
 fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &AtomicBool) {
     match cmd {
         DaemonCommand::TogglePause => {
-            // toggle_pause flips MASTER and returns (effective, changed).
-            // We clear idle BEFORE the toggle so the recompute inside
-            // toggle_pause sees idle=false and produces the correct
-            // effective state. The old order (toggle → set_idle) left
-            // EFFECTIVE_PAUSED stale when master flipped to false while
-            // idle was set — the daemon stayed "effectively paused" even
-            // though every source was cleared.
-            let was_master = pause::is_master_paused();
-            if was_master {
-                pause::set_idle_auto_paused(false);
-                pause::mark_voice_seen();
-            }
-            let (effective, changed) = pause::toggle_pause();
-            let master = pause::is_master_paused();
-            // Master always changed (we just toggled it) — broadcast so
-            // the UI can label the global toggle correctly.
-            global_broadcaster().master_pause_changed(master);
-            if changed {
-                if effective {
-                    pause::dictation_buffer_clear();
-                    global_broadcaster().paused();
-                } else {
-                    global_broadcaster().resumed();
-                }
-            }
-            tracing::info!(master, effective, changed, "uds_toggle_pause");
+            // Same semantics as the master chord: while anything the user
+            // may override is pausing (master, idle, mic conflict, audio
+            // output), a toggle RESUMES. It used to flip master only, so
+            // the idle pill's Play (and the tray / CLI) turned an idle or
+            // mic-conflict pause into "paused everywhere".
+            let out = crate::always::pause_commands::toggle_global();
+            tracing::info!(
+                master = out.master,
+                effective = out.effective,
+                changed = out.changed,
+                "uds_toggle_pause"
+            );
+        }
+        DaemonCommand::Resume => {
+            let out = crate::always::pause_commands::resume();
+            tracing::info!(
+                master = out.master,
+                effective = out.effective,
+                changed = out.changed,
+                "uds_resume"
+            );
         }
         DaemonCommand::ToggleAutoEnter => {
             let new_state = pause::toggle_auto_enter();
@@ -884,9 +895,12 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                     tracing::info!(effective, "audio_output_auto_resumed");
                 }
             } else {
-                // Idle-paused: drop the audio source flag quietly so it
-                // can't strand a pause after idle resume.
+                // Idle-paused: drop the audio source flag (no Resumed —
+                // idle still pauses) so it can't strand a pause after idle
+                // resume. The GUI must still hear the source cleared, or
+                // its prediction keeps "audio playing" forever (#124).
                 let _ = pause::set_audio_output_paused(false);
+                global_broadcaster().pause_source_changed("audio_output", false, None);
             }
         }
         DaemonCommand::SetAppPaused { bundle_id, paused } => {
@@ -894,29 +908,15 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             // effective state. Broadcasting is gated on `changed` so
             // setting an override for a non-focused app doesn't spam
             // the UDS bus.
-            match crate::always::per_app::set_app_paused_override(&bundle_id, paused) {
-                Ok(()) => {
-                    let (effective, changed) = pause::recompute_effective();
-                    if changed {
-                        if effective {
-                            pause::dictation_buffer_clear();
-                            global_broadcaster().paused();
-                        } else {
-                            pause::mark_voice_seen();
-                            global_broadcaster().resumed();
-                        }
-                    }
-                    // Always broadcast the updated allowlist so every
-                    // connected client (Settings UI, menu bar) sees
-                    // the same snapshot without round-tripping
-                    // through the CLI `config show` path.
-                    global_broadcaster()
-                        .resumed_apps_changed(crate::always::per_app::resumed_apps());
+            // Resuming the focused app is a resume press: it also lifts
+            // idle / watchdog pauses (see `pause_commands::set_app_paused`).
+            match crate::always::pause_commands::set_app_paused(&bundle_id, paused) {
+                Ok(out) => {
                     tracing::info!(
                         bundle = %bundle_id,
                         paused = ?paused,
-                        effective,
-                        changed,
+                        effective = out.effective,
+                        changed = out.changed,
                         "uds_set_app_paused"
                     );
                 }

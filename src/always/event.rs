@@ -638,6 +638,9 @@ impl DaemonEvent {
 #[serde(tag = "type", content = "data")]
 pub enum DaemonCommand {
     TogglePause,
+    /// Explicit, idempotent "resume listening" (the idle pill's Play):
+    /// clears master, idle and watchdog pauses; never pauses.
+    Resume,
     ToggleAutoEnter,
     /// Set auto-enter on/off to an explicit value (Settings toggle).
     SetAutoEnter {

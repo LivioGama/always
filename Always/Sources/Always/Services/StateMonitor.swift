@@ -52,6 +52,11 @@ class StateMonitor: ObservableObject {
     /// using the mic", "audio playing"), nil when no watchdog pause is
     /// active. Drives explanatory copy in the menu/overlay.
     @Published var pauseReason: String? = nil
+    /// Watchdog pause sources the daemon reported active ("mic_conflict",
+    /// "audio_output"). Part of the local pause prediction: leaving them
+    /// out made every focus change / master toggle predict "listening"
+    /// while the daemon stayed paused, so the menu-bar icon drifted.
+    @Published var autoPauseSources: Set<String> = []
 
     /// True while onboarding is visible. Toggles the daemon's setup mode,
     /// which bypasses per-app pause rules so the user can test voice
@@ -247,17 +252,34 @@ class StateMonitor: ObservableObject {
     /// Toggle the **master** pause flag (not per-app allowlist). The daemon
     /// recomputes effective pause; we predict locally so the UI matches.
     func togglePause() {
-        let newMaster = !isMasterPaused
-        isMasterPaused = newMaster
-        if newMaster {
-            isPaused = true
-            isIdleAutoPaused = false
+        // Mirrors the daemon (`pause_commands::toggle_global`): while
+        // anything the user may override is pausing, the toggle resumes.
+        if isMasterPaused || isIdleAutoPaused || !autoPauseSources.isEmpty {
+            predictUserResume()
         } else {
-            isIdleAutoPaused = false
-            applyLocalEffectivePauseState()
+            isMasterPaused = true
+            isPaused = true
         }
         StatusOverlayController.shared.flash(state: isPaused ? .paused : .resumed)
         udsClient.sendCommand("TogglePause")
+    }
+
+    /// Explicit, idempotent resume (the idle pill's Play button). Never
+    /// pauses — the pill used to run `toggle-pause`, which turned an idle
+    /// or mic-conflict pause into "paused everywhere".
+    func resumeListening() {
+        predictUserResume()
+        StatusOverlayController.shared.hideIdleResumeWidget()
+        StatusOverlayController.shared.flash(state: isPaused ? .paused : .resumed)
+        udsClient.sendCommand("Resume")
+    }
+
+    private func predictUserResume() {
+        isMasterPaused = false
+        isIdleAutoPaused = false
+        autoPauseSources.removeAll()
+        pauseReason = nil
+        applyLocalEffectivePauseState()
     }
 
     /// Toggle daemon setup mode: when enabled, bypasses per-app pause rules
@@ -287,7 +309,7 @@ class StateMonitor: ObservableObject {
     /// show/hide churn. Assign only on a real change.
     func applyLocalEffectivePauseState() {
         let desired: Bool
-        if isMasterPaused || isIdleAutoPaused {
+        if isMasterPaused || isIdleAutoPaused || !autoPauseSources.isEmpty {
             desired = true
         } else if let bundle = FocusedAppMonitor.shared.currentBundleId {
             desired = !resumedBundleIds.contains(bundle)
@@ -661,6 +683,9 @@ class StateMonitor: ObservableObject {
             // Suppress overlay flashes during this ~300ms window so reconnecting
             // doesn't pop "Auto-Enter On" / "Paused" badges at the user.
             isInitialSync = true
+            // A (re)started daemon re-states its active sources in the
+            // burst that follows; drop what the previous one reported.
+            autoPauseSources.removeAll()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 self?.isInitialSync = false
             }
@@ -675,6 +700,7 @@ class StateMonitor: ObservableObject {
             daemonPaused = false
             let changed = isPaused
             isPaused = false
+            StatusOverlayController.shared.hideIdleResumeWidget()
             if changed {
                 StatusOverlayController.shared.flash(state: .resumed)
             }
@@ -687,6 +713,7 @@ class StateMonitor: ObservableObject {
         case .resumedQuietly:
             isPaused = false
             daemonPaused = false
+            StatusOverlayController.shared.hideIdleResumeWidget()
         case .autoEnterEnabled:
             let changed = !isAutoEnter
             isAutoEnter = true
@@ -895,6 +922,7 @@ class StateMonitor: ObservableObject {
             StatusOverlayController.shared.showIdleTimeoutAnimation(seconds: secs)
         case .idleAutoResumed:
             isIdleAutoPaused = false
+            StatusOverlayController.shared.hideIdleResumeWidget()
             applyLocalEffectivePauseState()
             if !isPaused {
                 StatusOverlayController.shared.flash(state: .resumed)
@@ -951,6 +979,11 @@ class StateMonitor: ObservableObject {
         case .pauseSourceChanged:
             guard let info = event.pauseSource else { break }
             if info.paused {
+                autoPauseSources.insert(info.source)
+            } else {
+                autoPauseSources.remove(info.source)
+            }
+            if info.paused {
                 let reason: String
                 switch info.source {
                 case "mic_conflict":
@@ -962,10 +995,11 @@ class StateMonitor: ObservableObject {
                 }
                 pauseReason = reason
                 // Arrives after the generic Paused flash — replaces it
-                // with the explanatory copy.
-                StatusOverlayController.shared.flash(
-                    state: .pausedExternal(reason: reason), duration: 2.5)
-            } else {
+                // with the explanatory copy. Not during the reconnect
+                // burst, which only re-states state.
+                if !isInitialSync { StatusOverlayController.shared.flash(
+                    state: .pausedExternal(reason: reason), duration: 2.5) }
+            } else if autoPauseSources.isEmpty {
                 pauseReason = nil
             }
         default:
