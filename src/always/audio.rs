@@ -1541,6 +1541,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `CAPTURE_HELPER_FAILED` / `CAPTURE_PLAIN_FAILED` are process-global;
+    /// the spawn tests below set and assert them, so they must not
+    /// interleave under the parallel test runner.
+    #[cfg(target_os = "macos")]
+    static CAPTURE_FLAGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// A helper whose echo-cancelling mode fails (VPIO unavailable — seen
     /// on a fresh macOS 26 VM: kAUInitialize -10875) must fall back to the
     /// SAME helper in plain `--no-vp` mode, never to SoX `rec` (absent on a
@@ -1549,6 +1555,7 @@ mod tests {
     #[test]
     fn helper_vp_failure_falls_back_to_plain_helper_not_rec() {
         use std::sync::atomic::Ordering;
+        let _guard = CAPTURE_FLAGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("always-cap-plain-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("fake-capture");
@@ -1605,6 +1612,7 @@ mod tests {
     #[test]
     fn default_spawn_is_plain_helper_without_vpio() {
         use std::sync::atomic::Ordering;
+        let _guard = CAPTURE_FLAGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("always-cap-default-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("fake-capture");
