@@ -12,7 +12,7 @@ export function Caption({ children, className = "" }: { children: ReactNode; cla
 }
 
 export function Divider() {
-  return <div className="border-t border-surface-800 my-1" />;
+  return <div className="border-t border-white/10 my-1" />;
 }
 
 /// SwiftUI `Color.secondary.opacity(0.08)` card.
@@ -24,7 +24,7 @@ export function Card({ children, accent = false, className = "" }: {
   return (
     <div
       className={`rounded-md p-2.5 ${
-        accent ? "bg-primary-500/10" : "bg-surface-500/[0.08]"
+        accent ? "bg-primary-500/10" : "bg-white/[0.08]"
       } ${className}`}
     >
       {children}

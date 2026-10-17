@@ -80,14 +80,14 @@ export function HistoryPanel() {
       )}
 
       {!loading && !error && entries.length === 0 && (
-        <div className="rounded-lg bg-surface-500/[0.08] p-6 text-center">
+        <div className="rounded-lg bg-white/[0.08] p-6 text-center">
           <Caption className="italic">No transcripts yet today — say something.</Caption>
         </div>
       )}
 
       <div className="space-y-1.5">
         {entries.map((e, i) => (
-          <div key={`${e.timestamp_ms}-${i}`} className="rounded-lg bg-surface-500/[0.08] p-2.5">
+          <div key={`${e.timestamp_ms}-${i}`} className="rounded-lg bg-white/[0.08] p-2.5">
             <div className="flex items-start gap-2">
               <div className="flex-1 min-w-0">
                 <div className="text-sm text-surface-100 whitespace-pre-wrap">{e.text}</div>

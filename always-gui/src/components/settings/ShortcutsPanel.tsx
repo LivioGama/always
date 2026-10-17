@@ -31,7 +31,7 @@ export function ShortcutsPanel({
       )}
       <div>
         <PanelTitle>Global Shortcuts</PanelTitle>
-        <div className="mt-1 divide-y divide-surface-800/60">
+        <div className="mt-1 divide-y divide-white/[0.08]">
           <KeyCaptureButton
             label="Master Pause / Resume"
             description="Pause or resume Always everywhere (kill switch)"

@@ -1,38 +1,35 @@
 import { useEffect, useState } from "react";
 import type { DaemonApi } from "../../hooks/useDaemonState";
-import { appVersion, openUrl } from "../../lib/tauri";
+import { appVersion, openUrl, platform } from "../../lib/tauri";
 import { Btn, Caption, Divider, PanelTitle, Spinner } from "../controls";
 
-const GITHUB_URL = "https://github.com/LivioGama/always";
+const REPOSITORY_URL = "https://github.com/LivioGama/always";
+const DONATE_URL = "https://donate.stripe.com/aFa7sN1jZdHD6b82dY4Ja00";
+const LICENSE = "AGPL-3.0";
 
-/// Settings → About: version, update section, links. Mirrors
-/// AboutPanel.swift + UpdateSection.swift.
+/// Settings → About. Mirrors AboutPanel.swift exactly: app info, updates,
+/// description, links, support-development (Donate), license.
 export function AboutPanel({ daemon }: { daemon: DaemonApi }) {
   const [version, setVersion] = useState("");
+  const [os, setOs] = useState("");
 
   useEffect(() => {
-    appVersion().then(setVersion).catch(() => setVersion("dev"));
+    appVersion().then(setVersion).catch(() => setVersion("unknown"));
+    platform().then(setOs).catch(() => {});
   }, []);
 
-  return (
-    <div className="p-5 space-y-4">
-      <div className="flex items-center gap-3">
-        <div className="w-12 h-12 rounded-xl bg-primary-600 flex items-center justify-center">
-          <svg className="w-7 h-7 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-            <path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M12 3a3 3 0 013 3v5a3 3 0 01-6 0V6a3 3 0 013-3z" />
-            <path strokeWidth={2} strokeLinecap="round" d="M19 10v1a7 7 0 01-14 0v-1M12 18v3" />
-          </svg>
-        </div>
-        <div>
-          <div className="text-lg font-semibold text-white">Always</div>
-          <Caption>Version {version || "…"}</Caption>
-        </div>
-      </div>
+  const platformName = os === "windows" ? "Windows" : os === "macos" ? "macOS" : "Linux";
 
-      <Caption>
-        Voice-first typing: speak, Always transcribes and pastes where your cursor is.
-        Local or Groq cloud transcription, optional post-processing, per-app allowlist.
-      </Caption>
+  return (
+    <div className="p-5 space-y-5">
+      {/* App Info */}
+      <div className="space-y-2 pb-2.5">
+        <div className="text-[32px] font-bold text-white leading-tight">Always</div>
+        <div className="text-lg text-surface-400">
+          The first speech-to-text software designed to be always on and free your hands from the affordance
+        </div>
+        <Caption>Version {version || "unknown"}</Caption>
+      </div>
 
       <Divider />
 
@@ -40,19 +37,101 @@ export function AboutPanel({ daemon }: { daemon: DaemonApi }) {
 
       <Divider />
 
+      {/* Description */}
+      <div className="space-y-2">
+        <PanelTitle>About</PanelTitle>
+        <p className="text-sm text-surface-400">
+          Always provides continuous voice transcription using Groq's STT API with intelligent
+          post-processing. It runs as a background daemon and integrates with your {platformName} workflow.
+        </p>
+      </div>
+
+      <Divider />
+
+      {/* Links */}
       <div className="space-y-2">
         <PanelTitle>Links</PanelTitle>
-        <div className="flex flex-wrap gap-2">
-          <Btn onClick={() => openUrl(GITHUB_URL)}>GitHub</Btn>
-          <Btn onClick={() => openUrl(`${GITHUB_URL}#readme`)}>Documentation</Btn>
-          <Btn onClick={() => openUrl(`${GITHUB_URL}/issues`)}>Report an Issue</Btn>
-          <Btn onClick={() => openUrl("https://github.com/sponsors/LivioGama")}>♥ Donate</Btn>
+        <div className="flex flex-wrap gap-2.5">
+          <LinkButton title="GitHub Repository" url={REPOSITORY_URL} icon="globe" />
+          <LinkButton title="Documentation" url={`${REPOSITORY_URL}#readme`} icon="book" />
+          <LinkButton title="Issues" url={`${REPOSITORY_URL}/issues`} icon="ant" />
         </div>
       </div>
 
-      <Caption>MIT License · Made by Livio Gamassia</Caption>
+      <Divider />
+
+      {/* Support Development */}
+      <div className="space-y-2">
+        <PanelTitle>Support Development</PanelTitle>
+        <p className="text-sm text-surface-400">
+          Always is free and open source. If it saves you time, consider supporting its development.
+        </p>
+        <LinkButton title="Donate" url={DONATE_URL} icon="heart" prominent />
+      </div>
+
+      <Divider />
+
+      {/* License */}
+      <div className="space-y-2">
+        <PanelTitle>License</PanelTitle>
+        <p className="text-sm text-surface-400">{LICENSE}</p>
+      </div>
     </div>
   );
+}
+
+function LinkButton({ title, url, icon, prominent = false }: {
+  title: string;
+  url: string;
+  icon: "globe" | "book" | "ant" | "heart";
+  prominent?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => openUrl(url)}
+      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+        prominent
+          ? "bg-primary-600 text-white hover:bg-primary-500"
+          : "bg-surface-800 text-surface-200 hover:bg-surface-700 border border-surface-700"
+      }`}
+    >
+      <LinkIcon kind={icon} />
+      {title}
+    </button>
+  );
+}
+
+function LinkIcon({ kind }: { kind: "globe" | "book" | "ant" | "heart" }) {
+  const cls = "w-3.5 h-3.5";
+  switch (kind) {
+    case "heart":
+      return (
+        <svg className={cls} viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 21s-7.5-4.6-10-9.3C.4 8.6 2.4 5 6 5c2.2 0 3.6 1.2 4.5 2.6L12 9l1.5-1.4C14.4 6.2 15.8 5 18 5c3.6 0 5.6 3.6 4 6.7C19.5 16.4 12 21 12 21z" />
+        </svg>
+      );
+    case "globe":
+      return (
+        <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor">
+          <circle cx="12" cy="12" r="9" strokeWidth={2} />
+          <path strokeWidth={2} d="M3 12h18M12 3c2.5 2.6 3.9 5.7 3.9 9s-1.4 6.4-3.9 9c-2.5-2.6-3.9-5.7-3.9-9S9.5 5.6 12 3z" />
+        </svg>
+      );
+    case "book":
+      return (
+        <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor">
+          <path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M4 19.5A2.5 2.5 0 016.5 17H20V4a2 2 0 00-2-2H6.5A2.5 2.5 0 004 4.5v15zM20 17v5H6.5a2.5 2.5 0 010-5" />
+        </svg>
+      );
+    case "ant":
+      return (
+        <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor">
+          <circle cx="12" cy="12" r="8" strokeWidth={2} />
+          <path strokeWidth={2} strokeLinecap="round" d="M12 8v4l2 2" />
+        </svg>
+      );
+  }
 }
 
 /// Mirrors UpdateSection.swift — check / available / install / progress / fail.

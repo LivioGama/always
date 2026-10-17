@@ -45,7 +45,7 @@ export function OnboardingView({
           ))}
         </div>
 
-        <div className="bg-surface-900 rounded-2xl p-6 border border-surface-800 animate-fade-in min-h-[300px]">
+        <div className="bg-surface-900 rounded-2xl p-6 border border-white/10 animate-fade-in min-h-[300px]">
           {step === "welcome" && <StepWelcome />}
           {step === "permissions" && <StepPermissions daemon={daemon} />}
           {step === "apps" && <StepApps daemon={daemon} />}
@@ -215,7 +215,7 @@ function PermissionCard({ ok, title, detail, actionTitle, onAction }: {
   onAction?: () => void;
 }) {
   return (
-    <div className="flex items-start gap-3 rounded-lg bg-surface-800/60 p-3">
+    <div className="flex items-start gap-3 rounded-lg bg-white/[0.06] p-3">
       <span className={`mt-0.5 ${ok ? "text-green-500" : "text-orange-400"}`}>
         {ok ? <CheckIcon /> : (
           <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
@@ -251,7 +251,7 @@ function StepApps({ daemon }: { daemon: DaemonApi }) {
         you can change this any time in Settings → General.
       </p>
       {candidates.length === 0 ? (
-        <div className="rounded-lg bg-surface-800/60 p-5 text-center">
+        <div className="rounded-lg bg-white/[0.06] p-5 text-center">
           <Caption className="italic">
             No apps detected yet. Focus the app you want to dictate in, then come back — it'll show up here.
           </Caption>
@@ -265,7 +265,7 @@ function StepApps({ daemon }: { daemon: DaemonApi }) {
                 key={bundleId}
                 type="button"
                 onClick={() => toggle(bundleId)}
-                className="w-full flex items-center gap-3 rounded-lg bg-surface-800/60 px-3 py-2.5 text-left hover:bg-surface-800"
+                className="w-full flex items-center gap-3 rounded-lg bg-white/[0.06] px-3 py-2.5 text-left hover:bg-surface-800"
               >
                 <span
                   className={`w-4 h-4 rounded border flex items-center justify-center ${
