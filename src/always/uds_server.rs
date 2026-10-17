@@ -5,9 +5,11 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 #[cfg(unix)]
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixListener;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::ServerOptions;
 use tokio::sync::Mutex;
 
 use super::event::{DaemonCommand, DaemonEvent, global_broadcaster};
@@ -156,9 +158,21 @@ pub fn socket_path() -> Result<PathBuf> {
     Ok(path)
 }
 
-#[cfg(not(unix))]
+/// Windows equivalent of the UDS socket: a named pipe per instance.
+/// The `\\.\pipe\` prefix selects the local-machine pipe namespace —
+/// the pipe is reachable only from this machine, same trust boundary
+/// as the per-user socket file.
+#[cfg(windows)]
 pub fn socket_path() -> Result<PathBuf> {
-    anyhow::bail!("Unix domain sockets not supported on this platform")
+    Ok(PathBuf::from(format!(
+        r"\\.\pipe\always{}",
+        crate::config::instance_suffix()
+    )))
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn socket_path() -> Result<PathBuf> {
+    anyhow::bail!("daemon IPC not supported on this platform")
 }
 
 /// Start the Unix Domain Socket server.
@@ -209,58 +223,7 @@ pub async fn start_server(
 
     tracing::info!(socket_path = %socket_path.display(), "uds_server_listening");
 
-    // Orphan watchdog: if no UDS client is connected for ORPHAN_TIMEOUT_SECS,
-    // the Mac app is gone (quit/crashed/force-killed). Exit so we don't leave
-    // a stale daemon that the next app launch can't communicate with.
-    //
-    // Before exiting we remove the pid + socket files explicitly because
-    // `std::process::exit` does NOT run Drop, so `PidGuard::Drop` would
-    // be skipped and the next launch would have to wait for
-    // `remove_stale_pid` / `remove_stale_socket` to detect a dead PID.
-    // Only a GUI-spawned daemon mutes itself when clients vanish — a
-    // daemon started manually from a terminal (`always run`) has no GUI
-    // to wait for and keeps today's behavior.
-    let gui_spawned = std::env::var("ALWAYS_SPAWNED_BY_GUI").ok().as_deref() == Some("1");
-    tokio::spawn(async move {
-        let mut last_had_clients = Instant::now();
-        loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            let clients = CONNECTED_CLIENTS.load(Ordering::Relaxed);
-            if clients > 0 {
-                last_had_clients = Instant::now();
-                continue;
-            }
-            // Mute first (fast, reversible), exit later (cleanup). The
-            // mute is what guarantees speech never pastes into windows
-            // while the app is closed.
-            if gui_spawned
-                && !pause::is_no_gui_paused()
-                && last_had_clients.elapsed() > Duration::from_secs(NO_GUI_MUTE_GRACE_SECS)
-            {
-                let (effective, changed) = pause::set_no_gui_paused(true);
-                tracing::warn!(effective, changed, "no_gui_pause_engaged");
-            }
-            if last_had_clients.elapsed() > Duration::from_secs(ORPHAN_TIMEOUT_SECS) {
-                tracing::warn!(
-                    timeout_secs = ORPHAN_TIMEOUT_SECS,
-                    "orphan_daemon_exit: no UDS clients for too long"
-                );
-                // Mirror PidGuard::Drop's cleanup so the next daemon
-                // launch sees a clean slate without needing to detect
-                // a dead pid.
-                if let Ok(log_path) = crate::always::config::configured_log_path()
-                    && let Ok(mut log) = crate::always::log::Logger::open(&log_path)
-                {
-                    log.write(crate::always::log::Event::Stop);
-                }
-                let _ = std::fs::remove_file(crate::always::daemon::pid_path());
-                if let Some(sock) = crate::always::daemon::socket_path() {
-                    let _ = std::fs::remove_file(sock);
-                }
-                std::process::exit(0);
-            }
-        }
-    });
+    spawn_orphan_watchdog();
 
     // Accept connections in a loop
     loop {
@@ -273,6 +236,124 @@ pub async fn start_server(
             }
             Err(e) => {
                 tracing::error!(error = %e, "uds_accept_failed");
+            }
+        }
+    }
+}
+
+/// Orphan watchdog: if no IPC client is connected for ORPHAN_TIMEOUT_SECS,
+/// the GUI is gone (quit/crashed/force-killed). Exit so we don't leave
+/// a stale daemon that the next app launch can't communicate with.
+///
+/// Before exiting we remove the pid + socket files explicitly because
+/// `std::process::exit` does NOT run Drop, so `PidGuard::Drop` would
+/// be skipped and the next launch would have to wait for
+/// `remove_stale_pid` / `remove_stale_socket` to detect a dead PID.
+/// Only a GUI-spawned daemon mutes itself when clients vanish — a
+/// daemon started manually from a terminal (`always run`) has no GUI
+/// to wait for and keeps today's behavior.
+///
+/// The watchdog only runs for GUI-spawned daemons — they are the only
+/// ones a vanished client can orphan. A daemon started from a terminal
+/// (`always run` / `always start`) has no client to wait for and must
+/// keep running; on Windows, where IPC clients are transient CLI
+/// invocations, an unconditional exit would kill every `always start`
+/// daemon 30 seconds in.
+fn spawn_orphan_watchdog() {
+    if std::env::var("ALWAYS_SPAWNED_BY_GUI").ok().as_deref() != Some("1") {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut last_had_clients = Instant::now();
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let clients = CONNECTED_CLIENTS.load(Ordering::Relaxed);
+            if clients > 0 {
+                last_had_clients = Instant::now();
+                continue;
+            }
+            // Mute first (fast, reversible), exit later (cleanup). The
+            // mute is what guarantees speech never pastes into windows
+            // while the app is closed.
+            if !pause::is_no_gui_paused()
+                && last_had_clients.elapsed() > Duration::from_secs(NO_GUI_MUTE_GRACE_SECS)
+            {
+                let (effective, changed) = pause::set_no_gui_paused(true);
+                tracing::warn!(effective, changed, "no_gui_pause_engaged");
+            }
+            if last_had_clients.elapsed() > Duration::from_secs(ORPHAN_TIMEOUT_SECS) {
+                tracing::warn!(
+                    timeout_secs = ORPHAN_TIMEOUT_SECS,
+                    "orphan_daemon_exit: no IPC clients for too long"
+                );
+                // Mirror PidGuard::Drop's cleanup so the next daemon
+                // launch sees a clean slate without needing to detect
+                // a dead pid.
+                if let Ok(log_path) = crate::always::config::configured_log_path()
+                    && let Ok(mut log) = crate::always::log::Logger::open(&log_path)
+                {
+                    log.write(crate::always::log::Event::Stop);
+                }
+                let _ = std::fs::remove_file(crate::always::daemon::pid_path());
+                // On Windows the pipe vanishes with the process — there is
+                // no stale endpoint file to remove.
+                #[cfg(unix)]
+                if let Some(sock) = crate::always::daemon::socket_path() {
+                    let _ = std::fs::remove_file(sock);
+                }
+                std::process::exit(0);
+            }
+        }
+    });
+}
+
+/// Named-pipe server — the Windows equivalent of the UDS listener. Same
+/// JSON-lines protocol, same per-connection handler. `first_pipe_instance`
+/// makes bind a single-winner operation, mirroring the socket-file check:
+/// a second daemon cannot steal the endpoint out from under a live one.
+#[cfg(windows)]
+pub async fn start_server(
+    registry: ModelRegistry,
+    active: ActiveTranscriber,
+    cfg: ActiveConfig,
+) -> Result<()> {
+    spawn_registry_event_bridge(registry.clone());
+    let ctx = ModelCommandCtx {
+        registry,
+        active,
+        cfg,
+    };
+
+    let pipe_path = socket_path()?;
+    let mut server = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&pipe_path)
+        .context("Failed to create named pipe — another always daemon may hold it")?;
+
+    spawn_orphan_watchdog();
+    tracing::info!(pipe = %pipe_path.display(), "pipe_server_listening");
+
+    loop {
+        match server.connect().await {
+            Ok(()) => {
+                // The connected instance is handed to a task; a fresh
+                // instance takes its place as the listener.
+                match ServerOptions::new().create(&pipe_path) {
+                    Ok(next) => {
+                        let conn = std::mem::replace(&mut server, next);
+                        let ctx = ctx.clone();
+                        tokio::spawn(async move {
+                            let _ = handle_client(conn, ctx).await;
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "pipe_recreate_failed");
+                        anyhow::bail!("named pipe listener lost: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "pipe_accept_failed");
             }
         }
     }
@@ -348,47 +429,56 @@ fn spawn_registry_event_bridge(registry: ModelRegistry) {
     });
 }
 
-/// Handle a single client connection
+/// Bump the UDS send buffer for the large initial-state payload.
+/// `tokio::net::UnixStream` exposes no setter (unlike TcpStream), so go
+/// through the raw fd. A failure is non-fatal: the payload is also
+/// chunked, the bigger buffer only avoids the extra round-trips.
 #[cfg(unix)]
-async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
+fn tune_send_buf<S: std::os::fd::AsRawFd>(stream: &S) {
+    use std::os::fd::AsRawFd;
+    // macOS caps SO_SNDBUF on Unix domain streams well below 1 MB —
+    // asking for it fails with EINVAL on every boot (observed live).
+    // Step down to a size the kernel accepts and log at debug: this
+    // is a throughput nicety, not a correctness requirement.
+    for size in [1024 * 1024, 256 * 1024, 64 * 1024] {
+        let size: libc::c_int = size;
+        let rc = unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                std::ptr::from_ref(&size).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc == 0 {
+            break;
+        }
+        if size == 64 * 1024 {
+            tracing::debug!(
+                error = %std::io::Error::last_os_error(),
+                "uds_send_buffer_increase_failed (kernel default in use)"
+            );
+        }
+    }
+}
+
+/// Named pipes have no SO_SNDBUF equivalent — kernel buffering is internal.
+#[cfg(not(unix))]
+fn tune_send_buf<S>(_: &S) {}
+
+/// Handle a single client connection
+async fn handle_client<S>(stream: S, ctx: ModelCommandCtx) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     CONNECTED_CLIENTS.fetch_add(1, Ordering::Relaxed);
     let consume_lease = Arc::new(AtomicBool::new(false));
     let _guard = ClientGuard {
         consume_lease: Arc::clone(&consume_lease),
     };
 
-    // Increase the socket send buffer to handle larger initial payloads.
-    // `tokio::net::UnixStream` exposes no setter for this (unlike TcpStream),
-    // so go through the raw fd. A failure is non-fatal: the payload is also
-    // chunked, the bigger buffer only avoids the extra round-trips.
-    {
-        use std::os::fd::AsRawFd;
-        // macOS caps SO_SNDBUF on Unix domain streams well below 1 MB —
-        // asking for it fails with EINVAL on every boot (observed live).
-        // Step down to a size the kernel accepts and log at debug: this
-        // is a throughput nicety, not a correctness requirement.
-        for size in [1024 * 1024, 256 * 1024, 64 * 1024] {
-            let size: libc::c_int = size;
-            let rc = unsafe {
-                libc::setsockopt(
-                    stream.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_SNDBUF,
-                    std::ptr::from_ref(&size).cast::<libc::c_void>(),
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                )
-            };
-            if rc == 0 {
-                break;
-            }
-            if size == 64 * 1024 {
-                tracing::debug!(
-                    error = %std::io::Error::last_os_error(),
-                    "uds_send_buffer_increase_failed (kernel default in use)"
-                );
-            }
-        }
-    }
+    tune_send_buf(&stream);
 
     tracing::info!(
         clients = CONNECTED_CLIENTS.load(Ordering::Relaxed),
@@ -411,7 +501,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     }
 
     let mut rx = global_broadcaster().subscribe();
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(stream);
     let reader = BufReader::new(reader);
     let rate_limiter = Mutex::new(RateLimiter::new());
 
