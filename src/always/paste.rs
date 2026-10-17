@@ -4,7 +4,7 @@
 //! posts synthetic Cmd+V / Return events via Core Graphics. The trait
 //! ([`ClipboardProvider`]) exists so the `event_loop` can be exercised
 //! end-to-end in tests without actually touching the user's pasteboard,
-//! and so future Linux/Windows backends can plug in without rewriting
+//! and so Linux/Windows backends can plug in without rewriting
 //! callers.
 //!
 //! `MockClipboardProvider` (gated behind `cfg(test)`) records every
@@ -68,7 +68,7 @@ impl ClipboardProvider for WindowsClipboard {
     }
 }
 
-/// Linux clipboard via `xclip` / `xdotool` + optional Wayland ydotool.
+/// Linux clipboard via `wl-clipboard` on Wayland and `xclip` on X11.
 ///
 /// Stateless — safe to construct anywhere and share via `Arc`.
 #[cfg(target_os = "linux")]
@@ -213,15 +213,18 @@ fn copy_via_subprocess(text: String) -> Result<()> {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
 
-    let copy_cmd = if cfg!(target_os = "macos") {
-        "pbcopy"
+    let (copy_cmd, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("pbcopy", &[])
+    } else if cfg!(target_os = "linux") && is_wayland_session() && which_present("wl-copy") {
+        ("wl-copy", &[])
     } else if cfg!(target_os = "linux") {
-        "xclip"
+        ("xclip", &["-selection", "clipboard", "-in"])
     } else {
         anyhow::bail!("copy_to_clipboard not implemented for this platform");
     };
 
     let mut command = Command::new(copy_cmd);
+    command.args(args);
     // Force a UTF-8 locale for the clipboard tool. pbcopy decodes its stdin
     // bytes via CFStringGetSystemEncoding(); under the launchd-spawned daemon
     // environment (no LANG/LC_*/__CF_USER_TEXT_ENCODING) that is MacRoman, so
@@ -231,10 +234,6 @@ fn copy_via_subprocess(text: String) -> Result<()> {
     command
         .env("LANG", "en_US.UTF-8")
         .env("LC_ALL", "en_US.UTF-8");
-    if cfg!(target_os = "linux") {
-        command.args(["-selection", "clipboard", "-in"]);
-    }
-
     let mut copy = command
         .stdin(Stdio::piped())
         .spawn()
@@ -430,11 +429,16 @@ fn paste_wayland(auto_enter: bool) -> Result<()> {
 
 /// Paste via `ydotool type` — types plain text into the focused window.
 #[cfg(target_os = "linux")]
-fn paste_wayland_ydotool(_auto_enter: bool) -> Result<()> {
+fn paste_wayland_ydotool(auto_enter: bool) -> Result<()> {
     // ydotool type sends the text as a series of key events.
     // For clipboard paste on Wayland, we first write to clipboard via wl-copy/xdg-clipper,
     // then simulate Ctrl+V via ydotool key codes.
-    post_ydotool_key(["--delay", "3", "ctrl:v"])
+    post_ydotool_key(["--delay", "3", "ctrl:v"])?;
+    if auto_enter {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        post_ydotool_key(["--delay", "3", "Return"])?;
+    }
+    Ok(())
 }
 
 /// Paste on an X11 session via xdotool.
@@ -458,11 +462,8 @@ fn paste_x11(auto_enter: bool) -> Result<()> {
 /// Check whether an executable is available on PATH.
 #[allow(dead_code)]
 fn which_present(name: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(name)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
 }
 
 pub fn paste(text: &str, auto_enter: bool) -> Result<()> {
@@ -485,6 +486,8 @@ pub fn paste(text: &str, auto_enter: bool) -> Result<()> {
 pub fn read_clipboard_text() -> Result<String> {
     let (cmd, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
         ("pbpaste", &[])
+    } else if cfg!(target_os = "linux") && is_wayland_session() && which_present("wl-paste") {
+        ("wl-paste", &["--no-newline"])
     } else if cfg!(target_os = "linux") {
         ("xclip", &["-selection", "clipboard", "-out"])
     } else {

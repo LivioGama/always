@@ -3,10 +3,8 @@ import type { DaemonApi } from "../../hooks/useDaemonState";
 import { openUrl, platform } from "../../lib/tauri";
 import { Btn, Caption, PanelTitle, Spinner } from "../controls";
 
-/// Settings → Permissions. Mirrors PermissionsPanel.swift; Windows semantics:
-/// the OS has no accessibility/input-monitoring TCC grants, so the actionable
-/// row is the microphone privacy toggle, plus the daemon-reported shortcut
-/// listener status.
+/// Settings → Permissions. Platform copy follows the native permission and
+/// global-hotkey model reported by the daemon.
 export function PermissionsPanel({ daemon }: { daemon: DaemonApi }) {
   const [os, setOs] = useState("windows");
   const [checking, setChecking] = useState(false);
@@ -31,7 +29,9 @@ export function PermissionsPanel({ daemon }: { daemon: DaemonApi }) {
         <Caption className="mt-1">
           {os === "windows"
             ? "Windows grants desktop apps mic access globally — but it can be turned off in Settings → Privacy & security → Microphone."
-            : "Always needs these permissions to hear you and type for you."}
+            : os === "linux"
+              ? "Microphone access comes from your audio session. Global shortcuts require an X11 session."
+              : "Always needs these permissions to hear you and type for you."}
         </Caption>
       </div>
 
@@ -40,19 +40,21 @@ export function PermissionsPanel({ daemon }: { daemon: DaemonApi }) {
         title="Microphone"
         okText="Granted — the daemon is hearing audio."
         badText="Can't reach the daemon, so the microphone state is unknown. Start the daemon, or check OS microphone privacy settings."
-        actionTitle={os === "windows" ? "Open Microphone Settings" : "Open Settings"}
+        actionTitle={os === "windows" ? "Open Microphone Settings" : os === "macos" ? "Open Settings" : undefined}
         onAction={() =>
           openUrl(
             os === "windows"
               ? "ms-settings:privacy-microphone"
-              : "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+            : os === "macos"
+              ? "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+              : "",
           )
         }
       />
 
       <PermissionRow
         ok={shortcutsOk}
-        title={os === "windows" ? "Global Shortcuts" : "Input Monitoring"}
+        title={os === "macos" ? "Input Monitoring" : "Global Shortcuts"}
         okText={
           os === "windows"
             ? "Active — the daemon is listening for global hotkeys."
@@ -61,7 +63,9 @@ export function PermissionsPanel({ daemon }: { daemon: DaemonApi }) {
         badText={
           os === "windows"
             ? "The daemon couldn't register the global hotkeys — another app may already own one of the chords. Reassign it in the Shortcuts tab."
-            : "Required for global shortcuts to work."
+            : os === "linux"
+              ? "X11 is required for global shortcuts. On Wayland, use the CLI to toggle pause and auto-enter."
+              : "Required for global shortcuts to work."
         }
         actionTitle={os === "macos" ? "Open Settings" : undefined}
         onAction={

@@ -152,7 +152,7 @@ function StepPermissions({ daemon }: { daemon: DaemonApi }) {
     <div className="animate-slide-up">
       <h2 className="text-xl font-semibold text-white mb-3">Permissions</h2>
       <p className="text-surface-300 text-sm leading-relaxed mb-4">
-        Always needs access to your microphone. {os === "macos" ? "It also needs Input Monitoring for global shortcuts." : ""}
+        Always needs access to your microphone. {os === "macos" ? "It also needs Input Monitoring for global shortcuts." : os === "linux" ? "Global shortcuts are available in X11 sessions." : ""}
       </p>
       <div className="space-y-2.5">
         <PermissionCard
@@ -165,7 +165,7 @@ function StepPermissions({ daemon }: { daemon: DaemonApi }) {
                 ? "If dictation is silent, allow desktop apps under Settings → Privacy & security → Microphone."
                 : "Required to hear you speak."
           }
-          actionTitle={micOk ? undefined : os === "windows" ? "Open Microphone Settings" : "Open Settings"}
+          actionTitle={micOk ? undefined : os === "windows" ? "Open Microphone Settings" : os === "macos" ? "Open Settings" : undefined}
           onAction={
             micOk
               ? undefined
@@ -173,19 +173,23 @@ function StepPermissions({ daemon }: { daemon: DaemonApi }) {
                   openUrl(
                     os === "windows"
                       ? "ms-settings:privacy-microphone"
-                      : "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+                      : os === "macos"
+                        ? "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+                        : "",
                   )
           }
         />
         <PermissionCard
           ok={shortcutsOk}
-          title={os === "windows" ? "Global Shortcuts" : "Input Monitoring"}
+          title={os === "macos" ? "Input Monitoring" : "Global Shortcuts"}
           detail={
             shortcutsOk
               ? "Active — global hotkeys are working."
-              : os === "windows"
-                ? "Windows hotkey wiring is still landing — shortcuts won't fire yet."
-                : "Required for the global hotkeys to work."
+              : os === "linux"
+                ? "X11 is required for global shortcuts. On Wayland, use the CLI to toggle pause and auto-enter."
+                : os === "windows"
+                  ? "Another app may already own one of the global shortcut chords."
+                  : "Required for the global hotkeys to work."
           }
           actionTitle={
             !shortcutsOk && os === "macos" ? "Open Settings" : undefined

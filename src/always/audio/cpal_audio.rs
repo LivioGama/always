@@ -100,6 +100,8 @@ impl SharedAudioSource {
 
         let device = Self::find_input_device()?;
         let (stream_config, sample_format) = Self::find_config(&device)?;
+        let input_rate = stream_config.sample_rate;
+        let input_channels = stream_config.channels as usize;
         // cpal 0.18: Device no longer has .name(); use Display.
         let device_name = format!("{}", device);
 
@@ -112,6 +114,8 @@ impl SharedAudioSource {
             device,
             stream_config,
             sample_format,
+            input_rate,
+            input_channels,
             tx,
             rx,
             ring_clone,
@@ -120,7 +124,8 @@ impl SharedAudioSource {
 
         tracing::info!(
             device = %device_name,
-            sample_rate = RATE,
+            input_sample_rate = input_rate,
+            input_channels,
             "cpal_stream_started"
         );
 
@@ -153,7 +158,8 @@ impl SharedAudioSource {
             .map_err(|e| anyhow::anyhow!("Failed to list configs: {}", e))?
             .collect();
 
-        // Try exact match: 16kHz in range, mono.
+        // Prefer exact 16 kHz mono, then exact 16 kHz on any channel
+        // layout. The capture callback downmixes/resamples as needed.
         for cfg in &supported {
             if cfg.channels() == 1 && cfg.min_sample_rate() <= RATE && RATE <= cfg.max_sample_rate()
             {
@@ -161,28 +167,32 @@ impl SharedAudioSource {
                 return Ok((sc.config(), cfg.sample_format()));
             }
         }
+        for cfg in &supported {
+            if cfg.min_sample_rate() <= RATE && RATE <= cfg.max_sample_rate() {
+                let sc = cfg.with_sample_rate(RATE);
+                return Ok((sc.config(), cfg.sample_format()));
+            }
+        }
 
-        // Fallback: closest mono config.
+        // Fallback: closest supported format, preferring mono on ties.
         let best = supported
             .iter()
-            .filter(|c| c.channels() == 1)
             .min_by_key(|c| {
                 let lo = c.min_sample_rate();
                 let hi = c.max_sample_rate();
-                if RATE >= lo && RATE <= hi {
-                    0u32 // exact range match, prefer exact
+                let distance = if RATE >= lo && RATE <= hi {
+                    0u32
                 } else if RATE < lo {
                     lo - RATE
                 } else {
                     RATE - hi
-                }
+                };
+                distance.saturating_mul(2) + u32::from(c.channels() != 1)
             })
-            .context("No compatible mono input config")?;
+            .context("No compatible input config")?;
 
-        let sc = best
-            .try_with_sample_rate(RATE)
-            .or_else(|| best.try_with_sample_rate(best.max_sample_rate()))
-            .context("No compatible mono input config")?;
+        let selected_rate = RATE.clamp(best.min_sample_rate(), best.max_sample_rate());
+        let sc = best.with_sample_rate(selected_rate);
 
         Ok((sc.config(), best.sample_format()))
     }
@@ -192,6 +202,8 @@ impl SharedAudioSource {
         device: cpal::Device,
         config: cpal::StreamConfig,
         sample_format: cpal::SampleFormat,
+        input_rate: u32,
+        input_channels: usize,
         tx: mpsc::Sender<[u8; FRAME_BYTES]>,
         rx: Arc<Mutex<Option<mpsc::Receiver<[u8; FRAME_BYTES]>>>>,
         ring: Arc<Mutex<FrameRing>>,
@@ -208,19 +220,19 @@ impl SharedAudioSource {
                     let tx = Arc::clone(&tx_clone);
                     let running = Arc::clone(&running_clone);
                     let cfg = Arc::clone(&config);
-                    Self::start_stream_i16(&device, cfg, tx, running);
+                    Self::start_stream_i16(&device, cfg, tx, running, input_rate, input_channels);
                 }
                 cpal::SampleFormat::U16 => {
                     let tx = Arc::clone(&tx_clone);
                     let running = Arc::clone(&running_clone);
                     let cfg = Arc::clone(&config);
-                    Self::start_stream_u16(&device, cfg, tx, running);
+                    Self::start_stream_u16(&device, cfg, tx, running, input_rate, input_channels);
                 }
                 cpal::SampleFormat::F32 => {
                     let tx = Arc::clone(&tx_clone);
                     let running = Arc::clone(&running_clone);
                     let cfg = Arc::clone(&config);
-                    Self::start_stream_f32(&device, cfg, tx, running);
+                    Self::start_stream_f32(&device, cfg, tx, running, input_rate, input_channels);
                 }
                 _ => {
                     tracing::error!(format = ?sample_format, "unsupported sample format");
@@ -235,6 +247,8 @@ impl SharedAudioSource {
         config: Arc<cpal::StreamConfig>,
         tx: Arc<Mutex<Option<mpsc::Sender<[u8; FRAME_BYTES]>>>>,
         running: Arc<AtomicBool>,
+        input_rate: u32,
+        input_channels: usize,
     ) {
         // We need TWO Arc clones: one for the data callback, one for the
         // while loop. The data callback borrows `running` for its closure,
@@ -242,12 +256,13 @@ impl SharedAudioSource {
         let running_cb = Arc::clone(&running);
         let tx_cb = Arc::clone(&tx);
         let cfg_cb = Arc::clone(&config);
+        let mut framer = PcmFramer::new(input_rate, input_channels);
 
         let stream = device.build_input_stream(
             *cfg_cb,
             move |data: &[i16], _info| {
                 if running_cb.load(Ordering::Relaxed) {
-                    Self::push_frames_i16(data, &tx_cb);
+                    framer.push_i16(data, &tx_cb);
                 }
             },
             move |err| {
@@ -255,12 +270,16 @@ impl SharedAudioSource {
             },
             None,
         );
-        if let Ok(stream) = stream
-            && stream.play().is_ok()
-        {
-            while running.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(100));
-            }
+        match stream {
+            Ok(stream) => match stream.play() {
+                Ok(()) => {
+                    while running.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                }
+                Err(error) => tracing::error!(%error, "cpal_stream_play_failed"),
+            },
+            Err(error) => tracing::error!(%error, "cpal_stream_build_failed"),
         }
     }
 
@@ -269,15 +288,18 @@ impl SharedAudioSource {
         config: Arc<cpal::StreamConfig>,
         tx: Arc<Mutex<Option<mpsc::Sender<[u8; FRAME_BYTES]>>>>,
         running: Arc<AtomicBool>,
+        input_rate: u32,
+        input_channels: usize,
     ) {
         let running_cb = Arc::clone(&running);
         let tx_cb = Arc::clone(&tx);
         let cfg_cb = Arc::clone(&config);
+        let mut framer = PcmFramer::new(input_rate, input_channels);
         let stream = device.build_input_stream(
             *cfg_cb,
             move |data: &[u16], _info| {
                 if running_cb.load(Ordering::Relaxed) {
-                    Self::push_frames_u16(data, &tx_cb);
+                    framer.push_u16(data, &tx_cb);
                 }
             },
             move |err| {
@@ -285,12 +307,16 @@ impl SharedAudioSource {
             },
             None,
         );
-        if let Ok(stream) = stream
-            && stream.play().is_ok()
-        {
-            while running.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(100));
-            }
+        match stream {
+            Ok(stream) => match stream.play() {
+                Ok(()) => {
+                    while running.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                }
+                Err(error) => tracing::error!(%error, "cpal_stream_play_failed"),
+            },
+            Err(error) => tracing::error!(%error, "cpal_stream_build_failed"),
         }
     }
 
@@ -299,15 +325,18 @@ impl SharedAudioSource {
         config: Arc<cpal::StreamConfig>,
         tx: Arc<Mutex<Option<mpsc::Sender<[u8; FRAME_BYTES]>>>>,
         running: Arc<AtomicBool>,
+        input_rate: u32,
+        input_channels: usize,
     ) {
         let running_cb = Arc::clone(&running);
         let tx_cb = Arc::clone(&tx);
         let cfg_cb = Arc::clone(&config);
+        let mut framer = PcmFramer::new(input_rate, input_channels);
         let stream = device.build_input_stream(
             *cfg_cb,
             move |data: &[f32], _info| {
                 if running_cb.load(Ordering::Relaxed) {
-                    Self::push_frames_f32(data, &tx_cb);
+                    framer.push_f32(data, &tx_cb);
                 }
             },
             move |err| {
@@ -315,12 +344,16 @@ impl SharedAudioSource {
             },
             None,
         );
-        if let Ok(stream) = stream
-            && stream.play().is_ok()
-        {
-            while running.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(100));
-            }
+        match stream {
+            Ok(stream) => match stream.play() {
+                Ok(()) => {
+                    while running.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                }
+                Err(error) => tracing::error!(%error, "cpal_stream_play_failed"),
+            },
+            Err(error) => tracing::error!(%error, "cpal_stream_build_failed"),
         }
     }
 
@@ -343,54 +376,85 @@ impl SharedAudioSource {
             ring.lock().push(frame);
         }
     }
+}
 
-    fn push_frames_i16(data: &[i16], tx: &Mutex<Option<mpsc::Sender<[u8; FRAME_BYTES]>>>) {
-        let frames = data.len() / FRAME_SAMPLES;
-        for i in 0..frames {
-            let start = i * FRAME_SAMPLES;
-            let mut frame = [0u8; FRAME_BYTES];
-            for j in 0..FRAME_SAMPLES {
-                let val = data[start + j];
-                frame[j * 2..j * 2 + 2].copy_from_slice(&val.to_le_bytes());
-            }
-            if let Some(sender) = &*tx.lock() {
-                let _ = sender.send(frame);
-            }
+/// Converts an input device's interleaved samples into the daemon's
+/// 16 kHz mono frames. State spans CPAL callbacks so neither arbitrary
+/// callback boundaries nor stereo devices drop samples.
+struct PcmFramer {
+    input_rate: u32,
+    input_channels: usize,
+    rate_phase: u64,
+    frame: [u8; FRAME_BYTES],
+    samples_in_frame: usize,
+}
+
+impl PcmFramer {
+    fn new(input_rate: u32, input_channels: usize) -> Self {
+        Self {
+            input_rate: input_rate.max(1),
+            input_channels: input_channels.max(1),
+            rate_phase: 0,
+            frame: [0; FRAME_BYTES],
+            samples_in_frame: 0,
         }
     }
 
-    fn push_frames_u16(data: &[u16], tx: &Mutex<Option<mpsc::Sender<[u8; FRAME_BYTES]>>>) {
-        let frames = data.len() / FRAME_SAMPLES;
-        for i in 0..frames {
-            let start = i * FRAME_SAMPLES;
-            let mut frame = [0u8; FRAME_BYTES];
-            for j in 0..FRAME_SAMPLES {
-                let idx = start + j;
-                if idx < data.len() {
-                    let signed = ((data[idx] as i32) - 32768) as i16;
-                    frame[j * 2..j * 2 + 2].copy_from_slice(&signed.to_le_bytes());
-                }
-            }
-            if let Some(sender) = &*tx.lock() {
-                let _ = sender.send(frame);
-            }
-        }
+    fn push_i16(&mut self, data: &[i16], tx: &Mutex<Option<mpsc::Sender<[u8; FRAME_BYTES]>>>) {
+        self.push_interleaved(
+            data.chunks_exact(self.input_channels).map(|channels| {
+                let sum: i64 = channels.iter().map(|sample| i64::from(*sample)).sum();
+                (sum / channels.len() as i64) as i16
+            }),
+            tx,
+        );
     }
 
-    fn push_frames_f32(data: &[f32], tx: &Mutex<Option<mpsc::Sender<[u8; FRAME_BYTES]>>>) {
-        let frames = data.len() / FRAME_SAMPLES;
-        for i in 0..frames {
-            let start = i * FRAME_SAMPLES;
-            let mut frame = [0u8; FRAME_BYTES];
-            for j in 0..FRAME_SAMPLES {
-                let idx = start + j;
-                if idx < data.len() {
-                    let sample = (data[idx] * 32767.0) as i16;
-                    frame[j * 2..j * 2 + 2].copy_from_slice(&sample.to_le_bytes());
+    fn push_u16(&mut self, data: &[u16], tx: &Mutex<Option<mpsc::Sender<[u8; FRAME_BYTES]>>>) {
+        self.push_interleaved(
+            data.chunks_exact(self.input_channels).map(|channels| {
+                let sum: i64 = channels
+                    .iter()
+                    .map(|sample| i64::from(*sample) - 32768)
+                    .sum();
+                (sum / channels.len() as i64) as i16
+            }),
+            tx,
+        );
+    }
+
+    fn push_f32(&mut self, data: &[f32], tx: &Mutex<Option<mpsc::Sender<[u8; FRAME_BYTES]>>>) {
+        self.push_interleaved(
+            data.chunks_exact(self.input_channels).map(|channels| {
+                let sum: f64 = channels
+                    .iter()
+                    .map(|sample| sample.clamp(-1.0, 1.0) as f64)
+                    .sum();
+                ((sum / channels.len() as f64) * 32767.0).round() as i16
+            }),
+            tx,
+        );
+    }
+
+    fn push_interleaved(
+        &mut self,
+        samples: impl Iterator<Item = i16>,
+        tx: &Mutex<Option<mpsc::Sender<[u8; FRAME_BYTES]>>>,
+    ) {
+        for sample in samples {
+            self.rate_phase += u64::from(RATE);
+            while self.rate_phase >= u64::from(self.input_rate) {
+                self.rate_phase -= u64::from(self.input_rate);
+                let offset = self.samples_in_frame * 2;
+                self.frame[offset..offset + 2].copy_from_slice(&sample.to_le_bytes());
+                self.samples_in_frame += 1;
+                if self.samples_in_frame == FRAME_SAMPLES {
+                    if let Some(sender) = &*tx.lock() {
+                        let _ = sender.send(self.frame);
+                    }
+                    self.frame = [0; FRAME_BYTES];
+                    self.samples_in_frame = 0;
                 }
-            }
-            if let Some(sender) = &*tx.lock() {
-                let _ = sender.send(frame);
             }
         }
     }

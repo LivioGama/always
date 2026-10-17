@@ -5,7 +5,7 @@ description: Cut an Always release end to end — pick the version, prepare the 
 
 # Releasing Always
 
-Branch model (differs from Pixel's single-branch model):
+Branch model:
 
 - **`develop`** is where work lands. Pull requests target it.
 - **`main`** is protected and deploys. It receives changes only through a
