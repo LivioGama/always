@@ -51,8 +51,8 @@ export function Toggle({ on, onChange, disabled = false }: {
       } ${disabled ? "opacity-40 cursor-not-allowed" : ""}`}
     >
       <span
-        className={`absolute top-[2px] w-[18px] h-[18px] bg-white rounded-full shadow transition-transform ${
-          on ? "translate-x-[20px]" : "translate-x-[2px]"
+        className={`absolute top-[2px] w-[18px] h-[18px] bg-white rounded-full shadow transition-[left] ${
+          on ? "left-[20px]" : "left-[2px]"
         }`}
       />
     </button>

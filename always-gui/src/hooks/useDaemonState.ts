@@ -346,7 +346,10 @@ export function useDaemonState() {
       cmd({ type: "CancelVoiceEnrollment" });
     },
     deleteVoiceProfile: () => cmd({ type: "DeleteVoiceProfile" }),
-    setVoiceProfileEnabled: (enabled: boolean) => cmd({ type: "SetVoiceProfileEnabled", data: { enabled } }),
+    setVoiceProfileEnabled: (enabled: boolean) => {
+      setState((prev) => ({ ...prev, voiceEnabled: enabled }));
+      cmd({ type: "SetVoiceProfileEnabled", data: { enabled } });
+    },
 
     approveCorrection: (id: string) => cmd({ type: "ApproveCorrection", data: { id } }),
     rejectCorrection: (id: string) => cmd({ type: "RejectCorrection", data: { id } }),
