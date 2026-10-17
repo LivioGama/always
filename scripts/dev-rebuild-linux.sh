@@ -20,6 +20,8 @@ PID_FILE="$STATE_DIR/gui.pid"
 LOG_FILE="$STATE_DIR/gui.log"
 DAEMON_PID_FILE="$STATE_DIR/daemon.pid"
 DAEMON_LOG_FILE="$STATE_DIR/daemon.log"
+DEV_GROQ_API_KEY="${GROQ_API_KEY:-}"
+unset GROQ_API_KEY
 if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
     SOCKET_FILE="$XDG_RUNTIME_DIR/always-dev.sock"
 else
@@ -94,8 +96,13 @@ if [[ ! -x "$DAEMON_BIN" || ! -x "$GUI_BIN" ]]; then
 fi
 
 echo "▶ launching dev daemon..."
-ALWAYS_INSTANCE=dev "$DAEMON_BIN" run >"$DAEMON_LOG_FILE" 2>&1 &
+if [[ -n "$DEV_GROQ_API_KEY" ]]; then
+    ALWAYS_INSTANCE=dev GROQ_API_KEY="$DEV_GROQ_API_KEY" "$DAEMON_BIN" run >"$DAEMON_LOG_FILE" 2>&1 &
+else
+    ALWAYS_INSTANCE=dev "$DAEMON_BIN" run >"$DAEMON_LOG_FILE" 2>&1 &
+fi
 daemon_pid=$!
+unset DEV_GROQ_API_KEY
 printf '%s\n' "$daemon_pid" > "$DAEMON_PID_FILE"
 
 daemon_ready=false
