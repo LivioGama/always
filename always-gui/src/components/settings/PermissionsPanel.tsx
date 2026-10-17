@@ -60,7 +60,7 @@ export function PermissionsPanel({ daemon }: { daemon: DaemonApi }) {
         }
         badText={
           os === "windows"
-            ? "The daemon reports the hotkey listener isn't running yet — Windows hotkey wiring is still landing. Shortcuts set in the Shortcuts tab won't fire."
+            ? "Global hotkeys aren't implemented on Windows yet — there's no OS permission to grant. Dictation still works (it's voice-activated); pause/resume via the tray icon or `always toggle-pause`."
             : "Required for global shortcuts to work."
         }
         actionTitle={os === "macos" ? "Open Settings" : undefined}
