@@ -62,6 +62,20 @@ export function BehaviorPanel({
     return `Custom — closest to ${best.label} (${best.secs.toFixed(1)}s). Yours: ${config.sttSilence.toFixed(2)}s.`;
   };
 
+  const changeRuntimeSetting = (patch: Partial<Config>) => {
+    onConfigChange(patch);
+    const next = { ...config, ...patch };
+    daemon.applyRuntimePreferences({
+      auto_enter_delay_ms: next.autoEnterDelayMs,
+      energy_threshold: next.sttEnergyThreshold,
+      silence_secs: next.sttSilence,
+      cooldown_ms: next.sttCooldownMs,
+      silero_threshold: next.sileroThreshold,
+      adaptive_silence: next.sttAdaptiveSilence,
+      stt_live_preview: next.sttLivePreview,
+    });
+  };
+
   return (
     <div className="p-5 space-y-3.5">
       {/* Sensitivity */}
@@ -112,13 +126,13 @@ export function BehaviorPanel({
           label="Extend automatically when a sentence sounds unfinished"
           help="When the transcript-so-far ends mid-thought (no punctuation, trailing 'and'/'which'/…), the pause window is temporarily doubled so the sentence isn't split."
           on={config.sttAdaptiveSilence}
-          onChange={(v) => onConfigChange({ sttAdaptiveSilence: v })}
+          onChange={(v) => changeRuntimeSetting({ sttAdaptiveSilence: v })}
         />
         <ToggleRow
           label="Show live transcript while you speak"
           help="Periodically transcribes what you've said so far and shows the provisional text in the overlay while you're still talking."
           on={config.sttLivePreview}
-          onChange={(v) => onConfigChange({ sttLivePreview: v })}
+          onChange={(v) => changeRuntimeSetting({ sttLivePreview: v })}
         />
 
         {/* Advanced thresholds disclosure */}

@@ -1342,6 +1342,11 @@ as ordinary web text. Inputs, editable text, and transcript-history entries
 remain selectable. Models cards use subdued dark surfaces against the dark
 window.
 
+On Linux, the Behavior switches for adaptive silence and live transcript apply
+their changes to the running daemon immediately and save them for the next
+launch. Models dropdown controls and their option menus use dark surfaces with
+readable light text.
+
 **Linux permissions.** Linux does not show the microphone-permission banner in
 General: microphone access comes from the active audio session, and the
 Permissions page reports the daemon/audio-session status. Global shortcuts
