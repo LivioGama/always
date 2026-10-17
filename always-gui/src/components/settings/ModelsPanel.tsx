@@ -214,7 +214,7 @@ function ModelsSection({ daemon, config, onConfigChange }: {
           <path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M17.5 18a4.5 4.5 0 100-9 6 6 0 00-11.5 1.5A4 4 0 006.5 18h11z" />
         </svg>
         <div className="flex-1 min-w-0">
-          <div className="text-sm font-medium text-surface-100">Groq Cloud</div>
+          <div className="text-[13px] font-medium text-surface-100">Groq Cloud</div>
           <Caption>Fastest and lightest — audio is transcribed on Groq's servers. Needs an API key.</Caption>
         </div>
         {cloudActive ? (
@@ -345,7 +345,7 @@ function ModelCard({ m, daemon, active }: { m: CatalogModel; daemon: DaemonApi; 
       <div className="flex items-start gap-2.5">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5">
-            <span className="text-sm font-medium text-surface-100 truncate">{m.name}</span>
+            <span className="text-[13px] font-medium text-surface-100 truncate">{m.name}</span>
             {m.is_recommended && (
               <span className="text-[9px] px-1 py-px rounded bg-primary-500/15 text-primary-300">recommended</span>
             )}

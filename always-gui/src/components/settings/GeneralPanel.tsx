@@ -34,7 +34,7 @@ export function GeneralPanel({
             )}
           </svg>
           <div className="flex-1 min-w-0">
-            <div className="text-sm font-semibold text-white">Sound</div>
+            <div className="text-[13px] font-semibold text-white">Sound</div>
             <Caption>Play distinct sounds for listening, transcribing, success, and failure.</Caption>
           </div>
           <Segmented
@@ -57,7 +57,7 @@ export function GeneralPanel({
       <div>
         <PanelTitle>Status Overlay</PanelTitle>
         <div className="flex items-center gap-3 mt-2">
-          <span className="text-sm text-surface-200" title="The floating indicator shown while you dictate. Compact shrinks it to a small pill; Hidden never shows it.">
+          <span className="text-[13px] text-surface-200" title="The floating indicator shown while you dictate. Compact shrinks it to a small pill; Hidden never shows it.">
             Listening / transcribing indicator
           </span>
           <div className="flex-1" />
@@ -101,7 +101,7 @@ export function GeneralPanel({
               )}
             </svg>
             <div className="flex-1">
-              <div className="text-sm font-semibold text-white">
+              <div className="text-[13px] font-semibold text-white">
                 {s.isMasterPaused ? "Paused everywhere" : "Allowlist active"}
               </div>
               <Caption>
@@ -172,7 +172,7 @@ function FocusedAppCard({ daemon }: { daemon: DaemonApi }) {
         </svg>
         <div className="flex-1 min-w-0">
           <Caption>{bundleId ? "Currently focused" : "No focused app"}</Caption>
-          <div className="text-sm font-semibold text-white truncate">{appName(bundleId)}</div>
+          <div className="text-[13px] font-semibold text-white truncate">{appName(bundleId)}</div>
           <Caption>{stateText}</Caption>
         </div>
         {bundleId && (
@@ -198,7 +198,7 @@ function ResumedAppRow({ bundleId, isFocused, onRemove }: {
       >
         {isFocused ? <path d="M8 5v14l11-7z" /> : <path d="M12 2a10 10 0 100 20 10 10 0 000-20zm-1.5 14.5l-4-4 1.4-1.4 2.6 2.6 5.6-5.6 1.4 1.4-7 7z" />}
       </svg>
-      <span className="text-sm text-surface-200 truncate flex-1">{appName(bundleId)}</span>
+      <span className="text-[13px] text-surface-200 truncate flex-1">{appName(bundleId)}</span>
       <button
         type="button"
         title="Remove from allowlist (this app will be paused again)"

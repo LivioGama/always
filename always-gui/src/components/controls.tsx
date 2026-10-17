@@ -4,7 +4,7 @@ import { parseShortcutParts, partSymbol, shortcutFromKeyEvent } from "../lib/sho
 // ── Typography / layout primitives (SwiftUI-ish) ────────────────────────────
 
 export function PanelTitle({ children }: { children: ReactNode }) {
-  return <h3 className="text-sm font-semibold text-white">{children}</h3>;
+  return <h3 className="text-[13px] font-semibold text-white">{children}</h3>;
 }
 
 export function Caption({ children, className = "" }: { children: ReactNode; className?: string }) {
@@ -189,7 +189,7 @@ export function NumericSettingRow({
       <div className="flex items-baseline gap-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1">
-            <span className="text-sm text-surface-200" title={help}>{title}</span>
+            <span className="text-[13px] text-surface-200" title={help}>{title}</span>
             {explanation && (
               <button
                 type="button"
@@ -235,7 +235,7 @@ export function NumericSettingRow({
       </div>
       {showInfo && explanation && (
         <div className="mt-1 ml-4 p-3 w-72 bg-surface-800 border border-surface-700 rounded-lg shadow-xl z-10 relative">
-          <div className="text-sm font-medium text-white mb-1">{title}</div>
+          <div className="text-[13px] font-medium text-white mb-1">{title}</div>
           <div className="text-xs text-surface-400">{explanation}</div>
         </div>
       )}

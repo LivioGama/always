@@ -104,7 +104,7 @@ function PermissionRow({ ok, title, okText, badText, actionTitle, onAction }: {
         )}
       </span>
       <div className="flex-1 min-w-0">
-        <div className="text-sm font-medium text-surface-100">{title}</div>
+        <div className="text-[13px] font-medium text-surface-100">{title}</div>
         <Caption>{ok ? okText : badText}</Caption>
       </div>
       {!ok && actionTitle && onAction && <Btn onClick={onAction}>{actionTitle}</Btn>}

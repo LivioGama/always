@@ -112,7 +112,7 @@ function VocabularyPanel() {
             <div key={e.term} className="rounded-lg bg-white/[0.08] px-3 py-2">
               <div className="flex items-start gap-2">
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium text-surface-100">{e.term}</div>
+                  <div className="text-[13px] font-medium text-surface-100">{e.term}</div>
                   {e.mistranscriptions.length > 0 && (
                     <Caption className="truncate">
                       heard as: {e.mistranscriptions.join(", ")}
@@ -146,7 +146,7 @@ function VocabularyPanel() {
       {pendingDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="bg-surface-900 border border-surface-700 rounded-xl p-5 w-80 shadow-2xl">
-            <div className="text-sm font-semibold text-white mb-1">Delete "{pendingDelete.term}"?</div>
+            <div className="text-[13px] font-semibold text-white mb-1">Delete "{pendingDelete.term}"?</div>
             <Caption className="mb-4">This removes the term and its learned mistranscriptions.</Caption>
             <div className="flex gap-2 justify-end">
               <Btn small onClick={() => setPendingDelete(null)}>Cancel</Btn>
@@ -240,7 +240,7 @@ function SnippetsPanel() {
           {[...snippets].sort((a, b) => a.trigger.localeCompare(b.trigger)).map((s) => (
             <div key={s.trigger} className="flex items-start gap-2.5 px-3 py-2">
               <div className="flex-1 min-w-0">
-                <div className="text-sm text-surface-100 truncate">{s.trigger}</div>
+                <div className="text-[13px] text-surface-100 truncate">{s.trigger}</div>
                 <Caption className="line-clamp-2">{s.expansion}</Caption>
               </div>
               <button
@@ -266,7 +266,7 @@ function SnippetsPanel() {
       {pendingDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="bg-surface-900 border border-surface-700 rounded-xl p-5 w-80 shadow-2xl">
-            <div className="text-sm font-semibold text-white mb-1">Delete "{pendingDelete.trigger}"?</div>
+            <div className="text-[13px] font-semibold text-white mb-1">Delete "{pendingDelete.trigger}"?</div>
             <Caption className="mb-4">This snippet will no longer expand.</Caption>
             <div className="flex gap-2 justify-end">
               <Btn small onClick={() => setPendingDelete(null)}>Cancel</Btn>
