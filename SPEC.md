@@ -1462,7 +1462,10 @@ already prevents that anyway). Opening the pipe IS the liveness probe:
 Windows mean "endpoint answers", not `Path::exists`. CLI commands that
 need live IPC (`toggle-pause`, `toggle-auto-enter`, `get-state`,
 `models.*`, voice enrollment) go through the pipe like on unix and fall
-back to local state only when no daemon is running. The orphan watchdog
+back to local state only when no daemon is running. The Tauri settings
+app (`always-tauri` + `always-gui`) connects through the same pipe —
+same protocol, same transport — and holds a persistent client
+connection where CLI calls are transient. The orphan watchdog
 (no client for 30 s → exit) now runs only when `ALWAYS_SPAWNED_BY_GUI=1`:
 a terminal-spawned daemon has no client to wait for and would otherwise
 suicide 30 s after every `always start` — on Windows, where clients are
