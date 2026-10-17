@@ -33,9 +33,13 @@ export function MyVoicePanel({ daemon }: { daemon: DaemonApi }) {
         <Toggle
           on={s.voiceEnabled}
           onChange={(v) => daemon.setVoiceProfileEnabled(v)}
-          disabled={!allEnrolled || !s.isDaemonConnected}
+          disabled={!s.isDaemonConnected || (!allEnrolled && !s.voiceEnabled)}
         />
       </div>
+
+      {s.isDaemonConnected && !allEnrolled && !s.voiceEnabled && (
+        <Caption className="pl-9">Voice gating is off. Record all three samples before you can enable My Voice.</Caption>
+      )}
 
       {!s.isDaemonConnected && (
         <div className="rounded-md bg-orange-500/10 border border-orange-500/30 px-3 py-2 text-xs text-orange-400">

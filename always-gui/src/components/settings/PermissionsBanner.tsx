@@ -7,16 +7,16 @@ import { Btn } from "../controls";
 /// there's no TCC, so the actionable row is the OS microphone privacy
 /// toggle; input monitoring isn't required.
 export function PermissionsBanner() {
-  const [os, setOs] = useState("windows");
+  const [os, setOs] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(
     () => sessionStorage.getItem("always_perms_banner_dismissed") === "1",
   );
 
   useEffect(() => {
-    platform().then(setOs).catch(() => {});
+    platform().then(setOs).catch(() => setOs("unknown"));
   }, []);
 
-  if (dismissed) return null;
+  if (dismissed || os === null || os === "linux" || os === "unknown") return null;
 
   return (
     <div className="rounded-lg bg-orange-500/[0.08] border border-orange-500/35 p-2.5 space-y-2">
@@ -51,7 +51,9 @@ export function PermissionsBanner() {
           openUrl(
             os === "windows"
               ? "ms-settings:privacy-microphone"
-              : "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+              : os === "macos"
+                ? "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+                : "",
           )
         }
       />

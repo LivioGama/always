@@ -144,9 +144,9 @@ pub fn socket_path() -> Result<PathBuf> {
     } else {
         // Linux: Use XDG_RUNTIME_DIR or fallback to /tmp
         if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-            PathBuf::from(runtime_dir).join("always.sock")
+            PathBuf::from(runtime_dir).join(format!("always{}.sock", crate::config::instance_suffix()))
         } else {
-            PathBuf::from("/tmp/always.sock")
+            PathBuf::from(format!("/tmp/always{}.sock", crate::config::instance_suffix()))
         }
     };
 
