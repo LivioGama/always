@@ -36,6 +36,7 @@ export function PermissionsPanel({ daemon }: { daemon: DaemonApi }) {
       </div>
 
       <PermissionRow
+        icon="mic"
         ok={micOk}
         title="Microphone"
         okText="Granted — the daemon is hearing audio."
@@ -53,6 +54,7 @@ export function PermissionsPanel({ daemon }: { daemon: DaemonApi }) {
       />
 
       <PermissionRow
+        icon="keyboard"
         ok={shortcutsOk}
         title={os === "macos" ? "Input Monitoring" : "Global Shortcuts"}
         okText={
@@ -86,7 +88,8 @@ export function PermissionsPanel({ daemon }: { daemon: DaemonApi }) {
   );
 }
 
-function PermissionRow({ ok, title, okText, badText, actionTitle, onAction }: {
+function PermissionRow({ icon, ok, title, okText, badText, actionTitle, onAction }: {
+  icon: "mic" | "keyboard";
   ok: boolean;
   title: string;
   okText: string;
@@ -96,6 +99,13 @@ function PermissionRow({ ok, title, okText, badText, actionTitle, onAction }: {
 }) {
   return (
     <div className="flex items-start gap-3 rounded-lg bg-white/[0.08] p-3">
+      <span className="mt-0.5 text-surface-400">
+        {icon === "mic" ? (
+          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="9" y="2" width="6" height="12" rx="3" strokeWidth={2} /><path strokeWidth={2} strokeLinecap="round" d="M5 10a7 7 0 0014 0m-7 7v5m-4 0h8" /></svg>
+        ) : (
+          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="4" width="18" height="13" rx="2" strokeWidth={2} /><path strokeWidth={2} strokeLinecap="round" d="M8 21h8m-4-4v4" /></svg>
+        )}
+      </span>
       <span className={`mt-0.5 ${ok ? "text-green-500" : "text-orange-400"}`}>
         {ok ? (
           <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
@@ -111,7 +121,9 @@ function PermissionRow({ ok, title, okText, badText, actionTitle, onAction }: {
         <div className="text-[13px] font-medium text-surface-100">{title}</div>
         <Caption>{ok ? okText : badText}</Caption>
       </div>
-      {!ok && actionTitle && onAction && <Btn onClick={onAction}>{actionTitle}</Btn>}
+      {ok ? (
+        <svg className="w-4 h-4 mt-0.5 text-green-500" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 100 20 10 10 0 000-20zm-1.5 14.5l-4-4 1.4-1.4 2.6 2.6 5.6-5.6 1.4 1.4-7 7z" /></svg>
+      ) : actionTitle && onAction ? <Btn onClick={onAction}>{actionTitle}</Btn> : null}
     </div>
   );
 }

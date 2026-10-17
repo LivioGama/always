@@ -1342,6 +1342,13 @@ as ordinary web text. Inputs, editable text, and transcript-history entries
 remain selectable. Models cards use subdued dark surfaces against the dark
 window.
 
+The Linux settings UI follows the macOS panel conventions for selection and
+status: selected segmented options use the blue accent; the Models catalog
+filters by All, English, or Multilingual and offers Translation, Fast, and
+Streaming filters. A downloaded model leaves its in-progress state after the
+daemon confirms it in the catalog, so the row settles into its downloaded
+actions instead of spinning indefinitely.
+
 On Linux, the Behavior switches for adaptive silence and live transcript apply
 their changes to the running daemon immediately and save them for the next
 launch. Models dropdown controls and their option menus use dark surfaces with

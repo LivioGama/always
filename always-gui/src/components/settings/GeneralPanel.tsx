@@ -97,7 +97,7 @@ export function GeneralPanel({
               {s.isMasterPaused ? (
                 <path strokeWidth={2} strokeLinecap="round" d="M12 8v5m0 3h.01M12 3l9 16H3l9-16z" />
               ) : (
-                <path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6l7-3z" />
+                <path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6l7-3zm-3 9l2 2 4-4" />
               )}
             </svg>
             <div className="flex-1">
@@ -165,9 +165,9 @@ function FocusedAppCard({ daemon }: { daemon: DaemonApi }) {
       <div className="flex items-center gap-2.5">
         <svg className={`w-5 h-5 ${isResumed && !isPaused ? "text-green-500" : "text-orange-400"}`} viewBox="0 0 24 24" fill="none" stroke="currentColor">
           {isResumed && !isPaused ? (
-            <path strokeWidth={2} strokeLinecap="round" d="M9 12l2 2 4-4m5 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            <><circle cx="12" cy="12" r="9" strokeWidth={2} /><path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M8 12l2.5 2.5L16 9" /></>
           ) : (
-            <path strokeWidth={2} strokeLinecap="round" d="M10 9v6m4-6v6m5-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            <><circle cx="12" cy="12" r="9" strokeWidth={2} /><path strokeWidth={2} strokeLinecap="round" d="M10 9v6m4-6v6" /></>
           )}
         </svg>
         <div className="flex-1 min-w-0">

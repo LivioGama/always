@@ -206,7 +206,7 @@ export function useDaemonState() {
           break;
 
         case "ModelsList": {
-          next.models = (d.models ?? []).map((m: any) => ({
+          const models = (d.models ?? []).map((m: any) => ({
             id: m.id,
             name: m.name ?? m.id,
             description: m.description ?? "",
@@ -224,22 +224,47 @@ export function useDaemonState() {
             supports_language_selection: !!m.supports_language_selection,
             is_verifying: !!m.is_verifying,
           }));
+          next.models = models;
+          const downloadedIds = new Set<string>(models.filter((m: CatalogModel) => m.is_downloaded).map((m: CatalogModel) => m.id));
+          next.installing = prev.installing.filter((id) => !downloadedIds.has(id));
+          next.extracting = prev.extracting.filter((id) => !downloadedIds.has(id));
+          next.verifying = prev.verifying.filter((id) => !downloadedIds.has(id));
+          if (downloadedIds.size) {
+            const progress = { ...prev.downloadProgress };
+            for (const id of downloadedIds) delete progress[id];
+            next.downloadProgress = progress;
+            const errors = { ...prev.modelErrors };
+            for (const id of downloadedIds) delete errors[id];
+            next.modelErrors = errors;
+          }
           break;
         }
         case "ModelDownloadProgress":
           next.downloadProgress = { ...prev.downloadProgress, [d.model_id]: d.percentage ?? 0 };
           break;
-        case "ModelDownloadComplete":
+        case "ModelDownloadComplete": {
+          const p = { ...prev.downloadProgress };
+          delete p[d.model_id];
+          next.downloadProgress = p;
+          sendDaemonCommand({ type: "ListModels" }).catch(() => {});
+          break;
+        }
         case "ModelDownloadCancelled": {
           const p = { ...prev.downloadProgress };
           delete p[d.model_id];
           next.downloadProgress = p;
+          next.installing = prev.installing.filter((id) => id !== d.model_id);
+          next.extracting = prev.extracting.filter((id) => id !== d.model_id);
+          next.verifying = prev.verifying.filter((id) => id !== d.model_id);
           break;
         }
         case "ModelDownloadFailed": {
           const p = { ...prev.downloadProgress };
           delete p[d.model_id];
           next.downloadProgress = p;
+          next.installing = prev.installing.filter((id) => id !== d.model_id);
+          next.extracting = prev.extracting.filter((id) => id !== d.model_id);
+          next.verifying = prev.verifying.filter((id) => id !== d.model_id);
           next.modelErrors = { ...prev.modelErrors, [d.model_id]: d.error ?? "Download failed" };
           break;
         }
@@ -255,6 +280,7 @@ export function useDaemonState() {
           break;
         case "ModelExtractionFailed":
           next.extracting = prev.extracting.filter((id) => id !== d.model_id);
+          next.installing = prev.installing.filter((id) => id !== d.model_id);
           next.modelErrors = { ...prev.modelErrors, [d.model_id]: d.error ?? "Extraction failed" };
           break;
 

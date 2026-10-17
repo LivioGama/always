@@ -102,7 +102,7 @@ export function Segmented<T extends string>({
           onClick={() => onChange(o.value)}
           className={`flex-1 px-3 py-1 text-xs rounded-md transition-colors whitespace-nowrap ${
             value === o.value
-              ? "bg-surface-600 text-white shadow"
+              ? "bg-primary-600 text-white shadow"
               : "text-surface-400 hover:text-surface-200"
           }`}
         >

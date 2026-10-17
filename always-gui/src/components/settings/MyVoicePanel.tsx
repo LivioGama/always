@@ -24,7 +24,7 @@ export function MyVoicePanel({ daemon }: { daemon: DaemonApi }) {
           viewBox="0 0 24 24" fill="none" stroke="currentColor"
         >
           <circle cx="12" cy="8" r="3.5" strokeWidth={2} />
-          <path strokeWidth={2} strokeLinecap="round" d="M4 20c1.5-3.5 4.5-5 8-5s6.5 1.5 8 5" />
+          <path strokeWidth={2} strokeLinecap="round" d="M4 20c1.5-3.5 4.5-5 8-5s6.5 1.5 8 5M2 10c.8-2 1.8-3 3-3m17 3c-.8-2-1.8-3-3-3" />
         </svg>
         <div className="flex-1">
           <PanelTitle>My Voice</PanelTitle>

@@ -21,9 +21,7 @@ export function ShortcutsPanel({
 
   return (
     <div className="p-5 space-y-3">
-      <Caption>
-        Click a shortcut to record a new one. Changes apply immediately — no restart needed.
-      </Caption>
+      <PanelTitle>Keyboard Shortcuts</PanelTitle>
       {!sReady(daemon) && (
         <div className="rounded-md bg-orange-500/10 border border-orange-500/30 px-3 py-2 text-xs text-orange-400">
           Daemon not connected — new shortcuts are saved but won't take effect until the daemon is running.
@@ -33,37 +31,38 @@ export function ShortcutsPanel({
         <PanelTitle>Global Shortcuts</PanelTitle>
         <div className="mt-1 divide-y divide-white/[0.08]">
           <KeyCaptureButton
-            label="Master Pause / Resume"
-            description="Pause or resume Always everywhere (kill switch)"
+            label="Master Pause / Mute"
+            description="Globally pause or resume all dictation."
             shortcut={config.shortcutMasterPause}
             onSave={save("shortcutMasterPause")}
           />
           <KeyCaptureButton
-            label="Toggle Pause for This App"
-            description="Pause or resume voice typing in the focused app (allowlist)"
+            label="Pause / Resume"
+            description="Toggle pause for the currently focused app only."
             shortcut={config.shortcutPause}
             onSave={save("shortcutPause")}
           />
           <KeyCaptureButton
             label="Toggle Auto-Enter"
-            description="Turn the post-paste Return press on or off"
+            description="Enable or disable automatic Enter after pasting."
             shortcut={config.shortcutAutoEnter}
             onSave={save("shortcutAutoEnter")}
           />
           <KeyCaptureButton
-            label="Re-Paste Last Transcript"
-            description="Paste the most recent transcript again"
+            label="Paste Last Filtered"
+            description="Re-paste the most recent filtered transcript."
             shortcut={config.shortcutForcePaste}
             onSave={save("shortcutForcePaste")}
           />
           <KeyCaptureButton
             label="Correction Dialog"
-            description="Open the 'you misheard me' dialog to teach Always"
+            description="Open a dialog to correct the last transcript."
             shortcut={config.shortcutCorrectionDialog}
             onSave={save("shortcutCorrectionDialog")}
           />
         </div>
       </div>
+      <Caption className="pt-1">Changes take effect immediately.</Caption>
     </div>
   );
 }
