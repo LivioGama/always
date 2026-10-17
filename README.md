@@ -79,7 +79,7 @@ The first time you open Always, before you've said a single word, it quietly rea
 | Hold <kbd>⌘</kbd> as the text arrives | Skip this paste (it's kept — <kbd>⌃⌥V</kbd> pastes it) |
 | Hold <kbd>⌥</kbd> while speaking | Keep the sentence open through a long pause |
 
-Change them in **Settings → Shortcuts**. Keyboard shortcuts are macOS-only; on Linux and Windows use `always toggle-pause` and `always toggle-auto-enter`.
+Change them in **Settings → Shortcuts** on macOS. Linux supports the configured global shortcuts in X11 sessions; Wayland and Windows users can use `always toggle-pause` and `always toggle-auto-enter` from the CLI.
 
 ---
 

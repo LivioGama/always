@@ -17,22 +17,21 @@
 //!   Windows matches the full modifier+key chord natively, so no raw
 //!   keypress stream is needed. Live reload goes through a `WM_APP`
 //!   thread message that unregisters and re-registers the combos.
-//! * **Linux**: stub — `start_keyboard_listener` returns `Ok(())`
-//!   without registering anything. Voice activation still works; users
-//!   must toggle pause/auto-enter via the CLI for now.
+//! * **Linux/X11**: uses `rdev` to observe system keyboard events. On
+//!   Wayland, global shortcuts remain unavailable; use the CLI instead.
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use std::sync::Arc;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use std::thread;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use std::time::Duration;
 
 use anyhow::Result;
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use super::{clipboard_watcher, config as always_config, correction, event, log, paste, pause};
 
 // ─── Live-reloadable shortcut state ───────────────────────────────────
@@ -43,7 +42,7 @@ use super::{clipboard_watcher, config as always_config, correction, event, log, 
 // restart needed. The read lock is held for microseconds (copy 6 Combo
 // values), which is safe inside the time-budgeted CGEventTap callback.
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 struct Shortcuts {
     pause: Combo,
     auto_enter: Combo,
@@ -53,11 +52,11 @@ struct Shortcuts {
     master_pause: Combo,
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 static SHARED_SHORTCUTS: std::sync::OnceLock<Arc<parking_lot::RwLock<Shortcuts>>> =
     std::sync::OnceLock::new();
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn shared_shortcuts() -> &'static Arc<parking_lot::RwLock<Shortcuts>> {
     SHARED_SHORTCUTS.get_or_init(|| {
         let (pause, auto_enter, force_paste, log_correction, correction_dialog, master_pause) =
@@ -128,7 +127,17 @@ pub fn reload_shortcuts() {
 
 #[cfg(target_os = "linux")]
 pub fn reload_shortcuts() {
-    // No-op: keyboard shortcuts are not wired on Linux yet.
+    let (pause, auto_enter, force_paste, log_correction, correction_dialog, master_pause) =
+        load_shortcuts();
+    *shared_shortcuts().write() = Shortcuts {
+        pause,
+        auto_enter,
+        force_paste,
+        log_correction,
+        correction_dialog,
+        master_pause,
+    };
+    tracing::info!("shortcuts_reloaded");
 }
 
 /// Event-based tracking of Command key state as a fallback when
@@ -226,7 +235,7 @@ pub fn is_option_held() -> bool {
 }
 
 /// A parsed keyboard combo: modifier flags + a single character key.
-#[allow(dead_code)] // fields are unused on non-macos until Linux/Windows listeners land
+#[allow(dead_code)] // fields are unused on unsupported platforms
 #[derive(Clone, Debug)]
 struct Combo {
     ctrl: bool,
@@ -235,7 +244,7 @@ struct Combo {
     key_char: String,
 }
 
-#[allow(dead_code)] // listener body uses these on macOS only
+#[allow(dead_code)] // listener body uses these on desktop targets
 impl Combo {
     /// Parse `"ctrl+alt+p"` (case-insensitive, any modifier order).
     /// Requires at least one modifier and exactly one key character,
@@ -315,7 +324,7 @@ fn default_shortcuts() -> (Combo, Combo, Combo, Combo, Combo, Combo) {
     )
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 #[allow(clippy::too_many_arguments)]
 fn resolve_shortcuts(
     pause: Option<&str>,
@@ -360,7 +369,7 @@ fn resolve_shortcuts(
     )
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn load_shortcuts() -> (Combo, Combo, Combo, Combo, Combo, Combo) {
     let defaults = default_shortcuts();
 
@@ -384,7 +393,7 @@ fn load_shortcuts() -> (Combo, Combo, Combo, Combo, Combo, Combo) {
 // ----------------------------------------------------------------------
 // macOS implementation (rdev-backed; will become CGEventTap in P2.2)
 // ----------------------------------------------------------------------
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn key_to_shortcut_name(key: &rdev::Key) -> Option<&'static str> {
     use rdev::Key;
     match key {
@@ -423,7 +432,7 @@ fn key_to_shortcut_name(key: &rdev::Key) -> Option<&'static str> {
 /// Resolution of a per-app pause chord press. Pure data so the
 /// decision is unit-testable without a live focus monitor.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // consumed by the macos listener only
+#[allow(dead_code)] // consumed by platform listeners
 enum ChordAction {
     /// Toggle this bundle's place on the resumed-allowlist.
     TogglePerApp(String),
@@ -450,7 +459,7 @@ fn pause_chord_action(current_app: Option<&str>) -> ChordAction {
 /// here (allowlist it, lift idle / watchdog pauses); listening here →
 /// take it off the allowlist. Master on → allowlist toggle only. See
 /// `pause_commands::per_app_plan`.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn handle_per_app_pause_hotkey(bundle: &str) {
     // Shared with every other pause control: decides by what the user
     // sees (paused here → resume here), see `pause_commands::per_app_plan`.
@@ -490,18 +499,18 @@ fn handle_per_app_pause_hotkey(bundle: &str) {
 /// order (clear_global_pauses → set_idle_auto_paused) left
 /// EFFECTIVE_PAUSED stale at true because `set_idle_auto_paused` is a
 /// plain setter that does not recompute.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 /// Minimum interval between two master-pause toggles. A physical press
 /// that reaches the handler twice (two taps, key repeat) toggles once;
 /// the second call inside this window is swallowed. 150ms sits well
 /// below deliberate rapid tapping (~4-5 Hz ceiling ≈ 200ms+) while
 /// swallowing the 2-4ms double-delivery window.
 const MASTER_PAUSE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 static MASTER_PAUSE_LAST_FIRE: parking_lot::Mutex<Option<std::time::Instant>> =
     parking_lot::Mutex::new(None);
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn handle_master_pause_hotkey() {
     // Re-entrancy guard: a physical press must produce ONE logical toggle.
     // The master mute is reachable through independent event sources (the
@@ -578,7 +587,7 @@ pub fn input_monitoring_status() -> Option<bool> {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn set_input_monitoring_status(granted: bool) {
     INPUT_MONITORING_STATUS.store(
         if granted { 1 } else { 2 },
@@ -614,7 +623,7 @@ fn request_input_monitoring_access() {
 /// Read the `auto_learn_corrections` preference from the DB.
 /// Defaults to `true` when the DB or column is unavailable — the
 /// safe default is to learn, matching pre-toggle behavior.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn auto_learn_corrections_enabled() -> bool {
     let Ok(conn) = crate::db::open() else {
         return true;
@@ -629,7 +638,7 @@ fn auto_learn_corrections_enabled() -> bool {
 /// detached thread with its own tokio runtime so it doesn't block
 /// the keyboard listener. New pairs are written to the glossary
 /// (when `auto_apply` is true) or just logged for review.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn spawn_llm_extraction(
     original: String,
     corrected: String,
@@ -1047,7 +1056,7 @@ fn start_fn_listener() {
 /// target — on macOS that means Always itself is frontmost; on Windows
 /// focus tracking isn't wired yet so this currently falls back to the
 /// master toggle rather than dead-ending the only "pause" hotkey users see.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn dispatch_pause_chord() {
     match pause_chord_action(pause::current_app().as_deref()) {
         ChordAction::TogglePerApp(bundle) => {
@@ -1055,6 +1064,10 @@ fn dispatch_pause_chord() {
         }
         ChordAction::NoFocusedApp => {
             #[cfg(target_os = "windows")]
+            {
+                handle_master_pause_hotkey();
+            }
+            #[cfg(target_os = "linux")]
             {
                 handle_master_pause_hotkey();
             }
@@ -1068,7 +1081,7 @@ fn dispatch_pause_chord() {
 }
 
 /// `⌃⌥A` — auto-enter toggle.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn dispatch_auto_enter() {
     let new_state = pause::toggle_auto_enter();
     if new_state {
@@ -1084,7 +1097,7 @@ fn dispatch_auto_enter() {
 }
 
 /// `⌃⌥V` — paste the last filtered-out transcript anyway.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn dispatch_force_paste() {
     if let Some(text) = pause::take_last_filtered() {
         let chars = text.len();
@@ -1113,7 +1126,7 @@ fn dispatch_force_paste() {
 /// `capture_via_hotkey` can't read the foreground selection yet, so this
 /// reports `no_recent_paste` / `error` through the usual broadcast rather
 /// than failing silently.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn dispatch_log_correction() {
     let auto_learn = auto_learn_corrections_enabled();
     match correction::capture_via_hotkey(clipboard_watcher::PASTE_WINDOW, auto_learn) {
@@ -1163,7 +1176,7 @@ fn dispatch_log_correction() {
 }
 
 /// `⌃⌥W` — open the dialog-driven correction path.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn dispatch_correction_dialog() {
     let last = pause::last_transcript_for_correction().unwrap_or_default();
     event::global_broadcaster().correction_dialog_requested(last);
@@ -1344,14 +1357,114 @@ pub fn start_keyboard_listener() -> Result<()> {
 }
 
 // ----------------------------------------------------------------------
-// Linux: stub
+// Linux/X11 listener. Wayland intentionally reports unavailable because
+// global input capture is denied to ordinary clients by the compositor.
 // ----------------------------------------------------------------------
 #[cfg(target_os = "linux")]
 pub fn start_keyboard_listener() -> Result<()> {
-    tracing::warn!(
-        "global keyboard shortcuts are not yet wired up on this platform; \
-         use `always toggle pause` / `always toggle auto-enter` from the CLI"
-    );
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        tracing::warn!(
+            "global_hotkeys_unavailable_wayland: use the CLI to toggle pause and auto-enter"
+        );
+        set_input_monitoring_status(false);
+        return Ok(());
+    }
+
+    let shortcuts = Arc::clone(shared_shortcuts());
+    thread::spawn(move || {
+        use rdev::{EventType, Key, listen};
+
+        let mut ctrl_pressed = false;
+        let mut shift_pressed = false;
+        let mut alt_pressed = false;
+        set_input_monitoring_status(true);
+        tracing::info!("x11_hotkey_listener_started");
+
+        let result = listen(move |event| match event.event_type {
+            EventType::KeyPress(Key::ControlLeft) | EventType::KeyPress(Key::ControlRight) => {
+                ctrl_pressed = true;
+            }
+            EventType::KeyRelease(Key::ControlLeft) | EventType::KeyRelease(Key::ControlRight) => {
+                ctrl_pressed = false;
+            }
+            EventType::KeyPress(Key::ShiftLeft) | EventType::KeyPress(Key::ShiftRight) => {
+                shift_pressed = true;
+            }
+            EventType::KeyRelease(Key::ShiftLeft) | EventType::KeyRelease(Key::ShiftRight) => {
+                shift_pressed = false;
+            }
+            EventType::KeyPress(Key::Alt) | EventType::KeyPress(Key::AltGr) => {
+                alt_pressed = true;
+            }
+            EventType::KeyRelease(Key::Alt) | EventType::KeyRelease(Key::AltGr) => {
+                alt_pressed = false;
+            }
+            EventType::KeyPress(ref key) => {
+                crate::always::voice_edit::note_user_input();
+                if pause::countdown_active() {
+                    pause::countdown_request_cancel();
+                    pause::dictation_buffer_clear();
+                }
+                let Some(name) = key_to_shortcut_name(key) else {
+                    return;
+                };
+                let s = shortcuts.read();
+                if s.master_pause
+                    .matches_name(ctrl_pressed, shift_pressed, alt_pressed, name)
+                {
+                    drop(s);
+                    handle_master_pause_hotkey();
+                } else if s
+                    .pause
+                    .matches_name(ctrl_pressed, shift_pressed, alt_pressed, name)
+                {
+                    drop(s);
+                    dispatch_pause_chord();
+                } else if s
+                    .auto_enter
+                    .matches_name(ctrl_pressed, shift_pressed, alt_pressed, name)
+                {
+                    drop(s);
+                    dispatch_auto_enter();
+                } else if s
+                    .force_paste
+                    .matches_name(ctrl_pressed, shift_pressed, alt_pressed, name)
+                {
+                    drop(s);
+                    dispatch_force_paste();
+                } else if s.log_correction.matches_name(
+                    ctrl_pressed,
+                    shift_pressed,
+                    alt_pressed,
+                    name,
+                ) {
+                    drop(s);
+                    dispatch_log_correction();
+                } else if s.correction_dialog.matches_name(
+                    ctrl_pressed,
+                    shift_pressed,
+                    alt_pressed,
+                    name,
+                ) {
+                    drop(s);
+                    dispatch_correction_dialog();
+                }
+            }
+            EventType::ButtonPress(_) => {
+                crate::always::voice_edit::note_user_input();
+                if pause::countdown_active() {
+                    pause::countdown_request_cancel();
+                    pause::dictation_buffer_clear();
+                }
+            }
+            _ => {}
+        });
+
+        if let Err(error) = result {
+            tracing::error!(?error, "x11_hotkey_listener_error");
+            set_input_monitoring_status(false);
+        }
+    });
     Ok(())
 }
 

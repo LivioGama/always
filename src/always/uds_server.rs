@@ -229,6 +229,8 @@ pub async fn start_server(
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                #[cfg(unix)]
+                tune_send_buf(&stream);
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     let _ = handle_client(stream, ctx).await;
@@ -434,7 +436,10 @@ fn spawn_registry_event_bridge(registry: ModelRegistry) {
 /// through the raw fd. A failure is non-fatal: the payload is also
 /// chunked, the bigger buffer only avoids the extra round-trips.
 #[cfg(unix)]
-fn tune_send_buf<S: std::os::fd::AsRawFd>(stream: &S) {
+fn tune_send_buf<S>(stream: &S)
+where
+    S: std::os::fd::AsRawFd,
+{
     use std::os::fd::AsRawFd;
     // macOS caps SO_SNDBUF on Unix domain streams well below 1 MB —
     // asking for it fails with EINVAL on every boot (observed live).
@@ -463,9 +468,10 @@ fn tune_send_buf<S: std::os::fd::AsRawFd>(stream: &S) {
     }
 }
 
-/// Named pipes have no SO_SNDBUF equivalent — kernel buffering is internal.
 #[cfg(not(unix))]
-fn tune_send_buf<S>(_: &S) {}
+fn tune_send_buf<S>(_stream: &S) {
+    // No-op on non-Unix platforms (Windows uses named pipes)
+}
 
 /// Handle a single client connection
 async fn handle_client<S>(stream: S, ctx: ModelCommandCtx) -> Result<()>
@@ -478,7 +484,7 @@ where
         consume_lease: Arc::clone(&consume_lease),
     };
 
-    tune_send_buf(&stream);
+    // Skip tune_send_buf in generic handler - called in platform-specific code
 
     tracing::info!(
         clients = CONNECTED_CLIENTS.load(Ordering::Relaxed),

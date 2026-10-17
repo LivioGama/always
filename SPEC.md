@@ -89,6 +89,17 @@ Two processes, plus a recorder:
 | `always-daemon` (Rust) | Audio capture, VAD, speaker verification, transcription, pasting. |
 | `rec` (SoX) | Raw microphone capture, 16 kHz mono 16-bit, one instance, spawned by the daemon. Its output is drained continuously by one daemon reader thread (see §4, "Audio delivery"). |
 
+On Linux and Windows, the daemon uses CPAL for microphone capture. It converts
+the selected device's supported sample rate and channel layout to the pipeline's
+16 kHz mono frames; Linux exposes the capture device through ALSA, including
+PipeWire/PulseAudio ALSA compatibility layers. Linux uses `wl-copy`/`wl-paste`
+for clipboard access on Wayland when installed, falling back to `xclip`, and
+uses `xclip` on X11. It simulates paste with `ydotool` on Wayland when installed,
+falling back to `xdotool`; X11 uses `xdotool`. Linux global
+shortcuts are available in X11 sessions; Wayland compositors do not let the
+daemon observe global key events, so users there control pause and auto-enter
+through the CLI.
+
 The GUI spawns the daemon and talks to it over a Unix domain socket at
 `~/Library/Caches/always/always.sock`. Messages are newline-delimited JSON; the
 daemon broadcasts events, the GUI sends commands.

@@ -1,7 +1,7 @@
 name: Release
 
-# Release model (same shape as the Pixel project's, adapted for this repo's
-# develop -> main branching; see .agents/skills/release/SKILL.md):
+# Release model (develop -> main branching; see
+# .agents/skills/release/SKILL.md):
 #
 #   tag vX.Y.Z on main  ->  verify -> assets -> release -> smoke
 #
