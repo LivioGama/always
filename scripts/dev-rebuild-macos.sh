@@ -9,11 +9,11 @@
 # To ship a build as the production app, run scripts/promote.sh manually.
 #
 # Usage:
-#   scripts/dev-rebuild.sh                # debug build (default — transcripts visible)
-#   scripts/dev-rebuild.sh release        # release build (transcripts hidden)
-#   scripts/dev-rebuild.sh --no-daemon    # skip daemon restart (for Swift-only changes)
-#   scripts/dev-rebuild.sh --force-daemon # force daemon restart even if Rust unchanged
-#   ALWAYS_REBUILD_SILENT=1 scripts/dev-rebuild.sh   # mute sounds
+#   scripts/dev-rebuild-macos.sh                # debug build (default — transcripts visible)
+#   scripts/dev-rebuild-macos.sh release        # release build (transcripts hidden)
+#   scripts/dev-rebuild-macos.sh --no-daemon    # skip daemon restart (for Swift-only changes)
+#   scripts/dev-rebuild-macos.sh --force-daemon # force daemon restart even if Rust unchanged
+#   ALWAYS_REBUILD_SILENT=1 scripts/dev-rebuild-macos.sh   # mute sounds
 
 set -euo pipefail
 

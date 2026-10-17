@@ -89,6 +89,17 @@ Two processes, plus a recorder:
 | `always-daemon` (Rust) | Audio capture, VAD, speaker verification, transcription, pasting. |
 | `rec` (SoX) | Raw microphone capture, 16 kHz mono 16-bit, one instance, spawned by the daemon. Its output is drained continuously by one daemon reader thread (see §4, "Audio delivery"). |
 
+On Linux and Windows, the daemon uses CPAL for microphone capture. It converts
+the selected device's supported sample rate and channel layout to the pipeline's
+16 kHz mono frames; Linux exposes the capture device through ALSA, including
+PipeWire/PulseAudio ALSA compatibility layers. Linux uses `wl-copy`/`wl-paste`
+for clipboard access on Wayland when installed, falling back to `xclip`, and
+uses `xclip` on X11. It simulates paste with `ydotool` on Wayland when installed,
+falling back to `xdotool`; X11 uses `xdotool`. Linux global
+shortcuts are available in X11 sessions; Wayland compositors do not let the
+daemon observe global key events, so users there control pause and auto-enter
+through the CLI.
+
 The GUI spawns the daemon and talks to it over a Unix domain socket at
 `~/Library/Caches/always/always.sock`. Messages are newline-delimited JSON; the
 daemon broadcasts events, the GUI sends commands.
@@ -1415,10 +1426,12 @@ user's choice wins.
 
 **Commands.**
 
-- `scripts/dev-rebuild.sh` — the dev loop. Kills/rebuilds/relaunches only
+- `scripts/dev-rebuild-macos.sh` — the macOS dev loop. Kills/rebuilds/relaunches only
   `Always Dev.app`; never touches the production install. Exits non-zero
   unless the dev GUI + daemon are running the just-built binaries, and
   warns if production went missing.
+- `scripts/dev-rebuild-linux.sh` — builds the Linux daemon, settings frontend,
+  and Tauri app, then launches and verifies the checkout's settings app.
 - `scripts/promote.sh` — manual production promotion, user-invoked only.
   Kills production, rebuilds, deploys over `/Applications/Always.app`,
   relaunches, verifies. Agents must not run it.
@@ -1438,18 +1451,38 @@ user's choice wins.
   which renders cues offline to a buffer. A sandbox instance
   never pauses, resumes or reaps prod/dev daemons.
 
-**Windows daemon lifecycle.** On Windows the daemon is CLI-only: no UDS
-socket, no GUI, no peer handoff. `always start` spawns `always run`
-detached (no console), single-instance is a named kernel mutex
-(`Local\always-daemon[-dev]`, released by the kernel on process death),
-liveness is the pid file + an `OpenProcess` image-name check (recycled
-pids can't impersonate the daemon), and the process table comes from a
-Toolhelp32 snapshot with command lines read out of each candidate's
-PEB. `stop`/orphan-reaping use `TerminateProcess` — there is no SIGTERM
-equivalent for a detached process — and stale pid files are reclaimed on
-the next start. `always run` in a console shuts down gracefully on
-Ctrl+C (pid file cleanup); commands that need live IPC
-(`toggle-pause`, `get-state` from the daemon) fall back to local state.
+**Windows daemon lifecycle.** On Windows there is no GUI and no peer
+handoff, but the daemon is not CLI-only: the UDS protocol is carried
+over a named pipe instead of a unix socket. `always start` spawns
+`always run` detached (no console), single-instance is a named kernel
+mutex (`Local\always-daemon[-dev]`, released by the kernel on process
+death), liveness is the pid file + an `OpenProcess` image-name check
+(recycled pids can't impersonate the daemon), and the process table
+comes from a Toolhelp32 snapshot with command lines read out of each
+candidate's PEB. `stop`/orphan-reaping use `TerminateProcess` — there
+is no SIGTERM equivalent for a detached process — and stale pid files
+are reclaimed on the next start. `always run` in a console shuts down
+gracefully on Ctrl+C (pid file cleanup).
+
+**Windows IPC — named pipe.** The JSON-lines `DaemonCommand`/`DaemonEvent`
+protocol (same versioned schema as the UDS socket) listens on
+`\\.\pipe\always[-dev]`. The server creates the endpoint with
+`first_pipe_instance`, so bind failure is the pipe equivalent of the
+live-socket check — a second daemon can't steal it (the kernel mutex
+already prevents that anyway). Opening the pipe IS the liveness probe:
+`ERROR_FILE_NOT_FOUND` = no server, success/`ERROR_PIPE_BUSY` = live.
+`\\.\pipe\` paths never stat as files, so "socket exists" checks on
+Windows mean "endpoint answers", not `Path::exists`. CLI commands that
+need live IPC (`toggle-pause`, `toggle-auto-enter`, `get-state`,
+`models.*`, voice enrollment) go through the pipe like on unix and fall
+back to local state only when no daemon is running. The Tauri settings
+app (`always-tauri` + `always-gui`) connects through the same pipe —
+same protocol, same transport — and holds a persistent client
+connection where CLI calls are transient. The orphan watchdog
+(no client for 30 s → exit) now runs only when `ALWAYS_SPAWNED_BY_GUI=1`:
+a terminal-spawned daemon has no client to wait for and would otherwise
+suicide 30 s after every `always start` — on Windows, where clients are
+transient CLI calls, that is the only mode there is.
 
 **Nothing is "done" until the new build is running** (I10). "Built" and
 "deployed" are different claims, and only "running" is testable.
@@ -1553,7 +1586,9 @@ Per OS:
   pid), renames the current `always.exe` to `always.exe.old`, copies the new
   files, and the leftover `.old` is deleted by the next `always update` / daemon
   start. Installs into the directory the running `always.exe` lives in
-  (normally `%LOCALAPPDATA%\Programs\Always`). No UDS on Windows: CLI only.
+  (normally `%LOCALAPPDATA%\Programs\Always`). Windows talks to the daemon
+  over the `\\.\pipe\always` named pipe (§12); the CLI falls back to
+  spawning it when the pipe is absent.
 - **Linux, tarball install** (binary at `<prefix>/bin/always`, not owned by a
   package) — replaced in place, then the user service is restarted if it was
   active. Allowed from the CLI and from `InstallUpdate`.
@@ -1565,6 +1600,15 @@ Per OS:
   is refused for both (reinstall instead). After a Linux update the running
   daemon is still the old binary: the installer restarts the user service when
   it is active; otherwise `always update` says to restart it.
+
+**Windows global shortcuts.** Registered with `RegisterHotKey` on a dedicated
+message-loop thread; the OS matches the full chord, so no raw key stream or OS
+permission is needed (the Permissions row reports "active" once registration
+succeeds). `ReloadShortcuts` posts a `WM_APP` message to that thread to
+unregister and re-register — hotkey changes apply live. Modifier-less keys and
+`fn` are not registrable on Windows and are skipped. Because focus tracking
+isn't wired on Windows yet, the per-app pause chord falls back to the master
+toggle when no focused app is known.
 
 Downloaded files live only in the update directory; stale ones (older than 1 h,
 other than a running update's) are removed at daemon start and on

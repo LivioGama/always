@@ -18,8 +18,8 @@ pub fn pid_path() -> PathBuf {
 
 /// Best-effort UDS socket path. Mirrors `uds_server::socket_path` but is
 /// infallible so it can be used in cleanup paths where erroring is wrong
-/// (Drop, signal handlers). Returns `None` when `$HOME` is unset or on Windows
-/// (no GUI integration).
+/// (Drop, signal handlers). On Windows returns the daemon's named-pipe
+/// endpoint (`\\.\pipe\always[-dev]`); `None` when `$HOME` is unset.
 pub fn socket_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -41,7 +41,10 @@ pub fn socket_path() -> Option<PathBuf> {
     }
     #[cfg(target_os = "windows")]
     {
-        None
+        Some(PathBuf::from(format!(
+            r"\\.\pipe\always{}",
+            config::instance_suffix()
+        )))
     }
 }
 
@@ -244,9 +247,39 @@ pub fn socket_is_live(sock: &std::path::Path) -> bool {
     {
         std::os::unix::net::UnixStream::connect(sock).is_ok()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // Opening a named pipe IS the liveness probe: it fails with
+        // ERROR_FILE_NOT_FOUND when no server created it, succeeds (and
+        // immediately closes) when one is listening, and returns
+        // ERROR_PIPE_BUSY (231) when the server is alive but every
+        // instance is occupied — still live either way.
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(sock)
+        {
+            Ok(_) => true,
+            Err(e) => e.raw_os_error() == Some(231),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         false
+    }
+}
+
+/// IPC endpoint liveness probe. On unix the socket file must exist AND
+/// accept a connection; on Windows `\\.\pipe\` paths never stat as
+/// files, so opening the pipe is the only probe that works.
+fn ipc_endpoint_live(sock: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        sock.exists() && socket_is_live(sock)
+    }
+    #[cfg(not(unix))]
+    {
+        socket_is_live(sock)
     }
 }
 
@@ -298,7 +331,7 @@ pub fn peer_socket_path() -> Option<PathBuf> {
 
 /// True when the peer instance's daemon socket accepts a connection.
 pub fn peer_is_live() -> bool {
-    peer_socket_path().is_some_and(|p| p.exists() && socket_is_live(&p))
+    peer_socket_path().is_some_and(|p| ipc_endpoint_live(&p))
 }
 
 static WE_PAUSED_PEER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -310,7 +343,7 @@ pub fn set_peer_paused(paused: bool) -> bool {
     let Some(sock) = peer_socket_path() else {
         return false;
     };
-    if !sock.exists() || !socket_is_live(&sock) {
+    if !ipc_endpoint_live(&sock) {
         return false;
     }
     #[cfg(unix)]
@@ -348,7 +381,7 @@ pub fn pause_peer_when_ready() {
     std::thread::spawn(|| {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            if socket_path().is_some_and(|s| s.exists() && socket_is_live(&s)) {
+            if socket_path().is_some_and(|s| ipc_endpoint_live(&s)) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -833,7 +866,7 @@ fn remove_stale_socket() {
         return;
     }
     if let Some(sock) = socket_path() {
-        if sock.exists() && socket_is_live(&sock) {
+        if ipc_endpoint_live(&sock) {
             tracing::warn!(
                 socket = %sock.display(),
                 "not removing live UDS socket — another daemon is listening"

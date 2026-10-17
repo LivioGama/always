@@ -128,7 +128,7 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         let (pending, ready_signal) = PendingTranscriber::new();
         let active_placeholder: ActiveTranscriber = Arc::new(RwLock::new(pending));
 
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let registry_for_uds = registry_placeholder.clone();
             let active_for_uds = Arc::clone(&active_placeholder);
@@ -136,13 +136,13 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
                 if let Err(e) =
                     uds_server::start_server(registry_for_uds, active_for_uds, cfg_for_uds).await
                 {
-                    tracing::error!(error = %e, "UDS server error");
+                    tracing::error!(error = %e, "IPC server error");
                 }
             });
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
-            tracing::debug!("UDS server not available on this platform");
+            tracing::debug!("daemon IPC server not available on this platform");
         }
 
         (ready_signal, registry_placeholder, active_placeholder)

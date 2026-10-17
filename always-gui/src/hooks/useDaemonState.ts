@@ -1,22 +1,84 @@
-import { useState, useCallback, useRef, useEffect } from "react";
-import {
-  DaemonState,
-  DaemonStateType,
-  DaemonEvent,
-  ModelInfo,
-  CorrectionPendingData,
-  RecentEntry,
-  ENROLLMENT_STEPS,
-  EnrollmentStep,
-} from "../types/uds";
+import { useState, useCallback, useRef } from "react";
+import { sendDaemonCommand } from "../lib/tauri";
 
-function createInitialState(): DaemonState {
+// ── Daemon state (mirror of Swift StateMonitor's observable surface) ────────
+
+export interface CatalogModel {
+  id: string;
+  name: string;
+  description: string;
+  is_downloaded: boolean;
+  is_downloading: boolean;
+  partial_size: number;
+  size_mb: number;
+  accuracy_score: number;
+  speed_score: number;
+  supports_translation: boolean;
+  supports_streaming: boolean;
+  supportsMultipleLanguages: boolean;
+  is_recommended: boolean;
+  supported_languages: string[];
+  supports_language_selection: boolean;
+  is_verifying: boolean;
+}
+
+export type UpdateState =
+  | { kind: "unknown" }
+  | { kind: "checking" }
+  | { kind: "upToDate"; version: string }
+  | { kind: "noRelease" }
+  | { kind: "checkFailed"; reason: string }
+  | { kind: "available"; current: string; latest: string; url: string; canApply: boolean; applyHint: string }
+  | { kind: "installing"; phase: string; percent: number | null; detail: string }
+  | { kind: "failed"; message: string };
+
+export interface VoiceEnrollment {
+  recordingStep: string | null;
+  level: number;
+  voicedMs: number;
+  targetMs: number;
+  isPreparing: boolean;
+  lastError: string | null;
+}
+
+export interface DaemonUiState {
+  state: string;
+  isPaused: boolean;
+  isMasterPaused: boolean;
+  isIdleAutoPaused: boolean;
+  isAutoEnter: boolean;
+  isDaemonConnected: boolean;
+  currentTranscript: string;
+  interimText: string;
+  backend: string;          // active backend wire form ("groq", "apple", "local:<id>")
+  focusedApp: string | null;
+  enrolled: boolean;
+  voiceEnabled: boolean;
+  voiceSteps: string[];
+  enrollment: VoiceEnrollment;
+  inputMonitoringGranted: boolean;
+  resumedApps: string[];
+  pauseSource: string | null;
+  correctionPending: { id: string; wrong: string; right: string } | null;
+  models: CatalogModel[];
+  downloadProgress: Record<string, number>;
+  verifying: string[];
+  extracting: string[];
+  installing: string[];
+  modelErrors: Record<string, string>;
+  loadingBackend: string | null;
+  recentTranscripts: { text: string; timestamp: number }[];
+  update: UpdateState;
+}
+
+function initialState(): DaemonUiState {
   return {
     state: "Idle",
     isPaused: false,
     isMasterPaused: false,
-    masterPaused: false,
+    isIdleAutoPaused: false,
     isAutoEnter: true,
+    isDaemonConnected: false,
     currentTranscript: "",
     interimText: "",
     backend: "groq",
@@ -24,397 +86,286 @@ function createInitialState(): DaemonState {
     enrolled: false,
     voiceEnabled: false,
     voiceSteps: [],
+    enrollment: { recordingStep: null, level: 0, voicedMs: 0, targetMs: 0, isPreparing: false, lastError: null },
     inputMonitoringGranted: false,
     resumedApps: [],
     pauseSource: null,
     correctionPending: null,
     models: [],
+    downloadProgress: {},
+    verifying: [],
+    extracting: [],
+    installing: [],
+    modelErrors: {},
+    loadingBackend: null,
     recentTranscripts: [],
+    update: { kind: "unknown" },
   };
 }
 
-// Process a raw event (from Tauri IPC) into a structured DaemonEvent
-function parseEvent(raw: any): DaemonEvent | null {
-  if (!raw || typeof raw !== "string") return null;
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || !parsed.type) return null;
-    // Strip wrapping — Tauri may add extra keys
-    return {
-      type: parsed.type,
-      data: parsed.data ?? null,
-    } as DaemonEvent;
-  } catch {
-    return null;
-  }
-}
-
 export function useDaemonState() {
-  const [state, setState] = useState<DaemonState>(createInitialState);
-  const transcriptBuffer = useRef("");
-  const pendingCorrections = useRef<Map<string, CorrectionPendingData>>(new Map());
-  const [enrollmentStep, setEnrollmentStep] = useState<number>(0);
-  const [enrollmentProgress, setEnrollmentProgress] = useState<{
-    voiced_ms: number;
-    target_ms: number;
-    energy: number;
-  }>({ voiced_ms: 0, target_ms: 0, energy: 0 });
+  const [state, setState] = useState<DaemonUiState>(initialState);
 
-  const processEvent = useCallback((rawEvent: any) => {
-    const event = parseEvent(rawEvent);
-    if (!event) return;
+  const setConnected = useCallback((v: boolean) => {
+    setState((prev) => ({ ...prev, isDaemonConnected: v }));
+  }, []);
+
+  // Process one raw JSON event line from the daemon.
+  const processEvent = useCallback((raw: string) => {
+    let evt: any;
+    try {
+      evt = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (!evt?.type) return;
+    const d = evt.data ?? {};
 
     setState((prev) => {
-      const next = { ...prev };
-      const evt = event as any;
-
+      const next: DaemonUiState = { ...prev, enrollment: { ...prev.enrollment } };
       switch (evt.type) {
-        // ── Lifecycle ──
-        case "ListeningStarted":
-          next.state = "Listening";
-          break;
-        case "ListeningStopped":
-          next.state = "Idle";
-          break;
-        case "ProcessingStarted":
-          next.state = "Processing";
-          break;
+        case "ListeningStarted": next.state = "Listening"; break;
+        case "ListeningStopped": next.state = "Idle"; break;
+        case "ProcessingStarted": next.state = "Processing"; break;
         case "ProcessingStopped":
-          next.state = "Transcribing";
-          break;
-        case "TranscribingStarted":
-          next.state = "Transcribing";
-          break;
+        case "TranscribingStarted": next.state = "Transcribing"; break;
         case "TranscribingStopped":
-          if (next.currentTranscript) {
-            next.state = "Idle";
-          } else {
-            next.state = "Listening";
-          }
+          next.state = next.currentTranscript ? "Idle" : "Listening";
           break;
-
-        // ── Pauses ──
         case "Paused":
         case "PausedQuietly":
-          next.isPaused = true;
-          next.state = "Paused";
-          break;
+          next.isPaused = true; next.state = "Paused"; break;
         case "Resumed":
         case "ResumedQuietly":
-          next.isPaused = false;
-          next.state = "Listening";
-          break;
+          next.isPaused = false; next.state = "Listening"; break;
         case "MasterPauseChanged":
-          next.isMasterPaused = evt.data?.master_paused;
-          next.masterPaused = evt.data?.master_paused;
-          break;
+          next.isMasterPaused = !!d.master_paused; break;
         case "PauseSourceChanged":
-          next.pauseSource = evt.data?.paused ? evt.data?.source : null;
-          break;
+          next.pauseSource = d.paused ? d.source : null; break;
+        case "IdleAutoPaused":
+          next.isPaused = true; next.isIdleAutoPaused = true; next.state = "Paused"; break;
+        case "IdleAutoResumed":
+          next.isPaused = false; next.isIdleAutoPaused = false; next.state = "Listening"; break;
 
-        // ── Transcripts ──
         case "TranscriptChunk":
         case "TranscriptionInterim":
-          next.interimText = evt.data?.text;
-          break;
+          next.interimText = d.text ?? ""; break;
         case "TranscriptFinal": {
-          const text = evt.data?.text;
-          transcriptBuffer.current = text;
+          const text = d.text ?? "";
           next.currentTranscript = text;
           next.interimText = "";
           next.state = "Idle";
-          // Add to recent transcripts
-          const recent: RecentEntry = { text, timestamp: Date.now() };
-          next.recentTranscripts = [recent, ...prev.recentTranscripts].slice(0, 50);
+          next.recentTranscripts = [{ text, timestamp: Date.now() }, ...prev.recentTranscripts].slice(0, 50);
           break;
         }
+        case "AutoEnterEnabled": next.isAutoEnter = true; break;
+        case "AutoEnterDisabled": next.isAutoEnter = false; break;
 
-        // ── Auto-Enter ──
-        case "AutoEnterEnabled":
-          next.isAutoEnter = true;
-          break;
-        case "AutoEnterDisabled":
-          next.isAutoEnter = false;
-          break;
-        case "AutoEnterCountdownStarted":
-          break;
-        case "AutoEnterCountdownTick":
-          break;
-        case "AutoEnterCountdownCancelled":
-        case "AutoEnterCountdownFinished":
-          break;
-
-        // ── Voice Profile ──
         case "VoiceProfileStatus":
-          next.enrolled = evt.data?.enrolled;
-          next.voiceEnabled = evt.data?.enabled;
-          next.voiceSteps = evt.data?.steps ?? [];
+          next.enrolled = !!d.enrolled;
+          next.voiceEnabled = !!d.enabled;
+          next.voiceSteps = d.steps ?? [];
+          break;
+        case "VoiceEnrollmentPreparing":
+          next.enrollment.isPreparing = true;
+          next.enrollment.recordingStep = d.step ?? next.enrollment.recordingStep;
+          next.enrollment.lastError = null;
           break;
         case "VoiceEnrollmentStarted":
-          setEnrollmentProgress({ voiced_ms: 0, target_ms: 0, energy: 0 });
+          next.enrollment.recordingStep = d.step ?? null;
+          next.enrollment.isPreparing = false;
+          next.enrollment.voicedMs = 0;
+          next.enrollment.targetMs = 0;
+          next.enrollment.lastError = null;
           break;
         case "VoiceEnrollmentLevel":
-          setEnrollmentProgress({
-            voiced_ms: evt.data?.voiced_ms,
-            target_ms: evt.data?.target_ms,
-            energy: evt.data?.energy,
-          });
+          next.enrollment.level = d.energy ?? 0;
+          next.enrollment.voicedMs = d.voiced_ms ?? 0;
+          next.enrollment.targetMs = d.target_ms ?? 0;
           break;
-        case "VoiceEnrollmentSampleCaptured": {
-          const currentStep = ENROLLMENT_STEPS.indexOf(evt.data?.step as any);
-          if (currentStep >= 0 && currentStep < ENROLLMENT_STEPS.length - 1) {
-            setEnrollmentStep(currentStep + 1);
-          }
+        case "VoiceEnrollmentSampleCaptured":
+          next.enrollment.recordingStep = null;
+          next.enrollment.isPreparing = false;
           break;
-        }
-
-        // ── Correction ──
-        case "CorrectionPending": {
-          const data: CorrectionPendingData = {
-            id: evt.data?.id,
-            wrong: evt.data?.wrong,
-            right: evt.data?.right,
-            lastTranscript: prev.currentTranscript,
-          };
-          pendingCorrections.current.set(evt.data?.id, data);
-          next.correctionPending = data;
-          break;
-        }
-
-        // ── Active Backend ──
-        case "ActiveTranscriberChanged":
-          next.backend = evt.data?.backend;
+        case "VoiceEnrollmentFailed":
+          next.enrollment.recordingStep = null;
+          next.enrollment.isPreparing = false;
+          next.enrollment.lastError = d.message ?? "Enrollment failed";
           break;
 
-        // ── Focused App ──
-        case "FocusedAppChanged":
-          next.focusedApp = evt.data?.bundle_id;
+        case "CorrectionPending":
+          next.correctionPending = { id: d.id, wrong: d.wrong, right: d.right };
           break;
-
-        // ── Resume Apps ──
-        case "ResumedAppsChanged":
-          next.resumedApps = evt.data?.bundles ?? [];
-          break;
-
-        // ── Shortcut Listener ──
+        case "FocusedAppChanged": next.focusedApp = d.bundle_id ?? null; break;
+        case "ResumedAppsChanged": next.resumedApps = d.bundles ?? []; break;
         case "ShortcutListenerStatus":
-          next.inputMonitoringGranted = evt.data?.input_monitoring_granted ?? false;
+          next.inputMonitoringGranted = !!d.input_monitoring_granted; break;
+        case "ActiveTranscriberChanged":
+          next.backend = d.backend ?? prev.backend;
+          next.loadingBackend = null;
           break;
 
-        // ── Models ──
         case "ModelsList": {
-          const models: ModelInfo[] = (evt.data?.models ?? []).map(
-            (m: any) => ({
-              model_id: m.model_id,
-              name: m.name ?? m.model_id,
-              description: m.description ?? "",
-              is_downloaded: m.is_downloaded ?? false,
-              is_downloading: m.is_downloading ?? false,
-              download_percentage: m.percentage,
-              size_bytes: m.size_bytes,
-            }),
-          );
-          next.models = models;
+          next.models = (d.models ?? []).map((m: any) => ({
+            id: m.id,
+            name: m.name ?? m.id,
+            description: m.description ?? "",
+            is_downloaded: !!m.is_downloaded,
+            is_downloading: !!m.is_downloading,
+            partial_size: m.partial_size ?? 0,
+            size_mb: m.size_mb ?? 0,
+            accuracy_score: m.accuracy_score ?? 0,
+            speed_score: m.speed_score ?? 0,
+            supports_translation: !!m.supports_translation,
+            supports_streaming: !!m.supports_streaming,
+            supportsMultipleLanguages: (m.supported_languages ?? []).length > 1,
+            is_recommended: !!m.is_recommended,
+            supported_languages: m.supported_languages ?? [],
+            supports_language_selection: !!m.supports_language_selection,
+            is_verifying: !!m.is_verifying,
+          }));
           break;
         }
         case "ModelDownloadProgress":
-          next.models = next.models.map((m) =>
-            m.model_id === evt.data?.model_id
-              ? { ...m, is_downloading: true, download_percentage: evt.data?.percentage }
-              : m,
-          );
+          next.downloadProgress = { ...prev.downloadProgress, [d.model_id]: d.percentage ?? 0 };
           break;
         case "ModelDownloadComplete":
-          next.models = next.models.map((m) =>
-            m.model_id === evt.data?.model_id
-              ? { ...m, is_downloading: false, is_downloaded: true }
-              : m,
-          );
+        case "ModelDownloadCancelled": {
+          const p = { ...prev.downloadProgress };
+          delete p[d.model_id];
+          next.downloadProgress = p;
           break;
-        case "ModelDownloadCancelled":
-        case "ModelDownloadFailed":
-          next.models = next.models.map((m) =>
-            m.model_id === evt.data?.model_id
-              ? { ...m, is_downloading: false }
-              : m,
-          );
+        }
+        case "ModelDownloadFailed": {
+          const p = { ...prev.downloadProgress };
+          delete p[d.model_id];
+          next.downloadProgress = p;
+          next.modelErrors = { ...prev.modelErrors, [d.model_id]: d.error ?? "Download failed" };
+          break;
+        }
+        case "ModelVerificationStarted":
+          next.verifying = [...new Set([...prev.verifying, d.model_id])]; break;
+        case "ModelVerificationCompleted":
+          next.verifying = prev.verifying.filter((id) => id !== d.model_id); break;
+        case "ModelExtractionStarted":
+          next.extracting = [...new Set([...prev.extracting, d.model_id])]; break;
+        case "ModelExtractionCompleted":
+          next.extracting = prev.extracting.filter((id) => id !== d.model_id);
+          next.installing = [...new Set([...prev.installing, d.model_id])];
+          break;
+        case "ModelExtractionFailed":
+          next.extracting = prev.extracting.filter((id) => id !== d.model_id);
+          next.modelErrors = { ...prev.modelErrors, [d.model_id]: d.error ?? "Extraction failed" };
           break;
 
-        // ── Error ──
-        case "TranscriptionFailed":
-          next.state = "Error";
+        // ── Updates (SPEC §12a) ──
+        case "UpdateAvailable":
+          next.update = {
+            kind: "available",
+            current: d.current ?? "",
+            latest: d.latest ?? "",
+            url: d.url ?? "",
+            canApply: d.can_apply === "true",
+            applyHint: d.apply_hint ?? "",
+          };
+          break;
+        case "UpdateCheckDone": {
+          const r = d.result;
+          if (r === "up_to_date") next.update = { kind: "upToDate", version: d.current ?? "" };
+          else if (r === "no_release") next.update = { kind: "noRelease" };
+          else if (r === "update_available") break; // UpdateAvailable event follows
+          else next.update = { kind: "checkFailed", reason: r ?? "error" };
+          break;
+        }
+        case "UpdateProgress":
+          next.update = {
+            kind: "installing",
+            phase: d.phase ?? "",
+            percent: d.percent === "" || d.percent == null ? null : Number(d.percent),
+            detail: d.detail ?? "",
+          };
+          break;
+        case "UpdateFailed":
+          next.update = { kind: "failed", message: d.message ?? "Update failed" };
           break;
 
-        // ── Idle Auto Pause ──
-        case "IdleAutoPaused":
-          next.isPaused = true;
-          next.state = "Paused";
-          break;
-        case "IdleAutoResumed":
-          next.isPaused = false;
-          next.state = "Listening";
-          break;
+        case "TranscriptionFailed": next.state = "Error"; break;
       }
-
       return next;
     });
   }, []);
 
-  const sendCommand = useCallback((cmd: string) => {
-    const tauri = (window as any).__TAURI__;
-    if (tauri?.core?.send) {
-      tauri.core.send("uds_send", { data: cmd });
-    }
+  // ── Command senders (raw JSON lines through the Tauri bridge) ────────────
+
+  const cmd = useCallback((c: object) => {
+    sendDaemonCommand(c).catch(() => {});
   }, []);
 
-  const togglePause = useCallback(() => {
-    sendCommand(JSON.stringify({ type: "TogglePause" }));
-  }, [sendCommand]);
-
-  const toggleAutoEnter = useCallback(() => {
-    sendCommand(JSON.stringify({ type: "ToggleAutoEnter" }));
-  }, [sendCommand]);
-
-  const setAutoEnter = useCallback(
-    (enabled: boolean) => {
-      sendCommand(JSON.stringify({ type: "SetAutoEnter", data: { enabled } }));
-    },
-    [sendCommand],
-  );
-
-  const setConsumeMode = useCallback(
-    (enabled: boolean) => {
-      sendCommand(
-        JSON.stringify({ type: "SetConsumeMode", data: { enabled } }),
-      );
-    },
-    [sendCommand],
-  );
-
-  const applyRuntimePreferences = useCallback(
-    (prefs: Partial<{
-      auto_enter_delay_ms: number;
-      energy_threshold: number;
-      silence_secs: number;
-      cooldown_ms: number;
-      silero_threshold: number;
-      adaptive_silence: boolean;
-      stt_live_preview: boolean;
-    }>) => {
-      sendCommand(
-        JSON.stringify({
-          type: "ApplyRuntimePreferences",
-          data: {
-            auto_enter_delay_ms: prefs.auto_enter_delay_ms ?? 4000,
-            energy_threshold: prefs.energy_threshold ?? 0.012,
-            silence_secs: prefs.silence_secs ?? 0.9,
-            cooldown_ms: prefs.cooldown_ms ?? 800,
-            silero_threshold: prefs.silero_threshold ?? 0.5,
-            adaptive_silence: prefs.adaptive_silence,
-            stt_live_preview: prefs.stt_live_preview,
-          },
-        }),
-      );
-    },
-    [sendCommand],
-  );
-
-  const approveCorrection = useCallback(
-    (id: string) => {
-      sendCommand(JSON.stringify({ type: "ApproveCorrection", data: { id } }));
-    },
-    [sendCommand],
-  );
-
-  const rejectCorrection = useCallback(
-    (id: string) => {
-      sendCommand(JSON.stringify({ type: "RejectCorrection", data: { id } }));
-    },
-    [sendCommand],
-  );
-
-  const setActiveTranscriber = useCallback(
-    (backend: string) => {
-      sendCommand(
-        JSON.stringify({ type: "SetActiveTranscriber", data: { backend } }),
-      );
-    },
-    [sendCommand],
-  );
-
-  const setLanguage = useCallback(
-    (lang: string) => {
-      sendCommand(JSON.stringify({ type: "SetLanguage", data: { lang } }));
-    },
-    [sendCommand],
-  );
-
-  const startVoiceEnrollment = useCallback(
-    (step: string) => {
-      sendCommand(
-        JSON.stringify({ type: "StartVoiceEnrollment", data: { step } }),
-      );
-    },
-    [sendCommand],
-  );
-
-  const cancelVoiceEnrollment = useCallback(() => {
-    sendCommand(JSON.stringify({ type: "CancelVoiceEnrollment" }));
-  }, [sendCommand]);
-
-  const deleteVoiceProfile = useCallback(() => {
-    sendCommand(JSON.stringify({ type: "DeleteVoiceProfile" }));
-  }, [sendCommand]);
-
-  const setVoiceProfileEnabled = useCallback(
-    (enabled: boolean) => {
-      sendCommand(
-        JSON.stringify({
-          type: "SetVoiceProfileEnabled",
-          data: { enabled },
-        }),
-      );
-    },
-    [sendCommand],
-  );
-
-  const downloadModel = useCallback(
-    (modelId: string) => {
-      sendCommand(
-        JSON.stringify({ type: "DownloadModel", data: { model_id: modelId } }),
-      );
-    },
-    [sendCommand],
-  );
-
-  const deleteModel = useCallback(
-    (modelId: string) => {
-      sendCommand(
-        JSON.stringify({ type: "DeleteModel", data: { model_id: modelId } }),
-      );
-    },
-    [sendCommand],
-  );
-
-  return {
+  const api = {
     state,
-    enrollmentStep,
-    enrollmentProgress,
+    setConnected,
     processEvent,
-    togglePause,
-    toggleAutoEnter,
-    setAutoEnter,
-    setConsumeMode,
-    applyRuntimePreferences,
-    approveCorrection,
-    rejectCorrection,
-    setActiveTranscriber,
-    setLanguage,
-    startVoiceEnrollment,
-    cancelVoiceEnrollment,
-    deleteVoiceProfile,
-    setVoiceProfileEnabled,
-    downloadModel,
-    deleteModel,
+
+    togglePause: () => cmd({ type: "TogglePause" }),
+    resume: () => cmd({ type: "Resume" }),
+    toggleAutoEnter: () => cmd({ type: "ToggleAutoEnter" }),
+    setAutoEnter: (enabled: boolean) => cmd({ type: "SetAutoEnter", data: { enabled } }),
+    setPaused: (paused: boolean, reason?: string) => cmd({ type: "SetPaused", data: { paused, reason: reason ?? null } }),
+    setAppPaused: (bundle_id: string, paused: boolean | null) => cmd({ type: "SetAppPaused", data: { bundle_id, paused } }),
+    applyRuntimePreferences: (prefs: any) =>
+      cmd({
+        type: "ApplyRuntimePreferences",
+        data: {
+          auto_enter_delay_ms: prefs.auto_enter_delay_ms ?? 4000,
+          energy_threshold: prefs.energy_threshold ?? 0.012,
+          silence_secs: prefs.silence_secs ?? 0.9,
+          cooldown_ms: prefs.cooldown_ms ?? 150,
+          silero_threshold: prefs.silero_threshold ?? 0.5,
+          adaptive_silence: prefs.adaptive_silence,
+          audible_status_sound: prefs.audible_status_sound,
+          stt_live_preview: prefs.stt_live_preview,
+        },
+      }),
+    reloadShortcuts: () => cmd({ type: "ReloadShortcuts" }),
+    setupMode: (enabled: boolean) => cmd({ type: "SetupMode", data: { enabled } }),
+
+    listModels: () => cmd({ type: "ListModels" }),
+    downloadModel: (model_id: string) => cmd({ type: "DownloadModel", data: { model_id } }),
+    cancelModelDownload: (model_id: string) => cmd({ type: "CancelModelDownload", data: { model_id } }),
+    deleteModel: (model_id: string) => cmd({ type: "DeleteModel", data: { model_id } }),
+    setActiveTranscriber: (backend: string) => {
+      setState((p) => ({ ...p, loadingBackend: backend }));
+      cmd({ type: "SetActiveTranscriber", data: { backend } });
+    },
+    setLanguage: (lang: string | null) => cmd({ type: "SetLanguage", data: { lang: lang ?? "auto" } }),
+
+    getVoiceProfileStatus: () => cmd({ type: "GetVoiceProfileStatus" }),
+    startVoiceEnrollment: (step: string) => cmd({ type: "StartVoiceEnrollment", data: { step } }),
+    cancelVoiceEnrollment: () => {
+      setState((p) => ({ ...p, enrollment: { ...p.enrollment, recordingStep: null, isPreparing: false } }));
+      cmd({ type: "CancelVoiceEnrollment" });
+    },
+    deleteVoiceProfile: () => cmd({ type: "DeleteVoiceProfile" }),
+    setVoiceProfileEnabled: (enabled: boolean) => cmd({ type: "SetVoiceProfileEnabled", data: { enabled } }),
+
+    approveCorrection: (id: string) => cmd({ type: "ApproveCorrection", data: { id } }),
+    rejectCorrection: (id: string) => cmd({ type: "RejectCorrection", data: { id } }),
+    logCorrection: (intended: string) => cmd({ type: "LogCorrection", data: { intended } }),
+
+    checkForUpdates: () => {
+      setState((p) => ({ ...p, update: { kind: "checking" } }));
+      cmd({ type: "CheckForUpdates" });
+    },
+    installUpdate: () => cmd({ type: "InstallUpdate" }),
   };
+
+  return api;
 }
+
+export type DaemonApi = ReturnType<typeof useDaemonState>;
+
+export const ENROLLMENT_STEPS = [
+  { key: "normal", title: "Normal voice", prompt: "Read a few sentences at your usual speaking volume." },
+  { key: "lower", title: "Quieter voice", prompt: "Repeat, a little softer — like talking late at night." },
+  { key: "louder", title: "Louder voice", prompt: "Once more, louder — like calling across a room." },
+];
