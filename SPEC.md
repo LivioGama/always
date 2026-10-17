@@ -1438,18 +1438,35 @@ user's choice wins.
   which renders cues offline to a buffer. A sandbox instance
   never pauses, resumes or reaps prod/dev daemons.
 
-**Windows daemon lifecycle.** On Windows the daemon is CLI-only: no UDS
-socket, no GUI, no peer handoff. `always start` spawns `always run`
-detached (no console), single-instance is a named kernel mutex
-(`Local\always-daemon[-dev]`, released by the kernel on process death),
-liveness is the pid file + an `OpenProcess` image-name check (recycled
-pids can't impersonate the daemon), and the process table comes from a
-Toolhelp32 snapshot with command lines read out of each candidate's
-PEB. `stop`/orphan-reaping use `TerminateProcess` — there is no SIGTERM
-equivalent for a detached process — and stale pid files are reclaimed on
-the next start. `always run` in a console shuts down gracefully on
-Ctrl+C (pid file cleanup); commands that need live IPC
-(`toggle-pause`, `get-state` from the daemon) fall back to local state.
+**Windows daemon lifecycle.** On Windows there is no GUI and no peer
+handoff, but the daemon is not CLI-only: the UDS protocol is carried
+over a named pipe instead of a unix socket. `always start` spawns
+`always run` detached (no console), single-instance is a named kernel
+mutex (`Local\always-daemon[-dev]`, released by the kernel on process
+death), liveness is the pid file + an `OpenProcess` image-name check
+(recycled pids can't impersonate the daemon), and the process table
+comes from a Toolhelp32 snapshot with command lines read out of each
+candidate's PEB. `stop`/orphan-reaping use `TerminateProcess` — there
+is no SIGTERM equivalent for a detached process — and stale pid files
+are reclaimed on the next start. `always run` in a console shuts down
+gracefully on Ctrl+C (pid file cleanup).
+
+**Windows IPC — named pipe.** The JSON-lines `DaemonCommand`/`DaemonEvent`
+protocol (same versioned schema as the UDS socket) listens on
+`\\.\pipe\always[-dev]`. The server creates the endpoint with
+`first_pipe_instance`, so bind failure is the pipe equivalent of the
+live-socket check — a second daemon can't steal it (the kernel mutex
+already prevents that anyway). Opening the pipe IS the liveness probe:
+`ERROR_FILE_NOT_FOUND` = no server, success/`ERROR_PIPE_BUSY` = live.
+`\\.\pipe\` paths never stat as files, so "socket exists" checks on
+Windows mean "endpoint answers", not `Path::exists`. CLI commands that
+need live IPC (`toggle-pause`, `toggle-auto-enter`, `get-state`,
+`models.*`, voice enrollment) go through the pipe like on unix and fall
+back to local state only when no daemon is running. The orphan watchdog
+(no client for 30 s → exit) now runs only when `ALWAYS_SPAWNED_BY_GUI=1`:
+a terminal-spawned daemon has no client to wait for and would otherwise
+suicide 30 s after every `always start` — on Windows, where clients are
+transient CLI calls, that is the only mode there is.
 
 **Nothing is "done" until the new build is running** (I10). "Built" and
 "deployed" are different claims, and only "running" is testable.
