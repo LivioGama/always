@@ -77,7 +77,7 @@ export function MyVoicePanel({ daemon }: { daemon: DaemonApi }) {
                   )}
                 </span>
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium text-surface-100">{step.title}</div>
+                  <div className="text-[13px] font-medium text-surface-100">{step.title}</div>
                   <Caption>{step.prompt}</Caption>
                 </div>
                 {isRecording ? (

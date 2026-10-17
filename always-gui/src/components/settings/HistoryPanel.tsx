@@ -90,7 +90,7 @@ export function HistoryPanel() {
           <div key={`${e.timestamp_ms}-${i}`} className="rounded-lg bg-white/[0.08] p-2.5">
             <div className="flex items-start gap-2">
               <div className="flex-1 min-w-0">
-                <div className="text-sm text-surface-100 whitespace-pre-wrap">{e.text}</div>
+                <div className="text-[13px] text-surface-100 whitespace-pre-wrap">{e.text}</div>
                 <Caption className="mt-0.5">
                   {new Date(e.timestamp_ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
                 </Caption>

@@ -40,7 +40,7 @@ export function AboutPanel({ daemon }: { daemon: DaemonApi }) {
       {/* Description */}
       <div className="space-y-2">
         <PanelTitle>About</PanelTitle>
-        <p className="text-sm text-surface-400">
+        <p className="text-[13px] text-surface-400">
           Always provides continuous voice transcription using Groq's STT API with intelligent
           post-processing. It runs as a background daemon and integrates with your {platformName} workflow.
         </p>
@@ -63,7 +63,7 @@ export function AboutPanel({ daemon }: { daemon: DaemonApi }) {
       {/* Support Development */}
       <div className="space-y-2">
         <PanelTitle>Support Development</PanelTitle>
-        <p className="text-sm text-surface-400">
+        <p className="text-[13px] text-surface-400">
           Always is free and open source. If it saves you time, consider supporting its development.
         </p>
         <LinkButton title="Donate" url={DONATE_URL} icon="heart" prominent />
@@ -74,7 +74,7 @@ export function AboutPanel({ daemon }: { daemon: DaemonApi }) {
       {/* License */}
       <div className="space-y-2">
         <PanelTitle>License</PanelTitle>
-        <p className="text-sm text-surface-400">{LICENSE}</p>
+        <p className="text-[13px] text-surface-400">{LICENSE}</p>
       </div>
     </div>
   );
@@ -90,7 +90,7 @@ function LinkButton({ title, url, icon, prominent = false }: {
     <button
       type="button"
       onClick={() => openUrl(url)}
-      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[13px] font-medium transition-colors ${
         prominent
           ? "bg-primary-600 text-white hover:bg-primary-500"
           : "bg-surface-800 text-surface-200 hover:bg-surface-700 border border-surface-700"
@@ -171,7 +171,7 @@ function UpdateSection({ daemon }: { daemon: DaemonApi }) {
       )}
       {u.kind === "available" && (
         <div className="rounded-lg bg-primary-500/10 border border-primary-500/30 p-2.5 space-y-2">
-          <div className="text-sm text-surface-100">
+          <div className="text-[13px] text-surface-100">
             Version <span className="font-semibold text-primary-300">{u.latest}</span> is available
             <span className="text-surface-400"> (you have {u.current})</span>
           </div>

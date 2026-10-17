@@ -68,7 +68,7 @@ export function BehaviorPanel({
       <div className="space-y-2">
         <PanelTitle>Sensitivity</PanelTitle>
         <div className="flex items-center gap-3">
-          <span className="text-sm text-surface-200">Mic Sensitivity</span>
+          <span className="text-[13px] text-surface-200">Mic Sensitivity</span>
           <div className="flex-1" />
           <Segmented
             width={280}
@@ -87,7 +87,7 @@ export function BehaviorPanel({
 
         <div className="flex items-center gap-3">
           <span
-            className="text-sm text-surface-200"
+            className="text-[13px] text-surface-200"
             title="How long a mid-sentence pause can be before the utterance is finalized and pasted. Higher = fewer split sentences, slightly later paste."
           >
             Pause Tolerance

@@ -24,7 +24,7 @@ export function PermissionsBanner() {
         <svg className="w-4 h-4 text-orange-400" viewBox="0 0 24 24" fill="none" stroke="currentColor">
           <path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6l7-3zM12 9v4m0 3h.01" />
         </svg>
-        <span className="text-sm font-semibold text-orange-400">Permissions needed</span>
+        <span className="text-[13px] font-semibold text-orange-400">Permissions needed</span>
         <div className="flex-1" />
         <button
           type="button"
@@ -33,7 +33,7 @@ export function PermissionsBanner() {
             sessionStorage.setItem("always_perms_banner_dismissed", "1");
             setDismissed(true);
           }}
-          className="text-surface-500 hover:text-surface-200 text-sm leading-none"
+          className="text-surface-500 hover:text-surface-200 text-[13px] leading-none"
         >
           ×
         </button>

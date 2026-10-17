@@ -61,7 +61,7 @@ export function SettingsSidebar({
   state: DaemonUiState;
 }) {
   return (
-    <div className="w-[200px] shrink-0 bg-[#242427] border-r border-black/40 py-5 flex flex-col">
+    <div className="w-[200px] shrink-0 bg-surface-900 border-r border-white/10 py-5 flex flex-col">
       <div className="flex flex-col gap-1 px-2">
         {PANELS.map((p) => {
           const active = selected === p.key;
@@ -70,11 +70,11 @@ export function SettingsSidebar({
               key={p.key}
               type="button"
               onClick={() => onSelect(p.key)}
-              className={`flex items-center gap-2.5 px-4 py-2 rounded-md text-sm text-left w-full transition-colors ${
-                active ? "bg-white/10 text-white" : "text-surface-200/80 hover:bg-white/5"
+              className={`flex items-center gap-2.5 px-4 py-2 rounded-md text-[13px] text-left w-full transition-colors ${
+                active ? "bg-primary-500 text-white" : "text-white/90 hover:bg-white/5"
               }`}
             >
-              <span className={`w-[18px] flex items-center justify-center ${active ? "text-primary-400" : "text-surface-500"}`}>
+              <span className={`w-[18px] flex items-center justify-center ${active ? "text-white" : "text-surface-400"}`}>
                 {p.icon}
               </span>
               {p.label}
