@@ -35,7 +35,14 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "capabilities": [
+        {
+          "identifier": "main",
+          "windows": ["*"],
+          "permissions": ["core:event:default"]
+        }
+      ]
     }
   },
   "bundle": {

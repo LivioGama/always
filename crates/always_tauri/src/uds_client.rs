@@ -728,28 +728,45 @@ impl UdsClient {
 
         loop {
             buf.clear();
-            match reader.read_line(&mut buf).await {
-                Ok(0) => return false, // EOF
-                Ok(_) => {
-                    let line = buf.trim().to_string();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    // Forward the raw line — the frontend parses JSON and
-                    // understands variants this crate's enum doesn't.
-                    {
-                        let cb = event_cb.lock().await;
-                        for callback in cb.iter() {
-                            callback(ClientEvent::Event(line.clone()));
+            tokio::select! {
+                read = reader.read_line(&mut buf) => {
+                    match read {
+                        Ok(0) => return false, // EOF
+                        Ok(_) => {
+                            let line = buf.trim().to_string();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            // Forward the raw line — the frontend parses JSON and
+                            // understands variants this crate's enum doesn't.
+                            {
+                                let cb = event_cb.lock().await;
+                                for callback in cb.iter() {
+                                    callback(ClientEvent::Event(line.clone()));
+                                }
+                            }
+                            if let Ok(event) = serde_json::from_str::<DaemonEvent>(&line) {
+                                state.apply(&event);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "uds_read_error");
+                            return false;
                         }
                     }
-                    if let Ok(event) = serde_json::from_str::<DaemonEvent>(&line) {
-                        state.apply(&event);
-                    }
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "uds_read_error");
-                    return false;
+                cmd = rx.recv() => {
+                    match cmd {
+                        Some(cmd) => {
+                            if let Err(e) = Self::write_one(writer, &cmd).await {
+                                tracing::warn!(error = %e, "uds_write_error");
+                                return false; // broken pipe → reconnect
+                            }
+                        }
+                        // All senders dropped (client disconnected) — leave the
+                        // loop so the reconnect cycle can re-establish.
+                        None => return false,
+                    }
                 }
             }
         }
