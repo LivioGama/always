@@ -73,31 +73,31 @@ that kills it cuts the user's voice mid-sentence. Therefore:**
 
 ## 🚨 Rebuild After Changes — nothing is "done" until the new build is RUNNING
 
-**Every change to any `.rs` or `.swift` file MUST end with `scripts/dev-rebuild.sh`
-completing successfully, before the work is reported as finished.**
+**Every change to any `.rs` or `.swift` file MUST end with the platform's
+development rebuild script completing successfully before the work is reported
+as finished.**
 
 Not "deployed". Not "built". **Running.** Those are different claims, and only the
 last one lets a human test what you did.
 
 ```bash
-./scripts/dev-rebuild.sh
+./scripts/dev-rebuild-macos.sh  # macOS development app
+./scripts/dev-rebuild-linux.sh  # Linux daemon + settings app
 ```
 
-The script kills the DEV app AND its daemon (unconditionally — a Swift-only
-change still needs the GUI restarted to load it), builds Rust with the
-`local-stt` feature, builds and bundles the Swift app as `Always Dev.app`,
-deploys to `/Applications/Always Dev.app`, relaunches, and then **verifies the
-running dev processes are the ones just built** — plus confirms the production
-GUI is still alive at the end.
+On macOS, `dev-rebuild-macos.sh` kills the DEV app and its daemon, builds Rust
+with `local-stt`, bundles and deploys `Always Dev.app`, relaunches, and verifies
+the running dev processes use the new binaries. On Linux,
+`dev-rebuild-linux.sh` builds the daemon, frontend, and Tauri settings app,
+launches the app, and verifies its process is running from this checkout.
 
 ### The verification is the point
 
-After launching, the script compares each process's start time against its
-binary's mtime and **exits non-zero** with `✗ REBUILD NOT LIVE` if a process
-predates the code it was built from. If you see that, the change is NOT testable.
-Fix it before saying anything else — never report the work as shipped.
+After launching, each script verifies the rebuilt application is running and
+exits non-zero if it cannot verify that. If it fails, the change is NOT
+testable. Fix it before saying anything else — never report the work as shipped.
 
-Check by hand any time:
+On macOS, check by hand any time:
 
 ```bash
 stat -f "%Sm %N" -t "%H:%M:%S" "/Applications/Always Dev.app/Contents/MacOS/Always"
@@ -108,21 +108,21 @@ ps -o pid,lstart,comm -p $(pgrep -f "Always Dev.app/Contents/MacOS/Always$" | he
 ### Never do these
 
 - Do NOT say done / fixed / shipped / ready while the old dev process is still alive.
-- Do NOT rely on `open` alone. If the app is already running, `open`
+- On macOS, do NOT rely on `open` alone. If the app is already running, `open`
   re-focuses the live instance and the new binary never executes.
-- Do NOT skip the script for a "small" Swift change. That is exactly the case
+- Do NOT skip the macOS script for a "small" Swift change. That is exactly the case
   that broke.
-- Do NOT substitute `promote.sh` for `dev-rebuild.sh` to satisfy this rule.
+- Do NOT substitute `promote.sh` for `dev-rebuild-macos.sh` to satisfy this rule.
 
-**Why this rule exists**: the kill step used to be gated on Rust having changed.
+**Why this rule exists**: on macOS the kill step used to be gated on Rust having changed.
 A Swift-only fix was therefore built, deployed, and reported as shipped while the
 GUI had been running since 100 minutes earlier — `open` simply re-focused the
 stale instance. The user tested a build that was never running and correctly
 reported "I see no change". Hours were lost on both sides.
 
 **Options**:
-- `./scripts/dev-rebuild.sh release` - Release build instead of debug
-- `./scripts/dev-rebuild.sh --no-daemon` - Skip daemon restart (use sparingly; the
+- `./scripts/dev-rebuild-macos.sh release` - Release build instead of debug
+- `./scripts/dev-rebuild-macos.sh --no-daemon` - Skip daemon restart (use sparingly; the
   GUI is still restarted and verified)
 
 ### Shipping to production

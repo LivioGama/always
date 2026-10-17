@@ -1426,10 +1426,12 @@ user's choice wins.
 
 **Commands.**
 
-- `scripts/dev-rebuild.sh` — the dev loop. Kills/rebuilds/relaunches only
+- `scripts/dev-rebuild-macos.sh` — the macOS dev loop. Kills/rebuilds/relaunches only
   `Always Dev.app`; never touches the production install. Exits non-zero
   unless the dev GUI + daemon are running the just-built binaries, and
   warns if production went missing.
+- `scripts/dev-rebuild-linux.sh` — builds the Linux daemon, settings frontend,
+  and Tauri app, then launches and verifies the checkout's settings app.
 - `scripts/promote.sh` — manual production promotion, user-invoked only.
   Kills production, rebuilds, deploys over `/Applications/Always.app`,
   relaunches, verifies. Agents must not run it.

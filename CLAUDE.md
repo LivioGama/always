@@ -278,23 +278,25 @@ finding it different. The spec is how that stops.
 
 ### 🚨 HARD RULE — nothing is "done" until the new build is RUNNING
 
-**Every change to any `.rs` or `.swift` file MUST end with `scripts/dev-rebuild.sh`
-completing successfully, before you report the work as finished.**
+**Every change to any `.rs` or `.swift` file MUST end with its platform's
+development rebuild script completing successfully before you report the work
+as finished.** Use `scripts/dev-rebuild-macos.sh` on macOS and
+`scripts/dev-rebuild-linux.sh` on Linux.
 
 Not "deployed". Not "built". **Running.** These are different claims and only the
 last one lets a human test what you did.
 
 - Do NOT say done / fixed / shipped / ready while the old process is still alive.
 - Do NOT hand back a change that only exists in `/Applications` but is not executing.
-- Do NOT rely on `open -a Always` alone: if the app is already running, `open`
+- On macOS, do NOT rely on `open -a Always` alone: if the app is already running, `open`
   just re-focuses the live instance and your new binary never executes.
 - A Swift-only change still requires the full script. The GUI must be restarted
   to load it, and nothing else does that.
 
-The script now proves this itself: after launching it compares each process's
-start time against its binary's mtime and **exits non-zero** with
-`✗ REBUILD NOT LIVE` if a process predates the code it was built from. If you see
-that, the change is NOT testable — fix it before saying anything else.
+The macOS script compares each process's start time against its binary's mtime;
+the Linux script verifies the launched settings app belongs to this checkout.
+Both exit non-zero when the new app cannot be verified. If either fails, the
+change is NOT testable — fix it before saying anything else.
 
 To check by hand at any time:
 
@@ -312,19 +314,20 @@ correctly reported "I see no change". Hours were lost on both sides.
 
 ### Simple Workflow (Do This Every Time)
 
-**Required — use `scripts/dev-rebuild.sh` for every Rust+Swift rebuild.**
+**Required — use the platform-specific script for every rebuild.**
 ```bash
-scripts/dev-rebuild.sh            # debug profile (default — transcripts visible)
-scripts/dev-rebuild.sh release    # release profile (transcripts hidden)
+scripts/dev-rebuild-macos.sh            # macOS debug profile
+scripts/dev-rebuild-macos.sh release    # macOS release profile
+scripts/dev-rebuild-linux.sh            # Linux daemon + settings app
 ```
-The script kills the running app, rebuilds Rust + Swift, redeploys to `/Applications/Always.app`, and relaunches. It plays a short macOS system sound at each lifecycle marker (kill / compiled / up / fail) so you can hear progress while looking at logs. Mute with `ALWAYS_REBUILD_SILENT=1`.
+The macOS script rebuilds and relaunches `Always Dev.app`. The Linux script builds the daemon, frontend, and Tauri settings app, then launches it from this checkout.
 
 **Do not use the manual equivalent for normal rebuilds.**
 ```bash
 DO NOT run the manual equivalent for routine rebuilds.
 ```
 
-**Manual equivalent (release for distribution) is only for special cases:**
+**Manual equivalent (macOS release for distribution) is only for special cases:**
 ```bash
 pkill -f "Always.app"
 cargo build --release --lib --bin always
