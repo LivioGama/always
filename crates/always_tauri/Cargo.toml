@@ -18,7 +18,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 # Tauri v2 (stable)
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["custom-protocol", "tray-icon"] }
 
 # Note: tauri-plugin-autostart and tauri-plugin-updater are in 3.x alpha for
 # the Tauri v2 ecosystem.  The stable 2.x releases are for Tauri v1 only.
