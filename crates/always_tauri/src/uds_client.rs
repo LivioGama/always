@@ -11,7 +11,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 #[cfg(windows)]
@@ -422,12 +422,15 @@ pub fn resolve_socket_path() -> PathBuf {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
+        let suffix = std::env::var("ALWAYS_INSTANCE")
+            .ok()
+            .filter(|instance| instance != "prod" && !instance.is_empty())
+            .map(|instance| format!("-{instance}"))
+            .unwrap_or_default();
         if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-            PathBuf::from(runtime_dir).join("always.sock")
-        } else if let Some(cache) = dirs::cache_dir() {
-            cache.join("always.sock")
+            PathBuf::from(runtime_dir).join(format!("always{suffix}.sock"))
         } else {
-            PathBuf::from("/tmp/always.sock")
+            PathBuf::from(format!("/tmp/always{suffix}.sock"))
         }
     }
     #[cfg(windows)]
@@ -527,7 +530,7 @@ pub struct UdsClient {
     sender: Mutex<Option<mpsc::Sender<String>>>,
     state: Arc<Mutex<DaemonStateAccumulator>>,
     #[allow(clippy::type_complexity)]
-    event_callbacks: Arc<Mutex<Vec<Box<dyn Fn(ClientEvent) + Send + Sync>>>>,
+    event_callbacks: Arc<StdMutex<Vec<Box<dyn Fn(ClientEvent) + Send + Sync>>>>,
     reconnect_handle: tauri::async_runtime::JoinHandle<()>,
 }
 
@@ -545,7 +548,7 @@ impl UdsClient {
         F: Fn(ClientEvent) + Send + Sync + 'static,
     {
         let state = Arc::new(Mutex::new(DaemonStateAccumulator::default()));
-        let event_callback = Arc::new(Mutex::new(
+        let event_callback = Arc::new(StdMutex::new(
             on_event
                 .map(|cb| vec![Box::new(cb) as Box<dyn Fn(ClientEvent) + Send + Sync>])
                 .unwrap_or_default(),
@@ -569,7 +572,7 @@ impl UdsClient {
                         retry_delay = Duration::from_secs(1); // reset on success
                         reconnecting = false;
                         {
-                            let cb = event_cb_clone.lock().await;
+                            let cb = event_cb_clone.lock().expect("event callback mutex poisoned");
                             for callback in cb.iter() {
                                 callback(ClientEvent::Connected);
                             }
@@ -596,7 +599,7 @@ impl UdsClient {
                             tracing::warn!("uds_reader_exit: connection lost");
                         }
                         {
-                            let cb = event_cb_clone.lock().await;
+                            let cb = event_cb_clone.lock().expect("event callback mutex poisoned");
                             for callback in cb.iter() {
                                 callback(ClientEvent::Disconnected);
                             }
@@ -669,7 +672,7 @@ impl UdsClient {
     where
         F: Fn(ClientEvent) + Send + Sync + 'static,
     {
-        let mut cb = self.event_callbacks.blocking_lock();
+        let mut cb = self.event_callbacks.lock().expect("event callback mutex poisoned");
         cb.push(Box::new(callback));
     }
 
@@ -715,7 +718,7 @@ impl UdsClient {
         rx: &mut mpsc::Receiver<String>,
         writer: &mut W,
         state: &Arc<Mutex<DaemonStateAccumulator>>,
-        event_cb: &Arc<Mutex<Vec<Box<dyn Fn(ClientEvent) + Send + Sync>>>>,
+        event_cb: &Arc<StdMutex<Vec<Box<dyn Fn(ClientEvent) + Send + Sync>>>>,
     ) -> bool
     where
         R: AsyncRead + Unpin,
@@ -740,7 +743,7 @@ impl UdsClient {
                             // Forward the raw line — the frontend parses JSON and
                             // understands variants this crate's enum doesn't.
                             {
-                                let cb = event_cb.lock().await;
+                                let cb = event_cb.lock().expect("event callback mutex poisoned");
                                 for callback in cb.iter() {
                                     callback(ClientEvent::Event(line.clone()));
                                 }

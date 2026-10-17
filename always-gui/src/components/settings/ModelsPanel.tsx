@@ -104,7 +104,7 @@ function GroqKeyCard({ config, onConfigChange }: {
   };
 
   return (
-    <div className="rounded-lg bg-white/[0.08] p-3 space-y-2">
+    <div className="rounded-lg bg-white/[0.05] p-3 space-y-2">
       <div className="flex items-center gap-2">
         <PanelTitle>Groq API Key</PanelTitle>
         <div className="flex-1" />
@@ -209,7 +209,7 @@ function ModelsSection({ daemon, config, onConfigChange }: {
       </div>
 
       {/* Cloud option */}
-      <div className="rounded-lg bg-white/[0.08] p-2.5 flex items-center gap-2.5">
+      <div className="rounded-lg bg-white/[0.05] p-2.5 flex items-center gap-2.5">
         <svg className={`w-5 h-5 ${cloudActive ? "text-primary-400" : "text-surface-500"}`} viewBox="0 0 24 24" fill="none" stroke="currentColor">
           <path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M17.5 18a4.5 4.5 0 100-9 6 6 0 00-11.5 1.5A4 4 0 006.5 18h11z" />
         </svg>
@@ -341,7 +341,7 @@ function ModelCard({ m, daemon, active }: { m: CatalogModel; daemon: DaemonApi; 
   const busy = m.is_downloading || verifying || extracting || installing;
 
   return (
-    <div className={`rounded-lg p-2.5 ${active ? "bg-primary-500/10 ring-1 ring-primary-500/30" : "bg-white/[0.08]"}`}>
+    <div className={`rounded-lg p-2.5 ${active ? "bg-primary-500/10 ring-1 ring-primary-500/30" : "bg-white/[0.05]"}`}>
       <div className="flex items-start gap-2.5">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5">

@@ -19,6 +19,17 @@ body {
   -moz-osx-font-smoothing: grayscale;
   background: #020617;
   color: #e2e8f0;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea,
+select,
+[contenteditable="true"],
+.select-text {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 /* Scrollbar styling */

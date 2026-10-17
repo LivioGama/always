@@ -100,9 +100,12 @@ shortcuts are available in X11 sessions; Wayland compositors do not let the
 daemon observe global key events, so users there control pause and auto-enter
 through the CLI.
 
-The GUI spawns the daemon and talks to it over a Unix domain socket at
-`~/Library/Caches/always/always.sock`. Messages are newline-delimited JSON; the
-daemon broadcasts events, the GUI sends commands.
+The GUI talks to the daemon over a Unix domain socket using newline-delimited
+JSON. On macOS it is `~/Library/Caches/Always/always{suffix}.sock`; on Linux it
+is `$XDG_RUNTIME_DIR/always{suffix}.sock` (or `/tmp/always{suffix}.sock` when
+`XDG_RUNTIME_DIR` is unset). Development instances use the `-dev` suffix so
+they cannot replace the production socket. The daemon broadcasts events; the
+GUI sends commands.
 
 **Always never changes what the Mac plays (2026-10-16, v0.1.0 user report:
 micro-cuts / crackling in Apple Music and on a speaker while Always ran).**
@@ -472,6 +475,10 @@ television, meeting audio and music are ignored.
 
 **Enrollment** records three passes (normal, lower, louder), each needing 5 s of
 voice. Each pass is stored as its own embedding, plus their combined average.
+In Settings, the My Voice switch cannot be turned on until all three samples
+are recorded, but it remains possible to turn it off if the saved setting is
+on. When off without a complete profile, the UI explains that enrollment is
+required before the gate can be enabled.
 
 **Enrollment readiness.** The speaker model (26.5 MB, SHA-256 checked) is
 prefetched in a background thread at every daemon start, whatever the gate or
@@ -1329,6 +1336,17 @@ not required (local models need none) and it now lives in Settings → Models.
 
 Stored in the daemon's database, editable from Settings and the CLI
 (`always-daemon config set <key> <value>`).
+
+**Settings controls.** Settings labels and explanatory text are not selectable
+as ordinary web text. Inputs, editable text, and transcript-history entries
+remain selectable. Models cards use subdued dark surfaces against the dark
+window.
+
+**Linux permissions.** Linux does not show the microphone-permission banner in
+General: microphone access comes from the active audio session, and the
+Permissions page reports the daemon/audio-session status. Global shortcuts
+report their X11 requirement separately. Platform-specific banners wait until
+the app has identified the platform, avoiding a Windows warning flash on Linux.
 
 | Key | Default | Meaning |
 |---|---|---|
