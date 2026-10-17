@@ -62,7 +62,7 @@ export function MyVoicePanel({ daemon }: { daemon: DaemonApi }) {
           return (
             <div
               key={step.key}
-              className={`rounded-md p-2.5 ${isRecording ? "bg-primary-500/10 ring-1 ring-primary-500/30" : "bg-surface-500/[0.08]"}`}
+              className={`rounded-md p-2.5 ${isRecording ? "bg-primary-500/10 ring-1 ring-primary-500/30" : "bg-white/[0.08]"}`}
             >
               <div className="flex items-center gap-2.5">
                 <span className={`w-4 h-4 flex items-center justify-center ${done ? "text-green-500" : "text-surface-500"}`}>

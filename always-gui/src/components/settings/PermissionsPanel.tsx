@@ -91,7 +91,7 @@ function PermissionRow({ ok, title, okText, badText, actionTitle, onAction }: {
   onAction?: () => void;
 }) {
   return (
-    <div className="flex items-start gap-3 rounded-lg bg-surface-500/[0.08] p-3">
+    <div className="flex items-start gap-3 rounded-lg bg-white/[0.08] p-3">
       <span className={`mt-0.5 ${ok ? "text-green-500" : "text-orange-400"}`}>
         {ok ? (
           <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">

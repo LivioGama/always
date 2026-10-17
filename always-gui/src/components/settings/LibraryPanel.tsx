@@ -103,13 +103,13 @@ function VocabularyPanel() {
       )}
 
       {entries.length === 0 ? (
-        <div className="rounded-lg bg-surface-500/[0.08] p-5 text-center">
+        <div className="rounded-lg bg-white/[0.08] p-5 text-center">
           <Caption className="italic">No glossary entries yet. Open glossary.json to add terms.</Caption>
         </div>
       ) : (
         <div className="space-y-1.5">
           {[...entries].sort((a, b) => a.term.localeCompare(b.term)).map((e) => (
-            <div key={e.term} className="rounded-lg bg-surface-500/[0.08] px-3 py-2">
+            <div key={e.term} className="rounded-lg bg-white/[0.08] px-3 py-2">
               <div className="flex items-start gap-2">
                 <div className="flex-1 min-w-0">
                   <div className="text-sm font-medium text-surface-100">{e.term}</div>
@@ -232,11 +232,11 @@ function SnippetsPanel() {
       </div>
 
       {snippets.length === 0 ? (
-        <div className="rounded-lg bg-surface-500/[0.08] p-5 text-center">
+        <div className="rounded-lg bg-white/[0.08] p-5 text-center">
           <Caption className="italic">No snippets yet.</Caption>
         </div>
       ) : (
-        <div className="divide-y divide-surface-800/60 rounded-lg bg-surface-500/[0.08]">
+        <div className="divide-y divide-white/[0.08] rounded-lg bg-white/[0.08]">
           {[...snippets].sort((a, b) => a.trigger.localeCompare(b.trigger)).map((s) => (
             <div key={s.trigger} className="flex items-start gap-2.5 px-3 py-2">
               <div className="flex-1 min-w-0">
