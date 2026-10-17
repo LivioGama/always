@@ -10,9 +10,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::future::Future;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -507,7 +505,7 @@ pub struct UdsClient {
     state: Arc<Mutex<DaemonStateAccumulator>>,
     #[allow(clippy::type_complexity)]
     event_callback: Arc<Mutex<Option<Box<dyn Fn(DaemonEvent) + Send + Sync>>>>,
-    reconnect_handle: tokio::task::JoinHandle<()>,
+    reconnect_handle: tauri::async_runtime::JoinHandle<()>,
 }
 
 // Safety: `UdsClient` is Send because all shared state is behind Arc<Mutex<>>.
@@ -533,7 +531,9 @@ impl UdsClient {
         let state_clone = Arc::clone(&state);
         let event_cb_clone = Arc::clone(&event_callback);
 
-        let reconnect_handle = tokio::spawn(async move {
+        // tauri::async_runtime, not tokio::spawn — `new` is called from
+        // Tauri's `setup` on the main thread, outside a Tokio context.
+        let reconnect_handle = tauri::async_runtime::spawn(async move {
             let mut retry_delay = Duration::from_secs(1);
             let mut reconnecting = false;
             let socket_path = Arc::new(socket_path);
@@ -658,7 +658,6 @@ impl UdsClient {
             *guard = None;
         }
         self.reconnect_handle.abort();
-        let _ = self.reconnect_handle.await;
     }
 
     // ── internal helpers ───────────────────────────────────────────────
@@ -688,7 +687,7 @@ impl UdsClient {
                     if line.is_empty() {
                         continue;
                     }
-                    if let Ok(event) = DaemonEvent::from_json_line(&line) {
+                    if let Ok(event) = serde_json::from_str::<DaemonEvent>(&line) {
                         state.apply(&event);
                         let cb = event_cb.lock().await;
                         if let Some(callback) = cb.as_ref() {

@@ -45,13 +45,16 @@ fn main() {
             let socket_path = uds_client::resolve_socket_path();
             tracing::info!(path = %socket_path.display(), "uds_client_init");
 
-            let uds = Arc::new(uds_client::UdsClient::new(socket_path, None));
+            let uds = Arc::new(uds_client::UdsClient::new(
+                socket_path,
+                None::<fn(crate::uds_client::DaemonEvent)>,
+            ));
 
             // ── WindowManager ────────────────────────────────────────
             let wm = Arc::new(WindowManager::new(app.handle().clone()));
 
             // ── System Tray ──────────────────────────────────────────
-            match tray::build_tray(app.handle(), &uds) {
+            match tray::build_tray(app.handle(), Arc::clone(&uds)) {
                 Ok(t) => {
                     let _ = t;
                 }
