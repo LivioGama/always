@@ -1,52 +1,30 @@
-import { useState, useCallback } from "react";
+import { useEffect, useState } from "react";
+import type { DaemonApi } from "../hooks/useDaemonState";
+import { openUrl, platform } from "../lib/tauri";
+import { Btn, Caption, Spinner } from "./controls";
 
-interface OnboardingViewProps {
-  onComplete: () => void;
-  onStartSettings: () => void;
-  onStartEnrollment: () => void;
-  hasVoiceProfile: boolean;
-  shortcutListening: boolean;
-  onReloadShortcuts?: () => void;
-}
+type Step = "welcome" | "permissions" | "apps" | "done";
+const STEPS: Step[] = ["welcome", "permissions", "apps", "done"];
 
-type Step = 0 | 1 | 2 | 3 | 4;
-
-const NEXT_LABELS = ["Get Started", "Record: normal", "Record: lower", "Record: louder", "Launch Always"];
-
+/// First-run onboarding. Mirrors OnboardingView.swift: welcome → permission
+/// grants → pick the apps Always resumes in (allowlist) → done.
 export function OnboardingView({
+  daemon,
   onComplete,
-  onStartSettings,
-  onStartEnrollment,
-  hasVoiceProfile,
-  shortcutListening,
-  onReloadShortcuts,
-}: OnboardingViewProps) {
-  const [step, setStep] = useState<Step>(0);
-  const [hotkeys, setHotkeys] = useState({
-    pause: "⌥ Space",
-    resume: "⌥⇧ Space",
-    capture: "⌃⌥X",
-    grammarCorrect: "⌥G",
-    globalPause: "⌃⌥P",
-    globalResume: "⌃⌥⇧P",
-  });
-
-  const handleNext = () => {
-    if (step < 4) {
-      if (step === 1 || step === 2) {
-        onStartEnrollment();
-      }
-      setStep((s) => Math.min(s + 1, 4) as Step);
-    } else {
-      if (onReloadShortcuts) onReloadShortcuts();
-      onComplete();
-    }
-  };
+  onOpenSettings,
+}: {
+  daemon: DaemonApi;
+  onComplete: () => void;
+  onOpenSettings: () => void;
+}) {
+  const [step, setStep] = useState<Step>("welcome");
+  const idx = STEPS.indexOf(step);
+  const next = () => setStep(STEPS[Math.min(idx + 1, STEPS.length - 1)]);
+  const back = () => setStep(STEPS[Math.max(idx - 1, 0)]);
 
   return (
     <div className="min-h-screen bg-surface-950 flex flex-col items-center justify-center p-6">
       <div className="w-full max-w-lg">
-        {/* Logo */}
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary-600 mb-4">
             <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -56,51 +34,73 @@ export function OnboardingView({
           <h1 className="text-2xl font-bold text-white">Always</h1>
         </div>
 
-        {/* Progress dots */}
         <div className="flex justify-center gap-2 mb-8">
-          {[0, 1, 2, 3, 4].map((i) => (
+          {STEPS.map((s, i) => (
             <div
-              key={i}
+              key={s}
               className={`h-1.5 rounded-full transition-all duration-300 ${
-                i <= step ? "w-8 bg-primary-500" : "w-4 bg-surface-700"
+                i <= idx ? "w-8 bg-primary-500" : "w-4 bg-surface-700"
               }`}
             />
           ))}
         </div>
 
-        {/* Step content */}
-        <div className="bg-surface-900 rounded-2xl p-6 border border-surface-800 animate-fade-in">
-          {step === 0 && <StepWelcome />}
-          {step === 1 && <StepEnrollNormal />}
-          {step === 2 && <StepEnrollLower />}
-          {step === 3 && <StepEnrollLouder />}
-          {step === 4 && <StepDone />}
+        <div className="bg-surface-900 rounded-2xl p-6 border border-surface-800 animate-fade-in min-h-[300px]">
+          {step === "welcome" && <StepWelcome />}
+          {step === "permissions" && <StepPermissions daemon={daemon} />}
+          {step === "apps" && <StepApps daemon={daemon} />}
+          {step === "done" && <StepDone />}
         </div>
 
-        {/* Actions */}
         <div className="flex gap-3 mt-6">
-          {step >= 2 && step <= 3 && (
+          {idx > 0 && step !== "done" && (
             <button
-              onClick={() => setStep((s) => Math.max(s - 1, 0) as Step)}
+              onClick={back}
               className="px-4 py-2.5 text-sm font-medium text-surface-300 hover:text-white bg-surface-800 hover:bg-surface-700 rounded-lg transition-colors"
             >
               Back
             </button>
           )}
-          <button
-            onClick={handleNext}
-            className="flex-1 px-4 py-2.5 text-sm font-semibold text-white bg-primary-600 hover:bg-primary-500 rounded-lg transition-colors"
-          >
-            {NEXT_LABELS[step]}
-          </button>
+          {step !== "done" && (
+            <button
+              onClick={next}
+              className="flex-1 px-4 py-2.5 text-sm font-semibold text-white bg-primary-600 hover:bg-primary-500 rounded-lg transition-colors"
+            >
+              {step === "welcome" ? "Get Started" : step === "apps" ? "Finish" : "Continue"}
+            </button>
+          )}
+          {step === "done" && (
+            <button
+              onClick={onComplete}
+              className="flex-1 px-4 py-2.5 text-sm font-semibold text-white bg-primary-600 hover:bg-primary-500 rounded-lg transition-colors"
+            >
+              Launch Always
+            </button>
+          )}
         </div>
 
-        {step === 4 && (
+        {step === "done" && (
           <button
-            onClick={onStartSettings}
+            onClick={onOpenSettings}
             className="mt-3 w-full px-4 py-2 text-sm font-medium text-surface-400 hover:text-white transition-colors"
           >
             Open Settings instead
+          </button>
+        )}
+        {step === "permissions" && (
+          <button
+            onClick={next}
+            className="mt-3 w-full px-4 py-2 text-xs text-surface-500 hover:text-surface-300 transition-colors"
+          >
+            Skip for now — I'll do it later in Settings
+          </button>
+        )}
+        {step === "apps" && (
+          <button
+            onClick={next}
+            className="mt-3 w-full px-4 py-2 text-xs text-surface-500 hover:text-surface-300 transition-colors"
+          >
+            Skip — keep me paused everywhere for now
           </button>
         )}
       </div>
@@ -113,80 +113,185 @@ function StepWelcome() {
     <div className="animate-slide-up">
       <h2 className="text-xl font-semibold text-white mb-3">Welcome to Always</h2>
       <p className="text-surface-300 text-sm leading-relaxed mb-4">
-        Always is an on-device speech-to-text assistant that listens, transcribes,
-        and types your words wherever you need them. Everything runs locally on your Mac.
+        Always is a speech-to-text assistant that listens, transcribes, and types your words
+        wherever your cursor is. You stay in control: it only listens in the apps you allow.
       </p>
       <div className="space-y-2">
-        <div className="flex items-center gap-3 text-sm text-surface-300">
-          <CheckIcon />
-          <span>Privacy-first: your audio never leaves your Mac</span>
-        </div>
-        <div className="flex items-center gap-3 text-sm text-surface-300">
-          <CheckIcon />
-          <span>Transcribes in any app with global hotkey control</span>
-        </div>
-        <div className="flex items-center gap-3 text-sm text-surface-300">
-          <CheckIcon />
-          <span>Optional "My Voice" speaker verification</span>
-        </div>
+        {[
+          "Dictate in any app — transcribed text is pasted at the cursor",
+          "Paused by default — you choose which apps can listen",
+          "Local or Groq cloud transcription, optional post-processing",
+          "Optional “My Voice” speaker verification",
+        ].map((t) => (
+          <div key={t} className="flex items-center gap-3 text-sm text-surface-300">
+            <CheckIcon />
+            <span>{t}</span>
+          </div>
+        ))}
       </div>
     </div>
   );
 }
 
-function StepEnrollNormal() {
+function StepPermissions({ daemon }: { daemon: DaemonApi }) {
+  const [os, setOs] = useState("windows");
+  const [checking, setChecking] = useState(false);
+  useEffect(() => {
+    platform().then(setOs).catch(() => {});
+  }, []);
+
+  const micOk = daemon.state.isDaemonConnected;
+  const shortcutsOk = daemon.state.inputMonitoringGranted;
+
+  const recheck = () => {
+    setChecking(true);
+    setTimeout(() => setChecking(false), 800);
+  };
+
   return (
     <div className="animate-slide-up">
-      <h2 className="text-xl font-semibold text-white mb-3">My Voice — Step 1 of 3</h2>
+      <h2 className="text-xl font-semibold text-white mb-3">Permissions</h2>
       <p className="text-surface-300 text-sm leading-relaxed mb-4">
-        "Record: normal"
+        Always needs access to your microphone. {os === "macos" ? "It also needs Input Monitoring for global shortcuts." : ""}
       </p>
-      <p className="text-surface-400 text-xs leading-relaxed mb-4">
-        Speak this sentence at a normal volume:
-      </p>
-      <div className="bg-surface-800 rounded-lg p-4 text-center">
-        <p className="text-white text-base font-medium">
-          The quick brown fox jumps over the lazy dog
-        </p>
+      <div className="space-y-2.5">
+        <PermissionCard
+          ok={micOk}
+          title="Microphone"
+          detail={
+            micOk
+              ? "Granted — the daemon is hearing audio."
+              : os === "windows"
+                ? "If dictation is silent, allow desktop apps under Settings → Privacy & security → Microphone."
+                : "Required to hear you speak."
+          }
+          actionTitle={micOk ? undefined : os === "windows" ? "Open Microphone Settings" : "Open Settings"}
+          onAction={
+            micOk
+              ? undefined
+              : () =>
+                  openUrl(
+                    os === "windows"
+                      ? "ms-settings:privacy-microphone"
+                      : "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+                  )
+          }
+        />
+        <PermissionCard
+          ok={shortcutsOk}
+          title={os === "windows" ? "Global Shortcuts" : "Input Monitoring"}
+          detail={
+            shortcutsOk
+              ? "Active — global hotkeys are working."
+              : os === "windows"
+                ? "Windows hotkey wiring is still landing — shortcuts won't fire yet."
+                : "Required for the global hotkeys to work."
+          }
+          actionTitle={
+            !shortcutsOk && os === "macos" ? "Open Settings" : undefined
+          }
+          onAction={
+            !shortcutsOk && os === "macos"
+              ? () => openUrl("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+              : undefined
+          }
+        />
+      </div>
+      <div className="mt-4">
+        <Btn small onClick={recheck} disabled={checking}>
+          {checking ? <Spinner /> : null}
+          Re-check
+        </Btn>
       </div>
     </div>
   );
 }
 
-function StepEnrollLower() {
+function PermissionCard({ ok, title, detail, actionTitle, onAction }: {
+  ok: boolean;
+  title: string;
+  detail: string;
+  actionTitle?: string;
+  onAction?: () => void;
+}) {
   return (
-    <div className="animate-slide-up">
-      <h2 className="text-xl font-semibold text-white mb-3">My Voice — Step 2 of 3</h2>
-      <p className="text-surface-300 text-sm leading-relaxed mb-4">
-        "Record: lower"
-      </p>
-      <p className="text-surface-400 text-xs leading-relaxed mb-4">
-        Now speak the same sentence at a slightly lower volume:
-      </p>
-      <div className="bg-surface-800 rounded-lg p-4 text-center">
-        <p className="text-white text-base font-medium">
-          The quick brown fox jumps over the lazy dog
-        </p>
+    <div className="flex items-start gap-3 rounded-lg bg-surface-800/60 p-3">
+      <span className={`mt-0.5 ${ok ? "text-green-500" : "text-orange-400"}`}>
+        {ok ? <CheckIcon /> : (
+          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path strokeWidth={2} strokeLinecap="round" d="M12 8v5m0 3h.01M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z" />
+          </svg>
+        )}
+      </span>
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-medium text-surface-100">{title}</div>
+        <Caption>{detail}</Caption>
       </div>
+      {actionTitle && onAction && <Btn small onClick={onAction}>{actionTitle}</Btn>}
     </div>
   );
 }
 
-function StepEnrollLouder() {
+/// Candidate apps = whatever is focused now plus anything already resumed —
+/// the Windows analogue of OnboardingAppCandidates' "running apps" list.
+function StepApps({ daemon }: { daemon: DaemonApi }) {
+  const s = daemon.state;
+  const focused = s.focusedApp;
+  const candidates = [...new Set([...(focused ? [focused] : []), ...s.resumedApps])];
+
+  const toggle = (bundleId: string) => {
+    daemon.setAppPaused(bundleId, s.resumedApps.includes(bundleId) ? null : false);
+  };
+
   return (
     <div className="animate-slide-up">
-      <h2 className="text-xl font-semibold text-white mb-3">My Voice — Step 3 of 3</h2>
+      <h2 className="text-xl font-semibold text-white mb-3">Choose your apps</h2>
       <p className="text-surface-300 text-sm leading-relaxed mb-4">
-        "Record: louder"
+        Always stays paused except in apps you allow. Tick an app to resume voice typing while it's focused —
+        you can change this any time in Settings → General.
       </p>
-      <p className="text-surface-400 text-xs leading-relaxed mb-4">
-        Finally, speak the same sentence at a slightly higher volume:
-      </p>
-      <div className="bg-surface-800 rounded-lg p-4 text-center">
-        <p className="text-white text-base font-medium">
-          The quick brown fox jumps over the lazy dog
-        </p>
-      </div>
+      {candidates.length === 0 ? (
+        <div className="rounded-lg bg-surface-800/60 p-5 text-center">
+          <Caption className="italic">
+            No apps detected yet. Focus the app you want to dictate in, then come back — it'll show up here.
+          </Caption>
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          {candidates.map((bundleId) => {
+            const on = s.resumedApps.includes(bundleId);
+            return (
+              <button
+                key={bundleId}
+                type="button"
+                onClick={() => toggle(bundleId)}
+                className="w-full flex items-center gap-3 rounded-lg bg-surface-800/60 px-3 py-2.5 text-left hover:bg-surface-800"
+              >
+                <span
+                  className={`w-4 h-4 rounded border flex items-center justify-center ${
+                    on ? "bg-primary-500 border-primary-500" : "border-surface-600"
+                  }`}
+                >
+                  {on && (
+                    <svg className="w-3 h-3 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                      <path strokeWidth={3} strokeLinecap="round" d="M5 13l4 4L19 7" />
+                    </svg>
+                  )}
+                </span>
+                <span className="text-sm text-surface-100 flex-1 truncate">
+                  {(bundleId.split(/[\\/]/).pop() ?? bundleId).replace(/\.exe$/i, "")}
+                </span>
+                {bundleId === focused && (
+                  <Caption className="text-primary-400">focused now</Caption>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <Caption className="mt-3">
+        {s.resumedApps.length} {s.resumedApps.length === 1 ? "app" : "apps"} will listen.
+      </Caption>
     </div>
   );
 }
@@ -196,23 +301,23 @@ function StepDone() {
     <div className="animate-slide-up">
       <h2 className="text-xl font-semibold text-white mb-3">You're all set!</h2>
       <p className="text-surface-300 text-sm leading-relaxed mb-4">
-        Always is ready to transcribe your speech. Use the hotkeys in the Settings
-        to control listening, pausing, and grammar correction.
+        Always is ready. Focus an allowed app and speak — the transcribed text is pasted at your cursor.
       </p>
       <div className="bg-surface-800 rounded-lg p-4 space-y-2 text-sm">
-        <div className="flex justify-between text-surface-300">
-          <span>Pause listening</span>
-          <kbd className="text-surface-100 bg-surface-700 px-2 py-0.5 rounded text-xs">Alt+Space</kbd>
-        </div>
-        <div className="flex justify-between text-surface-300">
-          <span>Resume listening</span>
-          <kbd className="text-surface-100 bg-surface-700 px-2 py-0.5 rounded text-xs">Alt+Shift+Space</kbd>
-        </div>
-        <div className="flex justify-between text-surface-300">
-          <span>Capture correction</span>
-          <kbd className="text-surface-100 bg-surface-700 px-2 py-0.5 rounded text-xs">Ctrl+Alt+X</kbd>
-        </div>
+        {[
+          ["Pause / resume for this app", "Ctrl+Alt+P"],
+          ["Master pause (everywhere)", "Ctrl+Alt+Shift+P"],
+          ["Toggle auto-enter", "Ctrl+Alt+A"],
+          ["Re-paste last transcript", "Ctrl+Alt+V"],
+          ["Correction dialog", "Ctrl+Alt+W"],
+        ].map(([label, keys]) => (
+          <div key={label} className="flex justify-between text-surface-300">
+            <span>{label}</span>
+            <kbd className="text-surface-100 bg-surface-700 px-2 py-0.5 rounded text-xs">{keys}</kbd>
+          </div>
+        ))}
       </div>
+      <Caption className="mt-3">Remap these any time in Settings → Shortcuts.</Caption>
     </div>
   );
 }
