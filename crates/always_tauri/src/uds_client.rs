@@ -213,6 +213,12 @@ pub enum DaemonEvent {
     },
 }
 
+impl DaemonEvent {
+    pub fn from_json_line(line: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(line)
+    }
+}
+
 /// Model information returned in the `ModelsList` event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -427,7 +433,13 @@ pub fn resolve_socket_path() -> PathBuf {
     #[cfg(windows)]
     {
         // Daemon's named pipe — the Windows equivalent of the UDS path.
-        PathBuf::from(r"\\.\pipe\always")
+        // `ALWAYS_INSTANCE=dev` mirrors the daemon's `-dev` suffix.
+        let suffix = std::env::var("ALWAYS_INSTANCE")
+            .ok()
+            .filter(|i| i != "prod" && !i.is_empty())
+            .map(|i| format!("-{i}"))
+            .unwrap_or_default();
+        PathBuf::from(format!(r"\\.\pipe\always{suffix}"))
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -500,11 +512,22 @@ async fn connect_to_socket(_: &std::path::Path) -> Result<DaemonStream> {
 /// 3. Reads events and dispatches them to the callback.
 ///
 /// The reconnection loop runs indefinitely until [`Self::disconnect`] is called.
+/// What the client reports to its consumer: a raw daemon event line or a
+/// connection-state change. Raw lines are forwarded verbatim so the GUI
+/// sees every `DaemonEvent` variant — including ones this crate's enum
+/// doesn't know yet.
+#[derive(Debug, Clone)]
+pub enum ClientEvent {
+    Event(String),
+    Connected,
+    Disconnected,
+}
+
 pub struct UdsClient {
-    sender: Mutex<Option<mpsc::Sender<DaemonCommand>>>,
+    sender: Mutex<Option<mpsc::Sender<String>>>,
     state: Arc<Mutex<DaemonStateAccumulator>>,
     #[allow(clippy::type_complexity)]
-    event_callback: Arc<Mutex<Option<Box<dyn Fn(DaemonEvent) + Send + Sync>>>>,
+    event_callbacks: Arc<Mutex<Vec<Box<dyn Fn(ClientEvent) + Send + Sync>>>>,
     reconnect_handle: tauri::async_runtime::JoinHandle<()>,
 }
 
@@ -519,15 +542,16 @@ impl UdsClient {
     ///   Pass `None` to discard events.
     pub fn new<F>(socket_path: PathBuf, on_event: Option<F>) -> Self
     where
-        F: Fn(DaemonEvent) + Send + Sync + 'static,
+        F: Fn(ClientEvent) + Send + Sync + 'static,
     {
         let state = Arc::new(Mutex::new(DaemonStateAccumulator::default()));
-        let event_callback =
-            Arc::new(Mutex::new(on_event.map(|cb| {
-                Box::new(cb) as Box<dyn Fn(DaemonEvent) + Send + Sync>
-            })));
+        let event_callback = Arc::new(Mutex::new(
+            on_event
+                .map(|cb| vec![Box::new(cb) as Box<dyn Fn(ClientEvent) + Send + Sync>])
+                .unwrap_or_default(),
+        ));
 
-        let (tx, mut rx) = mpsc::channel::<DaemonCommand>(64);
+        let (tx, mut rx) = mpsc::channel::<String>(64);
         let state_clone = Arc::clone(&state);
         let event_cb_clone = Arc::clone(&event_callback);
 
@@ -544,6 +568,12 @@ impl UdsClient {
                         tracing::info!(path = %socket_path.display(), "uds_connected");
                         retry_delay = Duration::from_secs(1); // reset on success
                         reconnecting = false;
+                        {
+                            let cb = event_cb_clone.lock().await;
+                            for callback in cb.iter() {
+                                callback(ClientEvent::Connected);
+                            }
+                        }
 
                         // Drain any buffered commands accumulated while disconnected.
                         while let Ok(cmd) = rx.try_recv() {
@@ -564,6 +594,12 @@ impl UdsClient {
                             tracing::info!("uds_reader_exit: clean disconnect");
                         } else {
                             tracing::warn!("uds_reader_exit: connection lost");
+                        }
+                        {
+                            let cb = event_cb_clone.lock().await;
+                            for callback in cb.iter() {
+                                callback(ClientEvent::Disconnected);
+                            }
                         }
                         // `writer` is dropped here.
                     }
@@ -602,7 +638,7 @@ impl UdsClient {
         Self {
             sender: Mutex::new(Some(tx)),
             state,
-            event_callback,
+            event_callbacks: event_callback,
             reconnect_handle,
         }
     }
@@ -610,12 +646,19 @@ impl UdsClient {
     /// Send a command to the daemon. Queues it on the current connection,
     /// reconnecting first if necessary.
     pub async fn send_command(&self, cmd: DaemonCommand) -> Result<()> {
+        let line = serde_json::to_string(&cmd).context("serialize command")?;
+        self.send_line(line).await
+    }
+
+    /// Send a raw JSON command line verbatim — the caller decides the
+    /// command shape, so new daemon commands never need an enum update.
+    pub async fn send_line(&self, line: String) -> Result<()> {
         let sender = {
             let guard = self.sender.lock().await;
             guard.clone()
         };
         if let Some(tx) = sender {
-            tx.send(cmd).await.context("command channel closed")
+            tx.send(line).await.context("command channel closed")
         } else {
             bail!("client is disconnected")
         }
@@ -624,10 +667,10 @@ impl UdsClient {
     /// Register (or replace) an event callback.
     pub fn on_event<F>(&self, callback: F)
     where
-        F: Fn(DaemonEvent) + Send + Sync + 'static,
+        F: Fn(ClientEvent) + Send + Sync + 'static,
     {
-        let mut cb = self.event_callback.blocking_lock();
-        *cb = Some(Box::new(callback));
+        let mut cb = self.event_callbacks.blocking_lock();
+        cb.push(Box::new(callback));
     }
 
     /// Read the current daemon state snapshot.
@@ -638,6 +681,11 @@ impl UdsClient {
     /// Check if auto-enter is currently enabled.
     pub async fn is_auto_enter_enabled(&self) -> bool {
         self.state.lock().await.auto_enter
+    }
+
+    /// Whether the daemon IPC channel is currently connected.
+    pub async fn is_connected(&self) -> bool {
+        self.sender.lock().await.is_some()
     }
 
     /// Check if the daemon is currently paused.
@@ -664,10 +712,10 @@ impl UdsClient {
 
     async fn read_loop<R, W>(
         mut reader: BufReader<R>,
-        rx: &mut mpsc::Receiver<DaemonCommand>,
+        rx: &mut mpsc::Receiver<String>,
         writer: &mut W,
         state: &Arc<Mutex<DaemonStateAccumulator>>,
-        event_cb: &Arc<Mutex<Option<Box<dyn Fn(DaemonEvent) + Send + Sync>>>>,
+        event_cb: &Arc<Mutex<Vec<Box<dyn Fn(ClientEvent) + Send + Sync>>>>,
     ) -> bool
     where
         R: AsyncRead + Unpin,
@@ -687,15 +735,16 @@ impl UdsClient {
                     if line.is_empty() {
                         continue;
                     }
+                    // Forward the raw line — the frontend parses JSON and
+                    // understands variants this crate's enum doesn't.
+                    {
+                        let cb = event_cb.lock().await;
+                        for callback in cb.iter() {
+                            callback(ClientEvent::Event(line.clone()));
+                        }
+                    }
                     if let Ok(event) = serde_json::from_str::<DaemonEvent>(&line) {
                         state.apply(&event);
-                        let cb = event_cb.lock().await;
-                        if let Some(callback) = cb.as_ref() {
-                            callback(event.clone());
-                        }
-                        drop(cb);
-                    } else {
-                        tracing::warn!(line = %line, "uds_parse_event_failed");
                     }
                 }
                 Err(e) => {
@@ -706,11 +755,11 @@ impl UdsClient {
         }
     }
 
-    async fn write_one<W>(writer: &mut W, cmd: &DaemonCommand) -> Result<()>
+    async fn write_one<W>(writer: &mut W, cmd: &str) -> Result<()>
     where
         W: AsyncWrite + Unpin,
     {
-        let json = serde_json::to_string(cmd).context("serialize command")?;
+        let json = cmd.trim_end().to_string();
         writer
             .write_all(format!("{json}\n").as_bytes())
             .await

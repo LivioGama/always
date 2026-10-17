@@ -12,7 +12,7 @@ use tauri::tray::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Wry};
 use tokio::sync::mpsc;
 
-use crate::uds_client::{DaemonEvent, DaemonState, UdsClient};
+use crate::uds_client::{ClientEvent, DaemonEvent, DaemonState, UdsClient};
 
 /// Build the system tray with the menu and connect event-driven updates.
 pub fn build_tray(app: &AppHandle, uds: Arc<UdsClient>) -> Result<TrayIcon<Wry>, tauri::Error> {
@@ -86,8 +86,14 @@ async fn update_menu_loop(tray: &TrayIcon<Wry>, uds: &Arc<UdsClient>) {
     // Register a state-change callback on the UDS client.
     let tx = std::sync::Mutex::new(Some(tx));
     uds.on_event(move |event| {
+        let ClientEvent::Event(line) = event else {
+            return;
+        };
+        let Ok(parsed) = serde_json::from_str::<DaemonEvent>(&line) else {
+            return;
+        };
         let needs_update = matches!(
-            event,
+            parsed,
             DaemonEvent::Paused
                 | DaemonEvent::Resumed
                 | DaemonEvent::ResumedQuietly

@@ -1,7 +1,7 @@
-import { DaemonState } from "../types/uds";
+import type { DaemonUiState } from "../hooks/useDaemonState";
 
 interface StatusOverlayProps {
-  state: DaemonState;
+  state: DaemonUiState;
   onTogglePause: () => void;
   onOpenSettings: () => void;
   compact?: boolean;
@@ -16,7 +16,6 @@ export function StatusOverlay({
   const {
     state: daemonState,
     isPaused,
-    masterPaused,
     isAutoEnter,
     currentTranscript,
     interimText,
