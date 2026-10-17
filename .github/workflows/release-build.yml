@@ -231,10 +231,10 @@ jobs:
   build-windows:
     name: Build x86_64-pc-windows-msvc
     runs-on: windows-latest
-    # KNOWN BLOCKER: the Windows-specific sources do not compile against the
-    # pinned `windows` crate (E0428/E0432 in the win32 modules). On a branch dry
-    # run the failure is tolerated so the other platforms can be validated; on a
-    # tag it fails the release (no Windows asset = no release).
+    # The Windows build compiles (win32 sources were fixed for `windows`
+    # 0.62). On a branch dry run a failure is still tolerated so the other
+    # platforms can be validated; on a tag it fails the release
+    # (no Windows asset = no release).
     continue-on-error: ${{ github.ref_type != 'tag' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
