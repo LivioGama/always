@@ -62,6 +62,7 @@ export interface DaemonUiState {
   correctionPending: { id: string; wrong: string; right: string } | null;
   models: CatalogModel[];
   downloadProgress: Record<string, number>;
+  downloadBytes: Record<string, { downloaded: number; total: number }>;
   verifying: string[];
   extracting: string[];
   installing: string[];
@@ -93,6 +94,7 @@ function initialState(): DaemonUiState {
     correctionPending: null,
     models: [],
     downloadProgress: {},
+    downloadBytes: {},
     verifying: [],
     extracting: [],
     installing: [],
@@ -105,6 +107,7 @@ function initialState(): DaemonUiState {
 
 export function useDaemonState() {
   const [state, setState] = useState<DaemonUiState>(initialState);
+  const backendSwitchAttempt = useRef(0);
 
   const setConnected = useCallback((v: boolean) => {
     setState((prev) => ({ ...prev, isDaemonConnected: v }));
@@ -203,7 +206,16 @@ export function useDaemonState() {
         case "ActiveTranscriberChanged":
           next.backend = d.backend ?? prev.backend;
           next.loadingBackend = null;
+          backendSwitchAttempt.current += 1;
           break;
+        case "ActiveTranscriberFailed": {
+          const backend = String(d.backend ?? "");
+          const errorKey = backend.startsWith("local:") ? backend.slice(6) : backend;
+          next.modelErrors = { ...prev.modelErrors, [errorKey]: d.error ?? "Couldn't load this transcription model." };
+          next.loadingBackend = null;
+          backendSwitchAttempt.current += 1;
+          break;
+        }
 
         case "ModelsList": {
           const models = (d.models ?? []).map((m: any) => ({
@@ -231,21 +243,40 @@ export function useDaemonState() {
           next.verifying = prev.verifying.filter((id) => !downloadedIds.has(id));
           if (downloadedIds.size) {
             const progress = { ...prev.downloadProgress };
+            const byteCounts = { ...prev.downloadBytes };
             for (const id of downloadedIds) delete progress[id];
+            for (const id of downloadedIds) delete byteCounts[id];
             next.downloadProgress = progress;
+            next.downloadBytes = byteCounts;
             const errors = { ...prev.modelErrors };
             for (const id of downloadedIds) delete errors[id];
             next.modelErrors = errors;
           }
           break;
         }
-        case "ModelDownloadProgress":
-          next.downloadProgress = { ...prev.downloadProgress, [d.model_id]: d.percentage ?? 0 };
+        case "ModelDownloadProgress": {
+          const progress = { ...prev.downloadProgress };
+          const bytes = { ...prev.downloadBytes };
+          if ((d.percentage ?? 0) >= 100) {
+            delete progress[d.model_id];
+            delete bytes[d.model_id];
+            next.installing = [...new Set([...prev.installing, d.model_id])];
+          } else {
+            progress[d.model_id] = d.percentage ?? 0;
+            bytes[d.model_id] = { downloaded: d.downloaded ?? 0, total: d.total ?? 0 };
+          }
+          next.downloadProgress = progress;
+          next.downloadBytes = bytes;
           break;
+        }
         case "ModelDownloadComplete": {
           const p = { ...prev.downloadProgress };
           delete p[d.model_id];
           next.downloadProgress = p;
+          const b = { ...prev.downloadBytes };
+          delete b[d.model_id];
+          next.downloadBytes = b;
+          next.installing = [...new Set([...prev.installing, d.model_id])];
           sendDaemonCommand({ type: "ListModels" }).catch(() => {});
           break;
         }
@@ -253,6 +284,9 @@ export function useDaemonState() {
           const p = { ...prev.downloadProgress };
           delete p[d.model_id];
           next.downloadProgress = p;
+          const b = { ...prev.downloadBytes };
+          delete b[d.model_id];
+          next.downloadBytes = b;
           next.installing = prev.installing.filter((id) => id !== d.model_id);
           next.extracting = prev.extracting.filter((id) => id !== d.model_id);
           next.verifying = prev.verifying.filter((id) => id !== d.model_id);
@@ -262,6 +296,9 @@ export function useDaemonState() {
           const p = { ...prev.downloadProgress };
           delete p[d.model_id];
           next.downloadProgress = p;
+          const b = { ...prev.downloadBytes };
+          delete b[d.model_id];
+          next.downloadBytes = b;
           next.installing = prev.installing.filter((id) => id !== d.model_id);
           next.extracting = prev.extracting.filter((id) => id !== d.model_id);
           next.verifying = prev.verifying.filter((id) => id !== d.model_id);
@@ -360,8 +397,22 @@ export function useDaemonState() {
     cancelModelDownload: (model_id: string) => cmd({ type: "CancelModelDownload", data: { model_id } }),
     deleteModel: (model_id: string) => cmd({ type: "DeleteModel", data: { model_id } }),
     setActiveTranscriber: (backend: string) => {
-      setState((p) => ({ ...p, loadingBackend: backend }));
+      const attempt = ++backendSwitchAttempt.current;
+      const errorKey = backend.startsWith("local:") ? backend.slice(6) : backend;
+      setState((p) => {
+        const errors = { ...p.modelErrors };
+        delete errors[errorKey];
+        return { ...p, modelErrors: errors, loadingBackend: backend };
+      });
       cmd({ type: "SetActiveTranscriber", data: { backend } });
+      setTimeout(() => {
+        if (backendSwitchAttempt.current !== attempt) return;
+        setState((p) => p.loadingBackend === backend ? {
+          ...p,
+          loadingBackend: null,
+          modelErrors: { ...p.modelErrors, [errorKey]: "Didn't finish loading. Try again, or pick another model." },
+        } : p);
+      }, 120_000);
     },
     setLanguage: (lang: string | null) => cmd({ type: "SetLanguage", data: { lang: lang ?? "auto" } }),
 

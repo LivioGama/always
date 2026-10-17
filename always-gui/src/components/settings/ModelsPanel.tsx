@@ -172,77 +172,70 @@ function ModelsSection({ daemon, config, onConfigChange }: {
   const [sort, setSort] = useState<SortKey>("default");
   const [showAll, setShowAll] = useState(false);
 
-  const languages = useMemo(() => {
-    const set = new Set<string>();
-    for (const m of s.models) for (const l of m.supported_languages) set.add(l);
-    return [...set].sort();
-  }, [s.models]);
-
   const filtered = useMemo(() => {
     let list = [...s.models];
     if (langFilter === "english") list = list.filter((m) => !m.supportsMultipleLanguages);
     if (langFilter === "multilingual") list = list.filter((m) => m.supportsMultipleLanguages);
     if (onlyTranslation) list = list.filter((m) => m.supports_translation);
     if (onlyStreaming) list = list.filter((m) => m.supports_streaming);
-    if (onlyFast) list = list.filter((m) => m.speed_score >= 8);
+    if (onlyFast) list = list.filter((m) => m.speed_score >= 0.75);
     switch (sort) {
       case "best": list.sort((a, b) => (b.accuracy_score + b.speed_score) - (a.accuracy_score + a.speed_score)); break;
       case "accuracy": list.sort((a, b) => b.accuracy_score - a.accuracy_score); break;
       case "speed": list.sort((a, b) => b.speed_score - a.speed_score); break;
-      default:
-        list.sort((a, b) => Number(b.is_recommended) - Number(a.is_recommended) || b.accuracy_score - a.accuracy_score);
+      default: break;
     }
     return list;
   }, [s.models, langFilter, onlyTranslation, onlyStreaming, onlyFast, sort]);
 
   const filtersActive = langFilter !== "all" || onlyTranslation || onlyFast || onlyStreaming || sort !== "default";
-  const downloaded = filtered.filter((m) => m.is_downloaded);
-  const available = filtered.filter((m) => !m.is_downloaded);
+  const downloaded = filtered.filter((m) => m.is_downloaded).sort((a, b) =>
+    Number(b.is_recommended) - Number(a.is_recommended) || a.name.localeCompare(b.name));
+  const available = filtered.filter((m) => !m.is_downloaded).sort((a, b) =>
+    Number(b.is_recommended) - Number(a.is_recommended) || a.size_mb - b.size_mb);
   const visibleAvailable = showAll ? available : available.slice(0, 8);
   const activeId = s.backend.startsWith("local:") ? s.backend.slice(6) : null;
-  const cloudActive = s.backend === "groq" || s.backend === "apple";
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2">
-        <PanelTitle>Speech Recognition</PanelTitle>
-        <div className="flex-1" />
-        <Btn small onClick={daemon.listModels} disabled={!s.isDaemonConnected}>Refresh</Btn>
+      <div>
+        <PanelTitle>Transcription Models</PanelTitle>
+        <Caption className="mt-0.5">Select a transcription model or download additional models. Different models offer varying levels of accuracy and speed.</Caption>
       </div>
 
-      {/* Cloud option */}
-      <div className="rounded-lg bg-white/[0.05] p-2.5 flex items-center gap-2.5">
-        <svg className={`w-5 h-5 ${cloudActive ? "text-primary-400" : "text-surface-500"}`} viewBox="0 0 24 24" fill="none" stroke="currentColor">
-          <path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M17.5 18a4.5 4.5 0 100-9 6 6 0 00-11.5 1.5A4 4 0 006.5 18h11z" />
-        </svg>
-        <div className="flex-1 min-w-0">
-          <div className="text-[13px] font-medium text-surface-100">Groq Cloud</div>
-          <Caption>Fastest and lightest — audio is transcribed on Groq's servers. Needs an API key.</Caption>
-        </div>
-        {cloudActive ? (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary-500/15 text-primary-300">active</span>
-        ) : (
-          <Btn onClick={() => daemon.setActiveTranscriber("groq")} disabled={!s.isDaemonConnected || s.loadingBackend !== null}>
-            {s.loadingBackend === "groq" ? <Spinner /> : null}Use
-          </Btn>
+      <div className="flex items-center gap-2.5 rounded-md bg-white/[0.05] px-2.5 py-2">
+        <span className="text-xs text-surface-400">Active:</span>
+        <span className="text-xs font-semibold text-surface-100">
+          {activeId ? s.models.find((m) => m.id === activeId)?.name ?? activeId : s.backend === "groq" ? "Groq Whisper (Remote)" : s.backend}
+        </span>
+        <div className="flex-1" />
+        {s.backend !== "groq" && (
+          s.loadingBackend === "groq" ? <LoadingLabel /> : (
+            <Btn small disabled={!s.isDaemonConnected || s.loadingBackend !== null} onClick={() => daemon.setActiveTranscriber("groq")}>Use Groq (Remote)</Btn>
+          )
         )}
       </div>
 
-      {/* Language filter */}
+      {(() => {
+        const activeModel = s.models.find((m) => m.id === activeId);
+        if (!activeModel?.supports_language_selection || activeModel.supported_languages.length < 2) return null;
+        return (
+          <div className="flex items-center gap-2">
+            <Caption>Language:</Caption>
+            <select
+              value={config.lang && config.lang !== "auto" ? config.lang : activeModel.supported_languages[0]}
+              onChange={(e) => {
+                onConfigChange({ lang: e.target.value });
+                daemon.setLanguage(e.target.value);
+              }}
+              className="bg-surface-800 border border-surface-700 rounded px-2 py-1 text-xs text-surface-200"
+            >
+              {activeModel.supported_languages.map((l) => <option key={l} value={l}>{l.toUpperCase()}</option>)}
+            </select>
+          </div>
+        );
+      })()}
       <div className="flex flex-wrap items-center gap-2">
-        <Caption>Language</Caption>
-        <select
-          value={config.lang ?? "auto"}
-          onChange={(e) => {
-            const v = e.target.value;
-            onConfigChange({ lang: v === "auto" ? null : v });
-            daemon.setLanguage(v === "auto" ? null : v);
-          }}
-          className="bg-surface-800 border border-surface-700 rounded px-2 py-1 text-xs text-surface-200"
-        >
-          <option value="auto">Auto-detect</option>
-          {languages.map((l) => <option key={l} value={l}>{l.toUpperCase()}</option>)}
-        </select>
         <div className="flex-1" />
         <Segmented
           value={langFilter}
@@ -255,9 +248,9 @@ function ModelsSection({ daemon, config, onConfigChange }: {
           className="bg-surface-800 border border-surface-700 rounded px-2 py-1 text-xs text-surface-200"
         >
           <option value="default">Sort</option>
-          <option value="best">Best</option>
-          <option value="accuracy">Accuracy</option>
-          <option value="speed">Speed</option>
+          <option value="best">↓ Best</option>
+          <option value="accuracy">↓ Accuracy</option>
+          <option value="speed">↓ Speed</option>
         </select>
       </div>
       <div className="flex flex-wrap items-center gap-2">
@@ -279,7 +272,7 @@ function ModelsSection({ daemon, config, onConfigChange }: {
       {/* Downloaded */}
       {downloaded.length > 0 && (
         <div className="space-y-1.5">
-          <Caption>Downloaded</Caption>
+          <Caption>Downloaded Models</Caption>
           {downloaded.map((m) => (
             <ModelCard key={m.id} m={m} daemon={daemon} active={activeId === m.id} />
           ))}
@@ -288,7 +281,7 @@ function ModelsSection({ daemon, config, onConfigChange }: {
 
       {/* Available */}
       <div className="space-y-1.5">
-        <Caption>Available to download</Caption>
+          <Caption>Available to Download</Caption>
         {visibleAvailable.map((m) => (
           <ModelCard key={m.id} m={m} daemon={daemon} active={false} />
         ))}
@@ -325,13 +318,13 @@ function FilterChip({ on, onClick, children }: { on: boolean; onClick: () => voi
   );
 }
 
-function ScorePips({ score, title }: { score: number; title: string }) {
-  const filled = Math.round((score / 10) * 5);
+function ScoreBar({ score, title }: { score: number; title: string }) {
   return (
-    <span className="inline-flex items-center gap-0.5" title={`${title}: ${score}/10`}>
-      {[0, 1, 2, 3, 4].map((i) => (
-        <span key={i} className={`w-1.5 h-1.5 rounded-full ${i < filled ? "bg-primary-400" : "bg-surface-700"}`} />
-      ))}
+    <span className="flex items-center gap-1.5" title={`${title}: ${Math.round(score * 100)}%`}>
+      <span className="w-14 text-right text-[10px] text-surface-400">{title}</span>
+      <span className="w-[70px] h-1.5 overflow-hidden rounded-full bg-surface-700">
+        <span className="block h-full rounded-full bg-primary-500" style={{ width: `${Math.max(0, Math.min(1, score)) * 100}%` }} />
+      </span>
     </span>
   );
 }
@@ -346,23 +339,47 @@ function ModelCard({ m, daemon, active }: { m: CatalogModel; daemon: DaemonApi; 
   const busy = m.is_downloading || verifying || extracting || installing;
 
   return (
-    <div className={`rounded-lg p-2.5 ${active ? "bg-primary-500/10 ring-1 ring-primary-500/30" : "bg-white/[0.05]"}`}>
+    <div className={`rounded-lg border p-2.5 ${active ? "border-primary-500/60" : "border-white/[0.12]"}`}>
       <div className="flex items-start gap-2.5">
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5">
-            <span className="text-[13px] font-medium text-surface-100 truncate">{m.name}</span>
-            {m.is_recommended && (
-              <span className="text-[9px] px-1 py-px rounded bg-primary-500/15 text-primary-300">recommended</span>
-            )}
-            {m.supportsMultipleLanguages && (
-              <span className="text-[9px] px-1 py-px rounded bg-surface-700/60 text-surface-300">multi</span>
+          <div className="flex items-start gap-3">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[13px] font-medium text-surface-100 truncate">{m.name}</span>
+                {active && <ModelBadge>Active</ModelBadge>}
+                {!active && m.is_recommended && <ModelBadge outline>Recommended</ModelBadge>}
+              </div>
+              {m.description && <Caption className="line-clamp-2">{m.description}</Caption>}
+            </div>
+            {(m.accuracy_score !== 0 || m.speed_score !== 0) && (
+              <div className="shrink-0 flex flex-col items-end gap-0.5">
+                <ScoreBar score={m.accuracy_score} title="accuracy" />
+                <ScoreBar score={m.speed_score} title="speed" />
+              </div>
             )}
           </div>
-          {m.description && <Caption className="line-clamp-2">{m.description}</Caption>}
-          <div className="flex items-center gap-3 mt-1">
-            <Caption>{m.size_mb >= 1024 ? `${(m.size_mb / 1024).toFixed(1)} GB` : `${m.size_mb} MB`}</Caption>
-            <span className="flex items-center gap-1"><Caption>Acc</Caption><ScorePips score={m.accuracy_score} title="Accuracy" /></span>
-            <span className="flex items-center gap-1"><Caption>Spd</Caption><ScorePips score={m.speed_score} title="Speed" /></span>
+          <div className="mt-1.5 flex items-center gap-2.5 flex-wrap">
+            <ModelMetadata icon="globe">{languageLabel(m)}</ModelMetadata>
+            {m.supports_translation && <ModelMetadata icon="translate">Translate to English</ModelMetadata>}
+            {m.supports_streaming && <ModelMetadata icon="stream">Live streaming</ModelMetadata>}
+            <ModelMetadata icon="drive">{sizeLabel(m.size_mb)}</ModelMetadata>
+            <div className="flex-1" />
+            {m.is_downloaded && (active ? <span className="text-[10px] text-surface-400">Active</span> : (
+              s.loadingBackend === `local:${m.id}` ? <LoadingLabel /> : (
+                <Btn small disabled={!s.isDaemonConnected || busy || s.loadingBackend !== null} onClick={() => daemon.setActiveTranscriber(`local:${m.id}`)}>Use</Btn>
+              )
+            ))}
+            {m.is_downloaded ? (
+              <Btn small destructive disabled={active || busy || s.loadingBackend !== null} title={active ? `Switch to another model before deleting ${m.name}` : `Delete ${m.name}`} onClick={() => {
+                if (window.confirm(`Delete "${m.name}"? You'll need to re-download it to use it again.`)) daemon.deleteModel(m.id);
+              }}>Delete</Btn>
+            ) : m.is_downloading ? (
+              <Btn small onClick={() => daemon.cancelModelDownload(m.id)}>Cancel</Btn>
+            ) : installing ? <Spinner /> : (
+              <Btn small disabled={!s.isDaemonConnected || busy} onClick={() => daemon.downloadModel(m.id)}>
+                <DownloadIcon />{sizeLabel(m.size_mb)}
+              </Btn>
+            )}
           </div>
           {err && <Caption className="text-red-400 mt-1">{err}</Caption>}
           {busy && (
@@ -372,7 +389,10 @@ function ModelCard({ m, daemon, active }: { m: CatalogModel; daemon: DaemonApi; 
                   <div className="flex-1 h-1.5 rounded-full bg-surface-700/50 overflow-hidden">
                     <div className="h-full bg-primary-500 transition-[width]" style={{ width: `${pct}%` }} />
                   </div>
-                  <span className="text-[10px] text-surface-400 tabular-nums">{pct.toFixed(0)}%</span>
+                  <div className="flex gap-2 text-[10px] text-surface-400 tabular-nums">
+                    <span>{pct.toFixed(0)}%</span>
+                    {s.downloadBytes[m.id]?.total ? <span>{byteString(s.downloadBytes[m.id].downloaded)} / {byteString(s.downloadBytes[m.id].total)}</span> : null}
+                  </div>
                 </div>
               ) : (
                 <div className="flex items-center gap-1.5">
@@ -385,37 +405,49 @@ function ModelCard({ m, daemon, active }: { m: CatalogModel; daemon: DaemonApi; 
             </div>
           )}
         </div>
-        <div className="flex flex-col items-end gap-1 shrink-0">
-          {m.is_downloaded ? (
-            <>
-              {active ? (
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary-500/15 text-primary-300">active</span>
-              ) : (
-                <Btn small disabled={!s.isDaemonConnected || busy} onClick={() => daemon.setActiveTranscriber(`local:${m.id}`)}>
-                  {s.loadingBackend === `local:${m.id}` ? <Spinner /> : null}Use
-                </Btn>
-              )}
-              <Btn
-                small destructive
-                disabled={busy}
-                onClick={() => {
-                  if (window.confirm(`Delete "${m.name}"? You'll need to re-download it to use it again.`)) {
-                    daemon.deleteModel(m.id);
-                  }
-                }}
-              >
-                Delete
-              </Btn>
-            </>
-          ) : m.is_downloading ? (
-            <Btn small onClick={() => daemon.cancelModelDownload(m.id)}>Cancel</Btn>
-          ) : (
-            <Btn small disabled={!s.isDaemonConnected || busy} onClick={() => daemon.downloadModel(m.id)}>
-              Download
-            </Btn>
-          )}
-        </div>
       </div>
     </div>
   );
+}
+
+function ModelBadge({ children, outline = false }: { children: React.ReactNode; outline?: boolean }) {
+  return <span className={`text-[10px] px-1.5 py-0.5 rounded ${outline ? "border border-surface-600 text-surface-300" : "bg-primary-500/20 text-primary-300"}`}>{children}</span>;
+}
+
+function ModelMetadata({ icon, children }: { icon: "globe" | "translate" | "stream" | "drive"; children: React.ReactNode }) {
+  return <span className="inline-flex items-center gap-1 text-[10px] text-surface-400"><ModelIcon kind={icon} />{children}</span>;
+}
+
+function ModelIcon({ kind }: { kind: "globe" | "translate" | "stream" | "drive" }) {
+  const common = { className: "w-3 h-3 shrink-0", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  if (kind === "globe") return <svg {...common}><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a15 15 0 010 18M12 3a15 15 0 000 18" /></svg>;
+  if (kind === "translate") return <svg {...common}><path d="M4 5h10M9 3v2m5 0c-.7 4-3 7-7 9m0-6c1.5 2 3.5 3.5 6 4.5M14 20l4-10 4 10m-6.5-3h5" /></svg>;
+  if (kind === "stream") return <svg {...common}><path d="M3 9a13 13 0 000 6m4-9a8 8 0 000 12m4-15a3 3 0 000 18m4-12a3 3 0 000 6m5-4a1 1 0 000 2" /></svg>;
+  return <svg {...common}><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M7 9h10M7 13h6" /></svg>;
+}
+
+function LoadingLabel() {
+  return <span className="inline-flex items-center gap-1 text-xs text-surface-400"><Spinner />Loading…</span>;
+}
+
+function DownloadIcon() {
+  return <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="9" strokeWidth={1.8} /><path d="M12 7v10m-4-4 4 4 4-4" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" /></svg>;
+}
+
+function languageLabel(m: CatalogModel): string {
+  if (m.supports_language_selection && m.supported_languages.length > 1) return "Multi-language";
+  if (m.supported_languages.length === 1) return m.supported_languages[0].toUpperCase() === "EN" ? "English Only" : `${m.supported_languages[0].toUpperCase()} Only`;
+  return "Multi-language";
+}
+
+function sizeLabel(mb: number): string {
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`;
+}
+
+function byteString(bytes: number): string {
+  const units = ["bytes", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1000 && unit < units.length - 1) { value /= 1000; unit += 1; }
+  return `${unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
 }

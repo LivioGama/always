@@ -1348,6 +1348,11 @@ filters by All, English, or Multilingual and offers Translation, Fast, and
 Streaming filters. A downloaded model leaves its in-progress state after the
 daemon confirms it in the catalog, so the row settles into its downloaded
 actions instead of spinning indefinitely.
+The Fast filter includes catalog entries with `speed_score >= 0.75`, matching
+the 0–1 score scale. Model rows use accuracy and speed bars, plus globe,
+translation, streaming, and storage metadata icons. Target language selection
+appears only for an active model that supports it; Linux omits the Auto-detect
+choice from that picker.
 
 On Linux, the Behavior switches for adaptive silence and live transcript apply
 their changes to the running daemon immediately and save them for the next
