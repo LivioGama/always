@@ -82,7 +82,7 @@ function initialState(): DaemonUiState {
     isDaemonConnected: false,
     currentTranscript: "",
     interimText: "",
-    backend: "groq",
+    backend: "none",
     focusedApp: null,
     enrolled: false,
     voiceEnabled: false,
@@ -402,6 +402,7 @@ export function useDaemonState() {
       setState((p) => {
         const errors = { ...p.modelErrors };
         delete errors[errorKey];
+        if (backend.startsWith("local:")) delete errors.groq;
         return { ...p, modelErrors: errors, loadingBackend: backend };
       });
       cmd({ type: "SetActiveTranscriber", data: { backend } });

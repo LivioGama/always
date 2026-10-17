@@ -759,6 +759,16 @@ offline; the cloud backend is faster to start and needs an API key.
 - A local model may be armed as fallback for the cloud backend; failures fall
   back silently but are logged.
 - Switching models takes effect on the next utterance.
+- Linux development and release builds include the local STT engines. Selecting a local
+  model never invokes Groq or requires its API key; missing files or missing
+  local-engine support produce a local-model error and keep the previous
+  backend selected.
+- On Linux startup, Groq is eligible only when a non-empty key is configured.
+  Without a key, a downloaded local model is chosen (recommended first, then
+  combined accuracy and speed); with none downloaded, the backend is `none`
+  and Settings shows “No model selected” with setup guidance. A saved local
+  selection takes precedence. A failed startup load reports its error and
+  returns to `none`, rather than showing an unavailable backend as active.
 - A switch loads the new engine before the config names it, and never under
   the config lock the main loop reads, so a slow load does not block dictation.
   Engine rebuilds (a switch, a language change) run one at a time.

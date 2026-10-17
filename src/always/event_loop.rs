@@ -114,6 +114,20 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         tracing::info!("speaker_model_prefetch_already_present");
     }
 
+    let registry_placeholder = ModelRegistry::new().context("init model registry")?;
+    // Linux has no built-in Apple engine. Without cloud credentials, select
+    // an installed offline engine or explicitly report that setup is needed.
+    #[cfg(target_os = "linux")]
+    let startup_cfg = {
+        let mut startup = cfg.clone();
+        startup.transcriber_backend =
+            crate::stt_dispatch::linux_startup_backend(cfg, &registry_placeholder);
+        tracing::info!(backend = %startup.transcriber_backend, "linux_startup_backend");
+        startup
+    };
+    #[cfg(target_os = "linux")]
+    let cfg = &startup_cfg;
+
     // Create shared config early so UDS server can start immediately
     let active_cfg: ActiveConfig = Arc::new(RwLock::new(cfg.clone()));
 
@@ -121,7 +135,6 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     // can connect while the real backend loads in the background.
     let (ready_signal, registry_placeholder, active_placeholder) = {
         let cfg_for_uds = Arc::clone(&active_cfg);
-        let registry_placeholder = ModelRegistry::new().context("init model registry")?;
         // Pending placeholder blocks transcribe() until the real backend swaps in,
         // so the first utterance after launch waits for init instead of being
         // dropped with a "still initializing" error.
@@ -176,6 +189,8 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     let cfg_for_build = cfg.clone();
     let registry_for_build = registry_placeholder.clone();
     let active_for_build = Arc::clone(&active_placeholder);
+    #[cfg(target_os = "linux")]
+    let cfg_for_init = Arc::clone(&active_cfg);
     std::thread::Builder::new()
         .name("transcriber-init".into())
         .spawn(move || {
@@ -187,7 +202,33 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
                     ready_signal.set(transcriber);
                     tracing::info!("transcriber_ready");
                 }
-                Err(e) => tracing::error!(error = %e, "transcriber_init_failed"),
+                Err(e) => {
+                    tracing::error!(error = %e, "transcriber_init_failed");
+                    #[cfg(target_os = "linux")]
+                    {
+                        use crate::stt_dispatch::TranscriberBackendChoice;
+                        let backend = cfg_for_build.transcriber_backend.to_string();
+                        event::global_broadcaster().send(
+                            event::DaemonEvent::ActiveTranscriberFailed {
+                                backend,
+                                error: format!("{e:#}"),
+                            },
+                        );
+                        let mut fallback_cfg = cfg_for_build.clone();
+                        fallback_cfg.transcriber_backend = TranscriberBackendChoice::Unconfigured;
+                        let idle = build_transcriber(&fallback_cfg, &registry_for_build)
+                            .expect("unconfigured transcriber does not load a model");
+                        cfg_for_init.write().transcriber_backend =
+                            TranscriberBackendChoice::Unconfigured;
+                        *active_for_build.write() = Arc::clone(&idle);
+                        ready_signal.set(idle);
+                        event::global_broadcaster().send(
+                            event::DaemonEvent::ActiveTranscriberChanged {
+                                backend: "none".into(),
+                            },
+                        );
+                    }
+                }
             }
         })
         .expect("spawn transcriber-init thread");
@@ -221,12 +262,13 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     // handshake like before.
     let prewarm_key = cfg.groq_stt_api_key.clone();
     let _prewarm_handle = rt.spawn(async move {
+        let Some(key) = prewarm_key.filter(|key| !key.trim().is_empty()) else {
+            return;
+        };
         let started = Instant::now();
         let mut req =
             crate::http_client::async_client().get("https://api.groq.com/openai/v1/models");
-        if let Some(key) = prewarm_key {
-            req = req.header("Authorization", format!("Bearer {key}"));
-        }
+        req = req.header("Authorization", format!("Bearer {key}"));
         match req.send().await {
             Ok(resp) => tracing::info!(
                 status = %resp.status(),

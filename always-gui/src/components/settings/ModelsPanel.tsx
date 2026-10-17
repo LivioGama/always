@@ -206,7 +206,7 @@ function ModelsSection({ daemon, config, onConfigChange }: {
       <div className="flex items-center gap-2.5 rounded-md bg-white/[0.05] px-2.5 py-2">
         <span className="text-xs text-surface-400">Active:</span>
         <span className="text-xs font-semibold text-surface-100">
-          {activeId ? s.models.find((m) => m.id === activeId)?.name ?? activeId : s.backend === "groq" ? "Groq Whisper (Remote)" : s.backend}
+          {activeId ? s.models.find((m) => m.id === activeId)?.name ?? activeId : s.backend === "groq" ? "Groq Whisper (Remote)" : s.backend === "none" ? "No model selected" : s.backend}
         </span>
         <div className="flex-1" />
         {s.backend !== "groq" && (
@@ -215,6 +215,9 @@ function ModelsSection({ daemon, config, onConfigChange }: {
           )
         )}
       </div>
+
+      {s.backend === "none" && <Caption>Choose a downloaded local model or add a Groq API key to enable cloud transcription.</Caption>}
+      {s.modelErrors.groq && <Caption className="!text-orange-400">{s.modelErrors.groq}</Caption>}
 
       {(() => {
         const activeModel = s.models.find((m) => m.id === activeId);
