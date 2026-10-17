@@ -577,6 +577,11 @@ where
             input_monitoring_granted: granted,
         });
     }
+    // A stuck microphone recorder: a client connecting after the
+    // supervisor's one-shot broadcast must still learn about it.
+    if crate::always::audio::mic_unavailable() {
+        initial_events.push(DaemonEvent::MicUnavailable { unavailable: true });
+    }
     // "My Voice" profile snapshot so the Settings tab renders correct
     // state on open without a request round-trip.
     {

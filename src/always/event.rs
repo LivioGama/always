@@ -105,6 +105,14 @@ pub enum DaemonEvent {
     ShortcutListenerStatus {
         input_monitoring_granted: bool,
     },
+    /// The microphone capture supervisor gave up on the recorder after
+    /// repeated read timeouts / EOFs (`unavailable: true`), or audio
+    /// resumed (`false`). Lets the GUI offer a "Mic stuck — Fix" action
+    /// instead of leaving dictation silently dead. Included in every
+    /// client's initial state burst while the mic is stuck.
+    MicUnavailable {
+        unavailable: bool,
+    },
     /// Daemon has started listening for voice input
     ListeningStarted,
     /// Daemon has stopped listening
@@ -1125,6 +1133,12 @@ impl EventBroadcaster {
         self.send(DaemonEvent::ShortcutListenerStatus {
             input_monitoring_granted,
         });
+    }
+
+    /// Report that the microphone recorder is stuck (`true`) or delivering
+    /// audio again (`false`). See [`DaemonEvent::MicUnavailable`].
+    pub fn mic_unavailable(&self, unavailable: bool) {
+        self.send(DaemonEvent::MicUnavailable { unavailable });
     }
 
     /// Send transcription-filtered event with the human-readable reason.

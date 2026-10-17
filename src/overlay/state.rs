@@ -424,7 +424,8 @@ impl OverlayStateReducer {
             | DaemonEvent::UpdateFailed { .. }
             | DaemonEvent::ShortcutListenerStatus {
                 input_monitoring_granted: _,
-            } => None,
+            }
+            | DaemonEvent::MicUnavailable { unavailable: _ } => None,
 
             DaemonEvent::ProcessingStarted | DaemonEvent::ProcessingStopped => {
                 // Not used in current overlay logic

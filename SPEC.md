@@ -193,6 +193,9 @@ VPIO's noise suppression was not measurable on a single-speaker machine.
   is genuinely gone.
 - The daemon sends its full current state on connect, so a reconnecting GUI is
   never out of sync.
+- `MicUnavailable { unavailable }` (2026-10-17) is additive — no protocol
+  bump. It is broadcast on change and included in the initial burst while the
+  mic is stuck (§7.1, §7.2).
 
 ---
 
@@ -693,6 +696,13 @@ next poll — and logs `mic_conflict_self_only_ignored` as an error.
 for 3 consecutive 1 s polls. A failing probe while paused counts as a free
 poll, so a broken probe can never strand Always paused.
 
+**Mic unavailable** (2026-10-17, requested by Livio: "Always loses the mic and
+it's impossible to retrieve it"). After 3 consecutive recorder failures (§7.2)
+the menu bar shows **"Mic stuck — Fix"**, which reaps the daemon's audio
+children and restarts the daemon. The item hides when audio resumes or the
+daemon disconnects. This is distinct from a mic conflict: nothing else holds
+the mic, the device is simply delivering nothing.
+
 ### 7.2 Recorder health and respawn
 
 The `rec` (SoX) process runs for the daemon's lifetime and is only replaced
@@ -731,6 +741,32 @@ or device change) or when the daemon goes away; the daemon sees EOF and
 respawns it through the normal path. It emits no CoreAudio overrun lines, so
 the overrun-rate respawn never fires for it. A `RespawnRecorder` (default
 input change) re-enables the helper after an earlier start-up failure.
+
+**Escalation when the mic stays dead** (2026-10-17, requested by Livio). The
+18:50–18:59 outage that day: a default-input change wedged the device, the
+helper failed to start (VPIO -10875, then plain `'what'`), the daemon fell
+back to SoX, and SoX delivered nothing — `rec_timeout_recorder_reset` fired
+~40 times at 15 s intervals forever, and manual restarts hit the same path.
+- A failed helper start (VPIO or plain) is remembered for **60 s**, not for
+  the daemon's lifetime; after that the next spawn retries the native helper
+  before falling back to SoX.
+- Read timeouts, EOFs and failed spawns count as **consecutive failures**.
+  Respawns back off **1, 2, 5, 15, 30 s** (the last repeats); the wait runs
+  outside the recorder lock.
+- **3** failures log `mic_stuck` and broadcast `MicUnavailable { true }` (§7.1).
+- **6** failures make a GUI-spawned daemon (`ALWAYS_SPAWNED_BY_GUI=1`) drop
+  its recorder, remove its pid/socket files and exit with code **75**, so the
+  GUI respawns it. A terminal-launched daemon keeps retrying.
+- The first delivered frame resets the count and broadcasts
+  `MicUnavailable { false }`.
+- SoX runs in its own process group and the group is killed on drop. At the
+  first spawn of a daemon, and when the GUI kills a stale daemon, orphaned
+  (ppid 1) `always-capture` binaries from the app bundle and `rec`/`sox`
+  processes with the daemon's exact argument signature are killed (I4).
+- The GUI coalesces default-input changes: `RespawnRecorder` is sent only once
+  the default input has been quiet for **1.5 s**.
+- ❓ A device wedged at the coreaudiod level may only recover after a
+  coreaudiod restart or a replug; Always does not restart coreaudiod.
 ### 7.3 Daemon memory ceiling and self-restart
 
 The daemon checks its own **physical footprint** every 30 s (same metric

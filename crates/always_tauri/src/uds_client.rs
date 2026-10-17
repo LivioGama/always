@@ -48,6 +48,10 @@ pub enum DaemonEvent {
     ShortcutListenerStatus {
         input_monitoring_granted: bool,
     },
+    /// The daemon's microphone recorder is stuck (`true`) or recovered.
+    MicUnavailable {
+        unavailable: bool,
+    },
     ListeningStarted,
     ListeningStopped,
     ProcessingStarted,
