@@ -54,7 +54,7 @@ export function AboutPanel({ daemon }: { daemon: DaemonApi }) {
         <div className="flex flex-wrap gap-2.5">
           <LinkButton title="GitHub Repository" url={REPOSITORY_URL} icon="globe" />
           <LinkButton title="Documentation" url={`${REPOSITORY_URL}#readme`} icon="book" />
-          <LinkButton title="Issues" url={`${REPOSITORY_URL}/issues`} icon="ant" />
+          <LinkButton title="Issues" url={`${REPOSITORY_URL}/issues`} icon="bug" />
         </div>
       </div>
 
@@ -83,7 +83,7 @@ export function AboutPanel({ daemon }: { daemon: DaemonApi }) {
 function LinkButton({ title, url, icon, prominent = false }: {
   title: string;
   url: string;
-  icon: "globe" | "book" | "ant" | "heart";
+  icon: "globe" | "book" | "bug" | "heart";
   prominent?: boolean;
 }) {
   return (
@@ -102,7 +102,7 @@ function LinkButton({ title, url, icon, prominent = false }: {
   );
 }
 
-function LinkIcon({ kind }: { kind: "globe" | "book" | "ant" | "heart" }) {
+function LinkIcon({ kind }: { kind: "globe" | "book" | "bug" | "heart" }) {
   const cls = "w-3.5 h-3.5";
   switch (kind) {
     case "heart":
@@ -121,14 +121,13 @@ function LinkIcon({ kind }: { kind: "globe" | "book" | "ant" | "heart" }) {
     case "book":
       return (
         <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor">
-          <path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M4 19.5A2.5 2.5 0 016.5 17H20V4a2 2 0 00-2-2H6.5A2.5 2.5 0 004 4.5v15zM20 17v5H6.5a2.5 2.5 0 010-5" />
+          <path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M3 5.5A2.5 2.5 0 015.5 3H12v17H5.5A2.5 2.5 0 013 17.5v-12zM21 5.5A2.5 2.5 0 0018.5 3H12v17h6.5a2.5 2.5 0 002.5-2.5v-12z" />
         </svg>
       );
-    case "ant":
+    case "bug":
       return (
         <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor">
-          <circle cx="12" cy="12" r="8" strokeWidth={2} />
-          <path strokeWidth={2} strokeLinecap="round" d="M12 8v4l2 2" />
+          <path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M8 8 5 5m11 3 3-3M4 13H2m20 0h-2M5 19l3-3m8 0 3 3M8 9h8v6a4 4 0 01-8 0V9zm-1-2a5 5 0 0110 0" />
         </svg>
       );
   }
@@ -142,16 +141,18 @@ function UpdateSection({ daemon }: { daemon: DaemonApi }) {
     <div className="space-y-2">
       <div className="flex items-center gap-2">
         <PanelTitle>Updates</PanelTitle>
-        <div className="flex-1" />
-        <Btn
-          small
-          onClick={daemon.checkForUpdates}
-          disabled={!daemon.state.isDaemonConnected || u.kind === "checking" || u.kind === "installing"}
-        >
-          {u.kind === "checking" ? <Spinner /> : null}
-          Check for Updates
-        </Btn>
       </div>
+
+      <Btn
+        small
+        onClick={daemon.checkForUpdates}
+        disabled={!daemon.state.isDaemonConnected || u.kind === "checking" || u.kind === "installing"}
+      >
+        {u.kind === "checking" ? <Spinner /> : (
+          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M20 7v5h-5M4 17v-5h5m10-1a7 7 0 00-12.4-4L4 9m16 6-2.6 2a7 7 0 01-12.4-4" /></svg>
+        )}
+        Check for Updates
+      </Btn>
 
       {u.kind === "unknown" && (
         <Caption>The daemon checks GitHub releases. Click to check now.</Caption>

@@ -15,7 +15,7 @@ export type SettingsPanelKey =
 const PANELS: { key: SettingsPanelKey; label: string; icon: ReactNode }[] = [
   {
     key: "general", label: "General",
-    icon: <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="18" height="18" rx="4" strokeWidth={2} /><path strokeWidth={2} strokeLinecap="round" d="M9 12l2 2 4-4" /></svg>,
+    icon: <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="18" height="18" rx="4" strokeWidth={2} /><circle cx="17" cy="7" r="4" fill="currentColor" stroke="none" /><path stroke="white" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" d="m15.5 7 1 1 2-2" /></svg>,
   },
   {
     key: "models", label: "Models",
@@ -23,7 +23,7 @@ const PANELS: { key: SettingsPanelKey; label: string; icon: ReactNode }[] = [
   },
   {
     key: "myVoice", label: "My Voice",
-    icon: <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="8" r="3.5" strokeWidth={2} /><path strokeWidth={2} strokeLinecap="round" d="M4 20c1.5-3.5 4.5-5 8-5s6.5 1.5 8 5" /></svg>,
+    icon: <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="8" r="3.5" strokeWidth={2} /><path strokeWidth={2} strokeLinecap="round" d="M4 20c1.5-3.5 4.5-5 8-5s6.5 1.5 8 5M2 10c.8-2 1.8-3 3-3m17 3c-.8-2-1.8-3-3-3" /></svg>,
   },
   {
     key: "permissions", label: "Permissions",

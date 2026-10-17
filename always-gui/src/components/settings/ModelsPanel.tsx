@@ -156,7 +156,8 @@ function GroqKeyCard({ config, onConfigChange }: {
 
 // ── Local model catalog (ModelsSection.swift) ────────────────────────────────
 
-type SortKey = "recommended" | "name" | "size" | "accuracy" | "speed";
+type SortKey = "default" | "best" | "accuracy" | "speed";
+type LanguageFilter = "all" | "english" | "multilingual";
 
 function ModelsSection({ daemon, config, onConfigChange }: {
   daemon: DaemonApi;
@@ -164,11 +165,11 @@ function ModelsSection({ daemon, config, onConfigChange }: {
   onConfigChange: (patch: Partial<Config>) => void;
 }) {
   const s = daemon.state;
-  const [langFilter, setLangFilter] = useState<string>("all");
+  const [langFilter, setLangFilter] = useState<LanguageFilter>("all");
   const [onlyTranslation, setOnlyTranslation] = useState(false);
   const [onlyStreaming, setOnlyStreaming] = useState(false);
   const [onlyFast, setOnlyFast] = useState(false);
-  const [sort, setSort] = useState<SortKey>("recommended");
+  const [sort, setSort] = useState<SortKey>("default");
   const [showAll, setShowAll] = useState(false);
 
   const languages = useMemo(() => {
@@ -179,13 +180,13 @@ function ModelsSection({ daemon, config, onConfigChange }: {
 
   const filtered = useMemo(() => {
     let list = [...s.models];
-    if (langFilter !== "all") list = list.filter((m) => m.supported_languages.includes(langFilter));
+    if (langFilter === "english") list = list.filter((m) => !m.supportsMultipleLanguages);
+    if (langFilter === "multilingual") list = list.filter((m) => m.supportsMultipleLanguages);
     if (onlyTranslation) list = list.filter((m) => m.supports_translation);
     if (onlyStreaming) list = list.filter((m) => m.supports_streaming);
     if (onlyFast) list = list.filter((m) => m.speed_score >= 8);
     switch (sort) {
-      case "name": list.sort((a, b) => a.name.localeCompare(b.name)); break;
-      case "size": list.sort((a, b) => a.size_mb - b.size_mb); break;
+      case "best": list.sort((a, b) => (b.accuracy_score + b.speed_score) - (a.accuracy_score + a.speed_score)); break;
       case "accuracy": list.sort((a, b) => b.accuracy_score - a.accuracy_score); break;
       case "speed": list.sort((a, b) => b.speed_score - a.speed_score); break;
       default:
@@ -194,6 +195,7 @@ function ModelsSection({ daemon, config, onConfigChange }: {
     return list;
   }, [s.models, langFilter, onlyTranslation, onlyStreaming, onlyFast, sort]);
 
+  const filtersActive = langFilter !== "all" || onlyTranslation || onlyFast || onlyStreaming || sort !== "default";
   const downloaded = filtered.filter((m) => m.is_downloaded);
   const available = filtered.filter((m) => !m.is_downloaded);
   const visibleAvailable = showAll ? available : available.slice(0, 8);
@@ -241,23 +243,19 @@ function ModelsSection({ daemon, config, onConfigChange }: {
           <option value="auto">Auto-detect</option>
           {languages.map((l) => <option key={l} value={l}>{l.toUpperCase()}</option>)}
         </select>
-        <Caption>Catalog</Caption>
-        <select
+        <div className="flex-1" />
+        <Segmented
           value={langFilter}
-          onChange={(e) => setLangFilter(e.target.value)}
-          className="bg-surface-800 border border-surface-700 rounded px-2 py-1 text-xs text-surface-200"
-        >
-          <option value="all">All languages</option>
-          {languages.map((l) => <option key={l} value={l}>{l.toUpperCase()}</option>)}
-        </select>
+          onChange={setLangFilter}
+          options={[{ label: "All", value: "all" }, { label: "English", value: "english" }, { label: "Multilingual", value: "multilingual" }]}
+        />
         <select
           value={sort}
           onChange={(e) => setSort(e.target.value as SortKey)}
           className="bg-surface-800 border border-surface-700 rounded px-2 py-1 text-xs text-surface-200"
         >
-          <option value="recommended">Recommended</option>
-          <option value="name">Name</option>
-          <option value="size">Size</option>
+          <option value="default">Sort</option>
+          <option value="best">Best</option>
           <option value="accuracy">Accuracy</option>
           <option value="speed">Speed</option>
         </select>
@@ -266,6 +264,13 @@ function ModelsSection({ daemon, config, onConfigChange }: {
         <FilterChip on={onlyTranslation} onClick={() => setOnlyTranslation((v) => !v)}>Translation</FilterChip>
         <FilterChip on={onlyFast} onClick={() => setOnlyFast((v) => !v)}>Fast</FilterChip>
         <FilterChip on={onlyStreaming} onClick={() => setOnlyStreaming((v) => !v)}>Streaming</FilterChip>
+        {filtersActive && (
+          <button
+            type="button"
+            onClick={() => { setLangFilter("all"); setOnlyTranslation(false); setOnlyFast(false); setOnlyStreaming(false); setSort("default"); }}
+            className="text-xs text-surface-400 hover:text-surface-200"
+          >Clear</button>
+        )}
         {onlyTranslation && (
           <Caption className="text-orange-400/80">Translation support is limited on this backend.</Caption>
         )}
@@ -311,8 +316,8 @@ function FilterChip({ on, onClick, children }: { on: boolean; onClick: () => voi
     <button
       type="button"
       onClick={onClick}
-      className={`px-2 py-0.5 rounded-full text-[10px] border ${
-        on ? "bg-primary-500/15 border-primary-500/40 text-primary-300" : "border-surface-700 text-surface-400 hover:text-surface-200"
+      className={`px-2.5 py-1 rounded-md text-xs border transition-colors ${
+        on ? "bg-primary-600 border-primary-500 text-white" : "bg-surface-800 border-surface-700 text-surface-300 hover:bg-surface-700"
       }`}
     >
       {children}
