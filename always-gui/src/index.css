@@ -32,6 +32,18 @@ select,
   user-select: text;
 }
 
+/* GTK/WebKit otherwise paints native select menus with a light theme. */
+select {
+  color-scheme: dark;
+  background-color: #2c2c2e;
+  color: #e5e5ea;
+}
+
+select option {
+  background-color: #242427;
+  color: #e5e5ea;
+}
+
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   width: 6px;
