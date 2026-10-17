@@ -13,22 +13,26 @@
 //! * **macOS** (`target_os = "macos"`): uses `rdev` to subscribe to system
 //!   keyboard events. (P2 will replace `rdev` with a thin `CGEventTap`
 //!   wrapper to drop the unmaintained dep.)
-//! * **Linux / Windows**: stub — `start_keyboard_listener` returns `Ok(())`
+//! * **Windows**: `RegisterHotKey` + a thread-local `GetMessage` loop.
+//!   Windows matches the full modifier+key chord natively, so no raw
+//!   keypress stream is needed. Live reload goes through a `WM_APP`
+//!   thread message that unregisters and re-registers the combos.
+//! * **Linux**: stub — `start_keyboard_listener` returns `Ok(())`
 //!   without registering anything. Voice activation still works; users
 //!   must toggle pause/auto-enter via the CLI for now.
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::Arc;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::thread;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::time::Duration;
 
 use anyhow::Result;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::{clipboard_watcher, config as always_config, correction, event, log, paste, pause};
 
 // ─── Live-reloadable shortcut state ───────────────────────────────────
@@ -39,7 +43,7 @@ use super::{clipboard_watcher, config as always_config, correction, event, log, 
 // restart needed. The read lock is held for microseconds (copy 6 Combo
 // values), which is safe inside the time-budgeted CGEventTap callback.
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 struct Shortcuts {
     pause: Combo,
     auto_enter: Combo,
@@ -49,11 +53,11 @@ struct Shortcuts {
     master_pause: Combo,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 static SHARED_SHORTCUTS: std::sync::OnceLock<Arc<parking_lot::RwLock<Shortcuts>>> =
     std::sync::OnceLock::new();
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn shared_shortcuts() -> &'static Arc<parking_lot::RwLock<Shortcuts>> {
     SHARED_SHORTCUTS.get_or_init(|| {
         let (pause, auto_enter, force_paste, log_correction, correction_dialog, master_pause) =
@@ -100,9 +104,31 @@ pub fn reload_shortcuts() {
     tracing::info!("shortcuts_reloaded");
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows: swap the live combos, then ask the listener thread to
+/// unregister + re-register its `RegisterHotKey` calls.
+#[cfg(target_os = "windows")]
 pub fn reload_shortcuts() {
-    // No-op: keyboard shortcuts are not wired on non-macOS yet.
+    let (pause, auto_enter, force_paste, log_correction, correction_dialog, master_pause) =
+        load_shortcuts();
+    {
+        let shared = shared_shortcuts();
+        let mut guard = shared.write();
+        *guard = Shortcuts {
+            pause,
+            auto_enter,
+            force_paste,
+            log_correction,
+            correction_dialog,
+            master_pause,
+        };
+    }
+    windows_post_reload();
+    tracing::info!("shortcuts_reloaded");
+}
+
+#[cfg(target_os = "linux")]
+pub fn reload_shortcuts() {
+    // No-op: keyboard shortcuts are not wired on Linux yet.
 }
 
 /// Event-based tracking of Command key state as a fallback when
@@ -289,7 +315,7 @@ fn default_shortcuts() -> (Combo, Combo, Combo, Combo, Combo, Combo) {
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[allow(clippy::too_many_arguments)]
 fn resolve_shortcuts(
     pause: Option<&str>,
@@ -334,7 +360,7 @@ fn resolve_shortcuts(
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn load_shortcuts() -> (Combo, Combo, Combo, Combo, Combo, Combo) {
     let defaults = default_shortcuts();
 
@@ -424,7 +450,7 @@ fn pause_chord_action(current_app: Option<&str>) -> ChordAction {
 /// here (allowlist it, lift idle / watchdog pauses); listening here →
 /// take it off the allowlist. Master on → allowlist toggle only. See
 /// `pause_commands::per_app_plan`.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn handle_per_app_pause_hotkey(bundle: &str) {
     // Shared with every other pause control: decides by what the user
     // sees (paused here → resume here), see `pause_commands::per_app_plan`.
@@ -464,18 +490,18 @@ fn handle_per_app_pause_hotkey(bundle: &str) {
 /// order (clear_global_pauses → set_idle_auto_paused) left
 /// EFFECTIVE_PAUSED stale at true because `set_idle_auto_paused` is a
 /// plain setter that does not recompute.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 /// Minimum interval between two master-pause toggles. A physical press
 /// that reaches the handler twice (two taps, key repeat) toggles once;
 /// the second call inside this window is swallowed. 150ms sits well
 /// below deliberate rapid tapping (~4-5 Hz ceiling ≈ 200ms+) while
 /// swallowing the 2-4ms double-delivery window.
 const MASTER_PAUSE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 static MASTER_PAUSE_LAST_FIRE: parking_lot::Mutex<Option<std::time::Instant>> =
     parking_lot::Mutex::new(None);
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn handle_master_pause_hotkey() {
     // Re-entrancy guard: a physical press must produce ONE logical toggle.
     // The master mute is reachable through independent event sources (the
@@ -552,7 +578,7 @@ pub fn input_monitoring_status() -> Option<bool> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn set_input_monitoring_status(granted: bool) {
     INPUT_MONITORING_STATUS.store(
         if granted { 1 } else { 2 },
@@ -588,7 +614,7 @@ fn request_input_monitoring_access() {
 /// Read the `auto_learn_corrections` preference from the DB.
 /// Defaults to `true` when the DB or column is unavailable — the
 /// safe default is to learn, matching pre-toggle behavior.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn auto_learn_corrections_enabled() -> bool {
     let Ok(conn) = crate::db::open() else {
         return true;
@@ -603,7 +629,7 @@ fn auto_learn_corrections_enabled() -> bool {
 /// detached thread with its own tokio runtime so it doesn't block
 /// the keyboard listener. New pairs are written to the glossary
 /// (when `auto_apply` is true) or just logged for review.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn spawn_llm_extraction(
     original: String,
     corrected: String,
@@ -796,19 +822,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                         .matches_name(ctrl_pressed, shift_pressed, alt_pressed, name)
                     {
                         drop(s);
-                        match pause_chord_action(pause::current_app().as_deref()) {
-                            ChordAction::TogglePerApp(bundle) => {
-                                handle_per_app_pause_hotkey(&bundle);
-                            }
-                            ChordAction::NoFocusedApp => {
-                                tracing::info!("hotkey_pause_chord_no_focused_app");
-                                event::global_broadcaster().pause_scope_toggled(
-                                    "none",
-                                    None,
-                                    pause::is_paused(),
-                                );
-                            }
-                        }
+                        dispatch_pause_chord();
                     } else if s.auto_enter.matches_name(
                         ctrl_pressed,
                         shift_pressed,
@@ -816,17 +830,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                         name,
                     ) {
                         drop(s);
-                        let new_state = pause::toggle_auto_enter();
-                        if new_state {
-                            event::global_broadcaster().auto_enter_enabled();
-                        } else {
-                            event::global_broadcaster().auto_enter_disabled();
-                        }
-                        if let Ok(log_path) = always_config::configured_log_path()
-                            && let Ok(mut logger) = log::Logger::open(&log_path)
-                        {
-                            logger.write(log::Event::AutoEnterToggled { enabled: new_state });
-                        }
+                        dispatch_auto_enter();
                     } else if s.force_paste.matches_name(
                         ctrl_pressed,
                         shift_pressed,
@@ -834,29 +838,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                         name,
                     ) {
                         drop(s);
-                        if let Some(text) = pause::take_last_filtered() {
-                            let chars = text.len();
-                            tracing::info!(chars, "force_paste_filtered");
-                            if let Err(error) = paste::copy_to_clipboard(format!("{} ", text))
-                                .and_then(|_| paste::paste_text(pause::is_auto_enter_enabled()))
-                            {
-                                tracing::error!(?error, "force_paste_failed");
-                                pause::set_last_filtered(text);
-                                event::global_broadcaster()
-                                    .transcription_filtered("Force-paste failed — try again");
-                            } else {
-                                event::global_broadcaster().transcript_final(text.clone());
-                                if let Ok(log_path) = always_config::configured_log_path()
-                                    && let Ok(mut logger) = log::Logger::open(&log_path)
-                                {
-                                    logger.write(log::Event::ForcePastedFiltered { text: &text });
-                                }
-                            }
-                        } else {
-                            tracing::info!("force_paste_no_text");
-                            event::global_broadcaster()
-                                .transcription_filtered("Nothing to paste — no held transcript");
-                        }
+                        dispatch_force_paste();
                     } else if s.log_correction.matches_name(
                         ctrl_pressed,
                         shift_pressed,
@@ -864,59 +846,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                         name,
                     ) {
                         drop(s);
-                        let auto_learn = auto_learn_corrections_enabled();
-                        match correction::capture_via_hotkey(
-                            clipboard_watcher::PASTE_WINDOW,
-                            auto_learn,
-                        ) {
-                            Ok(correction::CaptureOutcome::Applied {
-                                pairs,
-                                applied,
-                                original,
-                                corrected,
-                            }) => {
-                                for p in &pairs {
-                                    event::global_broadcaster()
-                                        .correction_logged(p.wrong.clone(), p.right.clone());
-                                }
-                                event::global_broadcaster().correction_capture_result("applied");
-                                let _ = applied;
-                                // Spawn background LLM second-opinion extraction.
-                                spawn_llm_extraction(original, corrected, pairs, auto_learn);
-                            }
-                            Ok(correction::CaptureOutcome::Extracted {
-                                pairs,
-                                original,
-                                corrected,
-                            }) => {
-                                for p in &pairs {
-                                    event::global_broadcaster()
-                                        .correction_logged(p.wrong.clone(), p.right.clone());
-                                }
-                                event::global_broadcaster()
-                                    .correction_capture_result("extracted_not_applied");
-                                // Still run LLM extraction for review queue.
-                                spawn_llm_extraction(original, corrected, pairs, auto_learn);
-                            }
-                            Ok(correction::CaptureOutcome::NoRecentPaste) => {
-                                tracing::debug!("log_correction_no_recent_paste");
-                                event::global_broadcaster()
-                                    .correction_capture_result("no_recent_paste");
-                            }
-                            Ok(correction::CaptureOutcome::NoChange) => {
-                                tracing::debug!("log_correction_no_change");
-                                event::global_broadcaster().correction_capture_result("no_change");
-                            }
-                            Ok(correction::CaptureOutcome::NoCorrectionPairs) => {
-                                tracing::debug!("log_correction_no_correction_pairs");
-                                event::global_broadcaster()
-                                    .correction_capture_result("no_correction_pairs");
-                            }
-                            Err(error) => {
-                                tracing::error!(?error, "log_correction_failed");
-                                event::global_broadcaster().correction_capture_result("error");
-                            }
-                        }
+                        dispatch_log_correction();
                     } else if s.correction_dialog.matches_name(
                         ctrl_pressed,
                         shift_pressed,
@@ -924,8 +854,7 @@ pub fn start_keyboard_listener() -> Result<()> {
                         name,
                     ) {
                         drop(s);
-                        let last = pause::last_transcript_for_correction().unwrap_or_default();
-                        event::global_broadcaster().correction_dialog_requested(last);
+                        dispatch_correction_dialog();
                     }
                 }
                 _ => {
@@ -1110,9 +1039,314 @@ fn start_fn_listener() {
 }
 
 // ----------------------------------------------------------------------
-// Linux / Windows: stub
+// Shared dispatch — one body per chord, used by every platform listener
 // ----------------------------------------------------------------------
-#[cfg(not(target_os = "macos"))]
+
+/// Per-app pause chord (`⌃⌥P`): toggles the focused app's place on the
+/// resumed allowlist. Without a focused app there is no sensible per-app
+/// target — on macOS that means Always itself is frontmost; on Windows
+/// focus tracking isn't wired yet so this currently falls back to the
+/// master toggle rather than dead-ending the only "pause" hotkey users see.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn dispatch_pause_chord() {
+    match pause_chord_action(pause::current_app().as_deref()) {
+        ChordAction::TogglePerApp(bundle) => {
+            handle_per_app_pause_hotkey(&bundle);
+        }
+        ChordAction::NoFocusedApp => {
+            #[cfg(target_os = "windows")]
+            {
+                handle_master_pause_hotkey();
+            }
+            #[cfg(target_os = "macos")]
+            {
+                tracing::info!("hotkey_pause_chord_no_focused_app");
+                event::global_broadcaster().pause_scope_toggled("none", None, pause::is_paused());
+            }
+        }
+    }
+}
+
+/// `⌃⌥A` — auto-enter toggle.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn dispatch_auto_enter() {
+    let new_state = pause::toggle_auto_enter();
+    if new_state {
+        event::global_broadcaster().auto_enter_enabled();
+    } else {
+        event::global_broadcaster().auto_enter_disabled();
+    }
+    if let Ok(log_path) = always_config::configured_log_path()
+        && let Ok(mut logger) = log::Logger::open(&log_path)
+    {
+        logger.write(log::Event::AutoEnterToggled { enabled: new_state });
+    }
+}
+
+/// `⌃⌥V` — paste the last filtered-out transcript anyway.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn dispatch_force_paste() {
+    if let Some(text) = pause::take_last_filtered() {
+        let chars = text.len();
+        tracing::info!(chars, "force_paste_filtered");
+        if let Err(error) = paste::copy_to_clipboard(format!("{} ", text))
+            .and_then(|_| paste::paste_text(pause::is_auto_enter_enabled()))
+        {
+            tracing::error!(?error, "force_paste_failed");
+            pause::set_last_filtered(text);
+            event::global_broadcaster().transcription_filtered("Force-paste failed — try again");
+        } else {
+            event::global_broadcaster().transcript_final(text.clone());
+            if let Ok(log_path) = always_config::configured_log_path()
+                && let Ok(mut logger) = log::Logger::open(&log_path)
+            {
+                logger.write(log::Event::ForcePastedFiltered { text: &text });
+            }
+        }
+    } else {
+        tracing::info!("force_paste_no_text");
+        event::global_broadcaster().transcription_filtered("Nothing to paste — no held transcript");
+    }
+}
+
+/// `⌃⌥X` — hotkey correction capture. On non-macOS platforms
+/// `capture_via_hotkey` can't read the foreground selection yet, so this
+/// reports `no_recent_paste` / `error` through the usual broadcast rather
+/// than failing silently.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn dispatch_log_correction() {
+    let auto_learn = auto_learn_corrections_enabled();
+    match correction::capture_via_hotkey(clipboard_watcher::PASTE_WINDOW, auto_learn) {
+        Ok(correction::CaptureOutcome::Applied {
+            pairs,
+            applied,
+            original,
+            corrected,
+        }) => {
+            for p in &pairs {
+                event::global_broadcaster().correction_logged(p.wrong.clone(), p.right.clone());
+            }
+            event::global_broadcaster().correction_capture_result("applied");
+            let _ = applied;
+            // Spawn background LLM second-opinion extraction.
+            spawn_llm_extraction(original, corrected, pairs, auto_learn);
+        }
+        Ok(correction::CaptureOutcome::Extracted {
+            pairs,
+            original,
+            corrected,
+        }) => {
+            for p in &pairs {
+                event::global_broadcaster().correction_logged(p.wrong.clone(), p.right.clone());
+            }
+            event::global_broadcaster().correction_capture_result("extracted_not_applied");
+            // Still run LLM extraction for review queue.
+            spawn_llm_extraction(original, corrected, pairs, auto_learn);
+        }
+        Ok(correction::CaptureOutcome::NoRecentPaste) => {
+            tracing::debug!("log_correction_no_recent_paste");
+            event::global_broadcaster().correction_capture_result("no_recent_paste");
+        }
+        Ok(correction::CaptureOutcome::NoChange) => {
+            tracing::debug!("log_correction_no_change");
+            event::global_broadcaster().correction_capture_result("no_change");
+        }
+        Ok(correction::CaptureOutcome::NoCorrectionPairs) => {
+            tracing::debug!("log_correction_no_correction_pairs");
+            event::global_broadcaster().correction_capture_result("no_correction_pairs");
+        }
+        Err(error) => {
+            tracing::error!(?error, "log_correction_failed");
+            event::global_broadcaster().correction_capture_result("error");
+        }
+    }
+}
+
+/// `⌃⌥W` — open the dialog-driven correction path.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn dispatch_correction_dialog() {
+    let last = pause::last_transcript_for_correction().unwrap_or_default();
+    event::global_broadcaster().correction_dialog_requested(last);
+}
+
+// ----------------------------------------------------------------------
+// Windows: RegisterHotKey + GetMessage loop
+// ----------------------------------------------------------------------
+
+/// Post a `WM_APP` reload message to the listener thread so it can
+/// unregister + re-register its hotkeys. Registration/unregistration
+/// must happen on the thread that registered them, so `reload_shortcuts`
+/// can't do it directly.
+#[cfg(target_os = "windows")]
+fn windows_post_reload() {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP};
+
+    let tid = WINDOWS_LISTENER_TID.load(Ordering::Relaxed);
+    if tid == 0 {
+        return;
+    }
+    const WM_HOTKEY_RELOAD: u32 = WM_APP + 0x41;
+    unsafe {
+        let _ = PostThreadMessageW(tid, WM_HOTKEY_RELOAD, WPARAM(0), LPARAM(0));
+    }
+}
+
+/// Thread id of the Windows hotkey listener (0 = not started).
+#[cfg(target_os = "windows")]
+static WINDOWS_LISTENER_TID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Map a [`Combo`] to Win32 `fsModifiers` + virtual-key code. Returns
+/// `None` for combos Windows can't express (`fn`, modifier-less keys —
+/// `Combo::from_str` already rejects most of them) or named keys we
+/// don't translate.
+#[cfg(target_os = "windows")]
+fn combo_to_win32(c: &Combo) -> Option<(u32, u32)> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, VK_SPACE,
+    };
+
+    // `from_str` guarantees at least one of ctrl/alt/shift for anything
+    // but "fn"; a config-supplied combo with none would swallow normal
+    // keystrokes system-wide, so refuse it here too.
+    if !c.ctrl && !c.alt && !c.shift {
+        return None;
+    }
+    let mut mods = MOD_NOREPEAT;
+    if c.ctrl {
+        mods |= MOD_CONTROL;
+    }
+    if c.alt {
+        mods |= MOD_ALT;
+    }
+    if c.shift {
+        mods |= MOD_SHIFT;
+    }
+    let mods: HOT_KEY_MODIFIERS = mods;
+
+    let vk = match c.key_char.as_str() {
+        "space" => VK_SPACE.0 as u32,
+        s if s.len() == 1 => {
+            let b = s.as_bytes()[0];
+            match b {
+                b'a'..=b'z' => (b - b'a') as u32 + 0x41,
+                b'0'..=b'9' => (b - b'0') as u32 + 0x30,
+                _ => return None,
+            }
+        }
+        // "fn" and any other named key: no virtual-key translation.
+        _ => return None,
+    };
+    Some((mods.0, vk))
+}
+
+/// Windows global hotkeys via `RegisterHotKey`. The OS matches the full
+/// chord itself, so this needs no raw key stream — just a message queue.
+/// `hwnd = HWND_MESSAGE`-style (thread messages): passing `None` posts
+/// `WM_HOTKEY` to this thread's queue, which `GetMessageW` drains.
+#[cfg(target_os = "windows")]
+pub fn start_keyboard_listener() -> Result<()> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey};
+    use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_APP, WM_HOTKEY};
+
+    const WM_HOTKEY_RELOAD: u32 = WM_APP + 0x41;
+
+    // Slot ids — stable across reloads so dispatch never has to
+    // re-map messages.
+    const ID_PAUSE: i32 = 1;
+    const ID_AUTO_ENTER: i32 = 2;
+    const ID_FORCE_PASTE: i32 = 3;
+    const ID_LOG_CORRECTION: i32 = 4;
+    const ID_CORRECTION_DIALOG: i32 = 5;
+    const ID_MASTER_PAUSE: i32 = 6;
+    const ALL_IDS: [i32; 6] = [
+        ID_PAUSE,
+        ID_AUTO_ENTER,
+        ID_FORCE_PASTE,
+        ID_LOG_CORRECTION,
+        ID_CORRECTION_DIALOG,
+        ID_MASTER_PAUSE,
+    ];
+
+    let shortcuts = Arc::clone(shared_shortcuts());
+
+    thread::spawn(move || unsafe {
+        let tid = GetCurrentThreadId();
+        WINDOWS_LISTENER_TID.store(tid, Ordering::Relaxed);
+        tracing::debug!(tid, "hotkey_listener_thread_up");
+
+        let register = |s: &Shortcuts| {
+            let entries: [(i32, &Combo); 6] = [
+                (ID_PAUSE, &s.pause),
+                (ID_AUTO_ENTER, &s.auto_enter),
+                (ID_FORCE_PASTE, &s.force_paste),
+                (ID_LOG_CORRECTION, &s.log_correction),
+                (ID_CORRECTION_DIALOG, &s.correction_dialog),
+                (ID_MASTER_PAUSE, &s.master_pause),
+            ];
+            let mut registered = 0u32;
+            for (id, combo) in entries {
+                let Some((mods, vk)) = combo_to_win32(combo) else {
+                    tracing::debug!(id, key = %combo.key_char, "hotkey_combo_skipped_windows");
+                    continue;
+                };
+                match RegisterHotKey(
+                    None,
+                    id,
+                    windows::Win32::UI::Input::KeyboardAndMouse::HOT_KEY_MODIFIERS(mods),
+                    vk,
+                ) {
+                    Ok(()) => registered += 1,
+                    // ERROR_HOTKEY_ALREADY_REGISTERED (0x581) means another
+                    // app owns the chord — warn but keep the rest.
+                    Err(e) => {
+                        tracing::warn!(id, key = %combo.key_char, error = %e, "register_hotkey_failed")
+                    }
+                }
+            }
+            registered
+        };
+
+        let n = register(&shortcuts.read());
+        tracing::info!(registered = n, tid, "keyboard_listener_started");
+        // RegisterHotKey needs no OS permission — report success so the
+        // Permissions panel and Shortcuts UI reflect that hotkeys work.
+        set_input_monitoring_status(true);
+
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, Some(HWND::default()), 0, 0).as_bool() {
+            match msg.message {
+                WM_HOTKEY => match msg.wParam.0 as i32 {
+                    ID_MASTER_PAUSE => handle_master_pause_hotkey(),
+                    ID_PAUSE => dispatch_pause_chord(),
+                    ID_AUTO_ENTER => dispatch_auto_enter(),
+                    ID_FORCE_PASTE => dispatch_force_paste(),
+                    ID_LOG_CORRECTION => dispatch_log_correction(),
+                    ID_CORRECTION_DIALOG => dispatch_correction_dialog(),
+                    _ => {}
+                },
+                m if m == WM_HOTKEY_RELOAD => {
+                    for id in ALL_IDS {
+                        let _ = UnregisterHotKey(None, id);
+                    }
+                    let n = register(&shortcuts.read());
+                    tracing::info!(registered = n, "hotkeys_reregistered");
+                }
+                _ => {}
+            }
+        }
+        WINDOWS_LISTENER_TID.store(0, Ordering::Relaxed);
+    });
+
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
+// Linux: stub
+// ----------------------------------------------------------------------
+#[cfg(target_os = "linux")]
 pub fn start_keyboard_listener() -> Result<()> {
     tracing::warn!(
         "global keyboard shortcuts are not yet wired up on this platform; \
