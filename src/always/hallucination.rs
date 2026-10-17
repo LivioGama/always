@@ -158,6 +158,71 @@ fn normalize(text: &str) -> String {
     out
 }
 
+/// Canned closers Whisper appends after real speech when the audio tail is
+/// quiet. Matched (normalized) only against a trailing, separate sentence.
+const TRAILING_CANNED_PHRASES: &[&str] = &[
+    "thank you",
+    "thanks",
+    "thank you very much",
+    "thanks for watching",
+    "thank you for watching",
+    "bye",
+    "bye bye",
+];
+
+/// Minimum words of real content that must precede a trailing canned
+/// sentence before it is stripped. Shorter results are handled (or kept) by
+/// the whole-transcript filter.
+const TRAILING_CANNED_MIN_HEAD_WORDS: usize = 4;
+
+/// A final segment with its own decode metrics at least this good is treated
+/// as confidently spoken and its tail is kept.
+const TRAILING_KEEP_MIN_LOGPROB: f32 = -0.15;
+/// ...and with no-speech probability at most this.
+const TRAILING_KEEP_MAX_NO_SPEECH: f32 = 0.05;
+
+/// True when the final segment carries its own, confidently-good decode
+/// metrics. Groq's `verbose_json` repeats one window's metrics on every
+/// segment (measured 2026-10-17: identical `avg_logprob`/`no_speech_prob`
+/// across segments, and a pure-silence "Thank you." scored 0.00 / -0.29), so
+/// segments whose metrics merely equal the previous one prove nothing.
+fn tail_is_confident(result: &TranscriptionResult) -> bool {
+    let [.., prev, last] = result.segments.as_slice() else {
+        return false;
+    };
+    let distinct = (last.avg_logprob - prev.avg_logprob).abs() > f32::EPSILON
+        || (last.no_speech_prob - prev.no_speech_prob).abs() > f32::EPSILON;
+    distinct
+        && last.avg_logprob >= TRAILING_KEEP_MIN_LOGPROB
+        && last.no_speech_prob <= TRAILING_KEEP_MAX_NO_SPEECH
+}
+
+/// Remove a hallucinated canned closer ("Thank you.", "Bye.") that Whisper
+/// appended as a separate final sentence after real dictation.
+///
+/// Returns `Some(text_without_tail)` only when the text ends with a sentence
+/// whose normalized form is in [`TRAILING_CANNED_PHRASES`], at least
+/// [`TRAILING_CANNED_MIN_HEAD_WORDS`] words precede it, and the final segment
+/// is not confidently real (see [`tail_is_confident`]). A mid-sentence
+/// "..., thank you." (no sentence break) is never touched.
+pub fn strip_trailing_canned(text: &str, result: &TranscriptionResult) -> Option<String> {
+    let body = text.trim_end();
+    let core = body.trim_end_matches(['.', '!', '?', '\u{2026}', ' ']);
+    let idx = core.rfind(['.', '!', '?'])?;
+    let tail = &core[idx + 1..];
+    if !TRAILING_CANNED_PHRASES.contains(&normalize(tail).as_str()) {
+        return None;
+    }
+    let head = core[..=idx].trim();
+    if head.split_whitespace().count() < TRAILING_CANNED_MIN_HEAD_WORDS {
+        return None;
+    }
+    if tail_is_confident(result) {
+        return None;
+    }
+    Some(head.to_string())
+}
+
 /// Mean per-word acoustic confidence below which a transcript is treated as
 /// speech in a language other than the recognizer's (Layer H).
 ///
@@ -693,6 +758,78 @@ mod tests {
             segments: Vec::new(),
             ..Default::default()
         }
+    }
+
+    fn seg(text: &str, lp: f32, ns: f32) -> crate::stt::TranscriptionSegment {
+        crate::stt::TranscriptionSegment {
+            text: text.to_string(),
+            avg_logprob: lp,
+            no_speech_prob: ns,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn strips_trailing_thank_you_sentence() {
+        let r = make("Run the tests and fix the build. Thank you.");
+        assert_eq!(
+            strip_trailing_canned(&r.text, &r).as_deref(),
+            Some("Run the tests and fix the build.")
+        );
+        let r = make("Is that the right approach? Thank you.");
+        assert_eq!(
+            strip_trailing_canned(&r.text, &r).as_deref(),
+            Some("Is that the right approach?")
+        );
+        let r = make("Replace the database with pocket base. Bye.");
+        assert!(strip_trailing_canned(&r.text, &r).is_some());
+    }
+
+    #[test]
+    fn standalone_phrase_still_rejected_not_stripped() {
+        let r = make("Thank you.");
+        assert!(strip_trailing_canned(&r.text, &r).is_none());
+        assert!(is_hallucination(&r).is_some());
+        let r = make("Okay. Thank you.");
+        assert!(strip_trailing_canned(&r.text, &r).is_none());
+    }
+
+    #[test]
+    fn mid_sentence_thank_you_untouched() {
+        let r = make("When you receive it, thank you.");
+        assert!(strip_trailing_canned(&r.text, &r).is_none());
+        let r = make("Thank you for the review, I will merge it now.");
+        assert!(strip_trailing_canned(&r.text, &r).is_none());
+    }
+
+    #[test]
+    fn confident_distinct_final_segment_keeps_thank_you() {
+        let mut r = make("Please send the invoice to the client today. Thank you.");
+        r.segments = vec![
+            seg("Please send the invoice to the client today.", -0.4, 0.01),
+            seg(" Thank you.", -0.08, 0.01),
+        ];
+        assert!(strip_trailing_canned(&r.text, &r).is_none());
+    }
+
+    #[test]
+    fn identical_window_metrics_do_not_prove_confidence() {
+        let mut r = make("Please send the invoice to the client today. Thank you.");
+        r.segments = vec![
+            seg("Please send the invoice to the client today.", -0.1, 0.0),
+            seg(" Thank you.", -0.1, 0.0),
+        ];
+        assert!(strip_trailing_canned(&r.text, &r).is_some());
+    }
+
+    #[test]
+    fn single_segment_tail_is_stripped_single_short_is_not() {
+        let mut r = make("Please send the invoice to the client today. Thank you.");
+        r.segments = vec![seg(&r.text.clone(), -0.29, 0.0)];
+        assert!(strip_trailing_canned(&r.text, &r).is_some());
+        let mut r = make("Thank you.");
+        r.segments = vec![seg("Thank you.", -0.29, 0.0)];
+        assert!(strip_trailing_canned(&r.text, &r).is_none());
     }
 
     #[test]

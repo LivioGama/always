@@ -971,6 +971,16 @@ Between transcription and the keyboard:
    "ünkLöß") is removed and the rest is pasted. The utterance is rejected when it
    holds only such tokens, when they are ≥ 25% of the words of a short utterance
    (< 80 chars), or when it is mostly in a script that is not the user's.
+   **Trailing canned closer** (2026-10-17, requested by Livio: "thank you"
+   injected at the end of sentences). When a Groq result ends with a separate
+   final sentence that normalizes to "thank you", "thanks", "thank you very
+   much", "(thank you|thanks) for watching", "bye" or "bye bye", preceded by at
+   least 4 words, that sentence is removed and the rest is pasted. Mid-sentence
+   uses are never touched. A final segment with its own metrics (avg_logprob
+   ≥ -0.15, no_speech_prob ≤ 0.05, differing from the previous segment) is
+   treated as genuine and kept. Known limit: Groq repeats one window's metrics
+   on every segment, so on Groq a genuine closing "Thank you." after ≥ 4 words
+   is also removed. ❓ Thresholds not tuned on real tail audio.
 2. **Vocabulary bias** — the user's glossary is sent to the model as a hint so
    domain terms transcribe correctly. **The hint must never reach the user's
    text**: these models echo their prompt back, especially on short or quiet
