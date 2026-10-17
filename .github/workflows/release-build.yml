@@ -180,17 +180,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libasound2-dev libssl-dev pkg-config g++ rpm
+            libasound2-dev libssl-dev pkg-config g++ cmake libclang-dev rpm
 
       - name: Install cargo-deb and cargo-generate-rpm
         uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
           tool: cargo-deb,cargo-generate-rpm
 
-      # Same feature set as ci.yml / the Dockerfile. `cpal` is required: without
-      # it the linux build fails with E0425 get_or_spawn.
-      - name: Build daemon (linux,cpal)
-        run: cargo build --release --locked --no-default-features --features linux,cpal
+      # Include the local engines offered by Settings; offline model selection
+      # must work without Groq credentials. `cpal` supplies native audio capture.
+      - name: Build daemon (linux,cpal,local-stt)
+        run: cargo build --release --locked --no-default-features --features linux,cpal,local-stt
 
       - name: Smoke-test binary
         run: ./target/release/always --version

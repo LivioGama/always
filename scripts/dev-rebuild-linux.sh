@@ -79,7 +79,7 @@ rm -f "$PID_FILE"
 stop_recorded_dev_daemon
 
 echo "▶ building Linux daemon..."
-cargo build --locked --no-default-features --features linux --bin always
+cargo build --locked --no-default-features --features linux,local-stt --bin always
 
 echo "▶ building settings frontend..."
 (
