@@ -56,20 +56,35 @@ pub fn is_running() -> bool {
 }
 
 fn is_daemon_run_command(command: &str) -> bool {
-    let mut args = command.split_whitespace();
-    let Some(exe) = args.next() else {
+    let Some((exe, rest)) = first_argv(command) else {
         return false;
     };
-    let Some(subcommand) = args.next() else {
+    let Some((subcommand, _)) = first_argv(rest) else {
         return false;
     };
-    let Some(name) = std::path::Path::new(exe)
-        .file_name()
-        .and_then(|name| name.to_str())
-    else {
-        return false;
-    };
-    matches!(name, "always" | "always-daemon") && subcommand == "run" && same_instance(command)
+    exe_is_daemon(exe) && subcommand == "run" && same_instance(command)
+}
+
+/// Split off the first argv element, honoring `"…"` quoting — Windows
+/// command lines (read from a process's PEB) quote argv[0] whenever the
+/// path needs it, `ps` output does not.
+fn first_argv(command: &str) -> Option<(&str, &str)> {
+    let c = command.trim_start();
+    if let Some(rest) = c.strip_prefix('"') {
+        let end = rest.find('"')?;
+        Some((&rest[..end], rest[end + 1..].trim_start()))
+    } else {
+        let end = c.find(char::is_whitespace)?;
+        Some((&c[..end], c[end..].trim_start()))
+    }
+}
+
+/// Basename check tolerant of `.exe` suffixes, Windows path separators
+/// and case (`C:\…\Always.exe` vs `/usr/bin/always`).
+fn exe_is_daemon(exe: &str) -> bool {
+    let base = exe.rsplit(['/', '\\']).next().unwrap_or(exe);
+    let stem = base.strip_suffix(".exe").unwrap_or(base);
+    stem.eq_ignore_ascii_case("always") || stem.eq_ignore_ascii_case("always-daemon")
 }
 
 /// True when `command` belongs to this process's runtime instance. The dev
@@ -96,6 +111,7 @@ fn same_instance_for(instance: &str, own_exe: &str, command: &str) -> bool {
     }
 }
 
+#[cfg(unix)]
 fn process_table() -> Vec<(u32, String)> {
     let output = match std::process::Command::new("ps")
         .args(["-eo", "pid=,args="])
@@ -116,6 +132,11 @@ fn process_table() -> Vec<(u32, String)> {
         .collect()
 }
 
+#[cfg(windows)]
+fn process_table() -> Vec<(u32, String)> {
+    crate::always::win32_process::process_table()
+}
+
 /// All PIDs whose argv matches a voice daemon (may include the current process).
 pub fn list_daemon_pids() -> Vec<u32> {
     let mut pids: Vec<u32> = process_table()
@@ -127,6 +148,40 @@ pub fn list_daemon_pids() -> Vec<u32> {
     pids
 }
 
+/// `kill -TERM` counterpart for this platform. Unix sends SIGTERM (the
+/// daemon's signal handler runs the graceful cleanup); Windows has no
+/// gentle signal for a detached process, so this is `TerminateProcess`
+/// and the pid file is reclaimed by `remove_stale_pid` afterwards.
+fn terminate_gracefully(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+    #[cfg(windows)]
+    {
+        crate::always::win32_process::terminate(pid)
+    }
+}
+
+/// `kill -KILL` counterpart — last-resort stop when the graceful path
+/// left the process alive.
+fn terminate_forcefully(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        std::process::Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+    #[cfg(windows)]
+    {
+        crate::always::win32_process::terminate(pid)
+    }
+}
+
 /// Terminate stray daemon processes. Never signals `except_pid` (the caller).
 pub fn kill_orphan_daemon_processes_except(except_pid: u32) {
     let victims: Vec<u32> = list_daemon_pids()
@@ -135,16 +190,12 @@ pub fn kill_orphan_daemon_processes_except(except_pid: u32) {
         .collect();
 
     for pid in &victims {
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status();
+        terminate_gracefully(*pid);
     }
     std::thread::sleep(Duration::from_millis(200));
     for pid in victims {
         if process_is_running(pid) {
-            let _ = std::process::Command::new("kill")
-                .args(["-KILL", &pid.to_string()])
-                .status();
+            terminate_forcefully(pid);
         }
     }
     std::thread::sleep(Duration::from_millis(100));
@@ -524,24 +575,35 @@ pub fn start(cfg: &AlwaysConfig) -> Result<()> {
     }
 
     let exe = std::env::current_exe().context("cannot find always binary")?;
-    let child = std::process::Command::new(&exe)
-        .args([
-            "run",
-            "--lang",
-            &cfg.lang,
-            "--timeout",
-            &cfg.timeout_secs.to_string(),
-            "--silence",
-            &cfg.silence_secs.to_string(),
-        ])
-        .args(if cfg.auto_enter {
-            vec!["--auto-enter"]
-        } else {
-            vec![]
-        })
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args([
+        "run",
+        "--lang",
+        &cfg.lang,
+        "--timeout",
+        &cfg.timeout_secs.to_string(),
+        "--silence",
+        &cfg.silence_secs.to_string(),
+    ])
+    .args(if cfg.auto_enter {
+        vec!["--auto-enter"]
+    } else {
+        vec![]
+    })
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        // Detach fully: a child that inherits the console dies when the
+        // terminal that ran `always start` closes, taking the daemon
+        // with it.
+        use std::os::windows::process::CommandExt as _;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
+    }
+    let child = cmd
         .spawn()
         .context("failed to spawn always daemon process")?;
 
@@ -572,9 +634,7 @@ pub fn stop() -> Result<()> {
     remove_stale_pid();
     remove_stale_socket();
     if let Some(pid) = read_pid() {
-        let _ = std::process::Command::new("kill")
-            .arg(pid.to_string())
-            .status();
+        terminate_gracefully(pid);
         println!("Always-on daemon stopped (pid {pid}).");
     } else {
         println!("Always-on daemon not running.");
@@ -609,6 +669,10 @@ pub fn status() -> Result<()> {
 
 pub struct PidGuard {
     _lock: File,
+    /// Windows single-instance lock — the named-mutex counterpart of the
+    /// pid-file `flock` used on Unix.
+    #[cfg(windows)]
+    _instance_mutex: crate::always::win32_process::InstanceMutex,
 }
 
 impl PidGuard {
@@ -650,8 +714,12 @@ impl PidGuard {
             .truncate(false)
             .open(&path)
             .context("failed to open always PID file")?;
+        #[cfg(unix)]
         acquire_exclusive_lock(&file)
             .context("Always-on daemon already running (pid lock held)")?;
+        #[cfg(windows)]
+        let instance_mutex = crate::always::win32_process::InstanceMutex::acquire()
+            .context("Always-on daemon already running (instance mutex held)")?;
 
         // Post-lock recheck: if a peer beat us to binding the socket
         // between our short-circuit probe and the flock acquire (it
@@ -710,7 +778,11 @@ impl PidGuard {
                 "multiple daemon processes after PidGuard::install — duplicate transcripts likely"
             );
         }
-        Ok(Self { _lock: file })
+        Ok(Self {
+            _lock: file,
+            #[cfg(windows)]
+            _instance_mutex: instance_mutex,
+        })
     }
 }
 
@@ -724,10 +796,8 @@ impl Drop for PidGuard {
                 libc::flock(fd, libc::LOCK_UN);
             }
         }
-        #[cfg(windows)]
-        {
-            drop(&self._lock);
-        }
+        // Windows: `_instance_mutex` releases the named mutex on drop;
+        // `_lock` was only ever the pid file (no flock equivalent needed).
         if let Ok(log_path) = always_config::configured_log_path()
             && let Ok(mut log) = crate::always::log::Logger::open(&log_path)
         {
@@ -741,21 +811,15 @@ impl Drop for PidGuard {
     }
 }
 
+#[cfg(unix)]
 fn acquire_exclusive_lock(file: &File) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let fd = file.as_raw_fd();
-        let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-        if rc == 0 {
-            return Ok(());
-        }
-        anyhow::bail!("pid file flock failed (rc={rc})")
+    use std::os::unix::io::AsRawFd;
+    let fd = file.as_raw_fd();
+    let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        return Ok(());
     }
-    #[cfg(windows)]
-    {
-        Ok(())
-    }
+    anyhow::bail!("pid file flock failed (rc={rc})")
 }
 
 fn remove_stale_pid() {
@@ -820,18 +884,47 @@ pub fn install_signal_handlers(handle: &tokio::runtime::Handle) {
             std::process::exit(0);
         });
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        tracing::debug!("signal handlers not supported on this platform");
+        // No signals on Windows, but `always run` in a console can still
+        // be stopped gracefully with Ctrl+C — do the same cleanup the
+        // Unix handlers do. A daemon spawned via `always start` is
+        // console-less and simply never sees the event.
+        handle.spawn(async move {
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => tracing::info!("received Ctrl+C, shutting down"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed_to_listen_for_ctrl_c");
+                    return;
+                }
+            }
+            if let Ok(log_path) = always_config::configured_log_path()
+                && let Ok(mut log) = crate::always::log::Logger::open(&log_path)
+            {
+                log.write(crate::always::log::Event::Stop);
+            }
+            let _ = std::fs::remove_file(pid_path());
+            if let Some(sock) = socket_path() {
+                let _ = std::fs::remove_file(sock);
+            }
+            resume_peer_on_exit();
+            std::process::exit(0);
+        });
     }
 }
 
+#[cfg(unix)]
 fn process_is_running(pid: u32) -> bool {
     std::process::Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
         .output()
         .is_ok_and(|output| output.status.success())
+}
+
+#[cfg(windows)]
+fn process_is_running(pid: u32) -> bool {
+    crate::always::win32_process::process_is_running(pid)
 }
 
 #[cfg(test)]

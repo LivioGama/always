@@ -748,7 +748,7 @@ fn handle_toggle_pause() -> Result<()> {
     // empty atomics, so flipping them locally was a no-op. Send the
     // toggle through the UDS socket so the actual daemon process
     // receives it.
-    if always::always::daemon::is_running() {
+    if always::always::daemon::is_running() && always::always::daemon::socket_path().is_some() {
         send_uds_command(r#"{"type":"TogglePause"}"#)?;
         println!("Sent TogglePause to running daemon.");
         return Ok(());
@@ -758,9 +758,15 @@ fn handle_toggle_pause() -> Result<()> {
     // returns `(effective, changed)` — we print the effective value
     // since that's what the user cares about.
     let (effective, _changed) = always::always::pause::toggle_pause();
+    let note = if always::always::daemon::is_running() {
+        "daemon running but unreachable (no IPC on this platform); toggle was local-only"
+    } else {
+        "no daemon running; toggle was local-only"
+    };
     println!(
-        "Pause state: {} (no daemon running; toggle was local-only)",
-        if effective { "paused" } else { "resumed" }
+        "Pause state: {} ({})",
+        if effective { "paused" } else { "resumed" },
+        note,
     );
     Ok(())
 }
@@ -769,15 +775,21 @@ fn handle_toggle_auto_enter() -> Result<()> {
     // Same rationale as `handle_toggle_pause`: dial the running daemon
     // when one exists so the toggle reaches the right process-local
     // atomic.
-    if always::always::daemon::is_running() {
+    if always::always::daemon::is_running() && always::always::daemon::socket_path().is_some() {
         send_uds_command(r#"{"type":"ToggleAutoEnter"}"#)?;
         println!("Sent ToggleAutoEnter to running daemon.");
         return Ok(());
     }
     let new_state = always::always::pause::toggle_auto_enter();
+    let note = if always::always::daemon::is_running() {
+        "daemon running but unreachable (no IPC on this platform); toggle was local-only"
+    } else {
+        "no daemon running; toggle was local-only"
+    };
     println!(
-        "Auto-enter state: {} (no daemon running; toggle was local-only)",
-        if new_state { "enabled" } else { "disabled" }
+        "Auto-enter state: {} ({})",
+        if new_state { "enabled" } else { "disabled" },
+        note,
     );
     Ok(())
 }
@@ -909,7 +921,7 @@ fn send_uds_command(json: &str) -> Result<()> {
 }
 
 fn handle_get_state() -> Result<()> {
-    if always::always::daemon::is_running() {
+    if always::always::daemon::is_running() && always::always::daemon::socket_path().is_some() {
         let state = read_daemon_state()?;
         println!("{}", state);
         return Ok(());

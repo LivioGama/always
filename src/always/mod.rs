@@ -73,6 +73,8 @@ pub mod apple_intelligence;
 pub mod apple_stt;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod stt_apple;
+#[cfg(target_os = "windows")]
+pub mod win32_process;
 
 pub use config::AlwaysConfig;
 pub use event_loop::run;

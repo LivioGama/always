@@ -143,6 +143,11 @@ windows = { version = "0.62", features = [
     "Win32_System_Threading",
     "Win32_Media_Audio",
     "Win32_System_Com",
+    # daemon lifecycle: process table + single-instance (win32_process)
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Wdk_System_Threading",
 ] }
 # Windows: generic whisper-cpp build + ONNX (non-macOS target).
 transcribe-rs = { version = "=0.3.12", features = ["whisper-cpp", "onnx"], optional = true }

@@ -1438,6 +1438,19 @@ user's choice wins.
   which renders cues offline to a buffer. A sandbox instance
   never pauses, resumes or reaps prod/dev daemons.
 
+**Windows daemon lifecycle.** On Windows the daemon is CLI-only: no UDS
+socket, no GUI, no peer handoff. `always start` spawns `always run`
+detached (no console), single-instance is a named kernel mutex
+(`Local\always-daemon[-dev]`, released by the kernel on process death),
+liveness is the pid file + an `OpenProcess` image-name check (recycled
+pids can't impersonate the daemon), and the process table comes from a
+Toolhelp32 snapshot with command lines read out of each candidate's
+PEB. `stop`/orphan-reaping use `TerminateProcess` — there is no SIGTERM
+equivalent for a detached process — and stale pid files are reclaimed on
+the next start. `always run` in a console shuts down gracefully on
+Ctrl+C (pid file cleanup); commands that need live IPC
+(`toggle-pause`, `get-state` from the daemon) fall back to local state.
+
 **Nothing is "done" until the new build is running** (I10). "Built" and
 "deployed" are different claims, and only "running" is testable.
 
