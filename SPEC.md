@@ -1573,7 +1573,9 @@ Per OS:
   pid), renames the current `always.exe` to `always.exe.old`, copies the new
   files, and the leftover `.old` is deleted by the next `always update` / daemon
   start. Installs into the directory the running `always.exe` lives in
-  (normally `%LOCALAPPDATA%\Programs\Always`). No UDS on Windows: CLI only.
+  (normally `%LOCALAPPDATA%\Programs\Always`). Windows talks to the daemon
+  over the `\\.\pipe\always` named pipe (§12); the CLI falls back to
+  spawning it when the pipe is absent.
 - **Linux, tarball install** (binary at `<prefix>/bin/always`, not owned by a
   package) — replaced in place, then the user service is restarted if it was
   active. Allowed from the CLI and from `InstallUpdate`.
@@ -1585,6 +1587,15 @@ Per OS:
   is refused for both (reinstall instead). After a Linux update the running
   daemon is still the old binary: the installer restarts the user service when
   it is active; otherwise `always update` says to restart it.
+
+**Windows global shortcuts.** Registered with `RegisterHotKey` on a dedicated
+message-loop thread; the OS matches the full chord, so no raw key stream or OS
+permission is needed (the Permissions row reports "active" once registration
+succeeds). `ReloadShortcuts` posts a `WM_APP` message to that thread to
+unregister and re-register — hotkey changes apply live. Modifier-less keys and
+`fn` are not registrable on Windows and are skipped. Because focus tracking
+isn't wired on Windows yet, the per-app pause chord falls back to the master
+toggle when no focused app is known.
 
 Downloaded files live only in the update directory; stale ones (older than 1 h,
 other than a running update's) are removed at daemon start and on
