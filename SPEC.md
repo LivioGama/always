@@ -164,8 +164,12 @@ the daemon process were inaudible in production while the helper ran, so
 **while the helper runs, status cues are rendered through the helper's own
 voice-processing output** (`play <file>` on its stdin) — the unit never
 ducks its own output, and it is the echo reference, so cues never reach the
-mic. (In plain mode — the default since 2026-10-16 — the helper still plays
-the cues but nothing cancels them out of the mic.) With plain `rec` (or if the helper's cue channel fails) cues play
+mic. (In plain mode — the default since 2026-10-16 — the helper carries no
+output chain at all: attaching the cue players would keep the OUTPUT device
+running for the helper's whole lifetime and restarting output IO at launch,
+an audible cut in whatever the user is playing — reported 2026-10-18 as a
+"small jump" in output sound on every app start. Cues therefore play
+in-process; nothing ducks them once VPIO is off.) With plain `rec` (or if the helper's cue channel fails) cues play
 in-process as before. ❓ Residual ducking of other apps' audio at `.min`
 could not be measured here: while any voice-processing unit runs, even
 another process's raw `rec` capture of the speakers is strongly attenuated

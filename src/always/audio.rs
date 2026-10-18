@@ -691,7 +691,9 @@ impl RecChild {
             .args(args)
             // stdin carries status-cue commands (`play <path>`): cues are
             // rendered through the helper's voice-processing output so they
-            // are never ducked by it (see `capture_cue_play`).
+            // are never ducked by it (see `capture_cue_play`). A `--no-vp`
+            // helper has no output side — the sink below stays empty and
+            // cues take the in-process player pool instead.
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -733,7 +735,13 @@ impl RecChild {
             "capture_helper_spawned"
         );
         let ring = Self::start_reader(stdout, started, "capture-reader")?;
-        *CAPTURE_CUE_SINK.lock() = cue_stdin.map(|s| (child.id(), s));
+        // Only a voice-processing (`--vp`) helper renders cues — a plain
+        // one runs input-only and ignores its stdin.
+        *CAPTURE_CUE_SINK.lock() = if args.contains(&"--vp") {
+            cue_stdin.map(|s| (child.id(), s))
+        } else {
+            None
+        };
         crate::always::status_sound::capture_route_changed();
         Ok(Self {
             child,
