@@ -9,10 +9,11 @@
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuBuilder, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Wry};
+use tauri::{AppHandle, Manager, Wry};
 use tokio::sync::mpsc;
 
 use crate::uds_client::{ClientEvent, DaemonEvent, DaemonState, UdsClient};
+use crate::window_manager::{ShowOnboardingReason, WindowManager};
 
 /// Build the system tray with the menu and connect event-driven updates.
 pub fn build_tray(app: &AppHandle, uds: Arc<UdsClient>) -> Result<TrayIcon<Wry>, tauri::Error> {
@@ -25,6 +26,16 @@ pub fn build_tray(app: &AppHandle, uds: Arc<UdsClient>) -> Result<TrayIcon<Wry>,
         .icon(app.default_window_icon().unwrap().clone())
         .tooltip("Always")
         .menu(&build_menu(app, &initial_pause, &initial_auto)?)
+        .on_menu_event(|app, event| {
+            let Some(wm) = app.try_state::<Arc<WindowManager>>() else {
+                return;
+            };
+            match event.id().as_ref() {
+                "settings" => wm.show_settings(),
+                "onboarding" => wm.show_onboarding(ShowOnboardingReason::Reinvoked),
+                _ => {}
+            }
+        })
         .on_tray_icon_event(move |tray, event| {
             if let TrayIconEvent::Click { .. } = event {
                 // Left-click toggles pause/resume directly.
@@ -66,8 +77,8 @@ fn build_menu(
             "Settings",
             true,
             &[
-                &MenuItem::new(app, "Settings", true, None::<&str>)?,
-                &MenuItem::new(app, "Onboarding", true, None::<&str>)?,
+                &MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?,
+                &MenuItem::with_id(app, "onboarding", "Onboarding", true, None::<&str>)?,
             ],
         )?)
         .separator()

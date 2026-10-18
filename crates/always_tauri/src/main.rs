@@ -42,23 +42,34 @@ fn main() {
             commands::app_version,
             commands::window_label,
             commands::platform,
+            commands::show_settings_window,
+            commands::show_onboarding_window,
+            commands::finish_onboarding,
         ])
+        // Closing onboarding counts as skipping it: hide instead of destroy
+        // (the tray can re-open it), show Settings, and let the settings
+        // webview record completion.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "onboarding" {
+                    api.prevent_close();
+                    let app = window.app_handle();
+                    if let Some(wm) = app.try_state::<Arc<WindowManager>>() {
+                        wm.hide_onboarding();
+                        wm.show_settings();
+                    }
+                    let _ = app.emit_to("settings", "onboarding_dismissed", ());
+                }
+            }
+        })
         // ── Auto-launch (enabled via system settings outside Tauri) ──
         // The daemon itself provides auto-start via the `start` command
         // with PID-guard.  We may add `tauri-plugin-autostart` once it
         // reaches a stable release for Tauri v2.
         .setup(|app| {
             // ── Windows ──────────────────────────────────────────────
-            // Settings window — always available.
-            if let Some(win) = app.get_webview_window("settings") {
-                win.show().ok();
-                win.set_focus().ok();
-            }
-
-            // Onboarding window — initially hidden.
-            if let Some(win) = app.get_webview_window("onboarding") {
-                win.hide().ok();
-            }
+            // Both start hidden (tauri.conf.json). The settings webview
+            // shows one once it knows whether onboarding is done.
 
             // ── UDS Client ───────────────────────────────────────────
             let socket_path = uds_client::resolve_socket_path();
@@ -87,6 +98,7 @@ fn main() {
 
             // ── WindowManager ────────────────────────────────────────
             let wm = Arc::new(WindowManager::new(app.handle().clone()));
+            app.manage(wm);
 
             // ── System Tray ──────────────────────────────────────────
             match tray::build_tray(app.handle(), Arc::clone(&uds)) {

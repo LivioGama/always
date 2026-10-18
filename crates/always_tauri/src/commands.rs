@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::uds_client::UdsClient;
+use crate::window_manager::{ShowOnboardingReason, WindowManager};
 
 // ── CLI bridge ──────────────────────────────────────────────────────────────
 
@@ -272,6 +273,27 @@ pub fn app_version() -> String {
 #[tauri::command]
 pub fn window_label(window: tauri::Window) -> String {
     window.label().to_string()
+}
+
+// ── Windows ────────────────────────────────────────────────────────────────
+
+/// Both windows start hidden; the settings webview calls one of these once
+/// it knows whether onboarding is done.
+#[tauri::command]
+pub fn show_settings_window(wm: tauri::State<'_, std::sync::Arc<WindowManager>>) {
+    wm.show_settings();
+}
+
+#[tauri::command]
+pub fn show_onboarding_window(wm: tauri::State<'_, std::sync::Arc<WindowManager>>) {
+    wm.show_onboarding(ShowOnboardingReason::FirstLaunch);
+}
+
+/// Onboarding finished or skipped: swap to the settings window.
+#[tauri::command]
+pub fn finish_onboarding(wm: tauri::State<'_, std::sync::Arc<WindowManager>>) {
+    wm.hide_onboarding();
+    wm.show_settings();
 }
 
 /// Which platform the frontend should present (permission rows, copy).

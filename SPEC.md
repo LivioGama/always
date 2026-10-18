@@ -1340,6 +1340,15 @@ working setup with a welcome window.
 The Groq API key was deliberately removed from this flow for that reason — it is
 not required (local models need none) and it now lives in Settings → Models.
 
+**Linux and Windows (Tauri app).** Both windows start hidden. At launch the
+settings webview shows the onboarding window until completion is recorded, and
+the settings window afterwards. Completion lives in the webview's
+`always_onboarding_done` flag. A saved Groq key or a recorded voice profile
+(`always config show`, `always voice status`) retro-marks it. Finishing,
+skipping, or closing the onboarding window records completion and shows
+Settings. The tray's Settings → Onboarding item re-opens the flow from its first
+step.
+
 ---
 
 ## 10. Preferences
