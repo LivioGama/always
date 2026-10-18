@@ -834,6 +834,10 @@ pub enum DaemonCommand {
     /// Client (Settings tab open / reconnect) wants a fresh
     /// [`DaemonEvent::VoiceProfileStatus`] snapshot.
     GetVoiceProfileStatus,
+    /// Client (Settings open / reconnect) wants a fresh
+    /// [`DaemonEvent::ShortcutListenerStatus`]. The startup burst can be
+    /// missed by a client whose listeners attach late.
+    GetShortcutListenerStatus,
     /// macOS Swift app reports the system default input device changed
     /// (user picked a different mic in System Settings). Daemon kills
     /// and respawns the `rec` child so it opens the new default device

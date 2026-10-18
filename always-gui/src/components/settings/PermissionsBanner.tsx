@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
+import type { DaemonApi } from "../../hooks/useDaemonState";
 import { openUrl, platform } from "../../lib/tauri";
 import { Btn } from "../controls";
 
 /// Non-modal banner surfacing missing permissions inline at the top of
 /// Settings. Windows equivalent of PermissionsBanner.swift — on Windows
 /// there's no TCC, so the actionable row is the OS microphone privacy
-/// toggle; input monitoring isn't required.
-export function PermissionsBanner() {
+/// toggle. Each row shows only while its item is actually failing, so a
+/// working microphone never produces a warning.
+export function PermissionsBanner({ daemon }: { daemon: DaemonApi }) {
   const [os, setOs] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(
     () => sessionStorage.getItem("always_perms_banner_dismissed") === "1",
@@ -16,7 +18,15 @@ export function PermissionsBanner() {
     platform().then(setOs).catch(() => setOs("unknown"));
   }, []);
 
+  const micMissing = !daemon.state.isDaemonConnected;
+  // Windows hotkeys can fail to register (another app owns the chord).
+  // Only judge that once the daemon has reported, otherwise it reads as a
+  // failure while we're still waiting for the status.
+  const shortcutsMissing =
+    os === "windows" && daemon.state.isDaemonConnected && !daemon.state.inputMonitoringGranted;
+
   if (dismissed || os === null || os === "linux" || os === "unknown") return null;
+  if (!micMissing && !shortcutsMissing) return null;
 
   return (
     <div className="rounded-lg bg-orange-500/[0.08] border border-orange-500/35 p-2.5 space-y-2">
@@ -39,24 +49,33 @@ export function PermissionsBanner() {
         </button>
       </div>
 
-      <PermRow
-        title="Microphone"
-        detail={
-          os === "windows"
-            ? "Always needs microphone access to hear you speak. If dictation is silent, check Windows Settings → Privacy & security → Microphone and allow desktop apps."
-            : "Always needs microphone access to hear you speak."
-        }
-        actionTitle="Open Settings"
-        onAction={() =>
-          openUrl(
+      {micMissing && (
+        <PermRow
+          title="Microphone"
+          detail={
             os === "windows"
-              ? "ms-settings:privacy-microphone"
-              : os === "macos"
-                ? "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
-                : "",
-          )
-        }
-      />
+              ? "Always can't reach the daemon, so microphone access is unknown. Start the daemon, or check Windows Settings → Privacy & security → Microphone and allow desktop apps."
+              : "Always needs microphone access to hear you speak."
+          }
+          actionTitle="Open Settings"
+          onAction={() =>
+            openUrl(
+              os === "windows"
+                ? "ms-settings:privacy-microphone"
+                : os === "macos"
+                  ? "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+                  : "",
+            )
+          }
+        />
+      )}
+
+      {shortcutsMissing && (
+        <PermRow
+          title="Global Shortcuts"
+          detail="The daemon couldn't register the global hotkeys — another app may already own one of the chords. Reassign it in the Shortcuts tab."
+        />
+      )}
     </div>
   );
 }
@@ -64,8 +83,8 @@ export function PermissionsBanner() {
 function PermRow({ title, detail, actionTitle, onAction }: {
   title: string;
   detail: string;
-  actionTitle: string;
-  onAction: () => void;
+  actionTitle?: string;
+  onAction?: () => void;
 }) {
   return (
     <div className="flex items-start gap-2.5">
@@ -73,7 +92,7 @@ function PermRow({ title, detail, actionTitle, onAction }: {
         <div className="text-xs font-semibold text-surface-200">{title}</div>
         <div className="text-[10px] text-surface-500 leading-snug">{detail}</div>
       </div>
-      <Btn onClick={onAction}>{actionTitle}</Btn>
+      {actionTitle && onAction ? <Btn onClick={onAction}>{actionTitle}</Btn> : null}
     </div>
   );
 }

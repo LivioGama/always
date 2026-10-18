@@ -1655,6 +1655,14 @@ unregister and re-register — hotkey changes apply live. Modifier-less keys and
 isn't wired on Windows yet, the per-app pause chord falls back to the master
 toggle when no focused app is known.
 
+The Settings window learns the shortcut status from the daemon's startup burst,
+but its listeners can attach after that burst is sent. It therefore also asks
+the daemon (`GetShortcutListenerStatus`) on every connect, and the daemon
+re-sends the status it already knows. On Windows, the General banner shows a
+"Global Shortcuts" row only while the daemon is connected and hotkeys are not
+registered. The Microphone row shows only while the daemon is unreachable; a
+connected daemon with a working microphone never produces a warning.
+
 Downloaded files live only in the update directory; stale ones (older than 1 h,
 other than a running update's) are removed at daemon start and on
 `always update`.

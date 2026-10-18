@@ -28,6 +28,7 @@ export default function App() {
     const un2 = listen("uds_connected", () => {
       daemon.setConnected(true);
       daemon.getVoiceProfileStatus();
+      daemon.getShortcutListenerStatus();
       daemon.listModels();
     });
     const un3 = listen("uds_disconnected", () => daemon.setConnected(false));
@@ -42,6 +43,7 @@ export default function App() {
           if (ok) {
             daemon.setConnected(true);
             daemon.getVoiceProfileStatus();
+            daemon.getShortcutListenerStatus();
             daemon.listModels();
           }
           setTimeout(poll, ok ? 5000 : 1500);

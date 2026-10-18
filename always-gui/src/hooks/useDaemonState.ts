@@ -418,6 +418,7 @@ export function useDaemonState() {
     setLanguage: (lang: string | null) => cmd({ type: "SetLanguage", data: { lang: lang ?? "auto" } }),
 
     getVoiceProfileStatus: () => cmd({ type: "GetVoiceProfileStatus" }),
+    getShortcutListenerStatus: () => cmd({ type: "GetShortcutListenerStatus" }),
     startVoiceEnrollment: (step: string) => cmd({ type: "StartVoiceEnrollment", data: { step } }),
     cancelVoiceEnrollment: () => {
       setState((p) => ({ ...p, enrollment: { ...p.enrollment, recordingStep: null, isPreparing: false } }));

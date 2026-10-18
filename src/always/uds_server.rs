@@ -1228,6 +1228,13 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                 crate::always::enrollment::profile_status(ctx.cfg.read().speaker_gate_enabled);
             global_broadcaster().voice_profile_status(enrolled, enabled, steps);
         }
+        DaemonCommand::GetShortcutListenerStatus => {
+            // Re-send only a known status; "unknown" (listener not started
+            // yet) is announced by the listener itself when it reports.
+            if let Some(granted) = crate::always::keyboard::input_monitoring_status() {
+                global_broadcaster().shortcut_listener_status(granted);
+            }
+        }
         DaemonCommand::RespawnRecorder => {
             // macOS reports the default input device changed. The running
             // `rec` opened the old device at spawn time and won't follow

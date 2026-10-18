@@ -18,7 +18,7 @@ export function GeneralPanel({
 
   return (
     <div className="p-5 space-y-3.5">
-      <PermissionsBanner />
+      <PermissionsBanner daemon={daemon} />
 
       {/* Sound cues */}
       <Card>
