@@ -238,17 +238,19 @@ function ModelsSection({ daemon, config, onConfigChange }: {
           </div>
         );
       })()}
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="flex-1" />
+      <div className="flex items-center gap-1 overflow-x-auto">
         <Segmented
           value={langFilter}
           onChange={setLangFilter}
           options={[{ label: "All", value: "all" }, { label: "English", value: "english" }, { label: "Multilingual", value: "multilingual" }]}
         />
+        <FilterChip on={onlyTranslation} onClick={() => setOnlyTranslation((v) => !v)}>Translation</FilterChip>
+        <FilterChip on={onlyFast} onClick={() => setOnlyFast((v) => !v)}>Fast</FilterChip>
+        <FilterChip on={onlyStreaming} onClick={() => setOnlyStreaming((v) => !v)}>Streaming</FilterChip>
         <select
           value={sort}
           onChange={(e) => setSort(e.target.value as SortKey)}
-          className="bg-surface-800 border border-surface-700 rounded px-2 py-1 text-xs text-surface-200"
+          className="ml-auto shrink-0 bg-surface-800 border border-surface-700 rounded px-2 py-1 text-xs text-surface-200"
         >
           <option value="default">Sort</option>
           <option value="best">↓ Best</option>
@@ -256,10 +258,7 @@ function ModelsSection({ daemon, config, onConfigChange }: {
           <option value="speed">↓ Speed</option>
         </select>
       </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <FilterChip on={onlyTranslation} onClick={() => setOnlyTranslation((v) => !v)}>Translation</FilterChip>
-        <FilterChip on={onlyFast} onClick={() => setOnlyFast((v) => !v)}>Fast</FilterChip>
-        <FilterChip on={onlyStreaming} onClick={() => setOnlyStreaming((v) => !v)}>Streaming</FilterChip>
+      <div className="flex items-center gap-2">
         {filtersActive && (
           <button
             type="button"
@@ -312,7 +311,7 @@ function FilterChip({ on, onClick, children }: { on: boolean; onClick: () => voi
     <button
       type="button"
       onClick={onClick}
-      className={`px-2.5 py-1 rounded-md text-xs border transition-colors ${
+      className={`px-2 py-1 rounded-md text-xs border transition-colors ${
         on ? "bg-primary-600 border-primary-500 text-white" : "bg-surface-800 border-surface-700 text-surface-300 hover:bg-surface-700"
       }`}
     >
@@ -373,16 +372,28 @@ function ModelCard({ m, daemon, active }: { m: CatalogModel; daemon: DaemonApi; 
               )
             ))}
             {m.is_downloaded ? (
-              <Btn small destructive disabled={active || busy || s.loadingBackend !== null} title={active ? `Switch to another model before deleting ${m.name}` : `Delete ${m.name}`} onClick={() => {
+              <button
+                type="button"
+                className="inline-flex items-center justify-center w-7 h-7 rounded-md bg-red-500/10 text-red-400 hover:bg-red-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
+                aria-label={`Delete ${m.name}`}
+                disabled={active || busy || s.loadingBackend !== null}
+                title={active ? `Switch to another model before deleting ${m.name}` : `Delete ${m.name}`}
+                onClick={() => {
                 if (window.confirm(`Delete "${m.name}"? You'll need to re-download it to use it again.`)) daemon.deleteModel(m.id);
-              }}>Delete</Btn>
-            ) : m.is_downloading ? (
-              <Btn small onClick={() => daemon.cancelModelDownload(m.id)}>Cancel</Btn>
-            ) : installing ? <Spinner /> : (
-              <Btn small disabled={!s.isDaemonConnected || busy} onClick={() => daemon.downloadModel(m.id)}>
-                <DownloadIcon />{sizeLabel(m.size_mb)}
-              </Btn>
-            )}
+                }}
+              >
+                <TrashIcon />
+              </button>
+            ) : null}
+            {!m.is_downloaded ? (
+              m.is_downloading ? (
+                <Btn small onClick={() => daemon.cancelModelDownload(m.id)}>Cancel</Btn>
+              ) : installing ? <Spinner /> : (
+                <Btn small disabled={!s.isDaemonConnected || busy} onClick={() => daemon.downloadModel(m.id)}>
+                  <DownloadIcon />{sizeLabel(m.size_mb)}
+                </Btn>
+              )
+            ) : null}
           </div>
           {err && <Caption className="text-red-400 mt-1">{err}</Caption>}
           {busy && (
@@ -435,6 +446,10 @@ function LoadingLabel() {
 
 function DownloadIcon() {
   return <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="9" strokeWidth={1.8} /><path d="M12 7v10m-4-4 4 4 4-4" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" /></svg>;
+}
+
+function TrashIcon() {
+  return <svg aria-hidden="true" className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6m4 4v6m6-6v6" /></svg>;
 }
 
 function languageLabel(m: CatalogModel): string {

@@ -77,6 +77,14 @@ impl FrameRing {
 
 // ─── Shared audio source ───────────────────────────────────────────
 
+struct CaptureInput {
+    device: cpal::Device,
+    config: cpal::StreamConfig,
+    sample_format: cpal::SampleFormat,
+    sample_rate: u32,
+    channels: usize,
+}
+
 pub struct SharedAudioSource {
     ring: Arc<Mutex<FrameRing>>,
     running: Arc<AtomicBool>,
@@ -111,11 +119,13 @@ impl SharedAudioSource {
         let running_clone = Arc::clone(&running);
 
         let capture_thread = Self::run_capture(
-            device,
-            stream_config,
-            sample_format,
-            input_rate,
-            input_channels,
+            CaptureInput {
+                device,
+                config: stream_config,
+                sample_format,
+                sample_rate: input_rate,
+                channels: input_channels,
+            },
             tx,
             rx,
             ring_clone,
@@ -199,16 +209,19 @@ impl SharedAudioSource {
 
     /// Run the capture stream + channel drainer in one thread.
     fn run_capture(
-        device: cpal::Device,
-        config: cpal::StreamConfig,
-        sample_format: cpal::SampleFormat,
-        input_rate: u32,
-        input_channels: usize,
+        input: CaptureInput,
         tx: mpsc::Sender<[u8; FRAME_BYTES]>,
         rx: Arc<Mutex<Option<mpsc::Receiver<[u8; FRAME_BYTES]>>>>,
         ring: Arc<Mutex<FrameRing>>,
         running: Arc<AtomicBool>,
     ) -> thread::JoinHandle<()> {
+        let CaptureInput {
+            device,
+            config,
+            sample_format,
+            sample_rate: input_rate,
+            channels: input_channels,
+        } = input;
         let tx = Arc::new(Mutex::new(Some(tx)));
         let tx_clone = Arc::clone(&tx);
         let running_clone = Arc::clone(&running);

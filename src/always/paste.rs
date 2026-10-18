@@ -323,45 +323,84 @@ pub fn replace_via_undo(_text: &str) -> Result<()> {
 // ─── macOS paste_text ───────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
+struct MacPasteEvents {
+    command_down: core_graphics::event::CGEvent,
+    v_down: core_graphics::event::CGEvent,
+    v_up: core_graphics::event::CGEvent,
+    command_up: core_graphics::event::CGEvent,
+    enter: Option<(core_graphics::event::CGEvent, core_graphics::event::CGEvent)>,
+}
+
+#[cfg(target_os = "macos")]
+fn mac_paste_events(
+    source: &core_graphics::event_source::CGEventSource,
+    auto_enter: bool,
+) -> Result<MacPasteEvents> {
+    use core_graphics::event::{CGEvent, CGEventFlags, CGKeyCode, KeyCode};
+
+    let command_keycode: CGKeyCode = KeyCode::COMMAND;
+    let v_keycode: CGKeyCode = 9; // 'v' key
+    let command_down = CGEvent::new_keyboard_event(source.clone(), command_keycode, true)
+        .map_err(|_| anyhow::anyhow!("Failed to create Command key down event"))?;
+    command_down.set_flags(CGEventFlags::CGEventFlagCommand);
+    let v_down = CGEvent::new_keyboard_event(source.clone(), v_keycode, true)
+        .map_err(|_| anyhow::anyhow!("Failed to create V key down event"))?;
+    v_down.set_flags(CGEventFlags::CGEventFlagCommand);
+    let v_up = CGEvent::new_keyboard_event(source.clone(), v_keycode, false)
+        .map_err(|_| anyhow::anyhow!("Failed to create V key up event"))?;
+    v_up.set_flags(CGEventFlags::CGEventFlagCommand);
+    let command_up = CGEvent::new_keyboard_event(source.clone(), command_keycode, false)
+        .map_err(|_| anyhow::anyhow!("Failed to create Command key up event"))?;
+    command_up.set_flags(CGEventFlags::empty());
+
+    // Build every event before posting any, so a construction failure cannot
+    // leave a modifier logically held in the target application.
+    let enter = if auto_enter {
+        let enter_keycode: CGKeyCode = KeyCode::RETURN;
+        let down = CGEvent::new_keyboard_event(source.clone(), enter_keycode, true)
+            .map_err(|_| anyhow::anyhow!("Failed to create Return key down event"))?;
+        down.set_flags(CGEventFlags::empty());
+        let up = CGEvent::new_keyboard_event(source.clone(), enter_keycode, false)
+            .map_err(|_| anyhow::anyhow!("Failed to create Return key up event"))?;
+        up.set_flags(CGEventFlags::empty());
+        Some((down, up))
+    } else {
+        None
+    };
+
+    Ok(MacPasteEvents {
+        command_down,
+        v_down,
+        v_up,
+        command_up,
+        enter,
+    })
+}
+
+#[cfg(target_os = "macos")]
 pub fn paste_text(auto_enter: bool) -> Result<()> {
     if no_paste_env() {
         return Ok(());
     }
-    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
+    use core_graphics::event::CGEventTapLocation;
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow::anyhow!("Failed to create CGEventSource"))?;
+    let events = mac_paste_events(&source, auto_enter)?;
+    events.command_down.post(CGEventTapLocation::HID);
+    events.v_down.post(CGEventTapLocation::HID);
+    events.v_up.post(CGEventTapLocation::HID);
+    events.command_up.post(CGEventTapLocation::HID);
 
-    // Simulate Cmd+V
-    let v_keycode: CGKeyCode = 9; // 'v' key
-    let key_down = CGEvent::new_keyboard_event(source.clone(), v_keycode, true)
-        .map_err(|_| anyhow::anyhow!("Failed to create key down event"))?;
-    key_down.set_flags(CGEventFlags::CGEventFlagCommand);
-    key_down.post(CGEventTapLocation::HID);
-
-    let key_up = CGEvent::new_keyboard_event(source.clone(), v_keycode, false)
-        .map_err(|_| anyhow::anyhow!("Failed to create key up event"))?;
-    key_up.set_flags(CGEventFlags::CGEventFlagCommand);
-    key_up.post(CGEventTapLocation::HID);
-
-    if auto_enter {
+    if let Some((enter_down, enter_up)) = events.enter {
         // Longer sleep: the Cmd flag from the V keystrokes above can
         // still register as held when Return posts < 20ms later. In
         // Ghostty (and other apps that bind Cmd+Return) that surfaces
-        // as a spurious binding hit instead of a newline. Bumping to
-        // 50ms and explicitly clearing flags on the Return events
-        // makes the keystroke read as a bare Return everywhere.
+        // as a spurious binding hit instead of a newline. Keep the 50ms
+        // delay, with Command explicitly released before the bare Return.
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let enter_keycode: CGKeyCode = 36; // Return key
-        let enter_down = CGEvent::new_keyboard_event(source.clone(), enter_keycode, true)
-            .map_err(|_| anyhow::anyhow!("Failed to create enter key down event"))?;
-        enter_down.set_flags(CGEventFlags::empty());
         enter_down.post(CGEventTapLocation::HID);
-
-        let enter_up = CGEvent::new_keyboard_event(source, enter_keycode, false)
-            .map_err(|_| anyhow::anyhow!("Failed to create enter key up event"))?;
-        enter_up.set_flags(CGEventFlags::empty());
         enter_up.post(CGEventTapLocation::HID);
     }
 
@@ -996,6 +1035,90 @@ mod tests {
         // Erased trait object — the daemon hands `Box<dyn ClipboardProvider>`
         // around. If this stops compiling we've broken DI.
         let _: Box<dyn ClipboardProvider> = Box::new(MockClipboardProvider::new());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_paste_sends_balanced_command_flags_changed_events() {
+        use core_graphics::event::{CGEvent, CGEventFlags, CGEventType, EventField, KeyCode};
+        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+        fn command_seen_by_flags_observer(events: &[&CGEvent]) -> (bool, bool) {
+            let mut command_down_during_v = false;
+            let mut command_down_after_sequence = false;
+            let mut command_down = false;
+            for event in events {
+                if event.get_type() as u32 == CGEventType::FlagsChanged as u32 {
+                    command_down = event.get_flags().contains(CGEventFlags::CGEventFlagCommand);
+                }
+                if event.get_type() as u32 == CGEventType::KeyDown as u32
+                    && event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) == 9
+                // 'v' key
+                {
+                    command_down_during_v = command_down;
+                }
+                command_down_after_sequence = command_down;
+            }
+            (command_down_during_v, command_down_after_sequence)
+        }
+
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).unwrap();
+        let events = mac_paste_events(&source, false).unwrap();
+
+        assert_eq!(
+            events.command_down.get_type() as u32,
+            CGEventType::FlagsChanged as u32
+        );
+        assert_eq!(
+            events.command_up.get_type() as u32,
+            CGEventType::FlagsChanged as u32
+        );
+        assert_eq!(
+            events
+                .command_down
+                .get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
+            i64::from(KeyCode::COMMAND)
+        );
+        assert_eq!(
+            events
+                .command_up
+                .get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
+            i64::from(KeyCode::COMMAND)
+        );
+        assert!(
+            events
+                .command_down
+                .get_flags()
+                .contains(CGEventFlags::CGEventFlagCommand)
+        );
+        assert!(
+            !events
+                .command_up
+                .get_flags()
+                .contains(CGEventFlags::CGEventFlagCommand)
+        );
+
+        // Old implementation: V events carry Command flags, but a UTM-style
+        // observer that updates modifier state only for FlagsChanged sees plain v.
+        let old_v_down = CGEvent::new_keyboard_event(source.clone(), 9, true).unwrap();
+        old_v_down.set_flags(CGEventFlags::CGEventFlagCommand);
+        let old_v_up = CGEvent::new_keyboard_event(source.clone(), 9, false).unwrap();
+        old_v_up.set_flags(CGEventFlags::CGEventFlagCommand);
+        assert_eq!(
+            command_seen_by_flags_observer(&[&old_v_down, &old_v_up]),
+            (false, false)
+        );
+
+        assert_eq!(
+            command_seen_by_flags_observer(&[
+                &events.command_down,
+                &events.v_down,
+                &events.v_up,
+                &events.command_up,
+            ]),
+            (true, false)
+        );
+        assert!(events.enter.is_none());
     }
 
     #[cfg(all(not(target_os = "macos"), target_os = "linux"))]

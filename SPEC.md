@@ -230,7 +230,9 @@ VPIO's noise suppression was not measurable on a single-speaker machine.
    *after* Return, not before it (2026-10-13, user request: "make it insanely
    fast" — previously Return landed ~155 ms after the paste). The clipboard is
    written in-process through `NSPasteboard` (p50 0.84 ms) rather than a
-   `pbcopy` subprocess (p50 17.4 ms), which remains the fallback.
+   `pbcopy` subprocess (p50 17.4 ms), which remains the fallback. On macOS,
+   simulated Cmd+V brackets the V key events with Command `FlagsChanged` events;
+   optional Return is sent after Command is released.
 
 **Long utterances (chunks).** A chunk committed by the hard flush
 (`CHUNK_HARD_MAX_SECS`) ends at our cut, not at a pause the speaker made, so a
@@ -1406,6 +1408,10 @@ step.
 Stored in the daemon's database, editable from Settings and the CLI
 (`always-daemon config set <key> <value>`).
 
+The macOS Transcript History panel fills the available settings content height,
+including while loading or empty. With no entries, its message is centered in
+the space below the header; populated history uses that space for its list.
+
 **Settings controls.** Settings labels and explanatory text are not selectable
 as ordinary web text. Inputs, editable text, and transcript-history entries
 remain selectable. Models cards use subdued dark surfaces against the dark
@@ -1422,6 +1428,16 @@ the 0–1 score scale. Model rows use accuracy and speed bars, plus globe,
 translation, streaming, and storage metadata icons. Target language selection
 appears only for an active model that supports it; Linux omits the Auto-detect
 choice from that picker.
+
+The shared Windows/Linux settings layout follows the macOS reference in these
+areas: Models keeps language, capability, and sort filters in one row and uses
+an icon-only trash action for downloaded models; My Voice groups the gate label,
+current status, and switch in one tinted row without changing enrollment rules;
+Permissions puts a shield beside its heading, Re-check at the top right, and
+one inline status indicator per permission. Library centers its tabs without
+an extra content heading and puts the glossary file action and path above the
+entries. About places update status beside Check for Updates. Platform-specific
+permission names and actions remain intact.
 
 On Linux, the Behavior switches for adaptive silence and live transcript apply
 their changes to the running daemon immediately and save them for the next

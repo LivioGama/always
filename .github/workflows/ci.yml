@@ -101,7 +101,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-keys: |
+          shared-key: |
             rust-checks
           # Save from develop (the default branch): every PR and main can
           # restore default-branch caches, so one writer warms them all.

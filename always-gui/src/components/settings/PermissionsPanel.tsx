@@ -24,21 +24,32 @@ export function PermissionsPanel({ daemon }: { daemon: DaemonApi }) {
 
   return (
     <div className="p-5 space-y-4">
-      <div>
-        <PanelTitle>Permissions</PanelTitle>
-        <Caption className="mt-1">
+      <div className="flex items-start gap-3">
+        <svg className="w-6 h-6 shrink-0 text-green-500" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M12 2 3 5v6c0 5.6 3.8 9.8 9 11 5.2-1.2 9-5.4 9-11V5l-9-3zm-1.2 14.3-3.4-3.4 1.4-1.4 2 2 4.5-4.5 1.4 1.4-5.9 5.9z" />
+        </svg>
+        <div className="flex-1 min-w-0">
+          <PanelTitle>Permissions</PanelTitle>
+          <Caption className="mt-1">
           {os === "windows"
             ? "Windows grants desktop apps mic access globally — but it can be turned off in Settings → Privacy & security → Microphone."
             : os === "linux"
               ? "Microphone access comes from your audio session. Global shortcuts require an X11 session."
               : "Always needs these permissions to hear you and type for you."}
-        </Caption>
+          </Caption>
+        </div>
+        <Btn onClick={recheck} disabled={checking}>
+          {checking ? <Spinner /> : null}
+          Re-check
+        </Btn>
       </div>
 
       <PermissionRow
         icon="mic"
         ok={micOk}
         title="Microphone"
+        okStatus="Granted"
+        badStatus="Unavailable"
         okText="Granted — the daemon is hearing audio."
         badText="Can't reach the daemon, so the microphone state is unknown. Start the daemon, or check OS microphone privacy settings."
         actionTitle={os === "windows" ? "Open Microphone Settings" : os === "macos" ? "Open Settings" : undefined}
@@ -57,6 +68,8 @@ export function PermissionsPanel({ daemon }: { daemon: DaemonApi }) {
         icon="keyboard"
         ok={shortcutsOk}
         title={os === "macos" ? "Input Monitoring" : "Global Shortcuts"}
+        okStatus={os === "windows" ? "Active" : "Granted"}
+        badStatus={os === "windows" ? "Inactive" : "Unavailable"}
         okText={
           os === "windows"
             ? "Active — the daemon is listening for global hotkeys."
@@ -77,36 +90,25 @@ export function PermissionsPanel({ daemon }: { daemon: DaemonApi }) {
         }
       />
 
-      <div className="flex items-center gap-2 pt-1">
-        <Btn onClick={recheck} disabled={checking}>
-          {checking ? <Spinner /> : null}
-          Re-check
-        </Btn>
-        <Caption>Statuses refresh live when the daemon reports them.</Caption>
-      </div>
+      <Caption>Statuses refresh live when the daemon reports them.</Caption>
     </div>
   );
 }
 
-function PermissionRow({ icon, ok, title, okText, badText, actionTitle, onAction }: {
+function PermissionRow({ icon, ok, title, okStatus, badStatus, okText, badText, actionTitle, onAction }: {
   icon: "mic" | "keyboard";
   ok: boolean;
   title: string;
+  okStatus: string;
+  badStatus: string;
   okText: string;
   badText: string;
   actionTitle?: string;
   onAction?: () => void;
 }) {
   return (
-    <div className="flex items-start gap-3 rounded-lg bg-white/[0.08] p-3">
-      <span className="mt-0.5 text-surface-400">
-        {icon === "mic" ? (
-          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="9" y="2" width="6" height="12" rx="3" strokeWidth={2} /><path strokeWidth={2} strokeLinecap="round" d="M5 10a7 7 0 0014 0m-7 7v5m-4 0h8" /></svg>
-        ) : (
-          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="4" width="18" height="13" rx="2" strokeWidth={2} /><path strokeWidth={2} strokeLinecap="round" d="M8 21h8m-4-4v4" /></svg>
-        )}
-      </span>
-      <span className={`mt-0.5 ${ok ? "text-green-500" : "text-orange-400"}`}>
+    <div className="flex items-start gap-2 rounded-lg bg-white/[0.08] p-3">
+      <span className={`mt-0.5 shrink-0 ${ok ? "text-green-500" : "text-orange-400"}`}>
         {ok ? (
           <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
             <path d="M12 2a10 10 0 100 20 10 10 0 000-20zm-1.5 14.5l-4-4 1.4-1.4 2.6 2.6 5.6-5.6 1.4 1.4-7 7z" />
@@ -117,13 +119,21 @@ function PermissionRow({ icon, ok, title, okText, badText, actionTitle, onAction
           </svg>
         )}
       </span>
+      <span className="mt-0.5 shrink-0 text-surface-400">
+        {icon === "mic" ? (
+          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="9" y="2" width="6" height="12" rx="3" strokeWidth={2} /><path strokeWidth={2} strokeLinecap="round" d="M5 10a7 7 0 0014 0m-7 7v5m-4 0h8" /></svg>
+        ) : (
+          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="4" width="18" height="13" rx="2" strokeWidth={2} /><path strokeWidth={2} strokeLinecap="round" d="M8 21h8m-4-4v4" /></svg>
+        )}
+      </span>
       <div className="flex-1 min-w-0">
-        <div className="text-[13px] font-medium text-surface-100">{title}</div>
+        <div className="flex items-center gap-1.5">
+          <span className="text-[13px] font-medium text-surface-100">{title}</span>
+          <span className={`text-[10px] font-medium ${ok ? "text-green-400" : "text-orange-400"}`}>{ok ? okStatus : badStatus}</span>
+        </div>
         <Caption>{ok ? okText : badText}</Caption>
       </div>
-      {ok ? (
-        <svg className="w-4 h-4 mt-0.5 text-green-500" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 100 20 10 10 0 000-20zm-1.5 14.5l-4-4 1.4-1.4 2.6 2.6 5.6-5.6 1.4 1.4-7 7z" /></svg>
-      ) : actionTitle && onAction ? <Btn onClick={onAction}>{actionTitle}</Btn> : null}
+      {!ok && actionTitle && onAction ? <Btn onClick={onAction}>{actionTitle}</Btn> : null}
     </div>
   );
 }

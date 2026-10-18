@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { appFilePath, openPath, readAppFile, writeAppFile } from "../../lib/tauri";
-import { Btn, Caption, PanelTitle, Segmented, Spinner } from "../controls";
+import { Btn, Caption, Segmented, Spinner } from "../controls";
 
 /// Settings → Library: Vocabulary (glossary.json) + Snippets (snippets.json).
 /// Mirrors LibraryPanel.swift hosting VocabularyPanel / SnippetsPanel —
@@ -10,9 +10,7 @@ export function LibraryPanel() {
   const [tab, setTab] = useState<"vocabulary" | "snippets">("vocabulary");
   return (
     <div className="p-5 space-y-4">
-      <div className="flex items-center gap-2">
-        <PanelTitle>Library</PanelTitle>
-        <div className="flex-1" />
+      <div className="flex justify-center">
         <Segmented
           width={220}
           value={tab}
@@ -102,6 +100,11 @@ function VocabularyPanel() {
         </div>
       )}
 
+      <div className="flex items-center gap-2">
+        <Btn small onClick={() => openPath(path)}>Open glossary.json</Btn>
+      </div>
+      {path && <Caption className="truncate">{path}</Caption>}
+
       {entries.length === 0 ? (
         <div className="rounded-lg bg-white/[0.08] p-5 text-center">
           <Caption className="italic">No glossary entries yet. Open glossary.json to add terms.</Caption>
@@ -138,10 +141,7 @@ function VocabularyPanel() {
 
       <div className="flex items-center gap-2">
         <Caption>{entries.length} {entries.length === 1 ? "entry" : "entries"}</Caption>
-        <div className="flex-1" />
-        <Btn small onClick={() => openPath(path)}>Open glossary.json</Btn>
       </div>
-      {path && <Caption className="truncate">{path}</Caption>}
 
       {pendingDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">

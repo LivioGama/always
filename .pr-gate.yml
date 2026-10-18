@@ -10,6 +10,8 @@ remoteCi:
   workflow: ci.yml
   timeoutMin: 40
 maxCiAttempts: 3
+argus:
+  maxIterations: 7
 review:
   maxRounds: 6
   instructions: |

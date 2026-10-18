@@ -144,9 +144,13 @@ pub fn socket_path() -> Result<PathBuf> {
     } else {
         // Linux: Use XDG_RUNTIME_DIR or fallback to /tmp
         if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-            PathBuf::from(runtime_dir).join(format!("always{}.sock", crate::config::instance_suffix()))
+            PathBuf::from(runtime_dir)
+                .join(format!("always{}.sock", crate::config::instance_suffix()))
         } else {
-            PathBuf::from(format!("/tmp/always{}.sock", crate::config::instance_suffix()))
+            PathBuf::from(format!(
+                "/tmp/always{}.sock",
+                crate::config::instance_suffix()
+            ))
         }
     };
 
@@ -440,7 +444,6 @@ fn tune_send_buf<S>(stream: &S)
 where
     S: std::os::fd::AsRawFd,
 {
-    use std::os::fd::AsRawFd;
     // macOS caps SO_SNDBUF on Unix domain streams well below 1 MB —
     // asking for it fails with EINVAL on every boot (observed live).
     // Step down to a size the kernel accepts and log at debug: this

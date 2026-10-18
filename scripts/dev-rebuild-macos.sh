@@ -167,7 +167,27 @@ fi
 
 echo "▶ launching Always Dev..."
 open "$DEV_APP"
-sleep 3
+
+# LaunchServices starts the GUI before the app has finished spawning the
+# bundled daemon. A fixed three-second pause can race that asynchronous
+# startup; wait for the expected process instead, while retaining a hard
+# timeout so a broken launch still fails visibly.
+wait_for_process() {
+    local pattern="$1"
+    local attempt
+    for attempt in {1..15}; do
+        if pgrep -f "$pattern" >/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+wait_for_process "Always Dev.app/Contents/MacOS/Always$" || true
+if [ "$SKIP_DAEMON" = false ]; then
+    wait_for_process "Always Dev.app/Contents/MacOS/always-daemon run" || true
+fi
 
 # Prove the new build is the one running.
 #

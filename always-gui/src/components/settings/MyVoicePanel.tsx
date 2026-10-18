@@ -18,17 +18,29 @@ export function MyVoicePanel({ daemon }: { daemon: DaemonApi }) {
 
   return (
     <div className="p-5 space-y-3.5">
-      <div className="flex items-center gap-3">
+      <div>
+        <PanelTitle>My Voice</PanelTitle>
+        <Caption>
+          Teach Always your voice. Once enrolled and enabled, dictation responds only to you — voices from movies, music, videos, and other people are ignored.
+        </Caption>
+      </div>
+      <div className="flex items-center gap-3 rounded-md bg-primary-500/10 px-3 py-2.5">
         <svg
-          className={`w-6 h-6 ${allEnrolled && s.voiceEnabled ? "text-primary-400" : "text-surface-500"}`}
+          className={`w-5 h-5 shrink-0 ${allEnrolled && s.voiceEnabled ? "text-primary-400" : "text-surface-500"}`}
           viewBox="0 0 24 24" fill="none" stroke="currentColor"
         >
           <circle cx="12" cy="8" r="3.5" strokeWidth={2} />
           <path strokeWidth={2} strokeLinecap="round" d="M4 20c1.5-3.5 4.5-5 8-5s6.5 1.5 8 5M2 10c.8-2 1.8-3 3-3m17 3c-.8-2-1.8-3-3-3" />
         </svg>
         <div className="flex-1">
-          <PanelTitle>My Voice</PanelTitle>
-          <Caption>Teach Always to recognize your voice — others can't accidentally trigger it.</Caption>
+          <div className="text-[13px] font-medium text-surface-100">Only listen to my voice</div>
+          <Caption>
+            {allEnrolled && s.voiceEnabled
+              ? "Active — Always ignores every voice except yours."
+              : allEnrolled
+                ? "Voiceprint ready — enable My Voice to ignore other voices."
+                : "Voice gating is off. Record all three samples before you can enable My Voice."}
+          </Caption>
         </div>
         <Toggle
           on={s.voiceEnabled}
@@ -36,10 +48,6 @@ export function MyVoicePanel({ daemon }: { daemon: DaemonApi }) {
           disabled={!s.isDaemonConnected || (!allEnrolled && !s.voiceEnabled)}
         />
       </div>
-
-      {s.isDaemonConnected && !allEnrolled && !s.voiceEnabled && (
-        <Caption className="pl-9">Voice gating is off. Record all three samples before you can enable My Voice.</Caption>
-      )}
 
       {!s.isDaemonConnected && (
         <div className="rounded-md bg-orange-500/10 border border-orange-500/30 px-3 py-2 text-xs text-orange-400">

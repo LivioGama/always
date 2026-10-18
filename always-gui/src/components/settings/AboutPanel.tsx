@@ -143,33 +143,39 @@ function UpdateSection({ daemon }: { daemon: DaemonApi }) {
         <PanelTitle>Updates</PanelTitle>
       </div>
 
-      <Btn
-        small
-        onClick={daemon.checkForUpdates}
-        disabled={!daemon.state.isDaemonConnected || u.kind === "checking" || u.kind === "installing"}
-      >
-        {u.kind === "checking" ? <Spinner /> : (
-          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M20 7v5h-5M4 17v-5h5m10-1a7 7 0 00-12.4-4L4 9m16 6-2.6 2a7 7 0 01-12.4-4" /></svg>
-        )}
-        Check for Updates
-      </Btn>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <Btn
+          small
+          onClick={daemon.checkForUpdates}
+          disabled={!daemon.state.isDaemonConnected || u.kind === "checking" || u.kind === "installing"}
+        >
+          {u.kind === "checking" ? <Spinner /> : (
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M20 7v5h-5M4 17v-5h5m10-1a7 7 0 00-12.4-4L4 9m16 6-2.6 2a7 7 0 01-12.4-4" /></svg>
+          )}
+          Check for Updates
+        </Btn>
 
-      {u.kind === "unknown" && (
-        <Caption>The daemon checks GitHub releases. Click to check now.</Caption>
-      )}
-      {u.kind === "checking" && <Caption>Checking for updates…</Caption>}
-      {u.kind === "upToDate" && (
-        <div className="flex items-center gap-2 text-green-500">
-          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M12 2a10 10 0 100 20 10 10 0 000-20zm-1.5 14.5l-4-4 1.4-1.4 2.6 2.6 5.6-5.6 1.4 1.4-7 7z" />
-          </svg>
-          <Caption className="!text-green-400">You're up to date ({u.version}).</Caption>
-        </div>
-      )}
-      {u.kind === "noRelease" && <Caption>No release found for this platform yet.</Caption>}
-      {u.kind === "checkFailed" && (
-        <Caption className="!text-red-400">Update check failed: {u.reason}</Caption>
-      )}
+        {u.kind === "unknown" && (
+          <Caption>The daemon checks GitHub releases. Click to check now.</Caption>
+        )}
+        {u.kind === "checking" && <Caption>Checking for updates…</Caption>}
+        {u.kind === "upToDate" && (
+          <div className="flex items-center gap-1.5 text-green-500">
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 2a10 10 0 100 20 10 10 0 000-20zm-1.5 14.5l-4-4 1.4-1.4 2.6 2.6 5.6-5.6 1.4 1.4-7 7z" />
+            </svg>
+            <Caption className="!text-green-400">You're up to date ({u.version}).</Caption>
+          </div>
+        )}
+        {u.kind === "noRelease" && <Caption>No release found for this platform yet.</Caption>}
+        {u.kind === "checkFailed" && (
+          <Caption className="!text-red-400">Update check failed: {u.reason}</Caption>
+        )}
+        {u.kind === "failed" && (
+          <Caption className="!text-red-400">Update failed: {u.message}</Caption>
+        )}
+      </div>
+
       {u.kind === "available" && (
         <div className="rounded-lg bg-primary-500/10 border border-primary-500/30 p-2.5 space-y-2">
           <div className="text-[13px] text-surface-100">
@@ -200,9 +206,6 @@ function UpdateSection({ daemon }: { daemon: DaemonApi }) {
             )}
           </div>
         </div>
-      )}
-      {u.kind === "failed" && (
-        <Caption className="!text-red-400">Update failed: {u.message}</Caption>
       )}
     </div>
   );

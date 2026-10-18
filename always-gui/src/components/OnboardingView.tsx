@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import type { DaemonApi } from "../hooks/useDaemonState";
+import { ENROLLMENT_STEPS, type DaemonApi } from "../hooks/useDaemonState";
 import { openUrl, platform } from "../lib/tauri";
-import { Btn, Caption, Spinner } from "./controls";
+import { Btn, Caption, LevelMeter, Spinner } from "./controls";
 
-type Step = "welcome" | "permissions" | "apps" | "done";
-const STEPS: Step[] = ["welcome", "permissions", "apps", "done"];
+type Step = "welcome" | "permissions" | "voice" | "tips" | "ready";
+const STEPS: Step[] = ["welcome", "permissions", "voice", "tips", "ready"];
 
 /// First-run onboarding. Mirrors OnboardingView.swift: welcome → permission
 /// grants → pick the apps Always resumes in (allowlist) → done.
@@ -21,6 +21,25 @@ export function OnboardingView({
   const idx = STEPS.indexOf(step);
   const next = () => setStep(STEPS[Math.min(idx + 1, STEPS.length - 1)]);
   const back = () => setStep(STEPS[Math.max(idx - 1, 0)]);
+  const enrolledSteps = daemon.state.voiceSteps;
+  const allVoiceStepsRecorded = ENROLLMENT_STEPS.every((s) => enrolledSteps.includes(s.key));
+
+  useEffect(() => {
+    daemon.setupMode(true);
+    return () => daemon.setupMode(false);
+    // The daemon command sender is stable in behavior but recreated with the API object.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (daemon.state.isDaemonConnected) daemon.getVoiceProfileStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [daemon.state.isDaemonConnected]);
+
+  useEffect(() => {
+    if (allVoiceStepsRecorded && !daemon.state.voiceEnabled) daemon.setVoiceProfileEnabled(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allVoiceStepsRecorded]);
 
   return (
     <div className="min-h-screen bg-surface-950 flex flex-col items-center justify-center p-6">
@@ -48,12 +67,13 @@ export function OnboardingView({
         <div className="bg-surface-900 rounded-2xl p-6 border border-white/10 animate-fade-in min-h-[300px]">
           {step === "welcome" && <StepWelcome />}
           {step === "permissions" && <StepPermissions daemon={daemon} />}
-          {step === "apps" && <StepApps daemon={daemon} />}
-          {step === "done" && <StepDone />}
+          {step === "voice" && <StepVoice daemon={daemon} />}
+          {step === "tips" && <StepTips />}
+          {step === "ready" && <StepReady daemon={daemon} />}
         </div>
 
         <div className="flex gap-3 mt-6">
-          {idx > 0 && step !== "done" && (
+          {idx > 0 && step !== "ready" && (
             <button
               onClick={back}
               className="px-4 py-2.5 text-sm font-medium text-surface-300 hover:text-white bg-surface-800 hover:bg-surface-700 rounded-lg transition-colors"
@@ -61,15 +81,15 @@ export function OnboardingView({
               Back
             </button>
           )}
-          {step !== "done" && (
+          {step !== "ready" && (
             <button
               onClick={next}
               className="flex-1 px-4 py-2.5 text-sm font-semibold text-white bg-primary-600 hover:bg-primary-500 rounded-lg transition-colors"
             >
-              {step === "welcome" ? "Get Started" : step === "apps" ? "Finish" : "Continue"}
+              {step === "welcome" ? "Get Started" : step === "voice" && !allVoiceStepsRecorded ? "Continue without it" : "Continue"}
             </button>
           )}
-          {step === "done" && (
+          {step === "ready" && (
             <button
               onClick={onComplete}
               className="flex-1 px-4 py-2.5 text-sm font-semibold text-white bg-primary-600 hover:bg-primary-500 rounded-lg transition-colors"
@@ -79,7 +99,7 @@ export function OnboardingView({
           )}
         </div>
 
-        {step === "done" && (
+        {step === "ready" && (
           <button
             onClick={onOpenSettings}
             className="mt-3 w-full px-4 py-2 text-sm font-medium text-surface-400 hover:text-white transition-colors"
@@ -95,12 +115,22 @@ export function OnboardingView({
             Skip for now — I'll do it later in Settings
           </button>
         )}
-        {step === "apps" && (
+        {step === "voice" && !allVoiceStepsRecorded && (
           <button
-            onClick={next}
+            onClick={() => {
+              if (window.confirm("Voice enrollment helps Always ignore other people, videos, and calls. Skip voice setup for now?")) next();
+            }}
             className="mt-3 w-full px-4 py-2 text-xs text-surface-500 hover:text-surface-300 transition-colors"
           >
-            Skip — keep me paused everywhere for now
+            Skip voice setup for now
+          </button>
+        )}
+        {step === "ready" && (
+          <button
+            onClick={onComplete}
+            className="mt-3 w-full px-4 py-2 text-xs text-surface-500 hover:text-surface-300 transition-colors"
+          >
+            Keep me paused everywhere for now
           </button>
         )}
       </div>
@@ -238,7 +268,7 @@ function PermissionCard({ ok, title, detail, actionTitle, onAction }: {
 
 /// Candidate apps = whatever is focused now plus anything already resumed —
 /// the Windows analogue of OnboardingAppCandidates' "running apps" list.
-function StepApps({ daemon }: { daemon: DaemonApi }) {
+function StepApps({ daemon, compact = false }: { daemon: DaemonApi; compact?: boolean }) {
   const s = daemon.state;
   const focused = s.focusedApp;
   const candidates = [...new Set([...(focused ? [focused] : []), ...s.resumedApps])];
@@ -249,11 +279,15 @@ function StepApps({ daemon }: { daemon: DaemonApi }) {
 
   return (
     <div className="animate-slide-up">
-      <h2 className="text-xl font-semibold text-white mb-3">Choose your apps</h2>
-      <p className="text-surface-300 text-sm leading-relaxed mb-4">
-        Always stays paused except in apps you allow. Tick an app to resume voice typing while it's focused —
-        you can change this any time in Settings → General.
-      </p>
+      {!compact && (
+        <>
+          <h2 className="text-xl font-semibold text-white mb-3">Choose your apps</h2>
+          <p className="text-surface-300 text-sm leading-relaxed mb-4">
+            Always stays paused except in apps you allow. Tick an app to resume voice typing while it's focused —
+            you can change this any time in Settings → General.
+          </p>
+        </>
+      )}
       {candidates.length === 0 ? (
         <div className="rounded-lg bg-white/[0.06] p-5 text-center">
           <Caption className="italic">
@@ -300,28 +334,87 @@ function StepApps({ daemon }: { daemon: DaemonApi }) {
   );
 }
 
-function StepDone() {
+function StepVoice({ daemon }: { daemon: DaemonApi }) {
+  const s = daemon.state;
+  const enrolledSteps = s.voiceSteps;
+  const recording = s.enrollment.recordingStep;
+  const allEnrolled = ENROLLMENT_STEPS.every((step) => enrolledSteps.includes(step.key));
+
+  return (
+    <div className="animate-slide-up space-y-2.5">
+      <h2 className="text-xl font-semibold text-white mb-2">Teach Always your voice</h2>
+      <Caption>Optional, but it helps Always ignore other people, videos, and calls. Record three short samples; you can also do this later in Settings.</Caption>
+      {!s.isDaemonConnected && (
+        <div className="rounded-md bg-orange-500/10 border border-orange-500/30 px-3 py-2 text-xs text-orange-400">
+          Daemon not connected — voice enrollment needs the running daemon.
+        </div>
+      )}
+      {s.enrollment.lastError && (
+        <div className="rounded-md bg-red-500/10 border border-red-500/30 px-3 py-2 text-xs text-red-400">{s.enrollment.lastError}</div>
+      )}
+      <div className="space-y-2">
+        {ENROLLMENT_STEPS.map((sample) => {
+          const done = enrolledSteps.includes(sample.key);
+          const active = recording === sample.key;
+          return (
+            <div key={sample.key} className={`rounded-lg p-3 ${active ? "bg-primary-500/10 ring-1 ring-primary-500/30" : "bg-white/[0.06]"}`}>
+              <div className="flex items-center gap-3">
+                <span className={`text-sm ${done ? "text-green-500" : "text-surface-500"}`}>{done ? "✓" : "○"}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-surface-100">{sample.title}</div>
+                  <Caption>{active ? (s.enrollment.isPreparing ? "Preparing voice model…" : "Listening — keep talking…") : sample.prompt}</Caption>
+                </div>
+                {active ? (
+                  <Btn onClick={daemon.cancelVoiceEnrollment}>Cancel</Btn>
+                ) : (
+                  <Btn disabled={!s.isDaemonConnected || recording !== null || s.enrollment.isPreparing} onClick={() => daemon.startVoiceEnrollment(sample.key)}>
+                    {done ? "Re-record" : "Record"}
+                  </Btn>
+                )}
+              </div>
+              {active && (
+                <div className="mt-2 flex items-center gap-2 pl-6">
+                  {s.enrollment.isPreparing ? <><Spinner /><Caption>Starting microphone…</Caption></> : <><LevelMeter level={s.enrollment.level} /><Caption>{(s.enrollment.voicedMs / 1000).toFixed(1)}s{s.enrollment.targetMs > 0 ? ` / ${(s.enrollment.targetMs / 1000).toFixed(0)}s` : ""}</Caption></>}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {allEnrolled && <Caption className="text-green-400">All three recorded — Always will only listen to your voice.</Caption>}
+    </div>
+  );
+}
+
+function StepTips() {
+  return (
+    <div className="animate-slide-up space-y-3">
+      <h2 className="text-xl font-semibold text-white mb-2">Tips & shortcuts</h2>
+      <Caption>Auto-enter is on by default. You can adjust it and remap shortcuts any time in Settings.</Caption>
+      {[
+        ["Ctrl+Alt+P", "Pause or resume for this app", "Pause dictation in the focused app without changing the rest of your allowlist."],
+        ["Ctrl+Alt+Shift+P", "Pause everywhere", "Use the master pause when you want Always silent in every app."],
+        ["Ctrl+Alt+A", "Toggle auto-enter", "When enabled, Always presses Enter after typing your words."],
+        ["Ctrl+Alt+V", "Paste filtered text anyway", "Use this when you want the raw transcript instead of filtered text."],
+        ["Ctrl+Alt+W", "Correct & improve your vocabulary", "Fix the last transcript; Always can learn the correction for next time."],
+      ].map(([shortcut, title, detail]) => (
+        <div key={shortcut} className="flex items-start gap-3 rounded-lg bg-white/[0.06] p-3">
+          <kbd className="shrink-0 text-primary-200 bg-primary-500/20 px-2 py-1 rounded text-xs">{shortcut}</kbd>
+          <div><div className="text-sm font-medium text-surface-100">{title}</div><Caption>{detail}</Caption></div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function StepReady({ daemon }: { daemon: DaemonApi }) {
   return (
     <div className="animate-slide-up">
       <h2 className="text-xl font-semibold text-white mb-3">You're all set!</h2>
       <p className="text-surface-300 text-sm leading-relaxed mb-4">
-        Always is ready. Focus an allowed app and speak — the transcribed text is pasted at your cursor.
+        Choose the apps where Always should type. Every other app stays paused. You can change this any time in Settings.
       </p>
-      <div className="bg-surface-800 rounded-lg p-4 space-y-2 text-sm">
-        {[
-          ["Pause / resume for this app", "Ctrl+Alt+P"],
-          ["Master pause (everywhere)", "Ctrl+Alt+Shift+P"],
-          ["Toggle auto-enter", "Ctrl+Alt+A"],
-          ["Re-paste last transcript", "Ctrl+Alt+V"],
-          ["Correction dialog", "Ctrl+Alt+W"],
-        ].map(([label, keys]) => (
-          <div key={label} className="flex justify-between text-surface-300">
-            <span>{label}</span>
-            <kbd className="text-surface-100 bg-surface-700 px-2 py-0.5 rounded text-xs">{keys}</kbd>
-          </div>
-        ))}
-      </div>
-      <Caption className="mt-3">Remap these any time in Settings → Shortcuts.</Caption>
+      <StepApps daemon={daemon} compact />
     </div>
   );
 }
