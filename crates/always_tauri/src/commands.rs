@@ -278,20 +278,22 @@ pub fn window_label(window: tauri::Window) -> String {
 // ── Windows ────────────────────────────────────────────────────────────────
 
 /// Both windows start hidden; the settings webview calls one of these once
-/// it knows whether onboarding is done.
+/// it knows whether onboarding is done. They build the manager from the app
+/// handle rather than managed state: the webview can call before `setup` runs.
 #[tauri::command]
-pub fn show_settings_window(wm: tauri::State<'_, std::sync::Arc<WindowManager>>) {
-    wm.show_settings();
+pub fn show_settings_window(app: tauri::AppHandle) {
+    WindowManager::new(app).show_settings();
 }
 
 #[tauri::command]
-pub fn show_onboarding_window(wm: tauri::State<'_, std::sync::Arc<WindowManager>>) {
-    wm.show_onboarding(ShowOnboardingReason::FirstLaunch);
+pub fn show_onboarding_window(app: tauri::AppHandle) {
+    WindowManager::new(app).show_onboarding(ShowOnboardingReason::FirstLaunch);
 }
 
 /// Onboarding finished or skipped: swap to the settings window.
 #[tauri::command]
-pub fn finish_onboarding(wm: tauri::State<'_, std::sync::Arc<WindowManager>>) {
+pub fn finish_onboarding(app: tauri::AppHandle) {
+    let wm = WindowManager::new(app);
     wm.hide_onboarding();
     wm.show_settings();
 }

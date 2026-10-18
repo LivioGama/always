@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuBuilder, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, Wry};
+use tauri::{AppHandle, Wry};
 use tokio::sync::mpsc;
 
 use crate::uds_client::{ClientEvent, DaemonEvent, DaemonState, UdsClient};
@@ -27,9 +27,7 @@ pub fn build_tray(app: &AppHandle, uds: Arc<UdsClient>) -> Result<TrayIcon<Wry>,
         .tooltip("Always")
         .menu(&build_menu(app, &initial_pause, &initial_auto)?)
         .on_menu_event(|app, event| {
-            let Some(wm) = app.try_state::<Arc<WindowManager>>() else {
-                return;
-            };
+            let wm = WindowManager::new(app.clone());
             match event.id().as_ref() {
                 "settings" => wm.show_settings(),
                 "onboarding" => wm.show_onboarding(ShowOnboardingReason::Reinvoked),

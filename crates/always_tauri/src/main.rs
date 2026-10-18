@@ -54,10 +54,9 @@ fn main() {
                 if window.label() == "onboarding" {
                     api.prevent_close();
                     let app = window.app_handle();
-                    if let Some(wm) = app.try_state::<Arc<WindowManager>>() {
-                        wm.hide_onboarding();
-                        wm.show_settings();
-                    }
+                    let wm = WindowManager::new(app.clone());
+                    wm.hide_onboarding();
+                    wm.show_settings();
                     let _ = app.emit_to("settings", "onboarding_dismissed", ());
                 }
             }
@@ -98,7 +97,6 @@ fn main() {
 
             // ── WindowManager ────────────────────────────────────────
             let wm = Arc::new(WindowManager::new(app.handle().clone()));
-            app.manage(wm);
 
             // ── System Tray ──────────────────────────────────────────
             match tray::build_tray(app.handle(), Arc::clone(&uds)) {
