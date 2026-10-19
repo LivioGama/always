@@ -2,6 +2,17 @@
   "productName": "Always GUI",
   "bundle": {
     "targets": ["deb", "appimage"],
+    "linux": {
+      "deb": {
+        "depends": [
+          "libasound2t64",
+          "libgcc-s1",
+          "libstdc++6",
+          "libx11-6",
+          "libxtst6"
+        ]
+      }
+    },
     "resources": {
       "bundle/daemon/always": "daemon/always"
     }
