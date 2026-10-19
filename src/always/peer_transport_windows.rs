@@ -432,6 +432,7 @@ mod tests {
         ) -> Handle;
         fn ConnectNamedPipe(pipe: Handle, overlapped: *mut Overlapped) -> Bool;
         fn DisconnectNamedPipe(pipe: Handle) -> Bool;
+        fn FlushFileBuffers(pipe: Handle) -> Bool;
     }
 
     fn fixture_pipe() -> (std::path::PathBuf, Vec<u16>) {
@@ -511,6 +512,11 @@ mod tests {
         assert_eq!(written as usize, bytes.len());
     }
 
+    fn server_flush(pipe: Handle) {
+        let flushed = unsafe { FlushFileBuffers(pipe) };
+        assert_ne!(flushed, 0);
+    }
+
     #[test]
     fn bounds_connect_when_fixture_pipe_is_absent() {
         let (path, _) = fixture_pipe();
@@ -529,6 +535,7 @@ mod tests {
             server_write(pipe, b"caf\xC3");
             thread::sleep(Duration::from_millis(10));
             server_write(pipe, b"\xA9\n");
+            server_flush(pipe);
         });
         let mut client = connect(&path, Duration::from_secs(1)).unwrap();
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -542,7 +549,10 @@ mod tests {
 
     #[test]
     fn rejects_eof_mid_line() {
-        let (path, server) = fixture_server(|pipe| server_write(pipe, b"partial"));
+        let (path, server) = fixture_server(|pipe| {
+            server_write(pipe, b"partial");
+            server_flush(pipe);
+        });
         let mut client = connect(&path, Duration::from_secs(1)).unwrap();
         let error = client
             .read_line_until(Instant::now() + Duration::from_secs(1))
