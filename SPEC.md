@@ -1558,7 +1558,9 @@ that lease and wins over a delayed release. A paused-by-peer daemon resumes
 when its peer endpoint dies (~1 s), covering SIGKILL where no exit cleanup
 runs; graceful exits release only a still-owned lease. An explicit Dev resume
 is a deliberate takeover: it negotiates a conditional pause first and stays
-paused if the peer cannot safely confirm it.
+paused if the peer cannot safely confirm it. Similarly, if a new production
+daemon cannot safely pause a live older Dev peer, production enters standby
+and watches that peer instead of allowing both to capture.
 
 **Commands.**
 

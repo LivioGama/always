@@ -561,6 +561,19 @@ fn startup_peer_action_when_ready(
     }
 }
 
+fn startup_peer_action_after_peer_pause(
+    action: StartupPeerAction,
+    peer_pause_confirmed: bool,
+) -> StartupPeerAction {
+    if action == StartupPeerAction::PausePeer && !peer_pause_confirmed {
+        // A newer production daemon must not take the microphone from an
+        // older Dev daemon that cannot negotiate a conditional pause lease.
+        StartupPeerAction::PauseSelf
+    } else {
+        action
+    }
+}
+
 /// Send an ownership-tagged pause request only after negotiating the peer's
 /// conditional lease capability. Legacy daemons are never mutated here.
 pub fn set_peer_paused(paused: bool) -> bool {
@@ -807,7 +820,7 @@ pub fn pause_peer_when_ready() {
                 event::global_broadcaster().resumed();
             }
         }
-        tracing::info!("dev_instance_stayed_passive_for_production");
+        tracing::info!("instance_stayed_passive_for_peer");
     }
 
     std::thread::spawn(|| {
@@ -821,11 +834,17 @@ pub fn pause_peer_when_ready() {
         if pause::is_paused_by_peer() {
             spawn_peer_resume_watchdog();
         } else {
-            match startup_peer_action_when_ready(
+            let action = startup_peer_action_when_ready(
                 config::instance(),
                 peer_is_live(),
                 pause::is_paused_by_peer(),
-            ) {
+            );
+            let action = if action == StartupPeerAction::PausePeer {
+                startup_peer_action_after_peer_pause(action, set_peer_paused(true))
+            } else {
+                action
+            };
+            match action {
                 StartupPeerAction::PauseSelf => {
                     pause::set_paused_by_peer(true);
                     let (effective, changed) = pause::set_paused(true);
@@ -839,12 +858,12 @@ pub fn pause_peer_when_ready() {
                         }
                     }
                     spawn_peer_resume_watchdog();
-                    tracing::info!("dev_instance_stayed_passive_for_production");
+                    tracing::info!("instance_stayed_passive_for_peer");
                 }
-                StartupPeerAction::PausePeer if set_peer_paused(true) => {
+                StartupPeerAction::PausePeer => {
                     tracing::info!("peer_instance_paused_on_startup");
                 }
-                StartupPeerAction::PausePeer | StartupPeerAction::None => {}
+                StartupPeerAction::None => {}
             }
         }
     });
@@ -1536,6 +1555,19 @@ mod tests {
         assert_eq!(
             startup_peer_action_when_ready("dev", true, true),
             StartupPeerAction::None
+        );
+    }
+
+    #[test]
+    fn prod_startup_stays_passive_when_legacy_dev_cannot_confirm_pause() {
+        let legacy_hello = r#"{"type":"Hello","data":{"version":12}}"#;
+        let can_confirm_pause = peer_supports_pause_lease(legacy_hello);
+        let initial_action = startup_peer_action("prod", true);
+
+        assert_eq!(initial_action, StartupPeerAction::PausePeer);
+        assert_eq!(
+            startup_peer_action_after_peer_pause(initial_action, can_confirm_pause),
+            StartupPeerAction::PauseSelf
         );
     }
 
