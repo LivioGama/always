@@ -11,7 +11,10 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{
+    Arc, Mutex as StdMutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 #[cfg(windows)]
@@ -423,6 +426,7 @@ pub fn resolve_socket_path() -> PathBuf {
             .ok()
             .map(|home| PathBuf::from(home).join("Library/Caches/Always/always.sock"))
             .or_else(|| dirs::home_dir().map(|h| h.join("Library/Caches/Always/always.sock")))
+            .unwrap_or_else(|| PathBuf::from("/tmp/always.sock"))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -532,6 +536,7 @@ pub enum ClientEvent {
 
 pub struct UdsClient {
     sender: Mutex<Option<mpsc::Sender<String>>>,
+    connected: Arc<AtomicBool>,
     state: Arc<Mutex<DaemonStateAccumulator>>,
     #[allow(clippy::type_complexity)]
     event_callbacks: Arc<StdMutex<Vec<Box<dyn Fn(ClientEvent) + Send + Sync>>>>,
@@ -561,6 +566,8 @@ impl UdsClient {
         let (tx, mut rx) = mpsc::channel::<String>(64);
         let state_clone = Arc::clone(&state);
         let event_cb_clone = Arc::clone(&event_callback);
+        let connected = Arc::new(AtomicBool::new(false));
+        let connected_clone = Arc::clone(&connected);
 
         // tauri::async_runtime, not tokio::spawn — `new` is called from
         // Tauri's `setup` on the main thread, outside a Tokio context.
@@ -575,6 +582,7 @@ impl UdsClient {
                         tracing::info!(path = %socket_path.display(), "uds_connected");
                         retry_delay = Duration::from_secs(1); // reset on success
                         reconnecting = false;
+                        connected_clone.store(true, Ordering::Relaxed);
                         {
                             let cb = event_cb_clone.lock().expect("event callback mutex poisoned");
                             for callback in cb.iter() {
@@ -595,6 +603,7 @@ impl UdsClient {
                             &mut writer,
                             &state_clone,
                             &event_cb_clone,
+                            &connected_clone,
                         )
                         .await
                         {
@@ -602,6 +611,7 @@ impl UdsClient {
                         } else {
                             tracing::warn!("uds_reader_exit: connection lost");
                         }
+                        connected_clone.store(false, Ordering::Relaxed);
                         {
                             let cb = event_cb_clone.lock().expect("event callback mutex poisoned");
                             for callback in cb.iter() {
@@ -613,6 +623,7 @@ impl UdsClient {
                     Err(e) => {
                         tracing::warn!(error = %e, path = %socket_path.display(), "uds_connect_failed");
                         reconnecting = true;
+                        connected_clone.store(false, Ordering::Relaxed);
 
                         // Give the reader loop a chance to finish.
                         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -644,6 +655,7 @@ impl UdsClient {
 
         Self {
             sender: Mutex::new(Some(tx)),
+            connected,
             state,
             event_callbacks: event_callback,
             reconnect_handle,
@@ -692,7 +704,7 @@ impl UdsClient {
 
     /// Whether the daemon IPC channel is currently connected.
     pub async fn is_connected(&self) -> bool {
-        self.sender.lock().await.is_some()
+        self.connected.load(Ordering::Relaxed)
     }
 
     /// Check if the daemon is currently paused.
@@ -708,6 +720,7 @@ impl UdsClient {
 
     /// Gracefully stop the background reconnection task.
     pub async fn disconnect(&self) {
+        self.connected.store(false, Ordering::Relaxed);
         {
             let mut guard = self.sender.lock().await;
             *guard = None;
@@ -723,6 +736,7 @@ impl UdsClient {
         writer: &mut W,
         state: &Arc<Mutex<DaemonStateAccumulator>>,
         event_cb: &Arc<StdMutex<Vec<Box<dyn Fn(ClientEvent) + Send + Sync>>>>,
+        connected: &AtomicBool,
     ) -> bool
     where
         R: AsyncRead + Unpin,
@@ -738,7 +752,10 @@ impl UdsClient {
             tokio::select! {
                 read = reader.read_line(&mut buf) => {
                     match read {
-                        Ok(0) => return false, // EOF
+                        Ok(0) => {
+                            connected.store(false, Ordering::Relaxed);
+                            return false; // EOF
+                        }
                         Ok(_) => {
                             let line = buf.trim().to_string();
                             if line.is_empty() {
@@ -758,6 +775,7 @@ impl UdsClient {
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "uds_read_error");
+                            connected.store(false, Ordering::Relaxed);
                             return false;
                         }
                     }
@@ -767,12 +785,16 @@ impl UdsClient {
                         Some(cmd) => {
                             if let Err(e) = Self::write_one(writer, &cmd).await {
                                 tracing::warn!(error = %e, "uds_write_error");
+                                connected.store(false, Ordering::Relaxed);
                                 return false; // broken pipe → reconnect
                             }
                         }
                         // All senders dropped (client disconnected) — leave the
                         // loop so the reconnect cycle can re-establish.
-                        None => return false,
+                        None => {
+                            connected.store(false, Ordering::Relaxed);
+                            return false;
+                        }
                     }
                 }
             }
@@ -804,6 +826,30 @@ impl Drop for UdsClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn read_loop_clears_connection_state_after_peer_closes() {
+        let connected = AtomicBool::new(true);
+        let state = Arc::new(Mutex::new(DaemonStateAccumulator::default()));
+        let callbacks = Arc::new(StdMutex::new(Vec::new()));
+        let (stream, peer) = tokio::io::duplex(64);
+        let (reader, mut writer) = tokio::io::split(stream);
+        let (_tx, mut rx) = mpsc::channel(1);
+
+        drop(peer);
+        let clean = UdsClient::read_loop(
+            BufReader::new(reader),
+            &mut rx,
+            &mut writer,
+            &state,
+            &callbacks,
+            &connected,
+        )
+        .await;
+
+        assert!(!clean);
+        assert!(!connected.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn toggle_pause_command_serialises() {

@@ -9,6 +9,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use tauri::Manager;
 
 use crate::uds_client::UdsClient;
 use crate::window_manager::{ShowOnboardingReason, WindowManager};
@@ -17,9 +18,20 @@ use crate::window_manager::{ShowOnboardingReason, WindowManager};
 
 /// Locate the `always` CLI binary: the sibling of this exe (installed
 /// layout puts `always-tauri` next to `always`), else PATH.
-fn always_bin() -> Result<PathBuf, String> {
+fn always_bin(resource_dir: Option<&std::path::Path>) -> Result<PathBuf, String> {
     if let Ok(p) = std::env::var("ALWAYS_CLI") {
         return Ok(PathBuf::from(p));
+    }
+    if let Some(resources) = resource_dir {
+        let name = if cfg!(windows) {
+            "always.exe"
+        } else {
+            "always"
+        };
+        let bundled = resources.join("daemon").join(name);
+        if bundled.exists() {
+            return Ok(bundled);
+        }
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -41,10 +53,32 @@ fn always_bin() -> Result<PathBuf, String> {
     }))
 }
 
+/// Ensure the sibling daemon is running before the settings UI connects.
+/// The daemon's `start` command is detached and single-instance safe, so this
+/// is also a no-op when an existing daemon already owns the endpoint.
+pub fn start_daemon(resource_dir: Option<&std::path::Path>) -> Result<(), String> {
+    let bin = always_bin(resource_dir)?;
+    let output = Command::new(&bin)
+        .arg("start")
+        .output()
+        .map_err(|e| format!("start daemon with {}: {e}", bin.display()))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "`always start` exited {}: {}",
+            output.status,
+            stderr.trim()
+        ))
+    }
+}
+
 /// Run `always <args…>` and return stdout, like `CLIService.runCLI`.
 #[tauri::command]
-pub async fn cli(args: Vec<String>) -> Result<String, String> {
-    let bin = always_bin()?;
+pub async fn cli(app: tauri::AppHandle, args: Vec<String>) -> Result<String, String> {
+    let resource_dir = app.path().resource_dir().ok();
+    let bin = always_bin(resource_dir.as_deref())?;
     tauri::async_runtime::spawn_blocking(move || {
         let output = Command::new(&bin)
             .args(&args)
@@ -159,6 +193,10 @@ pub fn read_history() -> Result<Vec<serde_json::Value>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(format!("read {}: {e}", path.display())),
     };
+    Ok(parse_history_entries(&content))
+}
+
+fn parse_history_entries(content: &str) -> Vec<serde_json::Value> {
     let mut entries = Vec::new();
     for line in content.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -175,11 +213,12 @@ pub fn read_history() -> Result<Vec<serde_json::Value>, String> {
         let ts = v
             .get("timestamp_ms")
             .or_else(|| v.get("timestamp"))
+            .or_else(|| v.get("ts"))
             .and_then(|t| t.as_i64())
             .unwrap_or(0);
         entries.push(serde_json::json!({ "text": text, "timestamp_ms": ts }));
     }
-    Ok(entries)
+    entries
 }
 
 #[tauri::command]
@@ -241,10 +280,37 @@ pub fn reveal_path(path: String) -> Result<(), String> {
 fn open_detached(target: &str) -> Result<(), String> {
     #[cfg(windows)]
     {
-        Command::new("cmd")
-            .args(["/C", "start", "", target])
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        use std::ffi::c_void;
+        use std::ptr::null_mut;
+
+        let operation = nul_terminated_wide("open");
+        let target = nul_terminated_wide(target);
+
+        #[link(name = "shell32")]
+        extern "system" {
+            fn ShellExecuteW(
+                hwnd: *mut c_void,
+                operation: *const u16,
+                file: *const u16,
+                parameters: *const u16,
+                directory: *const u16,
+                show_command: i32,
+            ) -> *mut c_void;
+        }
+
+        let result = unsafe {
+            ShellExecuteW(
+                null_mut(),
+                operation.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        };
+        if result as isize <= 32 {
+            return Err(format!("Windows shell could not open target (code {})", result as isize));
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -261,6 +327,37 @@ fn open_detached(target: &str) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn nul_terminated_wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{nul_terminated_wide, parse_history_entries};
+
+    #[test]
+    fn history_reader_accepts_daemon_timestamp_field() {
+        let entries = parse_history_entries(
+            r#"{"ts":1720000000123,"raw_text":"hello","processed_text":"Hello."}"#,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["text"], "hello");
+        assert_eq!(entries[0]["timestamp_ms"], 1720000000123i64);
+    }
+
+    #[test]
+    fn windows_shell_target_remains_one_literal_argument() {
+        let target = "https://example.test/path & calc.exe";
+        let encoded = nul_terminated_wide(target);
+        let decoded = String::from_utf16(&encoded[..encoded.len() - 1]).unwrap();
+
+        assert_eq!(decoded, target);
+        assert_eq!(encoded.last(), Some(&0));
+    }
 }
 
 // ── Misc ───────────────────────────────────────────────────────────────────

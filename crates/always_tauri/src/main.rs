@@ -70,6 +70,14 @@ fn main() {
             // Both start hidden (tauri.conf.json). The settings webview
             // shows one once it knows whether onboarding is done.
 
+            // Start the sibling daemon before connecting. `always start` is
+            // detached and single-instance safe, and leaves the UI available
+            // to repair settings if the daemon cannot start.
+            let resource_dir = app.path().resource_dir().ok();
+            if let Err(error) = commands::start_daemon(resource_dir.as_deref()) {
+                tracing::warn!(error = %error, "daemon_start_failed");
+            }
+
             // ── UDS Client ───────────────────────────────────────────
             let socket_path = uds_client::resolve_socket_path();
             tracing::info!(path = %socket_path.display(), "uds_client_init");

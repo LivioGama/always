@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
                                     info!("Received daemon event: {:?}", std::mem::discriminant(&event));
 
                                     // Validate protocol version
-                                    if let DaemonEvent::Hello { version } = &event
+                                    if let DaemonEvent::Hello { version, .. } = &event
                                         && *version != PROTOCOL_VERSION
                                     {
                                         warn!(

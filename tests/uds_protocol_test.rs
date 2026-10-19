@@ -5,7 +5,7 @@
 //! silently desynchronizes the daemon and the GUI, which is the kind of
 //! bug that only surfaces in user reports days later.
 
-use always::always::event::{DaemonCommand, DaemonEvent, PROTOCOL_VERSION};
+use always::always::event::{BUILD_ID, DaemonCommand, DaemonEvent, PROTOCOL_VERSION};
 
 #[test]
 fn protocol_version_matches_swift_client() {
@@ -23,13 +23,16 @@ fn protocol_version_matches_swift_client() {
 fn hello_serializes_with_version_in_data() {
     let hello = DaemonEvent::Hello {
         version: PROTOCOL_VERSION,
+        build_id: Some(BUILD_ID.to_string()),
     };
     let json = serde_json::to_string(&hello).unwrap();
     // Format against the constant so future bumps don't desynchronize
     // the assertion from the declared version.
     assert_eq!(
         json,
-        format!(r#"{{"type":"Hello","data":{{"version":{PROTOCOL_VERSION}}}}}"#)
+        format!(
+            r#"{{"type":"Hello","data":{{"version":{PROTOCOL_VERSION},"build_id":"{BUILD_ID}"}}}}"#
+        )
     );
 }
 

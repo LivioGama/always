@@ -52,6 +52,11 @@ static LAST_LOW_MIC_OVERLAY: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(||
 /// `TranscriptFinal` remain for non-streaming chunk-based transcription.
 pub const PROTOCOL_VERSION: u32 = 12;
 
+/// Unique identity of this compiled daemon artifact. Compared at startup to
+/// the identity recorded by a running daemon; this identifies binaries, not
+/// source files that have not yet been rebuilt.
+pub const BUILD_ID: &str = env!("ALWAYS_BUILD_ID");
+
 /// Why a recoverable transcript was not pasted (`TranscriptRejected.reason`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RejectReason {
@@ -95,6 +100,9 @@ pub enum DaemonEvent {
     /// the version is not the one it was built with.
     Hello {
         version: u32,
+        /// Optional for compatibility with clients speaking to older daemons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        build_id: Option<String>,
     },
     /// Ground truth about the daemon's global-shortcut event tap. The
     /// GUI's own IOHIDCheckAccess reflects the GUI's TCC attribution —
@@ -1172,6 +1180,7 @@ impl EventBroadcaster {
     pub fn hello(&self) {
         self.send(DaemonEvent::Hello {
             version: PROTOCOL_VERSION,
+            build_id: Some(BUILD_ID.to_string()),
         });
     }
 
@@ -1354,6 +1363,23 @@ pub fn global_broadcaster() -> &'static EventBroadcaster {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hello_reports_the_daemon_build_identity() {
+        let hello = serde_json::to_value(DaemonEvent::Hello {
+            version: PROTOCOL_VERSION,
+            build_id: Some(BUILD_ID.to_string()),
+        })
+        .expect("hello serializes");
+        assert!(hello["data"]["build_id"].is_string());
+    }
+
+    #[test]
+    fn hello_from_an_older_daemon_remains_decodable() {
+        let hello: DaemonEvent = serde_json::from_str(r#"{"type":"Hello","data":{"version":12}}"#)
+            .expect("older hello remains compatible");
+        assert!(matches!(hello, DaemonEvent::Hello { build_id: None, .. }));
+    }
 
     #[test]
     fn set_consume_mode_command_parses_from_iris_wire_format() {

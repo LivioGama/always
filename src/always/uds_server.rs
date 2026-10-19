@@ -9,7 +9,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 #[cfg(unix)]
 use tokio::net::UnixListener;
 #[cfg(windows)]
-use tokio::net::windows::named_pipe::ServerOptions;
+use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::Mutex;
 
 use super::event::{DaemonCommand, DaemonEvent, global_broadcaster};
@@ -318,6 +318,81 @@ fn spawn_orphan_watchdog() {
 /// makes bind a single-winner operation, mirroring the socket-file check:
 /// a second daemon cannot steal the endpoint out from under a live one.
 #[cfg(windows)]
+const PRIVATE_PIPE_SDDL: &str = "D:P(A;;GA;;;OW)(A;;GA;;;SY)";
+
+#[cfg(windows)]
+fn create_private_pipe_server(
+    path: &std::path::Path,
+    first_instance: bool,
+) -> Result<NamedPipeServer> {
+    use std::ffi::c_void;
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr::null_mut;
+
+    #[repr(C)]
+    struct SecurityAttributes {
+        length: u32,
+        descriptor: *mut c_void,
+        inherit_handle: i32,
+    }
+
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            descriptor_string: *const u16,
+            revision: u32,
+            descriptor: *mut *mut c_void,
+            descriptor_size: *mut u32,
+        ) -> i32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LocalFree(memory: *mut c_void) -> *mut c_void;
+    }
+
+    // Protected DACL: only this process token's owner and SYSTEM may access
+    // the pipe. In particular, do not inherit the default Everyone/Anonymous
+    // read ACEs: the pipe carries transcript events.
+    let sddl_wide: Vec<u16> = PRIVATE_PIPE_SDDL
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut descriptor = null_mut();
+    let converted = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl_wide.as_ptr(),
+            1,
+            &mut descriptor,
+            null_mut(),
+        )
+    };
+    if converted == 0 {
+        return Err(std::io::Error::last_os_error()).context("build private named-pipe ACL");
+    }
+
+    let mut attributes = SecurityAttributes {
+        length: size_of::<SecurityAttributes>() as u32,
+        descriptor,
+        inherit_handle: 0,
+    };
+    let mut options = ServerOptions::new();
+    options
+        .first_pipe_instance(first_instance)
+        .reject_remote_clients(true);
+    let result = unsafe {
+        options.create_with_security_attributes_raw(
+            path.as_os_str(),
+            (&mut attributes as *mut SecurityAttributes).cast(),
+        )
+    };
+    unsafe {
+        LocalFree(descriptor);
+    }
+    result.context("create per-user named pipe")
+}
+
+#[cfg(windows)]
 pub async fn start_server(
     registry: ModelRegistry,
     active: ActiveTranscriber,
@@ -331,9 +406,7 @@ pub async fn start_server(
     };
 
     let pipe_path = socket_path()?;
-    let mut server = ServerOptions::new()
-        .first_pipe_instance(true)
-        .create(&pipe_path)
+    let mut server = create_private_pipe_server(&pipe_path, true)
         .context("Failed to create named pipe — another always daemon may hold it")?;
 
     spawn_orphan_watchdog();
@@ -344,7 +417,7 @@ pub async fn start_server(
             Ok(()) => {
                 // The connected instance is handed to a task; a fresh
                 // instance takes its place as the listener.
-                match ServerOptions::new().create(&pipe_path) {
+                match create_private_pipe_server(&pipe_path, false) {
                     Ok(next) => {
                         let conn = std::mem::replace(&mut server, next);
                         let ctx = ctx.clone();
@@ -526,6 +599,7 @@ where
     let mut initial_events = vec![
         DaemonEvent::Hello {
             version: crate::always::event::PROTOCOL_VERSION,
+            build_id: Some(crate::always::event::BUILD_ID.to_string()),
         },
         DaemonEvent::ListeningStarted, // Send immediately after Hello
         DaemonEvent::MasterPauseChanged {
@@ -1734,6 +1808,181 @@ fn best_token_match(haystack: &str, needle: &str) -> Option<(String, usize)> {
 /// Send an event to all connected clients
 pub fn send_event(event: DaemonEvent) {
     global_broadcaster().send(event);
+}
+
+#[cfg(all(test, windows))]
+mod private_pipe_security_tests {
+    use std::ffi::c_void;
+    use std::ptr::null_mut;
+
+    use super::PRIVATE_PIPE_SDDL;
+
+    #[repr(C)]
+    struct AclSizeInformation {
+        ace_count: u32,
+        acl_bytes_in_use: u32,
+        acl_bytes_free: u32,
+    }
+
+    #[repr(C)]
+    struct AceHeader {
+        ace_type: u8,
+        ace_flags: u8,
+        ace_size: u16,
+    }
+
+    #[repr(C)]
+    struct AccessAllowedAce {
+        header: AceHeader,
+        mask: u32,
+        sid_start: u32,
+    }
+
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            descriptor_string: *const u16,
+            revision: u32,
+            descriptor: *mut *mut c_void,
+            descriptor_size: *mut u32,
+        ) -> i32;
+        fn ConvertStringSidToSidW(string_sid: *const u16, sid: *mut *mut c_void) -> i32;
+        fn GetSecurityDescriptorDacl(
+            descriptor: *mut c_void,
+            dacl_present: *mut i32,
+            dacl: *mut *mut c_void,
+            dacl_defaulted: *mut i32,
+        ) -> i32;
+        fn GetSecurityDescriptorControl(
+            descriptor: *mut c_void,
+            control: *mut u16,
+            revision: *mut u32,
+        ) -> i32;
+        fn GetAclInformation(
+            acl: *mut c_void,
+            information: *mut c_void,
+            information_length: u32,
+            information_class: u32,
+        ) -> i32;
+        fn GetAce(acl: *mut c_void, ace_index: u32, ace: *mut *mut c_void) -> i32;
+        fn EqualSid(sid1: *mut c_void, sid2: *mut c_void) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LocalFree(memory: *mut c_void) -> *mut c_void;
+    }
+
+    fn wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    #[test]
+    fn generated_pipe_descriptor_allows_only_owner_and_system() {
+        let mut descriptor = null_mut();
+        let sddl = wide(PRIVATE_PIPE_SDDL);
+        assert_ne!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    1,
+                    &mut descriptor,
+                    null_mut(),
+                )
+            },
+            0
+        );
+
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut dacl = null_mut();
+        assert_ne!(
+            unsafe {
+                GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted)
+            },
+            0
+        );
+        assert_eq!(present, 1);
+        assert_eq!(defaulted, 0);
+        assert!(!dacl.is_null());
+
+        let mut control = 0;
+        let mut revision = 0;
+        assert_ne!(
+            unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) },
+            0
+        );
+        assert_ne!(
+            control & 0x1000,
+            0,
+            "DACL must be protected from inheritance"
+        );
+
+        let mut acl_info = AclSizeInformation {
+            ace_count: 0,
+            acl_bytes_in_use: 0,
+            acl_bytes_free: 0,
+        };
+        assert_ne!(
+            unsafe {
+                GetAclInformation(
+                    dacl,
+                    (&mut acl_info as *mut AclSizeInformation).cast(),
+                    std::mem::size_of::<AclSizeInformation>() as u32,
+                    2,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            acl_info.ace_count, 2,
+            "unexpected additional principals in pipe DACL"
+        );
+
+        let owner_sid_string = wide("S-1-3-4"); // OWNER RIGHTS
+        let system_sid_string = wide("S-1-5-18"); // LOCAL SYSTEM
+        let mut owner_sid = null_mut();
+        let mut system_sid = null_mut();
+        assert_ne!(
+            unsafe { ConvertStringSidToSidW(owner_sid_string.as_ptr(), &mut owner_sid) },
+            0
+        );
+        assert_ne!(
+            unsafe { ConvertStringSidToSidW(system_sid_string.as_ptr(), &mut system_sid) },
+            0
+        );
+
+        let mut saw_owner = false;
+        let mut saw_system = false;
+        for index in 0..acl_info.ace_count {
+            let mut ace_ptr = null_mut();
+            assert_ne!(unsafe { GetAce(dacl, index, &mut ace_ptr) }, 0);
+            let ace = unsafe { &*(ace_ptr as *const AccessAllowedAce) };
+            assert_eq!(
+                ace.header.ace_type, 0,
+                "pipe ACL must only contain allow ACEs"
+            );
+            assert_eq!(
+                ace.mask, 0x1000_0000,
+                "ACE must grant generic all only to private principals"
+            );
+            let sid = (&ace.sid_start as *const u32).cast_mut().cast::<c_void>();
+            if unsafe { EqualSid(sid, owner_sid) } != 0 {
+                saw_owner = true;
+            } else if unsafe { EqualSid(sid, system_sid) } != 0 {
+                saw_system = true;
+            } else {
+                panic!("pipe DACL contains an unexpected principal");
+            }
+        }
+        assert!(saw_owner && saw_system);
+
+        unsafe {
+            LocalFree(owner_sid);
+            LocalFree(system_sid);
+            LocalFree(descriptor);
+        }
+    }
 }
 
 #[cfg(test)]

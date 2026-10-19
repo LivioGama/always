@@ -1400,6 +1400,10 @@ the settings window afterwards. Completion lives in the webview's
 skipping, or closing the onboarding window records completion and shows
 Settings. The tray's Settings → Onboarding item re-opens the flow from its first
 step.
+The Tauri app starts the sibling `always` daemon with `always start` before
+creating its reconnecting IPC client. The daemon's single-instance guard makes
+this safe when it is already running; a start failure is logged and leaves the
+settings UI available.
 
 ---
 
@@ -1411,6 +1415,8 @@ Stored in the daemon's database, editable from Settings and the CLI
 The macOS Transcript History panel fills the available settings content height,
 including while loading or empty. With no entries, its message is centered in
 the space below the header; populated history uses that space for its list.
+The Linux and Windows Tauri History panel reads daemon history rows from
+`history.jsonl`, using the daemon's `ts` millisecond timestamp and `raw_text`.
 
 **Settings controls.** Settings labels and explanatory text are not selectable
 as ordinary web text. Inputs, editable text, and transcript-history entries
@@ -1517,6 +1523,7 @@ daemon (I4/I5 hold *per instance*).
 | URL scheme | `always://` | `always-dev://` |
 | Updates (§12a) | background check + notify; apply on request | no background check; apply refused |
 | Focus-state file | `~/Library/Caches/Always/focus-state.json` | `focus-state-dev.json` |
+| Daemon build identity | `always.build-id` in the state dir | `always.build-id` in the dev state dir |
 | Daemon logs | `~/Library/Logs/Always` | `~/Library/Logs/Always-dev` |
 
 Shared deliberately: `~/Library/Application Support/always/models` and the
@@ -1550,6 +1557,16 @@ user's choice wins.
   `Always Dev.app`; never touches the production install. Exits non-zero
   unless the dev GUI + daemon are running the just-built binaries, and
   warns if production went missing.
+- `always start` compares a running daemon's recorded build identity with the
+  current executable. A mismatch or missing identity is reported as stale or
+  unknown and returns an error without stopping the live daemon; `always
+  status` reports the same state. The identity distinguishes compiled daemon
+  artifacts. Source edits that have not been built are outside this check.
+  Process ownership is established from the OS-reported executable path and
+  the daemon's `run` command, never from arbitrary argument text. A live IPC
+  endpoint without a verifiable PID is reported as running with unknown build
+  identity; `start` does not start a duplicate and `stop` never signals an
+  unverified PID.
 - `scripts/dev-rebuild-linux.sh` — builds the Linux daemon, settings frontend,
   and Tauri app, then launches and verifies the checkout's settings app.
 - `scripts/promote.sh` — manual production promotion, user-invoked only.
@@ -1586,8 +1603,10 @@ gracefully on Ctrl+C (pid file cleanup).
 
 **Windows IPC — named pipe.** The JSON-lines `DaemonCommand`/`DaemonEvent`
 protocol (same versioned schema as the UDS socket) listens on
-`\\.\pipe\always[-dev]`. The server creates the endpoint with
-`first_pipe_instance`, so bind failure is the pipe equivalent of the
+`\\.\pipe\always[-dev]`. Its protected DACL permits only the creating
+user and SYSTEM; remote clients are rejected. The pipe carries transcript
+events, so it must not inherit the default Everyone/Anonymous read access.
+The server creates the endpoint with `first_pipe_instance`, so bind failure is the pipe equivalent of the
 live-socket check — a second daemon can't steal it (the kernel mutex
 already prevents that anyway). Opening the pipe IS the liveness probe:
 `ERROR_FILE_NOT_FOUND` = no server, success/`ERROR_PIPE_BUSY` = live.

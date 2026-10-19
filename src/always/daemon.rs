@@ -16,6 +16,125 @@ pub fn pid_path() -> PathBuf {
     config::config_dir().join("always.pid")
 }
 
+fn build_id_path() -> PathBuf {
+    config::config_dir().join("always.build-id")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BuildFreshness {
+    Fresh,
+    Stale { running: String, current: String },
+    Unknown,
+}
+
+fn build_freshness(current: &str, running: Option<&str>) -> BuildFreshness {
+    match running {
+        Some(running) if running == current => BuildFreshness::Fresh,
+        Some(running) => BuildFreshness::Stale {
+            running: running.to_string(),
+            current: current.to_string(),
+        },
+        None => BuildFreshness::Unknown,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RuntimeBuildRecord {
+    pid: u32,
+    pid_file_mtime_nanos: u128,
+    build_id: String,
+}
+
+fn parse_runtime_build_record(record: &str) -> Option<RuntimeBuildRecord> {
+    let mut lines = record.lines();
+    let pid = lines.next()?.parse().ok()?;
+    let pid_file_mtime_nanos = lines.next()?.parse().ok()?;
+    let build_id = lines.next()?.trim();
+    (!build_id.is_empty()).then(|| RuntimeBuildRecord {
+        pid,
+        pid_file_mtime_nanos,
+        build_id: build_id.to_string(),
+    })
+}
+
+fn pid_file_mtime_nanos() -> Option<u128> {
+    std::fs::metadata(pid_path())
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_nanos())
+}
+
+fn build_id_for_process(
+    record: &str,
+    running_pid: u32,
+    pid_file_mtime_nanos: u128,
+    is_daemon_process: bool,
+) -> Option<String> {
+    if !is_daemon_process {
+        return None;
+    }
+    let record = parse_runtime_build_record(record)?;
+    (record.pid == running_pid && record.pid_file_mtime_nanos == pid_file_mtime_nanos)
+        .then_some(record.build_id)
+}
+
+fn running_build_id() -> Option<String> {
+    let running_pid = read_pid()?;
+    build_id_for_process(
+        &std::fs::read_to_string(build_id_path()).ok()?,
+        running_pid,
+        pid_file_mtime_nanos()?,
+        list_daemon_pids().contains(&running_pid),
+    )
+}
+
+fn remove_build_id_for_pid(pid: u32) {
+    let Ok(contents) = std::fs::read_to_string(build_id_path()) else {
+        return;
+    };
+    let Some(record) = parse_runtime_build_record(&contents) else {
+        return;
+    };
+    if record.pid == pid && Some(record.pid_file_mtime_nanos) == pid_file_mtime_nanos() {
+        let _ = std::fs::remove_file(build_id_path());
+    }
+}
+
+fn current_build_freshness() -> BuildFreshness {
+    build_freshness(
+        crate::always::event::BUILD_ID,
+        running_build_id().as_deref(),
+    )
+}
+
+fn refresh_guidance() -> &'static str {
+    if config::instance() == "dev" {
+        "After dictation is complete, refresh the dev daemon with ./scripts/dev-rebuild-macos.sh."
+    } else {
+        "After dictation is complete, refresh this instance using its supported production rebuild procedure."
+    }
+}
+
+fn report_existing_daemon() -> Result<()> {
+    match current_build_freshness() {
+        BuildFreshness::Fresh => {
+            println!("Always-on daemon already running (build matches current executable).");
+            Ok(())
+        }
+        BuildFreshness::Stale { running, current } => anyhow::bail!(
+            "Always-on daemon is stale (running build {running}, current executable {current}). {}",
+            refresh_guidance()
+        ),
+        BuildFreshness::Unknown => anyhow::bail!(
+            "Always-on daemon is running, but its build identity is unknown. It may be an older daemon. {}",
+            refresh_guidance()
+        ),
+    }
+}
+
 /// Best-effort UDS socket path. Mirrors `uds_server::socket_path` but is
 /// infallible so it can be used in cleanup paths where erroring is wrong
 /// (Drop, signal handlers). On Windows returns the daemon's named-pipe
@@ -55,17 +174,44 @@ pub fn read_pid() -> Option<u32> {
 }
 
 pub fn is_running() -> bool {
-    read_pid().is_some_and(process_is_running)
+    let daemon_pids = list_daemon_pids();
+    read_pid().is_some_and(|pid| process_is_running(pid) && pid_is_daemon(pid, &daemon_pids))
 }
 
-fn is_daemon_run_command(command: &str) -> bool {
-    let Some((exe, rest)) = first_argv(command) else {
+fn pid_is_daemon(pid: u32, daemon_pids: &[u32]) -> bool {
+    daemon_pids.contains(&pid)
+}
+
+fn daemon_is_running(pid_matches_daemon: bool, socket_live: bool) -> bool {
+    pid_matches_daemon || socket_live
+}
+
+fn arguments_after_executable<'a>(command: &'a str, executable: &str) -> Option<&'a str> {
+    let command = command.trim_start();
+    let (command, quoted) = if let Some(command) = command.strip_prefix('"') {
+        (command, true)
+    } else {
+        (command, false)
+    };
+    let arguments = command.strip_prefix(executable)?;
+    let arguments = if quoted {
+        arguments.strip_prefix('"')?
+    } else {
+        arguments
+    };
+    arguments
+        .starts_with(char::is_whitespace)
+        .then(|| arguments.trim_start())
+}
+
+fn daemon_process_matches(instance: &str, own_exe: &str, process_exe: &str, command: &str) -> bool {
+    if !exe_is_daemon(process_exe) || !same_instance_for(instance, own_exe, process_exe) {
+        return false;
+    }
+    let Some(arguments) = arguments_after_executable(command, process_exe) else {
         return false;
     };
-    let Some((subcommand, _)) = first_argv(rest) else {
-        return false;
-    };
-    exe_is_daemon(exe) && subcommand == "run" && same_instance(command)
+    first_argv(arguments).is_some_and(|(subcommand, _)| subcommand == "run")
 }
 
 /// Split off the first argv element, honoring `"…"` quoting — Windows
@@ -90,15 +236,12 @@ fn exe_is_daemon(exe: &str) -> bool {
     stem.eq_ignore_ascii_case("always") || stem.eq_ignore_ascii_case("always-daemon")
 }
 
-/// True when `command` belongs to this process's runtime instance. The dev
-/// daemon lives inside `Always Dev.app`; every other `always run` command
-/// is prod. Without this gate a dev daemon startup would "reconcile" the
-/// production daemon as a duplicate and kill it.
-fn same_instance(command: &str) -> bool {
-    let exe = std::env::current_exe()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    same_instance_for(config::instance(), &exe, command)
+/// True when `executable` belongs to this process's runtime instance. The
+/// kernel-reported executable path, rather than arbitrary command-line text,
+/// keeps dev/prod startup cleanup from claiming each other's processes.
+fn same_install_directory(own_exe: &str, candidate_exe: &str) -> bool {
+    let own_parent = std::path::Path::new(own_exe).parent();
+    own_parent.is_some() && own_parent == std::path::Path::new(candidate_exe).parent()
 }
 
 /// Pure form of [`same_instance`]. Sandbox instances (anything but prod and
@@ -106,12 +249,45 @@ fn same_instance(command: &str) -> bool {
 /// match their OWN executable — 2026-10-14: the previous rule treated a
 /// sandbox like prod and the sandbox daemon's startup sweep killed the
 /// production daemon. Prod in turn never matches a sandbox bundle.
-fn same_instance_for(instance: &str, own_exe: &str, command: &str) -> bool {
+fn same_instance_for(instance: &str, own_exe: &str, executable: &str) -> bool {
     match instance {
-        "dev" => command.contains("Always Dev.app"),
-        "prod" => !command.contains("Always Dev.app") && !command.contains("AlwaysSmoke.app"),
-        _ => !own_exe.is_empty() && command.starts_with(own_exe),
+        "dev" => {
+            same_install_directory(own_exe, executable) && executable.contains("Always Dev.app")
+        }
+        "prod" => {
+            same_install_directory(own_exe, executable)
+                && !executable.contains("Always Dev.app")
+                && !executable.contains("AlwaysSmoke.app")
+        }
+        _ => !own_exe.is_empty() && executable == own_exe,
     }
+}
+
+#[cfg(target_os = "macos")]
+fn process_executable_path(pid: u32) -> Option<String> {
+    unsafe extern "C" {
+        fn proc_pidpath(pid: i32, buffer: *mut u8, buffer_size: u32) -> i32;
+    }
+    let mut buffer = [0u8; 4096];
+    let len = unsafe { proc_pidpath(pid as i32, buffer.as_mut_ptr(), buffer.len() as u32) };
+    (len > 0).then(|| String::from_utf8_lossy(&buffer[..len as usize]).into_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn process_executable_path(pid: u32) -> Option<String> {
+    let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let path = path.to_string_lossy();
+    Some(path.strip_suffix(" (deleted)").unwrap_or(&path).to_string())
+}
+
+#[cfg(windows)]
+fn process_executable_path(pid: u32) -> Option<String> {
+    crate::always::win32_process::process_executable_path(pid)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn process_executable_path(_pid: u32) -> Option<String> {
+    None
 }
 
 #[cfg(unix)]
@@ -142,9 +318,20 @@ fn process_table() -> Vec<(u32, String)> {
 
 /// All PIDs whose argv matches a voice daemon (may include the current process).
 pub fn list_daemon_pids() -> Vec<u32> {
+    let own_exe = match std::env::current_exe() {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(_) => return Vec::new(),
+    };
     let mut pids: Vec<u32> = process_table()
         .into_iter()
-        .filter_map(|(pid, command)| is_daemon_run_command(&command).then_some(pid))
+        .filter_map(|(pid, command)| {
+            if !command.to_ascii_lowercase().contains("always") {
+                return None;
+            }
+            let process_exe = process_executable_path(pid)?;
+            daemon_process_matches(config::instance(), &own_exe, &process_exe, &command)
+                .then_some(pid)
+        })
         .collect();
     pids.sort_unstable();
     pids.dedup();
@@ -550,21 +737,17 @@ pub fn should_self_restart(footprint: Option<u64>, idle_secs: u64, effective_pau
 pub const RSS_CEILING_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 
 pub fn start(cfg: &AlwaysConfig) -> Result<()> {
-    if is_running() {
-        println!("Always-on daemon already running.");
-        return Ok(());
-    }
-    if let Some(sock) = socket_path()
-        && sock.exists()
-        && socket_is_live(&sock)
-    {
-        println!("Always-on daemon already running.");
-        return Ok(());
+    let socket_live = socket_path().is_some_and(|sock| sock.exists() && socket_is_live(&sock));
+    if is_running() || socket_live {
+        return report_existing_daemon();
     }
     let existing = list_daemon_pids();
     if !existing.is_empty() {
-        println!("Always-on daemon already running (pids: {:?}).", existing);
-        return Ok(());
+        anyhow::bail!(
+            "Always-on daemon process exists (pids: {:?}), but its build identity is unknown. {}",
+            existing,
+            refresh_guidance()
+        );
     }
 
     let skip_orphan_kill = std::env::var("ALWAYS_SKIP_ORPHAN_KILL")
@@ -590,21 +773,17 @@ pub fn start(cfg: &AlwaysConfig) -> Result<()> {
         remove_stale_socket();
     }
 
-    if is_running() {
-        println!("Always-on daemon already running.");
-        return Ok(());
-    }
-    if let Some(sock) = socket_path()
-        && sock.exists()
-        && socket_is_live(&sock)
-    {
-        println!("Always-on daemon already running.");
-        return Ok(());
+    let socket_live = socket_path().is_some_and(|sock| sock.exists() && socket_is_live(&sock));
+    if is_running() || socket_live {
+        return report_existing_daemon();
     }
     let existing = list_daemon_pids();
     if !existing.is_empty() {
-        println!("Always-on daemon already running (pids: {:?}).", existing);
-        return Ok(());
+        anyhow::bail!(
+            "Always-on daemon process exists (pids: {:?}), but its build identity is unknown. {}",
+            existing,
+            refresh_guidance()
+        );
     }
 
     let exe = std::env::current_exe().context("cannot find always binary")?;
@@ -666,9 +845,13 @@ pub fn stop() -> Result<()> {
     let _ = wait_until_no_daemon_processes(Duration::from_secs(3));
     remove_stale_pid();
     remove_stale_socket();
-    if let Some(pid) = read_pid() {
+    let daemon_pids = list_daemon_pids();
+    if let Some(pid) = read_pid().filter(|pid| pid_is_daemon(*pid, &daemon_pids)) {
         terminate_gracefully(pid);
+        remove_build_id_for_pid(pid);
         println!("Always-on daemon stopped (pid {pid}).");
+    } else if read_pid().is_some() {
+        println!("Always-on daemon PID identity is unknown; leaving that process untouched.");
     } else {
         println!("Always-on daemon not running.");
     }
@@ -684,9 +867,30 @@ pub fn status() -> Result<()> {
             pids
         );
     }
-    if is_running() {
-        if let Some(pid) = read_pid() {
+    let recorded_pid = read_pid();
+    let recorded_pid_is_daemon = recorded_pid.is_some_and(|pid| pids.contains(&pid));
+    let socket_live = socket_path().is_some_and(|sock| ipc_endpoint_live(&sock));
+    if daemon_is_running(recorded_pid_is_daemon, socket_live) {
+        if let Some(pid) = recorded_pid.filter(|_| recorded_pid_is_daemon) {
             println!("Always-on daemon running (pid {pid})");
+            match current_build_freshness() {
+                BuildFreshness::Fresh => println!("Build freshness: current."),
+                BuildFreshness::Stale { running, current } => println!(
+                    "WARNING: daemon build is stale (running {running}; current executable {current}). {}",
+                    refresh_guidance()
+                ),
+                BuildFreshness::Unknown => println!(
+                    "WARNING: daemon build identity is unknown. {}",
+                    refresh_guidance()
+                ),
+            }
+            println!("Log: {}", always_config::configured_log_path()?.display());
+        } else {
+            println!("Always-on daemon running (PID unknown)");
+            println!(
+                "WARNING: daemon build identity is unknown. {}",
+                refresh_guidance()
+            );
             println!("Log: {}", always_config::configured_log_path()?.display());
         }
     } else {
@@ -804,6 +1008,18 @@ impl PidGuard {
             let _ = std::fs::remove_file(&path);
             return Err(e).context("failed to write always PID file");
         }
+        let pid_file_mtime = pid_file_mtime_nanos()
+            .context("cannot read always PID file timestamp for daemon identity")?;
+        let build_id_record = format!(
+            "{}\n{}\n{}",
+            std::process::id(),
+            pid_file_mtime,
+            crate::always::event::BUILD_ID
+        );
+        if let Err(e) = std::fs::write(build_id_path(), build_id_record) {
+            let _ = std::fs::remove_file(&path);
+            return Err(e).context("failed to write always daemon build identity");
+        }
         let count = list_daemon_pids();
         if count.len() > 1 {
             tracing::error!(
@@ -836,6 +1052,7 @@ impl Drop for PidGuard {
         {
             log.write(crate::always::log::Event::Stop);
         }
+        remove_build_id_for_pid(std::process::id());
         let _ = std::fs::remove_file(pid_path());
         if let Some(sock) = socket_path() {
             let _ = std::fs::remove_file(sock);
@@ -856,7 +1073,10 @@ fn acquire_exclusive_lock(file: &File) -> Result<()> {
 }
 
 fn remove_stale_pid() {
-    if read_pid().is_some_and(|pid| !process_is_running(pid)) {
+    if let Some(pid) = read_pid()
+        && !process_is_running(pid)
+    {
+        remove_build_id_for_pid(pid);
         let _ = std::fs::remove_file(pid_path());
     }
 }
@@ -909,6 +1129,7 @@ pub fn install_signal_handlers(handle: &tokio::runtime::Handle) {
             {
                 log.write(crate::always::log::Event::Stop);
             }
+            remove_build_id_for_pid(std::process::id());
             let _ = std::fs::remove_file(pid_path());
             if let Some(sock) = socket_path() {
                 let _ = std::fs::remove_file(sock);
@@ -936,6 +1157,7 @@ pub fn install_signal_handlers(handle: &tokio::runtime::Handle) {
             {
                 log.write(crate::always::log::Event::Stop);
             }
+            remove_build_id_for_pid(std::process::id());
             let _ = std::fs::remove_file(pid_path());
             if let Some(sock) = socket_path() {
                 let _ = std::fs::remove_file(sock);
@@ -984,6 +1206,110 @@ mod tests {
         assert!(!should_self_restart(None, 10_000, true));
     }
 
+    #[test]
+    fn build_freshness_distinguishes_matching_stale_and_unknown_daemons() {
+        assert_eq!(
+            build_freshness("current-build", Some("current-build")),
+            BuildFreshness::Fresh
+        );
+        assert_eq!(
+            build_freshness("current-build", Some("older-build")),
+            BuildFreshness::Stale {
+                running: "older-build".into(),
+                current: "current-build".into(),
+            }
+        );
+        assert_eq!(
+            build_freshness("current-build", None),
+            BuildFreshness::Unknown
+        );
+    }
+
+    #[test]
+    fn recorded_build_id_must_match_the_running_pid_and_pid_file() {
+        assert_eq!(
+            build_id_for_process("42\n100\nbuild-a", 42, 100, true),
+            Some("build-a".into())
+        );
+        assert_eq!(
+            build_id_for_process("42\n100\nbuild-a", 42, 200, true),
+            None
+        );
+        assert_eq!(
+            build_id_for_process("42\n100\nbuild-a", 43, 100, true),
+            None
+        );
+        assert_eq!(build_id_for_process("", 42, 100, true), None);
+        assert_eq!(
+            build_id_for_process("42\nnot-a-time\nbuild-a", 42, 100, true),
+            None
+        );
+        assert_eq!(build_id_for_process("42\n100\n", 42, 100, true), None);
+        assert_eq!(
+            build_id_for_process("42\n100\nbuild-a", 42, 100, false),
+            None,
+            "a reused PID owned by an unrelated process cannot inherit a stale build marker"
+        );
+    }
+
+    #[test]
+    fn old_daemon_cannot_inherit_a_newer_process_build_marker() {
+        // Build B stopped but left a marker; legacy build A starts and
+        // rewrites the PID file. The PID may even be reused, so the file's
+        // modification token must match too.
+        let marker = "42\n100\nbuild-b";
+        let running_id = build_id_for_process(marker, 42, 200, true);
+        assert_eq!(
+            build_freshness("build-b", running_id.as_deref()),
+            BuildFreshness::Unknown
+        );
+    }
+
+    #[test]
+    fn live_socket_counts_as_running_when_pid_record_is_missing() {
+        assert!(daemon_is_running(false, true));
+        assert!(daemon_is_running(true, false));
+        assert!(!daemon_is_running(false, false));
+    }
+
+    #[test]
+    fn daemon_instance_identity_uses_executable_path_not_argument_text() {
+        let prod_exe = "/Applications/Always.app/Contents/MacOS/always-daemon";
+        let dev_exe = "/Applications/Always Dev.app/Contents/MacOS/always-daemon";
+        let prod = format!("{prod_exe} run --label 'Always Dev.app'");
+        assert!(daemon_process_matches("prod", prod_exe, prod_exe, &prod));
+        assert!(!daemon_process_matches("dev", dev_exe, prod_exe, &prod));
+        // macOS `ps -o args` emits this live-style path unquoted even though
+        // the app bundle name contains spaces; the kernel image path anchors
+        // the executable boundary before parsing the `run` subcommand.
+        let dev_command = format!("{dev_exe} run --lang auto");
+        assert!(daemon_process_matches(
+            "dev",
+            dev_exe,
+            dev_exe,
+            &dev_command
+        ));
+        assert!(!daemon_process_matches(
+            "prod",
+            prod_exe,
+            dev_exe,
+            &dev_command
+        ));
+        assert!(!daemon_process_matches(
+            "dev",
+            dev_exe,
+            "/tmp/always-daemon",
+            "/tmp/always-daemon run --label 'Always Dev.app'"
+        ));
+    }
+
+    #[test]
+    fn recorded_pid_is_owned_only_when_process_identity_matches() {
+        assert!(pid_is_daemon(42, &[7, 42]));
+        assert!(!pid_is_daemon(42, &[7, 43]));
+        assert!(!pid_is_daemon(42, &[]));
+    }
+
     /// The live-footprint reader works on this platform and returns a
     /// plausible magnitude (tens of MB to tens of GB, never 0 or wild).
     #[cfg(target_os = "macos")]
@@ -1007,45 +1333,66 @@ mod tests {
 
     #[test]
     fn sandbox_instance_never_matches_prod_or_dev() {
-        let prod = "/Applications/Always.app/Contents/MacOS/always-daemon run --lang auto";
-        let dev = "/Applications/Always Dev.app/Contents/MacOS/always-daemon run";
+        let prod_exe = "/Applications/Always.app/Contents/MacOS/always-daemon";
+        let dev_exe = "/Applications/Always Dev.app/Contents/MacOS/always-daemon";
         let smoke_exe = "/tmp/x/AlwaysSmoke.app/Contents/MacOS/always-daemon";
-        let smoke = format!("{smoke_exe} run --lang auto");
         assert!(
-            !same_instance_for("smoke", smoke_exe, prod),
+            !same_instance_for("smoke", smoke_exe, prod_exe),
             "sandbox must not reap prod"
         );
-        assert!(!same_instance_for("smoke", smoke_exe, dev));
-        assert!(same_instance_for("smoke", smoke_exe, &smoke));
+        assert!(!same_instance_for("smoke", smoke_exe, dev_exe));
+        assert!(same_instance_for("smoke", smoke_exe, smoke_exe));
         assert!(
-            !same_instance_for("prod", "", &smoke),
+            !same_instance_for("prod", prod_exe, smoke_exe),
             "prod must not reap a sandbox"
         );
-        assert!(same_instance_for("prod", "", prod));
-        assert!(same_instance_for("dev", "", dev) && !same_instance_for("dev", "", prod));
+        assert!(same_instance_for("prod", prod_exe, prod_exe));
+        assert!(same_instance_for("dev", dev_exe, dev_exe));
+        assert!(!same_instance_for("dev", dev_exe, prod_exe));
     }
 
     #[test]
     fn daemon_run_matcher_rejects_diagnostic_commands() {
-        assert!(is_daemon_run_command(
-            "/Applications/Always.app/Contents/MacOS/always-daemon run --lang en"
+        let app_exe = "/Applications/Always.app/Contents/MacOS/always-daemon";
+        let local_exe = "/Users/livio/Documents/always/target/release/always";
+        assert!(daemon_process_matches(
+            "prod",
+            app_exe,
+            app_exe,
+            &format!("{app_exe} run --lang en")
         ));
-        assert!(is_daemon_run_command(
-            "/Users/livio/Documents/always/target/release/always run --timeout 30"
+        assert!(daemon_process_matches(
+            "prod",
+            local_exe,
+            local_exe,
+            &format!("{local_exe} run --timeout 30")
         ));
-        assert!(!is_daemon_run_command(
+        assert!(!daemon_process_matches(
+            "prod",
+            app_exe,
+            "/bin/zsh",
             "/bin/zsh -lc ps aux | rg \"(/Applications/Always.app|always run|always-daemon)\""
         ));
-        assert!(!is_daemon_run_command(
+        assert!(!daemon_process_matches(
+            "prod",
+            app_exe,
+            "/usr/bin/rg",
             "rg (/Applications/Always.app|always run|always-daemon)"
         ));
-        assert!(!is_daemon_run_command(
-            "/Applications/Always.app/Contents/MacOS/always-daemon status"
+        assert!(!daemon_process_matches(
+            "prod",
+            app_exe,
+            app_exe,
+            &format!("{app_exe} status")
         ));
         // Test binaries run as the prod instance: dev-bundle commands must
         // be foreign so prod never reconciles/kills the dev daemon.
-        assert!(!is_daemon_run_command(
-            "/Applications/Always Dev.app/Contents/MacOS/always-daemon run --lang en"
+        let dev_exe = "/Applications/Always Dev.app/Contents/MacOS/always-daemon";
+        assert!(!daemon_process_matches(
+            "prod",
+            app_exe,
+            dev_exe,
+            &format!("{dev_exe} run --lang en")
         ));
     }
 }

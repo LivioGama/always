@@ -729,6 +729,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     // The 2 ms budget is a release-build property. Unoptimised test builds
     // on a loaded machine measured p99 2.6–2.9 ms (2 of 3 runs over), so in
