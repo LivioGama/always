@@ -84,6 +84,8 @@ const HALLUCINATION_PHRASES: &[&str] = &[
     "subtitles by the amara.org community",
     "captions by the amara.org community",
     "transcription by castingwords",
+    // Russian "to be continued", Whisper's outro on silence.
+    "продолжение следует",
 ];
 
 /// Substrings whose mere presence (in the lowercased, whitespace-collapsed text)
@@ -112,6 +114,12 @@ const HALLUCINATION_SUBSTRINGS: &[&str] = &[
     "thank you for listening",
     "see you in the next video",
     "see you next time",
+    // Known credit hallucinations in other languages (lowercase). Whisper
+    // emits these on silence/noise; a real sentence never contains them.
+    "субтитры сделал",
+    "субтитры создавал",
+    "字幕由",
+    "ご視聴ありがとうございました",
 ];
 
 static PHRASE_SET: LazyLock<HashSet<&'static str>> =
@@ -148,6 +156,71 @@ fn normalize(text: &str) -> String {
         }
     }
     out
+}
+
+/// Canned closers Whisper appends after real speech when the audio tail is
+/// quiet. Matched (normalized) only against a trailing, separate sentence.
+const TRAILING_CANNED_PHRASES: &[&str] = &[
+    "thank you",
+    "thanks",
+    "thank you very much",
+    "thanks for watching",
+    "thank you for watching",
+    "bye",
+    "bye bye",
+];
+
+/// Minimum words of real content that must precede a trailing canned
+/// sentence before it is stripped. Shorter results are handled (or kept) by
+/// the whole-transcript filter.
+const TRAILING_CANNED_MIN_HEAD_WORDS: usize = 4;
+
+/// A final segment with its own decode metrics at least this good is treated
+/// as confidently spoken and its tail is kept.
+const TRAILING_KEEP_MIN_LOGPROB: f32 = -0.15;
+/// ...and with no-speech probability at most this.
+const TRAILING_KEEP_MAX_NO_SPEECH: f32 = 0.05;
+
+/// True when the final segment carries its own, confidently-good decode
+/// metrics. Groq's `verbose_json` repeats one window's metrics on every
+/// segment (measured 2026-10-17: identical `avg_logprob`/`no_speech_prob`
+/// across segments, and a pure-silence "Thank you." scored 0.00 / -0.29), so
+/// segments whose metrics merely equal the previous one prove nothing.
+fn tail_is_confident(result: &TranscriptionResult) -> bool {
+    let [.., prev, last] = result.segments.as_slice() else {
+        return false;
+    };
+    let distinct = (last.avg_logprob - prev.avg_logprob).abs() > f32::EPSILON
+        || (last.no_speech_prob - prev.no_speech_prob).abs() > f32::EPSILON;
+    distinct
+        && last.avg_logprob >= TRAILING_KEEP_MIN_LOGPROB
+        && last.no_speech_prob <= TRAILING_KEEP_MAX_NO_SPEECH
+}
+
+/// Remove a hallucinated canned closer ("Thank you.", "Bye.") that Whisper
+/// appended as a separate final sentence after real dictation.
+///
+/// Returns `Some(text_without_tail)` only when the text ends with a sentence
+/// whose normalized form is in [`TRAILING_CANNED_PHRASES`], at least
+/// [`TRAILING_CANNED_MIN_HEAD_WORDS`] words precede it, and the final segment
+/// is not confidently real (see [`tail_is_confident`]). A mid-sentence
+/// "..., thank you." (no sentence break) is never touched.
+pub fn strip_trailing_canned(text: &str, result: &TranscriptionResult) -> Option<String> {
+    let body = text.trim_end();
+    let core = body.trim_end_matches(['.', '!', '?', '\u{2026}', ' ']);
+    let idx = core.rfind(['.', '!', '?'])?;
+    let tail = &core[idx + 1..];
+    if !TRAILING_CANNED_PHRASES.contains(&normalize(tail).as_str()) {
+        return None;
+    }
+    let head = core[..=idx].trim();
+    if head.split_whitespace().count() < TRAILING_CANNED_MIN_HEAD_WORDS {
+        return None;
+    }
+    if tail_is_confident(result) {
+        return None;
+    }
+    Some(head.to_string())
 }
 
 /// Mean per-word acoustic confidence below which a transcript is treated as
@@ -262,12 +335,218 @@ pub fn foreign_speech_low_confidence(result: &TranscriptionResult) -> Option<f32
         .filter(|c| *c < FOREIGN_SPEECH_MAX_CONFIDENCE)
 }
 
+/// Writing system of a letter. `None` for anything that is not a letter
+/// (digits, punctuation, emoji, combining accents), which never counts
+/// toward script mixing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Script {
+    Latin,
+    Greek,
+    Cyrillic,
+    Armenian,
+    Hebrew,
+    Arabic,
+    Devanagari,
+    Bengali,
+    Thai,
+    Georgian,
+    Hangul,
+    Kana,
+    Han,
+    Other,
+}
+
+/// Script of `c`, `None` when `c` is not a letter.
+#[must_use]
+pub fn script_of(c: char) -> Option<Script> {
+    let u = c as u32;
+    // Combining diacritics (a decomposed "é" is "e" + U+0301) belong to
+    // the letter they sit on.
+    if (0x0300..=0x036F).contains(&u)
+        || (0x1AB0..=0x1AFF).contains(&u)
+        || (0x1DC0..=0x1DFF).contains(&u)
+    {
+        return None;
+    }
+    if !c.is_alphabetic() {
+        return None;
+    }
+    Some(match u {
+        0x0041..=0x024F
+        | 0x0250..=0x02AF
+        | 0x1D00..=0x1DBF
+        | 0x1E00..=0x1EFF
+        | 0x2C60..=0x2C7F
+        | 0xA720..=0xA7FF
+        | 0xAB30..=0xAB6F
+        | 0xFB00..=0xFB06
+        | 0xFF21..=0xFF3A
+        | 0xFF41..=0xFF5A => Script::Latin,
+        0x0370..=0x03FF | 0x1F00..=0x1FFF => Script::Greek,
+        0x0400..=0x052F | 0x1C80..=0x1C8F | 0x2DE0..=0x2DFF | 0xA640..=0xA69F => Script::Cyrillic,
+        0x0530..=0x058F => Script::Armenian,
+        0x0590..=0x05FF | 0xFB1D..=0xFB4F => Script::Hebrew,
+        0x0600..=0x06FF | 0x0750..=0x077F | 0x08A0..=0x08FF | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF => {
+            Script::Arabic
+        }
+        0x0900..=0x097F | 0xA8E0..=0xA8FF => Script::Devanagari,
+        0x0980..=0x09FF => Script::Bengali,
+        0x0E00..=0x0E7F => Script::Thai,
+        0x10A0..=0x10FF | 0x2D00..=0x2D2F => Script::Georgian,
+        0x1100..=0x11FF | 0x3130..=0x318F | 0xA960..=0xA97F | 0xAC00..=0xD7FF => Script::Hangul,
+        0x3040..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9F => Script::Kana,
+        0x3005..=0x3007
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xF900..=0xFAFF
+        | 0x20000..=0x3FFFF => Script::Han,
+        _ => Script::Other,
+    })
+}
+
+/// Scripts a language is written in, from a code (`fr`, `pt-BR`, `zh_Hans`)
+/// or the English name Whisper reports (`french`). Empty when unknown or
+/// `auto` — no claim about the user's script.
+#[must_use]
+pub fn scripts_for_language(lang: &str) -> &'static [Script] {
+    let lang = lang.trim().to_ascii_lowercase();
+    let key = lang.split(['-', '_']).next().unwrap_or("");
+    match key {
+        "ru" | "russian" | "uk" | "ukrainian" | "be" | "belarusian" | "bg" | "bulgarian" | "sr"
+        | "serbian" | "mk" | "macedonian" | "kk" | "kazakh" | "ky" | "mn" | "mongolian" | "tg"
+        | "tajik" | "ba" | "bashkir" | "tt" | "tatar" => &[Script::Cyrillic],
+        "el" | "greek" => &[Script::Greek],
+        "hy" | "armenian" => &[Script::Armenian],
+        "he" | "iw" | "hebrew" | "yi" | "yiddish" => &[Script::Hebrew],
+        "ar" | "arabic" | "fa" | "persian" | "ur" | "urdu" | "ps" | "pashto" | "sd" | "sindhi"
+        | "ug" => &[Script::Arabic],
+        "hi" | "hindi" | "mr" | "marathi" | "ne" | "nepali" | "sa" | "sanskrit" => {
+            &[Script::Devanagari]
+        }
+        "bn" | "bengali" | "as" | "assamese" => &[Script::Bengali],
+        "th" | "thai" => &[Script::Thai],
+        "ka" | "georgian" => &[Script::Georgian],
+        "ko" | "korean" => &[Script::Hangul, Script::Han],
+        "ja" | "japanese" => &[Script::Kana, Script::Han],
+        "zh" | "chinese" | "yue" | "cantonese" | "cmn" | "mandarin" => &[Script::Han],
+        _ => &[],
+    }
+}
+
+/// Scripts that are the user's own for this utterance: Latin always (names,
+/// brands and code are Latin in every language), plus the configured
+/// language's script. The engine-reported language's script counts ONLY
+/// when the user left the language on `auto`/empty: with an explicit
+/// language the engine's report is not evidence of what he speaks (Whisper
+/// reports "russian" for its own Russian credit hallucinations).
+fn allowed_scripts(user_lang: &str, detected_lang: &str) -> Vec<Script> {
+    let auto = matches!(user_lang.trim().to_ascii_lowercase().as_str(), "" | "auto");
+    let mut v = vec![Script::Latin];
+    let detected: &[Script] = if auto {
+        scripts_for_language(detected_lang)
+    } else {
+        &[]
+    };
+    for s in scripts_for_language(user_lang).iter().chain(detected) {
+        if !v.contains(s) {
+            v.push(*s);
+        }
+    }
+    v
+}
+
+/// An utterance shorter than this (in chars) is judged by the SHARE of its
+/// words that are noise; see [`NOISE_WORD_SHARE`].
+const SHORT_UTTERANCE_CHARS: usize = 80;
+
+/// In a short utterance, noise tokens at or above this share of the words
+/// make the whole utterance noise ("ünkLöß I Nativuchy Dk"); below it only
+/// the tokens are dropped ([`clean_suspicious_words`]).
+const NOISE_WORD_SHARE: f64 = 0.25;
+
+/// Lowercase-then-uppercase inside a word that also carries a non-ASCII
+/// letter — Whisper noise like "ünkLöß" / "expenseÁê". Pure-ASCII camel
+/// case ("iPhone", "LinkedIn") and all-caps ("DÉFENSE") are real words.
+fn garbled_case(word: &str) -> bool {
+    if word.chars().all(|c| c.is_ascii() || !c.is_alphabetic()) {
+        return false;
+    }
+    word.chars()
+        .zip(word.chars().skip(1))
+        .any(|(a, b)| a.is_lowercase() && b.is_uppercase())
+}
+
+/// Why `word` looks like decoder noise rather than speech, or `None`.
+/// Judged per word, from its letters only:
+/// - letters from two scripts in one word ("helloпривет"), except Han with
+///   Kana (ordinary Japanese) or Han with Hangul;
+/// - a case flip into uppercase mid-word carrying non-ASCII ("ünkLöß").
+///
+/// Latin with diacritics is ONE script: "déjà", "Ça", "naïve", "Übermorgen"
+/// are never suspicious.
+#[must_use]
+pub fn suspicious_word(word: &str) -> Option<&'static str> {
+    let mut scripts: Vec<Script> = Vec::new();
+    for s in word.chars().filter_map(script_of) {
+        if !scripts.contains(&s) {
+            scripts.push(s);
+        }
+    }
+    let cjk = |s: &Script| matches!(s, Script::Han | Script::Kana | Script::Hangul);
+    if scripts.len() > 1 && !scripts.iter().all(cjk) {
+        return Some("mixed-script word");
+    }
+    if garbled_case(word) {
+        return Some("garbled-case word");
+    }
+    None
+}
+
+/// The utterance with only its noise tokens removed (see
+/// [`suspicious_word`]), plus what was removed. The rest of what he said is
+/// kept verbatim — one bad token never costs the sentence.
+#[must_use]
+pub fn clean_suspicious_words(text: &str) -> (String, Vec<String>) {
+    let mut dropped = Vec::new();
+    let kept: Vec<&str> = text
+        .split_whitespace()
+        .filter(|w| {
+            let bad = suspicious_word(w).is_some();
+            if bad {
+                dropped.push((*w).to_string());
+            }
+            !bad
+        })
+        .collect();
+    if dropped.is_empty() {
+        return (text.to_string(), dropped);
+    }
+    (kept.join(" "), dropped)
+}
+
 /// Inspect a Whisper result and decide whether to reject it as a hallucination.
 ///
 /// Returns `Some(reason)` if the result should be REJECTED; `None` if it should
 /// be accepted. The reason is a stable static string suitable for logging.
 pub fn is_hallucination(result: &TranscriptionResult) -> Option<&'static str> {
+    is_hallucination_in(result, "")
+}
+
+/// [`is_hallucination`] for a user dictating in `user_lang` (the daemon's
+/// `cfg.lang`: a code like `fr`, `fr-FR`, or `auto`/empty when unset). The
+/// user's language decides which scripts are *his*: Latin (with any
+/// diacritics) always is, plus the script of `user_lang` and of the
+/// language the engine reported for this utterance (only when `user_lang`
+/// is `auto`/empty).
+///
+/// A single garbled token never costs the whole utterance: it is removed by
+/// [`clean_suspicious_words`] instead. Rejected here: only garbled tokens,
+/// garbled tokens making up ≥ [`NOISE_WORD_SHARE`] of a short utterance
+/// (< [`SHORT_UTTERANCE_CHARS`] chars), or text written mostly in a script
+/// that is not his.
+pub fn is_hallucination_in(result: &TranscriptionResult, user_lang: &str) -> Option<&'static str> {
     let text = result.text.trim();
+    let allowed = allowed_scripts(user_lang, &result.language);
 
     // ---- Layer A: empty or near-empty ----
     if text.is_empty() {
@@ -402,26 +681,29 @@ pub fn is_hallucination(result: &TranscriptionResult) -> Option<&'static str> {
         }
     }
 
-    // ---- Layer F: mixed-script / unicode gibberish ----
-    let total_chars = text.chars().count();
-    if total_chars > 0 && total_chars < 80 {
-        let non_ascii = text
-            .chars()
-            .filter(|c| !c.is_ascii() && !c.is_whitespace())
-            .count();
-        if (non_ascii as f64 / total_chars as f64) > 0.3 {
-            return Some("mixed-script gibberish");
-        }
-        // Per-word script mixing: any single word that mixes ASCII letters
-        // with non-ASCII letters is almost always Whisper hallucinated noise
-        // (e.g. "ünkLöß", "expenseÁê•").
-        for word in text.split_whitespace() {
-            let has_ascii_alpha = word.chars().any(|c| c.is_ascii_alphabetic());
-            let has_non_ascii_alpha = word.chars().any(|c| !c.is_ascii() && c.is_alphabetic());
-            if has_ascii_alpha && has_non_ascii_alpha {
-                return Some("mixed-script word");
-            }
-        }
+    // ---- Layer F: foreign-script / garbled-token gibberish ----
+    // Script, not ASCII: "été", "déjà", "Ça" are Latin like "summer".
+    let (letters, foreign) = text
+        .chars()
+        .filter_map(script_of)
+        .fold((0usize, 0usize), |(l, f), s| {
+            (l + 1, f + usize::from(!allowed.contains(&s)))
+        });
+    let short = text.chars().count() < SHORT_UTTERANCE_CHARS;
+    if letters > 0 && short && foreign as f64 / letters as f64 > 0.3 {
+        return Some("mixed-script gibberish");
+    }
+    let (total_words, noise_words) = text
+        .split_whitespace()
+        .filter(|w| w.chars().any(char::is_alphanumeric))
+        .fold((0usize, 0usize), |(t, n), w| {
+            (t + 1, n + usize::from(suspicious_word(w).is_some()))
+        });
+    if noise_words > 0
+        && (noise_words == total_words
+            || (short && noise_words as f64 / total_words as f64 >= NOISE_WORD_SHARE))
+    {
+        return Some("mixed-script word");
     }
     if text.contains('\u{FFFD}') {
         return Some("unicode replacement char");
@@ -435,11 +717,17 @@ pub fn is_hallucination(result: &TranscriptionResult) -> Option<&'static str> {
     }
 
     // ---- Layer G: suspicious single-token "domain" ----
+    // A dot inside the word, not a sentence-ending one ("Voilà." is a word).
     let words: Vec<&str> = text.split_whitespace().collect();
-    if words.len() == 1 && text.contains('.') {
-        let has_non_ascii = !text.is_ascii();
+    let body = text.trim_end_matches(|c: char| c.is_ascii_punctuation());
+    if words.len() == 1 && body.contains('.') {
         let has_latin = text.chars().any(|c| c.is_ascii_alphabetic());
-        if has_non_ascii || !has_latin {
+        let has_foreign = text
+            .chars()
+            .filter_map(script_of)
+            .any(|s| !allowed.contains(&s));
+        let garbled = body.split('.').any(garbled_case);
+        if has_foreign || garbled || !has_latin {
             return Some("malformed domain");
         }
     }
@@ -470,6 +758,78 @@ mod tests {
             segments: Vec::new(),
             ..Default::default()
         }
+    }
+
+    fn seg(text: &str, lp: f32, ns: f32) -> crate::stt::TranscriptionSegment {
+        crate::stt::TranscriptionSegment {
+            text: text.to_string(),
+            avg_logprob: lp,
+            no_speech_prob: ns,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn strips_trailing_thank_you_sentence() {
+        let r = make("Run the tests and fix the build. Thank you.");
+        assert_eq!(
+            strip_trailing_canned(&r.text, &r).as_deref(),
+            Some("Run the tests and fix the build.")
+        );
+        let r = make("Is that the right approach? Thank you.");
+        assert_eq!(
+            strip_trailing_canned(&r.text, &r).as_deref(),
+            Some("Is that the right approach?")
+        );
+        let r = make("Replace the database with pocket base. Bye.");
+        assert!(strip_trailing_canned(&r.text, &r).is_some());
+    }
+
+    #[test]
+    fn standalone_phrase_still_rejected_not_stripped() {
+        let r = make("Thank you.");
+        assert!(strip_trailing_canned(&r.text, &r).is_none());
+        assert!(is_hallucination(&r).is_some());
+        let r = make("Okay. Thank you.");
+        assert!(strip_trailing_canned(&r.text, &r).is_none());
+    }
+
+    #[test]
+    fn mid_sentence_thank_you_untouched() {
+        let r = make("When you receive it, thank you.");
+        assert!(strip_trailing_canned(&r.text, &r).is_none());
+        let r = make("Thank you for the review, I will merge it now.");
+        assert!(strip_trailing_canned(&r.text, &r).is_none());
+    }
+
+    #[test]
+    fn confident_distinct_final_segment_keeps_thank_you() {
+        let mut r = make("Please send the invoice to the client today. Thank you.");
+        r.segments = vec![
+            seg("Please send the invoice to the client today.", -0.4, 0.01),
+            seg(" Thank you.", -0.08, 0.01),
+        ];
+        assert!(strip_trailing_canned(&r.text, &r).is_none());
+    }
+
+    #[test]
+    fn identical_window_metrics_do_not_prove_confidence() {
+        let mut r = make("Please send the invoice to the client today. Thank you.");
+        r.segments = vec![
+            seg("Please send the invoice to the client today.", -0.1, 0.0),
+            seg(" Thank you.", -0.1, 0.0),
+        ];
+        assert!(strip_trailing_canned(&r.text, &r).is_some());
+    }
+
+    #[test]
+    fn single_segment_tail_is_stripped_single_short_is_not() {
+        let mut r = make("Please send the invoice to the client today. Thank you.");
+        r.segments = vec![seg(&r.text.clone(), -0.29, 0.0)];
+        assert!(strip_trailing_canned(&r.text, &r).is_some());
+        let mut r = make("Thank you.");
+        r.segments = vec![seg("Thank you.", -0.29, 0.0)];
+        assert!(strip_trailing_canned(&r.text, &r).is_none());
     }
 
     #[test]
@@ -537,7 +897,142 @@ mod tests {
 
     #[test]
     fn rejects_mixed_script_gibberish() {
+        // The canonical garbage: 1 noise token in 4 words (25%) of a short
+        // utterance is noise.
         assert!(is_hallucination(&make("ünkLöß I Nativuchy Dk")).is_some());
+        // Only noise tokens: the whole utterance is noise.
+        assert!(is_hallucination(&make("ünkLöß expenseÁê")).is_some());
+        assert!(is_hallucination(&make("helloпривет worldмир")).is_some());
+        // Mostly a script that is not his (English user): gibberish.
+        assert!(is_hallucination(&make("字幕由Amara社区提供")).is_some());
+        // One noise token among enough real words is not a reason to drop
+        // the utterance — clean_suspicious_words removes just the token.
+        let (kept, dropped) = clean_suspicious_words("ünkLöß I Nativuchy Dk");
+        assert_eq!(kept, "I Nativuchy Dk");
+        assert_eq!(dropped, vec!["ünkLöß".to_string()]);
+    }
+
+    /// Ludwig's bug (16 Oct): every French utterance with an accent was
+    /// dropped as "mixed-script word" on Groq Whisper.
+    #[test]
+    fn accepts_french_with_accents() {
+        for text in [
+            "J'ai déjà envoyé le message à l'équipe.",
+            "Ça marche très bien, merci beaucoup !",
+            "Voilà.",
+            "Est-ce que tu peux régénérer la réponse en français ?",
+            "L'été dernier, nous étions à Genève près du lac Léman.",
+            "Où est le café ? À côté de la gare, je crois.",
+            "Peux-tu résumer ce document en trois points, s'il te plaît ?",
+            "DÉFENSE D'ENTRER, c'est écrit en majuscules.",
+            "Ce naïve garçon a mangé une crème brûlée à Noël.",
+        ] {
+            for lang in ["", "en", "fr", "auto"] {
+                let mut r = make(text);
+                r.language = "french".into();
+                assert_eq!(is_hallucination_in(&r, lang), None, "{text} ({lang})");
+                assert_eq!(clean_suspicious_words(text).0, text, "{text} cleaned");
+            }
+        }
+    }
+
+    #[test]
+    fn accepts_mixed_french_english() {
+        for text in [
+            "J'ai push le commit sur la branche develop, tu peux faire la review ?",
+            "Le meeting est à 15h, on parle du roadmap et du pricing.",
+            "Ouvre ChatGPT et demande-lui un résumé de l'iPhone 17.",
+            "C'est un bug dans le LinkedIn feed, pas dans l'app.",
+        ] {
+            assert_eq!(is_hallucination_in(&make(text), "fr"), None, "{text}");
+            assert_eq!(is_hallucination_in(&make(text), "en"), None, "{text}");
+            assert!(clean_suspicious_words(text).1.is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn drops_only_the_bad_token_in_french() {
+        let text = "Je vais envoyer le rapport ünkLöß demain matin à Paul.";
+        assert_eq!(is_hallucination_in(&make(text), "fr"), None);
+        let (kept, dropped) = clean_suspicious_words(text);
+        assert_eq!(kept, "Je vais envoyer le rapport demain matin à Paul.");
+        assert_eq!(dropped, vec!["ünkLöß".to_string()]);
+        let (kept, dropped) = clean_suspicious_words("Bonjour Marieпривет, ça va ?");
+        assert_eq!(kept, "Bonjour ça va ?");
+        assert_eq!(dropped, vec!["Marieпривет,".to_string()]);
+    }
+
+    #[test]
+    fn respects_the_users_script() {
+        // Russian for a Russian user, Japanese for a Japanese user.
+        assert_eq!(
+            is_hallucination_in(&make("Привет, как дела сегодня?"), "ru"),
+            None
+        );
+        assert_eq!(
+            is_hallucination_in(&make("今日はいい天気ですね"), "ja"),
+            None
+        );
+        // Engine-reported language counts too (auto config).
+        let mut r = make("Привет, как дела сегодня?");
+        r.language = "russian".into();
+        assert_eq!(is_hallucination_in(&r, "auto"), None);
+        // Same text for an English user with no evidence of Russian: gibberish.
+        assert!(is_hallucination_in(&make("Привет, как дела сегодня?"), "en").is_some());
+        // An explicit language is not overridden by what the engine reports:
+        // an English user whose engine says "russian" still gets gibberish.
+        assert!(is_hallucination_in(&r, "en").is_some());
+        assert!(is_hallucination_in(&r, "fr").is_some());
+        // Japanese words mix Han and Kana by nature.
+        assert_eq!(suspicious_word("日本語です"), None);
+    }
+
+    /// Whisper's non-English credit hallucinations are rejected on `auto`
+    /// even when the engine-reported language makes their script "allowed".
+    #[test]
+    fn rejects_foreign_credit_hallucinations_on_auto() {
+        for (text, language) in [
+            ("Субтитры сделал DimaTorzok", "russian"),
+            ("Продолжение следует...", "russian"),
+            ("ご視聴ありがとうございました", "japanese"),
+            ("字幕由Amara.org社区提供", "chinese"),
+        ] {
+            let mut r = make(text);
+            r.language = language.into();
+            for lang in ["auto", ""] {
+                assert!(is_hallucination_in(&r, lang).is_some(), "{text} ({lang})");
+            }
+            assert!(is_hallucination(&r).is_some(), "{text}");
+        }
+    }
+
+    #[test]
+    fn short_utterance_noise_share() {
+        // 1 of 4 words: rejected; 1 of 10 words: only the token is dropped.
+        assert!(is_hallucination(&make("ünkLöß I Nativuchy Dk")).is_some());
+        assert_eq!(
+            is_hallucination_in(
+                &make("Je vais envoyer le rapport ünkLöß demain matin à Paul."),
+                "fr"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn script_classification() {
+        for c in ['a', 'Z', 'é', 'à', 'ç', 'Ç', 'ß', 'ø', 'œ', 'ł', 'ő', 'ễ'] {
+            assert_eq!(script_of(c), Some(Script::Latin), "{c}");
+        }
+        assert_eq!(script_of('\u{0301}'), None);
+        assert_eq!(script_of('1'), None);
+        assert_eq!(script_of('\''), None);
+        assert_eq!(script_of('п'), Some(Script::Cyrillic));
+        assert_eq!(script_of('न'), Some(Script::Devanagari));
+        // Decomposed accent ("e" + combining acute) is still Latin.
+        assert_eq!(suspicious_word("e\u{0301}te\u{0301}"), None);
+        assert_eq!(scripts_for_language("fr-FR"), &[] as &[Script]);
+        assert_eq!(scripts_for_language("ne"), &[Script::Devanagari]);
     }
 
     #[test]
@@ -701,6 +1196,7 @@ mod tests {
                 confidence,
                 live_stream,
                 preview_text: preview.map(str::to_string),
+                unrecovered_parts: 0,
             },
             ..Default::default()
         }

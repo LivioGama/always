@@ -1,15 +1,6 @@
 import SwiftUI
 import AppKit
 
-private struct TranscriptEntry: Identifiable {
-    let id = UUID()
-    let timestamp: Date
-    let rawText: String
-    let processedText: String
-
-    var displayText: String { processedText.isEmpty ? rawText : processedText }
-}
-
 struct HistoryPanel: View {
     @State private var entries: [TranscriptEntry] = []
     @State private var isLoading = false
@@ -54,7 +45,7 @@ struct HistoryPanel: View {
                 Text("No transcriptions yet today.")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                    .padding(.top, 8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 6) {
@@ -63,9 +54,11 @@ struct HistoryPanel: View {
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task { await loadHistory() }
         .confirmationDialog(
             "Delete all transcriptions from today's session?",
@@ -158,42 +151,9 @@ private struct HistoryEntryRow: View {
 }
 
 private func readTodayEntries() -> [TranscriptEntry] {
-    let dateStr = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: Date())
-    }()
-    let logPath = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/Always/always.\(dateStr)")
-        .path
-    guard let contents = try? String(contentsOfFile: logPath, encoding: .utf8) else { return [] }
-
-    let iso = ISO8601DateFormatter()
-    var result: [TranscriptEntry] = []
-    for line in contents.components(separatedBy: "\n") where !line.isEmpty {
-        guard
-            let data = line.data(using: .utf8),
-            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let fields = json["fields"] as? [String: Any],
-            let msg = fields["message"] as? String, msg == "transcription_pasted",
-            let rawText = fields["raw_text"] as? String
-        else { continue }
-        let processedText = fields["processed_text"] as? String ?? ""
-        let ts = (json["timestamp"] as? String).flatMap { iso.date(from: $0) } ?? Date()
-        result.append(TranscriptEntry(timestamp: ts, rawText: rawText, processedText: processedText))
-    }
-    return Array(result.suffix(20))
+    TranscriptHistoryStore.current.todayEntries()
 }
 
 private func clearTodayLog() {
-    let dateStr = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: Date())
-    }()
-    let logURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/Always/always.\(dateStr)")
-    // Truncate the log file. The daemon holds an open file handle and will
-    // continue appending new entries at the new (zero) offset.
-    try? Data().write(to: logURL, options: .atomic)
+    TranscriptHistoryStore.current.clear()
 }

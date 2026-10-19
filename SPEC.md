@@ -89,10 +89,42 @@ Two processes, plus a recorder:
 | `always-daemon` (Rust) | Audio capture, VAD, speaker verification, transcription, pasting. |
 | `rec` (SoX) | Raw microphone capture, 16 kHz mono 16-bit, one instance, spawned by the daemon. Its output is drained continuously by one daemon reader thread (see §4, "Audio delivery"). |
 
-The GUI spawns the daemon and talks to it over a Unix domain socket at
-`~/Library/Caches/always/always.sock`. Messages are newline-delimited JSON; the
-daemon broadcasts events, the GUI sends commands.
+On Linux and Windows, the daemon uses CPAL for microphone capture. It converts
+the selected device's supported sample rate and channel layout to the pipeline's
+16 kHz mono frames; Linux exposes the capture device through ALSA, including
+PipeWire/PulseAudio ALSA compatibility layers. Linux uses `wl-copy`/`wl-paste`
+for clipboard access on Wayland when installed, falling back to `xclip`, and
+uses `xclip` on X11. It simulates paste with `ydotool` on Wayland when installed,
+falling back to `xdotool`; X11 uses `xdotool`. Linux global
+shortcuts are available in X11 sessions; Wayland compositors do not let the
+daemon observe global key events, so users there control pause and auto-enter
+through the CLI.
 
+The GUI talks to the daemon over a Unix domain socket using newline-delimited
+JSON. On macOS it is `~/Library/Caches/Always/always{suffix}.sock`; on Linux it
+is `$XDG_RUNTIME_DIR/always{suffix}.sock` (or `/tmp/always{suffix}.sock` when
+`XDG_RUNTIME_DIR` is unset). Development instances use the `-dev` suffix so
+they cannot replace the production socket. The daemon broadcasts events; the
+GUI sends commands.
+
+**Always never changes what the Mac plays (2026-10-16, v0.1.0 user report:
+micro-cuts / crackling in Apple Music and on a speaker while Always ran).**
+The voice-processing (VPIO) echo canceller is OFF by default: the daemon
+starts `always-capture --no-vp` (plain mic) unless `capture_aec` is set true
+(or `ALWAYS_AEC=1`), and the helper itself runs VPIO only with `--vp` /
+`ALWAYS_CAPTURE_AEC=vp`. Measured on a MacBook Air (macOS 27, built-in
+speakers): starting a VPIO unit makes coreaudiod restart the OUTPUT device's
+IO (and again when it stops) with Audio IO Overloads at both edges, and duck
+every other app to 0.178 (−15 dB) for ~2 s, then 0.631 (−4 dB) while it runs
+— at `duckingLevel = .min`. The plain helper caused no output restart and no
+ducking. **Trade-off (owner decision, 2026-10-16):** with VPIO off, sound
+playing from the Mac's own speakers reaches the microphone again (measured
+below: playback put 100 % of frames above the speech floor, vs 0 % through
+VPIO), so dictating over a playing video now relies on the speaker gate and
+the audio-output pause instead of cancellation, and status cues are no
+longer cancelled out of the mic. Users who want the 2026-10-14 behaviour opt
+in with `always config set capture_aec true`. The paragraphs below describe
+the VPIO path, now opt-in.
 **Echo-cancelled capture (2026-10-14, user request: "When a YouTube video is
 playing she does not hear me at all — I should never have to pause a video to
 dictate").** When the bundled `always-capture` helper is present, it is the
@@ -101,9 +133,11 @@ process, spawned by the daemon), but captured through Apple's voice-processing
 I/O, which subtracts the Mac's own audio output from the microphone before the
 daemon's VAD, speaker gate and recognizers see it. Other apps' audio is not
 ducked (`duckingLevel = .min`) and VPIO's AGC is off, so energy thresholds stay
-calibrated to the raw mic. **Default ON** (the user confirmed dictation over a playing video works
-with it, 2026-10-14). Kill switch: `always config set capture_aec false`
-(applied at the next daemon start); env `ALWAYS_AEC=0/1` overrides.
+calibrated to the raw mic. **Opt-in since 2026-10-16** (it was default ON
+from 2026-10-14, when the user confirmed dictation over a playing video works
+with it; see above for why it changed). Enable: `always config set
+capture_aec true` (applied at the next daemon start); env `ALWAYS_AEC=0/1`
+overrides.
 **Echo canceller only while something plays (2026-10-14, user request:
 "optimise the fuck out of it… voice is badly lagging").** The canceller only
 has work when the Mac is producing sound, so while no other process runs audio
@@ -130,7 +164,12 @@ the daemon process were inaudible in production while the helper ran, so
 **while the helper runs, status cues are rendered through the helper's own
 voice-processing output** (`play <file>` on its stdin) — the unit never
 ducks its own output, and it is the echo reference, so cues never reach the
-mic. With plain `rec` (or if the helper's cue channel fails) cues play
+mic. (In plain mode — the default since 2026-10-16 — the helper carries no
+output chain at all: attaching the cue players would keep the OUTPUT device
+running for the helper's whole lifetime and restarting output IO at launch,
+an audible cut in whatever the user is playing — reported 2026-10-18 as a
+"small jump" in output sound on every app start. Cues therefore play
+in-process; nothing ducks them once VPIO is off.) With plain `rec` (or if the helper's cue channel fails) cues play
 in-process as before. ❓ Residual ducking of other apps' audio at `.min`
 could not be measured here: while any voice-processing unit runs, even
 another process's raw `rec` capture of the speakers is strongly attenuated
@@ -154,6 +193,9 @@ VPIO's noise suppression was not measurable on a single-speaker machine.
   is genuinely gone.
 - The daemon sends its full current state on connect, so a reconnecting GUI is
   never out of sync.
+- `MicUnavailable { unavailable }` (2026-10-17) is additive — no protocol
+  bump. It is broadcast on change and included in the initial burst while the
+  mic is stuck (§7.1, §7.2).
 
 ---
 
@@ -188,7 +230,9 @@ VPIO's noise suppression was not measurable on a single-speaker machine.
    *after* Return, not before it (2026-10-13, user request: "make it insanely
    fast" — previously Return landed ~155 ms after the paste). The clipboard is
    written in-process through `NSPasteboard` (p50 0.84 ms) rather than a
-   `pbcopy` subprocess (p50 17.4 ms), which remains the fallback.
+   `pbcopy` subprocess (p50 17.4 ms), which remains the fallback. On macOS,
+   simulated Cmd+V brackets the V key events with Command `FlagsChanged` events;
+   optional Return is sent after Command is released.
 
 **Long utterances (chunks).** A chunk committed by the hard flush
 (`CHUNK_HARD_MAX_SECS`) ends at our cut, not at a pause the speaker made, so a
@@ -306,8 +350,16 @@ Idle-paused · Low mic volume · correction confirmations.
   off-screen. Text taller than the cap is head-truncated — a leading "…"
   replaces the oldest words so the words just spoken stay visible. Compact
   mode remains a fixed single truncated line.
-- Hidden entirely when paused, disconnected, or when the user selects the hidden
-  display mode.
+- **Display mode applies live.** Settings → Status Overlay offers Normal,
+  Compact and Hidden; the default is Normal. A change takes effect at once, no
+  restart: the indicator already on screen is re-rendered in the new size, and
+  choosing Hidden removes it through the normal hide path, so invariant I2's
+  600 ms minimum on-screen time still holds. The indicator is still hidden
+  when paused or disconnected. It sits centred near the bottom of the screen
+  under the pointer, just above the Dock.
+- **The idle pill** (shown when idle auto-pause fires) hides on any resume,
+  whichever control caused it. Its Play button sends `Resume`, which lifts the
+  pause and never pauses (§7).
 - **Live feedback preempts transient confirmations.** Brief confirmation
   flashes (Pause/Resume, Auto-Enter toggles, low-mic volume, offline
   fallback — 1.5 s to 4 s) normally run their full duration, but if the user
@@ -432,6 +484,10 @@ television, meeting audio and music are ignored.
 
 **Enrollment** records three passes (normal, lower, louder), each needing 5 s of
 voice. Each pass is stored as its own embedding, plus their combined average.
+In Settings, the My Voice switch cannot be turned on until all three samples
+are recorded, but it remains possible to turn it off if the saved setting is
+on. When off without a complete profile, the UI explains that enrollment is
+required before the gate can be enabled.
 
 **Enrollment readiness.** The speaker model (26.5 MB, SHA-256 checked) is
 prefetched in a background thread at every daemon start, whatever the gate or
@@ -525,13 +581,27 @@ and swaps the live keyboard listener's combo set without a restart.
 | Per-app | Focused app is on the paused list | Focus moves to an allowed app |
 | Mic conflict | Another app holds the microphone | Mic free for ~3 s (§7.1) |
 | Audio output | System audio is playing | Playback stops |
-| Idle | No voice for `idle_pause_secs` | Voice detected again |
+| Idle | No voice for `idle_pause_secs` while Always is otherwise listening (never set while another pause is active — its clock restarts instead) | Voice detected again, or an explicit user resume |
 | No GUI | Daemon lost its last client | A client connects |
 
 **Rules:**
-- Any active source suppresses capture. The explicit global resume clears all of
-  them at once — including the idle auto-pause, so pressing the master chord
-  after an idle timeout resumes immediately without needing a separate action.
+- Any active source suppresses capture.
+- **An explicit user resume** (global chord, idle pill Play, `Resume` or
+  `TogglePause` over UDS, CLI, tray) clears master, idle, audio-output and
+  mic-conflict at once, and never pauses. A global toggle resumes whenever any
+  of those is active, and only otherwise sets master. The watchdogs re-arm on
+  their next transition, so the user can force dictation while music plays or
+  another app holds the mic. This is a deliberate user override of the
+  watchdogs; I7 still holds: when another app takes the mic Always stops
+  immediately, and it is the user who resumes. After each control press the
+  daemon re-broadcasts the authoritative `Paused` / `Resumed` state so a GUI
+  that predicted wrongly is corrected.
+- **Per-app chord** (for the focused app): if the app is effectively paused
+  (not on the allowlist, or idle / audio-output / mic-conflict active), it is
+  added to the allowlist if absent and idle / watchdog pauses are lifted; if it
+  is listening, it is removed from the allowlist; while master is on, the chord
+  edits the allowlist only. Allowlist edits from Settings / Onboarding
+  (`SetAppPaused`) are plain edits and never lift idle or watchdog pauses.
 - On resume, audio queued by the recorder during the suppressed period is
   **discarded** (I6). The recorder never stops, so its buffer holds several
   seconds of exactly the audio Always was meant to ignore.
@@ -628,6 +698,13 @@ next poll — and logs `mic_conflict_self_only_ignored` as an error.
 for 3 consecutive 1 s polls. A failing probe while paused counts as a free
 poll, so a broken probe can never strand Always paused.
 
+**Mic unavailable** (2026-10-17, requested by Livio: "Always loses the mic and
+it's impossible to retrieve it"). After 3 consecutive recorder failures (§7.2)
+the menu bar shows **"Mic stuck — Fix"**, which reaps the daemon's audio
+children and restarts the daemon. The item hides when audio resumes or the
+daemon disconnects. This is distinct from a mic conflict: nothing else holds
+the mic, the device is simply delivering nothing.
+
 ### 7.2 Recorder health and respawn
 
 The `rec` (SoX) process runs for the daemon's lifetime and is only replaced
@@ -666,6 +743,32 @@ or device change) or when the daemon goes away; the daemon sees EOF and
 respawns it through the normal path. It emits no CoreAudio overrun lines, so
 the overrun-rate respawn never fires for it. A `RespawnRecorder` (default
 input change) re-enables the helper after an earlier start-up failure.
+
+**Escalation when the mic stays dead** (2026-10-17, requested by Livio). The
+18:50–18:59 outage that day: a default-input change wedged the device, the
+helper failed to start (VPIO -10875, then plain `'what'`), the daemon fell
+back to SoX, and SoX delivered nothing — `rec_timeout_recorder_reset` fired
+~40 times at 15 s intervals forever, and manual restarts hit the same path.
+- A failed helper start (VPIO or plain) is remembered for **60 s**, not for
+  the daemon's lifetime; after that the next spawn retries the native helper
+  before falling back to SoX.
+- Read timeouts, EOFs and failed spawns count as **consecutive failures**.
+  Respawns back off **1, 2, 5, 15, 30 s** (the last repeats); the wait runs
+  outside the recorder lock.
+- **3** failures log `mic_stuck` and broadcast `MicUnavailable { true }` (§7.1).
+- **6** failures make a GUI-spawned daemon (`ALWAYS_SPAWNED_BY_GUI=1`) drop
+  its recorder, remove its pid/socket files and exit with code **75**, so the
+  GUI respawns it. A terminal-launched daemon keeps retrying.
+- The first delivered frame resets the count and broadcasts
+  `MicUnavailable { false }`.
+- SoX runs in its own process group and the group is killed on drop. At the
+  first spawn of a daemon, and when the GUI kills a stale daemon, orphaned
+  (ppid 1) `always-capture` binaries from the app bundle and `rec`/`sox`
+  processes with the daemon's exact argument signature are killed (I4).
+- The GUI coalesces default-input changes: `RespawnRecorder` is sent only once
+  the default input has been quiet for **1.5 s**.
+- ❓ A device wedged at the coreaudiod level may only recover after a
+  coreaudiod restart or a replug; Always does not restart coreaudiod.
 ### 7.3 Daemon memory ceiling and self-restart
 
 The daemon checks its own **physical footprint** every 30 s (same metric
@@ -698,6 +801,26 @@ offline; the cloud backend is faster to start and needs an API key.
 - A local model may be armed as fallback for the cloud backend; failures fall
   back silently but are logged.
 - Switching models takes effect on the next utterance.
+- Linux development and release builds include the local STT engines. Selecting a local
+  model never invokes Groq or requires its API key; missing files or missing
+  local-engine support produce a local-model error and keep the previous
+  backend selected.
+- On Linux startup, Groq is eligible only when a non-empty key is configured.
+  Without a key, a downloaded local model is chosen (recommended first, then
+  combined accuracy and speed); with none downloaded, the backend is `none`
+  and Settings shows “No model selected” with setup guidance. A saved local
+  selection takes precedence. A failed startup load reports its error and
+  returns to `none`, rather than showing an unavailable backend as active.
+- A switch loads the new engine before the config names it, and never under
+  the config lock the main loop reads, so a slow load does not block dictation.
+  Engine rebuilds (a switch, a language change) run one at a time.
+- Every `SetActiveTranscriber` request ends with `ActiveTranscriberChanged`
+  naming the backend now running — no-ops and failures included.
+- A failed load first sends `ActiveTranscriberFailed { backend, error }` and
+  leaves the previous backend active, so a retry really retries. The Models tab
+  shows the error on that row.
+- If the daemon never answers, "Loading…" gives up after 120 s with a message
+  on the row; a late success clears that message.
 
 **Streaming models available:** `moonshine-tiny-streaming-en`,
 `moonshine-small-streaming-en`, `moonshine-medium-streaming-en`, `nemotron-3.5-asr-streaming-0.6b`.
@@ -826,7 +949,8 @@ recognition. Requires no API key and never uploads audio on macOS 26+.
 - In the Settings → Models tab, the Apple on-device option appears at the top of
   the model list (above downloaded/available models and broken-model diagnostics).
   Selecting it sends `SetActiveTranscriber { "backend": "apple" }`, the active
-  row is badged, and the same loading spinner is shown while the daemon confirms.
+  row is badged, and the same loading spinner is shown until the daemon
+  answers (success, failure or no-op; 120 s give-up, see above).
 - `Always.app/Contents/Info.plist` declares `NSSpeechRecognitionUsageDescription`
   so the bundled `always-daemon` can request macOS speech-recognition permission.
   The first transcription attempt triggers a TCC prompt; without this key the
@@ -841,6 +965,24 @@ Between transcription and the keyboard:
 1. **Hallucination filter** — rejects the known failure modes of speech models:
    empty output, "thank you"/"bye" family, subtitle credits, repeated tokens,
    gibberish, low-confidence segments.
+   Groq backend only. Script mixing is judged by Unicode script, not ASCII: Latin
+   with diacritics is ONE script ("déjà", "Ça", "naïve" are ordinary words). The
+   user's scripts are Latin plus the script of `lang` (plus the engine-reported
+   language's script only when `lang` is `auto`). A single garbled token (two
+   scripts in one word, or a mid-word case flip carrying non-ASCII, e.g.
+   "ünkLöß") is removed and the rest is pasted. The utterance is rejected when it
+   holds only such tokens, when they are ≥ 25% of the words of a short utterance
+   (< 80 chars), or when it is mostly in a script that is not the user's.
+   **Trailing canned closer** (2026-10-17, requested by Livio: "thank you"
+   injected at the end of sentences). When a Groq result ends with a separate
+   final sentence that normalizes to "thank you", "thanks", "thank you very
+   much", "(thank you|thanks) for watching", "bye" or "bye bye", preceded by at
+   least 4 words, that sentence is removed and the rest is pasted. Mid-sentence
+   uses are never touched. A final segment with its own metrics (avg_logprob
+   ≥ -0.15, no_speech_prob ≤ 0.05, differing from the previous segment) is
+   treated as genuine and kept. Known limit: Groq repeats one window's metrics
+   on every segment, so on Groq a genuine closing "Thank you." after ≥ 4 words
+   is also removed. ❓ Thresholds not tuned on real tail audio.
 2. **Vocabulary bias** — the user's glossary is sent to the model as a hint so
    domain terms transcribe correctly. **The hint must never reach the user's
    text**: these models echo their prompt back, especially on short or quiet
@@ -1209,6 +1351,30 @@ Two steps:
 2. **My Voice.** The three enrollment recordings, inline. Always skippable —
    "Skip for now" and "Finish without it" both complete setup.
 
+**Last page: apps to turn voice typing on in.** The final "You're all set"
+page lists apps to turn voice typing on in, because Always pastes only into apps
+on the allowlist and every other app stays paused. The list is chosen by how
+likely you are to dictate into the app, not alphabetically:
+
+1. likely dictation targets that are **running** (Slack, Messages, ChatGPT,
+   Claude, Cursor, VS Code, Zed, Chrome, Safari, Arc, Dia, Firefox, Mail,
+   Notes, Notion, WhatsApp, Teams, Discord, Telegram), in that fixed order;
+2. likely targets that are **installed but not running**, in the same order;
+3. any other running regular (Dock) app, A→Z.
+
+The list is capped at **10**, and the chosen apps are then *shown* A→Z. An app
+appears once even if it is both running and installed. Never offered: Always
+itself (every known bundle id), Finder, System Settings, Activity Monitor, and
+password managers and keychain tools (Passwords, Keychain Access, 1Password,
+Bitwarden). A browser stands in for web apps — Slack in a browser is covered by
+turning that browser on, since the allowlist is per app. Every checkbox starts
+**unchecked** unless that app is already resumed; ticking one resumes Always in
+it, unticking pauses it again. With nothing to list the page says to open the
+app and use "Resume Always for …" in the menu bar. ❓ The "installed" check
+only looks up the likely-target bundle ids, so an installed app outside that
+list never appears unless it is running; this is read from the code, not
+exercised on a machine with every target installed.
+
 **Completion is a recorded fact, not an inference.** It was previously derived
 from "is a Groq API key saved?", which was wrong in both directions: a user
 running a local model has no key and was re-shown the welcome window on every
@@ -1226,6 +1392,19 @@ working setup with a welcome window.
 The Groq API key was deliberately removed from this flow for that reason — it is
 not required (local models need none) and it now lives in Settings → Models.
 
+**Linux and Windows (Tauri app).** Both windows start hidden. At launch the
+settings webview shows the onboarding window until completion is recorded, and
+the settings window afterwards. Completion lives in the webview's
+`always_onboarding_done` flag. A saved Groq key or a recorded voice profile
+(`always config show`, `always voice status`) retro-marks it. Finishing,
+skipping, or closing the onboarding window records completion and shows
+Settings. The tray's Settings → Onboarding item re-opens the flow from its first
+step.
+The Tauri app starts the sibling `always` daemon with `always start` before
+creating its reconnecting IPC client. The daemon's single-instance guard makes
+this safe when it is already running; a start failure is logged and leaves the
+settings UI available.
+
 ---
 
 ## 10. Preferences
@@ -1233,9 +1412,53 @@ not required (local models need none) and it now lives in Settings → Models.
 Stored in the daemon's database, editable from Settings and the CLI
 (`always-daemon config set <key> <value>`).
 
+The macOS Transcript History panel fills the available settings content height,
+including while loading or empty. With no entries, its message is centered in
+the space below the header; populated history uses that space for its list.
+The Linux and Windows Tauri History panel reads daemon history rows from
+`history.jsonl`, using the daemon's `ts` millisecond timestamp and `raw_text`.
+
+**Settings controls.** Settings labels and explanatory text are not selectable
+as ordinary web text. Inputs, editable text, and transcript-history entries
+remain selectable. Models cards use subdued dark surfaces against the dark
+window.
+
+The Linux settings UI follows the macOS panel conventions for selection and
+status: selected segmented options use the blue accent; the Models catalog
+filters by All, English, or Multilingual and offers Translation, Fast, and
+Streaming filters. A downloaded model leaves its in-progress state after the
+daemon confirms it in the catalog, so the row settles into its downloaded
+actions instead of spinning indefinitely.
+The Fast filter includes catalog entries with `speed_score >= 0.75`, matching
+the 0–1 score scale. Model rows use accuracy and speed bars, plus globe,
+translation, streaming, and storage metadata icons. Target language selection
+appears only for an active model that supports it; Linux omits the Auto-detect
+choice from that picker.
+
+The shared Windows/Linux settings layout follows the macOS reference in these
+areas: Models keeps language, capability, and sort filters in one row and uses
+an icon-only trash action for downloaded models; My Voice groups the gate label,
+current status, and switch in one tinted row without changing enrollment rules;
+Permissions puts a shield beside its heading, Re-check at the top right, and
+one inline status indicator per permission. Library centers its tabs without
+an extra content heading and puts the glossary file action and path above the
+entries. About places update status beside Check for Updates. Platform-specific
+permission names and actions remain intact.
+
+On Linux, the Behavior switches for adaptive silence and live transcript apply
+their changes to the running daemon immediately and save them for the next
+launch. Models dropdown controls and their option menus use dark surfaces with
+readable light text.
+
+**Linux permissions.** Linux does not show the microphone-permission banner in
+General: microphone access comes from the active audio session, and the
+Permissions page reports the daemon/audio-session status. Global shortcuts
+report their X11 requirement separately. Platform-specific banners wait until
+the app has identified the platform, avoiding a Windows warning flash on Linux.
+
 | Key | Default | Meaning |
 |---|---|---|
-| `lang` | `auto` | Dictation language |
+| `lang` | `auto` | Dictation language. Groq sends it as Whisper's `language` (bare ISO code, `fr-FR` → `fr`); `auto` resolves to the system locale's language (as the Apple recognizer does), `en` if unknown. Before 2026-10-16 Groq was always sent `en`. |
 | `stt_energy_threshold` | 0.012 | Speech energy floor |
 | `hear_energy_threshold` | 0.001 | Wake-on-voice floor |
 | `silero_threshold` | 0.4 | VAD speech probability |
@@ -1250,7 +1473,7 @@ Stored in the daemon's database, editable from Settings and the CLI
 | `postprocess_mode` | unset → migrated (§9 item 6) | `fast` · `apple` · `groq` · `off` |
 | `postprocess_enabled` | true | Legacy; only read to migrate `postprocess_mode` when unset |
 | `transcript_stream` | true | Append accepted utterances to `~/.always/transcripts.jsonl` |
-| `capture_aec` | true | Echo-cancelled capture via `always-capture` (§3); false = plain `rec` |
+| `capture_aec` | false (unset = off) | Echo-cancelled (VPIO) capture via `always-capture` (§3); false = plain helper (`--no-vp`) |
 | `audible_status_sound` | off | Sound cues (off/low/medium/high; see §10.1) |
 | `per_app_settings_json` | — | Per-application pause rules |
 | `update_check` | true | Background GitHub release check (§12a); `ALWAYS_UPDATE_CHECK=0` also disables it |
@@ -1300,6 +1523,7 @@ daemon (I4/I5 hold *per instance*).
 | URL scheme | `always://` | `always-dev://` |
 | Updates (§12a) | background check + notify; apply on request | no background check; apply refused |
 | Focus-state file | `~/Library/Caches/Always/focus-state.json` | `focus-state-dev.json` |
+| Daemon build identity | `always.build-id` in the state dir | `always.build-id` in the dev state dir |
 | Daemon logs | `~/Library/Logs/Always` | `~/Library/Logs/Always-dev` |
 
 Shared deliberately: `~/Library/Application Support/always/models` and the
@@ -1318,21 +1542,44 @@ seeds its state dir from production's db/voiceprint/vocabulary (one-time
 copy; afterwards they diverge).
 
 **Peer handoff.** The microphone is still singular — two live daemons would
-both transcribe and both paste. So whichever daemon starts last pauses its
-peer over the peer's UDS socket (`SetPaused{reason:"peer-instance"}`): the
-paused instance stops listening, no audio is transcribed or pasted. A
-paused-by-peer daemon runs a watchdog that self-resumes the moment the
-peer's socket dies (~1 s), covering SIGKILL where no cleanup runs;
-graceful exits resume the peer directly. A user pause/unpause of either
-instance always overrides the handoff — the watchdog stands down and the
-user's choice wins.
+both transcribe and both paste. Starting Dev while production is live keeps
+Dev passive: Dev pauses itself and watches production, without changing the
+production pause state. When a newer daemon starts alongside an older peer,
+it applies the same safe standby policy at socket readiness; it does not
+assume that a PID check alone completed the handoff.
+
+Cross-instance mutations use the optional `peer-pause-lease-v1` capability
+negotiated in the initial `Hello`. A pause/release request carries a unique
+request ID and requires a correlated `PeerPauseLeaseResult`; EOF, timeout,
+legacy peers, and mismatched replies fail closed. A peer already manually
+paused is acknowledged without acquiring a release lease. A matching lease
+may release only the pause it acquired; any later manual pause/resume revokes
+that lease and wins over a delayed release. A paused-by-peer daemon resumes
+when its peer endpoint dies (~1 s), covering SIGKILL where no exit cleanup
+runs; graceful exits release only a still-owned lease. An explicit Dev resume
+is a deliberate takeover: it negotiates a conditional pause first and stays
+paused if the peer cannot safely confirm it. Similarly, if a new production
+daemon cannot safely pause a live older Dev peer, production enters standby
+and watches that peer instead of allowing both to capture.
 
 **Commands.**
 
-- `scripts/dev-rebuild.sh` — the dev loop. Kills/rebuilds/relaunches only
+- `scripts/dev-rebuild-macos.sh` — the macOS dev loop. Kills/rebuilds/relaunches only
   `Always Dev.app`; never touches the production install. Exits non-zero
   unless the dev GUI + daemon are running the just-built binaries, and
   warns if production went missing.
+- `always start` compares a running daemon's recorded build identity with the
+  current executable. A mismatch or missing identity is reported as stale or
+  unknown and returns an error without stopping the live daemon; `always
+  status` reports the same state. The identity distinguishes compiled daemon
+  artifacts. Source edits that have not been built are outside this check.
+  Process ownership is established from the OS-reported executable path and
+  the daemon's `run` command, never from arbitrary argument text. A live IPC
+  endpoint without a verifiable PID is reported as running with unknown build
+  identity; `start` does not start a duplicate and `stop` never signals an
+  unverified PID.
+- `scripts/dev-rebuild-linux.sh` — builds the Linux daemon, settings frontend,
+  and Tauri app, then launches and verifies the checkout's settings app.
 - `scripts/promote.sh` — manual production promotion, user-invoked only.
   Kills production, rebuilds, deploys over `/Applications/Always.app`,
   relaunches, verifies. Agents must not run it.
@@ -1351,6 +1598,41 @@ user's choice wins.
   volume and never plays audibly: the sandbox sets `ALWAYS_CUE_DRY_RUN=1`,
   which renders cues offline to a buffer. A sandbox instance
   never pauses, resumes or reaps prod/dev daemons.
+
+**Windows daemon lifecycle.** On Windows the daemon is not CLI-only: the
+versioned IPC protocol is carried over a named pipe instead of a unix socket,
+including the negotiated peer pause lease. `always start` spawns
+`always run` detached (no console), single-instance is a named kernel
+mutex (`Local\always-daemon[-dev]`, released by the kernel on process
+death), liveness is the pid file + an `OpenProcess` image-name check
+(recycled pids can't impersonate the daemon), and the process table
+comes from a Toolhelp32 snapshot with command lines read out of each
+candidate's PEB. `stop`/orphan-reaping use `TerminateProcess` — there
+is no SIGTERM equivalent for a detached process — and stale pid files
+are reclaimed on the next start. `always run` in a console shuts down
+gracefully on Ctrl+C (pid file cleanup).
+
+**Windows IPC — named pipe.** The JSON-lines `DaemonCommand`/`DaemonEvent`
+protocol (same versioned schema as the UDS socket) listens on
+`\\.\pipe\always[-dev]`. Its protected DACL permits only the creating
+user and SYSTEM; remote clients are rejected. The pipe carries transcript
+events, so it must not inherit the default Everyone/Anonymous read access.
+The server creates the endpoint with `first_pipe_instance`, so bind failure is the pipe equivalent of the
+live-socket check — a second daemon can't steal it (the kernel mutex
+already prevents that anyway). Opening the pipe IS the liveness probe:
+`ERROR_FILE_NOT_FOUND` = no server, success/`ERROR_PIPE_BUSY` = live.
+`\\.\pipe\` paths never stat as files, so "socket exists" checks on
+Windows mean "endpoint answers", not `Path::exists`. CLI commands that
+need live IPC (`toggle-pause`, `toggle-auto-enter`, `get-state`,
+`models.*`, voice enrollment) go through the pipe like on unix and fall
+back to local state only when no daemon is running. The Tauri settings
+app (`always-tauri` + `always-gui`) connects through the same pipe —
+same protocol, same transport — and holds a persistent client
+connection where CLI calls are transient. The orphan watchdog
+(no client for 30 s → exit) now runs only when `ALWAYS_SPAWNED_BY_GUI=1`:
+a terminal-spawned daemon has no client to wait for and would otherwise
+suicide 30 s after every `always start` — on Windows, where clients are
+transient CLI calls, that is the only mode there is.
 
 **Nothing is "done" until the new build is running** (I10). "Built" and
 "deployed" are different claims, and only "running" is testable.
@@ -1454,7 +1736,9 @@ Per OS:
   pid), renames the current `always.exe` to `always.exe.old`, copies the new
   files, and the leftover `.old` is deleted by the next `always update` / daemon
   start. Installs into the directory the running `always.exe` lives in
-  (normally `%LOCALAPPDATA%\Programs\Always`). No UDS on Windows: CLI only.
+  (normally `%LOCALAPPDATA%\Programs\Always`). Windows talks to the daemon
+  over the `\\.\pipe\always` named pipe (§12); the CLI falls back to
+  spawning it when the pipe is absent.
 - **Linux, tarball install** (binary at `<prefix>/bin/always`, not owned by a
   package) — replaced in place, then the user service is restarted if it was
   active. Allowed from the CLI and from `InstallUpdate`.
@@ -1466,6 +1750,23 @@ Per OS:
   is refused for both (reinstall instead). After a Linux update the running
   daemon is still the old binary: the installer restarts the user service when
   it is active; otherwise `always update` says to restart it.
+
+**Windows global shortcuts.** Registered with `RegisterHotKey` on a dedicated
+message-loop thread; the OS matches the full chord, so no raw key stream or OS
+permission is needed (the Permissions row reports "active" once registration
+succeeds). `ReloadShortcuts` posts a `WM_APP` message to that thread to
+unregister and re-register — hotkey changes apply live. Modifier-less keys and
+`fn` are not registrable on Windows and are skipped. Because focus tracking
+isn't wired on Windows yet, the per-app pause chord falls back to the master
+toggle when no focused app is known.
+
+The Settings window learns the shortcut status from the daemon's startup burst,
+but its listeners can attach after that burst is sent. It therefore also asks
+the daemon (`GetShortcutListenerStatus`) on every connect, and the daemon
+re-sends the status it already knows. On Windows, the General banner shows a
+"Global Shortcuts" row only while the daemon is connected and hotkeys are not
+registered. The Microphone row shows only while the daemon is unreachable; a
+connected daemon with a working microphone never produces a warning.
 
 Downloaded files live only in the update directory; stale ones (older than 1 h,
 other than a running update's) are removed at daemon start and on

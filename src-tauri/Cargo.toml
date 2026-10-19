@@ -1,6 +1,6 @@
 [package]
 name = "always-tauri"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Always Tauri v2 backend — UDS client bridging the daemon to the web frontend"
 
@@ -24,3 +24,6 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[patch.crates-io]
+glib = { path = "../vendor/glib-0.18.5" }

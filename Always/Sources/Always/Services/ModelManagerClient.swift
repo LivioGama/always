@@ -166,7 +166,37 @@ final class ModelManagerClient: ObservableObject {
     /// immediately — cleared when `ActiveTranscriberChanged` confirms.
     func setActive(backend: String) {
         loadingBackend = backend
+        errors.removeValue(forKey: Self.errorKey(forBackend: backend))
         StateMonitor.shared.sendCommandWithData("SetActiveTranscriber", ["backend": backend])
+        // Safety net: the daemon answers every switch (success, no-op or
+        // failure), but a daemon that died mid-load never will. Never leave
+        // "Loading…" spinning with no way out.
+        // Only the LATEST attempt's timer may fire: X, Y, X within the window
+        // must not let the first X's timer cut the second X attempt short.
+        switchGeneration += 1
+        let attempt = backend
+        let generation = switchGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + switchTimeout) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.switchGeneration == generation,
+                      self.loadingBackend == attempt else { return }
+                self.loadingBackend = nil
+                self.errors[Self.errorKey(forBackend: attempt)] =
+                    "Didn't finish loading. Try again, or pick another model."
+            }
+        }
+    }
+
+    /// How long "Loading…" may spin before the row gives up and says so.
+    var switchTimeout: TimeInterval = 120
+
+    /// Bumped on every `setActive`; a timeout only acts if it is still current.
+    private var switchGeneration = 0
+
+    /// Row key for a backend's error: the model id for `local:<id>`, the
+    /// backend itself otherwise (`apple`, `groq`).
+    nonisolated static func errorKey(forBackend backend: String) -> String {
+        backend.hasPrefix("local:") ? String(backend.dropFirst("local:".count)) : backend
     }
 
     // MARK: Event handler (daemon → UI)
@@ -263,9 +293,19 @@ final class ModelManagerClient: ObservableObject {
                 verifying.remove(err.model_id)
                 errors[err.model_id] = err.error
             }
+        case .activeTranscriberFailed:
+            if let backend = event.data?["backend"] {
+                let error = event.data?["error"] ?? "Model failed to load"
+                if loadingBackend == backend { loadingBackend = nil }
+                errors[Self.errorKey(forBackend: backend)] = error
+                logger.error("switch to \(backend, privacy: .public) failed: \(error, privacy: .public)")
+            }
         case .activeTranscriberChanged:
             if let payload = event.activeTranscriber {
                 activeBackend = payload.backend
+                // A slow load that succeeds after the timeout already put an
+                // error on this row; it is running now, so drop the stale one.
+                errors.removeValue(forKey: Self.errorKey(forBackend: payload.backend))
                 // Daemon confirmed the switch — clear the optimistic loading
                 // indicator regardless of which backend became active.
                 loadingBackend = nil

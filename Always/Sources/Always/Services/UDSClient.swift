@@ -98,6 +98,9 @@ enum DaemonEventType: String, Codable {
     case modelExtractionCompleted = "ModelExtractionCompleted"
     case modelExtractionFailed = "ModelExtractionFailed"
     case activeTranscriberChanged = "ActiveTranscriberChanged"
+    /// A backend switch failed to load. `data` = {backend, error}; always
+    /// followed by `ActiveTranscriberChanged` naming the backend still running.
+    case activeTranscriberFailed = "ActiveTranscriberFailed"
     /// Speech was heard but energy was too low — mic input volume may need raising.
     case lowMicrophoneVolume = "LowMicrophoneVolume"
     /// Async grammar correction silently replaced the pasted text.
@@ -111,6 +114,9 @@ enum DaemonEventType: String, Codable {
     /// Input Monitoring is granted for the daemon process. Sent in every
     /// initial state burst and on change.
     case shortcutListenerStatus = "ShortcutListenerStatus"
+    /// The daemon's mic recorder is stuck (`unavailable: true`) or audio
+    /// resumed (`false`). Sent in the initial burst while stuck.
+    case micUnavailable = "MicUnavailable"
     // "My Voice" enrollment lifecycle (v10). Started/SampleCaptured/
     // Failed carry only string fields, so they decode through the
     // loose `data` dict; Level and ProfileStatus need typed payloads.
@@ -229,6 +235,10 @@ struct ShortcutListenerStatusData: Codable {
     let input_monitoring_granted: Bool
 }
 
+struct MicUnavailableData: Codable {
+    let unavailable: Bool
+}
+
 // "My Voice" enrollment live meter — ~10 Hz while recording a sample.
 struct VoiceEnrollmentLevelData: Codable {
     let energy: Double
@@ -319,6 +329,8 @@ struct DaemonEvent: Codable {
     let grammarCorrected: GrammarCorrectedData?
     /// Populated for `ShortcutListenerStatus`.
     let shortcutListenerStatus: ShortcutListenerStatusData?
+    /// Populated for `MicUnavailable`.
+    let micUnavailable: MicUnavailableData?
     /// Populated for `VoiceEnrollmentLevel`.
     let voiceEnrollmentLevel: VoiceEnrollmentLevelData?
     /// Populated for `VoiceProfileStatus`.
@@ -356,6 +368,7 @@ struct DaemonEvent: Codable {
         var lowMicrophoneVolume: LowMicrophoneVolumeData? = nil
         var grammarCorrected: GrammarCorrectedData? = nil
         var shortcutListenerStatus: ShortcutListenerStatusData? = nil
+        var micUnavailable: MicUnavailableData? = nil
         var voiceEnrollmentLevel: VoiceEnrollmentLevelData? = nil
         var voiceProfileStatus: VoiceProfileStatusData? = nil
 
@@ -405,6 +418,9 @@ struct DaemonEvent: Codable {
         case .shortcutListenerStatus:
             shortcutListenerStatus = try container.decodeIfPresent(
                 ShortcutListenerStatusData.self, forKey: .data)
+        case .micUnavailable:
+            micUnavailable = try container.decodeIfPresent(
+                MicUnavailableData.self, forKey: .data)
         case .voiceEnrollmentLevel:
             voiceEnrollmentLevel = try container.decodeIfPresent(
                 VoiceEnrollmentLevelData.self, forKey: .data)
@@ -443,6 +459,7 @@ struct DaemonEvent: Codable {
         self.lowMicrophoneVolume = lowMicrophoneVolume
         self.grammarCorrected = grammarCorrected
         self.shortcutListenerStatus = shortcutListenerStatus
+        self.micUnavailable = micUnavailable
         self.voiceEnrollmentLevel = voiceEnrollmentLevel
         self.voiceProfileStatus = voiceProfileStatus
     }
@@ -497,6 +514,8 @@ struct DaemonEvent: Codable {
             try container.encodeIfPresent(grammarCorrected, forKey: .data)
         case .shortcutListenerStatus:
             try container.encodeIfPresent(shortcutListenerStatus, forKey: .data)
+        case .micUnavailable:
+            try container.encodeIfPresent(micUnavailable, forKey: .data)
         case .voiceEnrollmentLevel:
             try container.encodeIfPresent(voiceEnrollmentLevel, forKey: .data)
         case .voiceProfileStatus:
@@ -530,6 +549,7 @@ struct DaemonEvent: Codable {
         lowMicrophoneVolume: LowMicrophoneVolumeData? = nil,
         grammarCorrected: GrammarCorrectedData? = nil,
         shortcutListenerStatus: ShortcutListenerStatusData? = nil,
+        micUnavailable: MicUnavailableData? = nil,
         voiceEnrollmentLevel: VoiceEnrollmentLevelData? = nil,
         voiceProfileStatus: VoiceProfileStatusData? = nil
     ) {
@@ -556,6 +576,7 @@ struct DaemonEvent: Codable {
         self.lowMicrophoneVolume = lowMicrophoneVolume
         self.grammarCorrected = grammarCorrected
         self.shortcutListenerStatus = shortcutListenerStatus
+        self.micUnavailable = micUnavailable
         self.voiceEnrollmentLevel = voiceEnrollmentLevel
         self.voiceProfileStatus = voiceProfileStatus
     }

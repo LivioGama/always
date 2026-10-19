@@ -14,8 +14,10 @@ name: Release build
 #   always-<tag>-x86_64-unknown-linux-gnu.{tar.gz,deb,rpm}
 #   always-<tag>-aarch64-unknown-linux-gnu.{tar.gz,deb,rpm}
 #   always-<tag>-x86_64-pc-windows-msvc.zip
+#   always-<tag>-<linux-target>-gui.{deb,AppImage}
+#   always-<tag>-x86_64-pc-windows-msvc-gui-setup.exe
 #   <each of the above>.sha256, install.sh, install.ps1, always-<tag>.intoto.jsonl
-#   <each archive/package, install.sh and install.ps1>.minisig
+#   <each archive/package/GUI installer, install.sh and install.ps1>.minisig
 #       minisign signature, verified by `always update` against the public key
 #       compiled into the app (resources/update-signing.pub). Trusted comment:
 #       timestamp:<unix> TAB file:<asset name> TAB tag:<tag>.
@@ -180,17 +182,81 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libasound2-dev libssl-dev pkg-config g++ rpm
+            libasound2-dev libssl-dev pkg-config g++ cmake libclang-dev rpm \
+            libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev \
+            libayatana-appindicator3-dev librsvg2-dev xdotool
 
       - name: Install cargo-deb and cargo-generate-rpm
         uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
           tool: cargo-deb,cargo-generate-rpm
 
-      # Same feature set as ci.yml / the Dockerfile. `cpal` is required: without
-      # it the linux build fails with E0425 get_or_spawn.
-      - name: Build daemon (linux,cpal)
-        run: cargo build --release --locked --no-default-features --features linux,cpal
+      # Include the local engines offered by Settings; offline model selection
+      # must work without Groq credentials. `cpal` supplies native audio capture.
+      - name: Build daemon (linux,cpal,local-stt)
+        run: cargo build --release --locked --no-default-features --features linux,cpal,local-stt
+
+      - name: Prepare bundled daemon for Always GUI
+        run: |
+          set -euo pipefail
+          mkdir -p crates/always_tauri/bundle/daemon
+          install -m 755 target/release/always crates/always_tauri/bundle/daemon/always
+          crates/always_tauri/bundle/daemon/always --version
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install GUI dependencies
+        working-directory: always-gui
+        run: bun install --frozen-lockfile
+
+      - name: Build GUI frontend
+        working-directory: always-gui
+        run: bun run build
+
+      - name: Build Always GUI installers
+        working-directory: crates/always_tauri
+        run: bun ../../always-gui/node_modules/@tauri-apps/cli/tauri.js build --bundles deb,appimage
+
+      - name: Package and inspect Always GUI installers
+        run: |
+          set -euo pipefail
+          TARGET="${{ matrix.target }}"
+          BUNDLE="crates/always_tauri/target/release/bundle"
+          shopt -s nullglob
+          debs=("$BUNDLE/deb/"*.deb)
+          appimages=("$BUNDLE/appimage/"*.AppImage)
+          [ "${#debs[@]}" -eq 1 ] || { echo "::error::expected one GUI deb, found ${#debs[@]}"; exit 1; }
+          [ "${#appimages[@]}" -eq 1 ] || { echo "::error::expected one GUI AppImage, found ${#appimages[@]}"; exit 1; }
+          GUI_DEB="always-${TAG}-${TARGET}-gui.deb"
+          GUI_APPIMAGE="always-${TAG}-${TARGET}-gui.AppImage"
+          cp "${debs[0]}" "$GUI_DEB"
+          cp "${appimages[0]}" "$GUI_APPIMAGE"
+          chmod +x "$GUI_APPIMAGE"
+          dpkg-deb --info "$GUI_DEB"
+          dpkg-deb --contents "$GUI_DEB"
+          dpkg-deb --fsys-tarfile "$GUI_DEB" | tar -tf - | sed -e 's#^\./##' -e 's#^/##' | tee gui-deb-files.txt
+          grep -Fxq "usr/bin/always-tauri" gui-deb-files.txt
+          grep -Fxq "usr/lib/Always GUI/daemon/always" gui-deb-files.txt
+          "./$GUI_APPIMAGE" --appimage-extract >/dev/null
+          test -x squashfs-root/usr/bin/always-tauri
+          test -x "squashfs-root/usr/lib/Always GUI/daemon/always"
+          "squashfs-root/usr/lib/Always GUI/daemon/always" --version
+          rm -rf squashfs-root gui-deb-files.txt
+          for f in "$GUI_DEB" "$GUI_APPIMAGE"; do sha256sum "$f" > "$f.sha256"; done
+          ls -l always-*-gui.*
+
+      - name: Upload GUI installers
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: always-${{ matrix.target }}-gui
+          path: |
+            always-*-gui.deb
+            always-*-gui.deb.sha256
+            always-*-gui.AppImage
+            always-*-gui.AppImage.sha256
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Smoke-test binary
         run: ./target/release/always --version
@@ -231,11 +297,8 @@ jobs:
   build-windows:
     name: Build x86_64-pc-windows-msvc
     runs-on: windows-latest
-    # KNOWN BLOCKER: the Windows-specific sources do not compile against the
-    # pinned `windows` crate (E0428/E0432 in the win32 modules). On a branch dry
-    # run the failure is tolerated so the other platforms can be validated; on a
-    # tag it fails the release (no Windows asset = no release).
-    continue-on-error: ${{ github.ref_type != 'tag' }}
+    # Windows is part of the required GUI release matrix; branch dry runs
+    # must fail too when the GUI installer or daemon integration is broken.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -256,6 +319,38 @@ jobs:
       - name: Build daemon (windows,cpal)
         run: cargo build --release --locked --no-default-features --features windows,cpal --target x86_64-pc-windows-msvc
 
+      - name: Test generated Windows named-pipe ACL
+        run: cargo test --locked --lib --no-default-features --features windows,cpal --target x86_64-pc-windows-msvc private_pipe_security_tests::generated_pipe_descriptor_allows_only_owner_and_system
+
+      - name: Test bounded Windows peer-pipe transport
+        run: cargo test --locked --lib --no-default-features --features windows,cpal --target x86_64-pc-windows-msvc peer_transport_windows::tests
+
+      - name: Prepare bundled daemon for Always GUI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundleDaemon = 'crates/always_tauri/bundle/daemon/always'
+          New-Item -ItemType Directory -Force -Path (Split-Path $bundleDaemon) | Out-Null
+          Copy-Item 'target/x86_64-pc-windows-msvc/release/always.exe' $bundleDaemon
+          Copy-Item 'target/x86_64-pc-windows-msvc/release/always.exe' "$bundleDaemon.exe"
+          & "$bundleDaemon.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'bundled daemon failed to run' }
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install GUI dependencies
+        working-directory: always-gui
+        run: bun install --frozen-lockfile
+
+      - name: Build GUI frontend
+        working-directory: always-gui
+        run: bun run build
+
+      - name: Build Always GUI installer
+        working-directory: crates/always_tauri
+        run: bun ../../always-gui/node_modules/@tauri-apps/cli/tauri.js build --bundles nsis
+
       - name: Package
         shell: pwsh
         run: |
@@ -272,6 +367,12 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
           # `<hash>  <name>`, the same shape as shasum/sha256sum.
           [IO.File]::WriteAllText("$zip.sha256", "$hash  $zip`n")
+          $installers = @(Get-ChildItem 'crates/always_tauri/target/release/bundle/nsis' -Filter '*-setup.exe')
+          if ($installers.Count -ne 1) { throw "Expected one Tauri NSIS installer, found $($installers.Count)" }
+          $guiInstaller = "always-$env:TAG-$target-gui-setup.exe"
+          Copy-Item $installers[0].FullName $guiInstaller
+          $guiHash = (Get-FileHash -Algorithm SHA256 $guiInstaller).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("$guiInstaller.sha256", "$guiHash  $guiInstaller`n")
           Get-ChildItem always-* | Format-Table Name, Length
 
       - name: Upload artifact
@@ -281,6 +382,8 @@ jobs:
           path: |
             always-*.zip
             always-*.zip.sha256
+            always-*-gui-setup.exe
+            always-*-gui-setup.exe.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -319,21 +422,21 @@ jobs:
             "always-${TAG}-x86_64-unknown-linux-gnu.rpm" \
             "always-${TAG}-aarch64-unknown-linux-gnu.tar.gz" \
             "always-${TAG}-aarch64-unknown-linux-gnu.deb" \
-            "always-${TAG}-aarch64-unknown-linux-gnu.rpm"; do
+            "always-${TAG}-aarch64-unknown-linux-gnu.rpm" \
+            "always-${TAG}-x86_64-unknown-linux-gnu-gui.deb" \
+            "always-${TAG}-x86_64-unknown-linux-gnu-gui.AppImage" \
+            "always-${TAG}-aarch64-unknown-linux-gnu-gui.deb" \
+            "always-${TAG}-aarch64-unknown-linux-gnu-gui.AppImage" \
+            "always-${TAG}-x86_64-pc-windows-msvc-gui-setup.exe"; do
             for g in "$f" "$f.sha256"; do
               if [ ! -s "$g" ]; then echo "::error::missing asset $g"; missing=1; fi
             done
           done
-          # Windows is mandatory for a real release; a branch dry run tolerates
-          # its absence (see build-windows).
+          # The Windows CLI archive and GUI installer are required on every run.
           win="always-${TAG}-x86_64-pc-windows-msvc.zip"
           for g in "$win" "$win.sha256"; do
             if [ ! -s "$g" ]; then
-              if [ "$GITHUB_REF_TYPE" = tag ]; then
-                echo "::error::missing asset $g"; missing=1
-              else
-                echo "::warning::DRY RUN without the Windows asset $g (Windows build is broken)"
-              fi
+              echo "::error::missing asset $g"; missing=1
             fi
           done
           [ "$missing" -eq 0 ]
@@ -353,6 +456,8 @@ jobs:
           subject-path: |
             artifacts/always-*.tar.gz
             artifacts/always-*.zip
+            artifacts/always-*.AppImage
+            artifacts/always-*-gui-setup.exe
             artifacts/always-*.deb
             artifacts/always-*.rpm
             scripts/release/install.sh
@@ -423,7 +528,7 @@ jobs:
           cd release-assets
           shopt -s nullglob
           count=0
-          for f in always-*.tar.gz always-*.zip always-*.deb always-*.rpm install.sh install.ps1; do
+          for f in always-*.tar.gz always-*.zip always-*.deb always-*.rpm always-*.AppImage always-*-gui-setup.exe install.sh install.ps1; do
             comment="timestamp:$(date +%s)${tab}file:${f}${tab}tag:${TAG}"
             if [ -n "$MINISIGN_PASSWORD" ]; then
               printf '%s\n' "$MINISIGN_PASSWORD" | minisign -S -s "$key" -m "$f" -x "$f.minisig" -t "$comment"

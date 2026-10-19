@@ -121,10 +121,23 @@ enum OverlayDisplayMode: String, CaseIterable, Identifiable {
 
     static let defaultsKey = "overlayDisplayMode"
 
+    /// Normal unless the user picked otherwise (issue #128).
+    static let defaultMode: OverlayDisplayMode = .normal
+
     static var current: OverlayDisplayMode {
-        OverlayDisplayMode(
-            rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? ""
-        ) ?? .normal
+        current(in: .standard)
+    }
+
+    static func current(in defaults: UserDefaults) -> OverlayDisplayMode {
+        OverlayDisplayMode(rawValue: defaults.string(forKey: defaultsKey) ?? "") ?? defaultMode
+    }
+
+    /// Make Normal the registered default so every reader (`current`, the
+    /// Settings `@AppStorage`) agrees before anything is saved. Applies only
+    /// when no mode is saved: a user's saved choice (Hidden included) is
+    /// never overwritten (issue #128).
+    static func registerDefault(in defaults: UserDefaults = .standard) {
+        defaults.register(defaults: [defaultsKey: defaultMode.rawValue])
     }
 }
 
@@ -1220,8 +1233,23 @@ class StatusOverlayController {
     private var flashEndsAt: Date?
     private var pendingShowState: OverlayState?
     private var spaceObservers: [NSObjectProtocol] = []
+    /// Mode the HUD surfaces currently reflect; compared on every defaults
+    /// change so only a real Normal/Compact/Hidden switch does any work.
+    private var appliedDisplayMode = OverlayDisplayMode.current
 
     private init() {
+        OverlayDisplayMode.registerDefault()
+        // Settings → Status Overlay writes UserDefaults in this process; apply
+        // the switch to whatever is on screen now, not at the next show.
+        spaceObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: UserDefaults.didChangeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.displayModeMayHaveChanged()
+            }
+        )
         let workspaceCenter = NSWorkspace.shared.notificationCenter
         spaceObservers.append(
             workspaceCenter.addObserver(
@@ -1241,6 +1269,37 @@ class StatusOverlayController {
                 self?.refreshVisibleOverlayPlacement()
             }
         )
+    }
+
+    /// Re-render the HUD in the newly chosen display mode. Hidden takes a
+    /// visible indicator (flash included) away at once; Normal/Compact
+    /// rebuild a visible one in place, or bring back the live listening /
+    /// transcribing state that Hidden had been suppressing.
+    private func displayModeMayHaveChanged() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in self?.displayModeMayHaveChanged() }
+            return
+        }
+        let mode = OverlayDisplayMode.current
+        guard mode != appliedDisplayMode else { return }
+        appliedDisplayMode = mode
+        overlayLogger.info("overlay display mode changed to \(mode.rawValue, privacy: .public)")
+        // Whatever StateMonitor last pushed was rendered (or suppressed) for
+        // the old mode; let its next state change re-apply.
+        StateMonitor.shared.invalidateAppliedOverlay()
+        if mode == .hidden {
+            cancelPendingHide()
+            // Normal hide path: invariant I2's 600 ms minimum still holds.
+            window?.hide()
+            return
+        }
+        if let window, window.isVisible, window.alphaValue > 0,
+           let state = window.currentOverlayState {
+            // show() rebuilds the content view for the new mode and resizes.
+            window.show(state: state, instant: true)
+        } else if !StateMonitor.shared.isSetupMode {
+            _ = StateMonitor.shared.reapplyLiveOverlay()
+        }
     }
 
     private func refreshVisibleOverlayPlacement() {
@@ -1397,31 +1456,17 @@ class StatusOverlayController {
     }
 
     /// Called when user clicks the play button in the idle resume widget.
+    /// Sends the explicit, idempotent `Resume` over the live UDS link —
+    /// it used to spawn `always-daemon toggle-pause`, a TOGGLE that, with
+    /// master off (idle / mic-conflict pause), turned master ON: Play
+    /// paused everywhere instead of resuming (v0.1.0 field report).
     private func handleIdleResumeClicked() {
-        // Send toggle-pause command to resume (unpause) the daemon. The
-        // bundled daemon is `always-daemon` (not `always`) — the GUI is
-        // `Always`, and on case-insensitive APFS a binary named `always`
-        // would collide with the GUI binary, so build.sh writes the
-        // daemon to `always-daemon`. Resolve via Bundle.main so we don't
-        // hardcode the install location either.
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let daemonURL = Bundle.main.bundleURL
-                .appendingPathComponent("Contents/MacOS/always-daemon")
-            let task = Process()
-            task.executableURL = daemonURL
-            task.arguments = ["toggle-pause"]
-            do {
-                try task.run()
-                task.waitUntilExit()
+        StateMonitor.shared.resumeListening()
+    }
 
-                // Hide the widget after successful unpause
-                DispatchQueue.main.async {
-                    self?.idleResumeWindow?.hide()
-                }
-            } catch {
-                overlayLogger.error("toggle-pause command failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }
+    /// Dismiss the idle pill (listening resumed by any path).
+    func hideIdleResumeWidget() {
+        idleResumeWindow?.hide()
     }
 
     /// Cancel any in-flight idle animation.

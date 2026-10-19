@@ -22,8 +22,13 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 
 fn get_socket_path() -> PathBuf {
-    let uid = unsafe { libc::getuid() };
-    PathBuf::from(format!("/run/user/{}/always.sock", uid))
+    let suffix = std::env::var("ALWAYS_INSTANCE")
+        .ok()
+        .filter(|instance| instance != "prod" && !instance.is_empty())
+        .map(|instance| format!("-{instance}"))
+        .unwrap_or_default();
+    let socket_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(socket_dir).join(format!("always{suffix}.sock"))
 }
 
 #[tokio::main]
@@ -63,7 +68,7 @@ async fn main() -> Result<()> {
                                     info!("Received daemon event: {:?}", std::mem::discriminant(&event));
 
                                     // Validate protocol version
-                                    if let DaemonEvent::Hello { version } = &event
+                                    if let DaemonEvent::Hello { version, .. } = &event
                                         && *version != PROTOCOL_VERSION
                                     {
                                         warn!(

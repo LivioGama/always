@@ -60,9 +60,27 @@ static EFFECTIVE_PAUSED: AtomicBool = AtomicBool::new(true);
 /// command clears it, so a manual pause/unpause always wins over the
 /// handoff and the watchdog stands down.
 static PAUSED_BY_PEER: AtomicBool = AtomicBool::new(false);
+static PAUSED_BY_PEER_LEASE: std::sync::LazyLock<Mutex<Option<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
 
 pub fn set_paused_by_peer(v: bool) {
+    if !v {
+        *PAUSED_BY_PEER_LEASE.lock() = None;
+    }
     PAUSED_BY_PEER.store(v, Ordering::Relaxed);
+}
+
+pub fn set_paused_by_peer_lease(lease_id: String) {
+    *PAUSED_BY_PEER_LEASE.lock() = Some(lease_id);
+    PAUSED_BY_PEER.store(true, Ordering::Relaxed);
+}
+
+pub fn paused_by_peer_lease_matches(lease_id: &str) -> bool {
+    PAUSED_BY_PEER.load(Ordering::Relaxed)
+        && PAUSED_BY_PEER_LEASE
+            .lock()
+            .as_deref()
+            .is_some_and(|current| current == lease_id)
 }
 
 pub fn is_paused_by_peer() -> bool {
@@ -71,7 +89,9 @@ pub fn is_paused_by_peer() -> bool {
 
 /// Clear-and-get: only the caller that observes the peer's death may resume.
 pub fn take_paused_by_peer() -> bool {
-    PAUSED_BY_PEER.swap(false, Ordering::Relaxed)
+    let owned = PAUSED_BY_PEER.swap(false, Ordering::Relaxed);
+    *PAUSED_BY_PEER_LEASE.lock() = None;
+    owned
 }
 
 /// Consumer source: an external controller asked the daemon (via
@@ -251,6 +271,16 @@ pub fn is_no_gui_paused() -> bool {
 /// state transition (so you CAN force dictation while music plays).
 pub fn is_any_global_pause() -> bool {
     is_master_paused() || is_audio_output_paused() || is_mic_conflict_paused()
+}
+
+/// True when anything an explicit user resume may lift is pausing: the
+/// global sources plus the idle watchdog. Per-app pause (allowlist) and
+/// the no-GUI lifecycle pause are not user-overridable this way. A user
+/// pressing a global toggle while this is true means "resume" — it used to
+/// read as "pause" whenever master itself was off (idle pill Play muted
+/// everything instead of resuming).
+pub fn is_user_resumable_pause() -> bool {
+    is_any_global_pause() || is_idle_auto_paused()
 }
 
 /// Setup mode: when true, bypasses per-app pause rules so the daemon
@@ -645,26 +675,46 @@ pub fn clear_dictation_buffer_for_test() {
     dictation_buffer_clear();
 }
 
+/// Serialises every test that touches the process-global pause state
+/// (here and in `pause_commands`).
+#[cfg(test)]
+pub(crate) static PAUSE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn reset_pause_state_for_test() {
+    MASTER_PAUSED.store(false, Ordering::Relaxed);
+    AUDIO_OUTPUT_PAUSED.store(false, Ordering::Relaxed);
+    MIC_CONFLICT_PAUSED.store(false, Ordering::Relaxed);
+    IDLE_AUTO_PAUSED.store(false, Ordering::Relaxed);
+    NO_GUI_PAUSED.store(false, Ordering::Relaxed);
+    SETUP_MODE.store(false, Ordering::Relaxed);
+    EFFECTIVE_PAUSED.store(true, Ordering::Relaxed);
+    PAUSED_BY_PEER.store(false, Ordering::Relaxed);
+    *PAUSED_BY_PEER_LEASE.lock() = None;
+    CONSUME_MODE_LEASES.store(0, Ordering::Relaxed);
+    *CURRENT_APP.lock() = None;
+    crate::always::per_app::set_cache_for_test(std::collections::HashMap::new());
+}
+
+/// Put `bundle` alone on the resumed allowlist (in-memory only).
+#[cfg(test)]
+pub(crate) fn allowlist_for_test(bundle: &str) {
+    crate::always::per_app::set_cache_for_test(std::collections::HashMap::from([(
+        bundle.to_string(),
+        crate::always::per_app::AppOverride {
+            paused: Some(false),
+            ..Default::default()
+        },
+    )]));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::always::per_app::{self, AppOverride};
     use std::collections::HashMap;
 
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn reset_pause_state_for_test() {
-        MASTER_PAUSED.store(false, Ordering::Relaxed);
-        AUDIO_OUTPUT_PAUSED.store(false, Ordering::Relaxed);
-        MIC_CONFLICT_PAUSED.store(false, Ordering::Relaxed);
-        IDLE_AUTO_PAUSED.store(false, Ordering::Relaxed);
-        NO_GUI_PAUSED.store(false, Ordering::Relaxed);
-        SETUP_MODE.store(false, Ordering::Relaxed);
-        EFFECTIVE_PAUSED.store(true, Ordering::Relaxed);
-        CONSUME_MODE_LEASES.store(0, Ordering::Relaxed);
-        *CURRENT_APP.lock() = None;
-        per_app::set_cache_for_test(HashMap::new());
-    }
+    use super::PAUSE_TEST_LOCK as TEST_LOCK;
 
     /// Allowlist the given bundle and focus it so the only thing keeping
     /// us paused is whatever global source the test sets.
@@ -695,6 +745,23 @@ mod tests {
         set_paused(true);
         let (effective, _) = set_mic_conflict_paused(false);
         assert!(effective, "manual master pause must survive mic release");
+        assert!(is_master_paused());
+    }
+
+    #[test]
+    fn manual_pause_revokes_peer_pause_lease() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        reset_pause_state_for_test();
+
+        set_paused_by_peer_lease("lease-1".into());
+        assert!(paused_by_peer_lease_matches("lease-1"));
+
+        // A user pause is authoritative and invalidates the peer's later
+        // release request without clearing MASTER.
+        set_paused_by_peer(false);
+        set_paused(true);
+
+        assert!(!paused_by_peer_lease_matches("lease-1"));
         assert!(is_master_paused());
     }
 

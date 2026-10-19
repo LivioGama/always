@@ -8,6 +8,7 @@
 //!
 #![warn(clippy::print_stdout, clippy::print_stderr)]
 
+pub mod commands;
 pub mod tray;
 pub mod uds_client;
 pub mod window_manager;

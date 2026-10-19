@@ -25,6 +25,7 @@ pub mod filter_config;
 pub mod focus_state;
 pub mod hallucination;
 pub mod held;
+pub mod history;
 pub mod hud;
 pub mod idle_watcher;
 pub mod keyboard;
@@ -38,6 +39,9 @@ pub mod mic_watcher;
 pub mod notification;
 pub mod paste;
 pub mod pause;
+pub mod pause_commands;
+#[cfg(windows)]
+pub(crate) mod peer_transport_windows;
 pub mod per_app;
 pub mod permissions;
 pub mod postprocess;
@@ -71,6 +75,8 @@ pub mod apple_intelligence;
 pub mod apple_stt;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod stt_apple;
+#[cfg(target_os = "windows")]
+pub mod win32_process;
 
 pub use config::AlwaysConfig;
 pub use event_loop::run;

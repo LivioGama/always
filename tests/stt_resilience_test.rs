@@ -296,3 +296,71 @@ async fn open_breaker_degrades_to_local_fallback_instead_of_dropping() {
     );
     reset_circuit_breaker_for_test();
 }
+
+/// Ludwig (16 Oct): French speaker on Groq Whisper. The user's language is
+/// sent to Whisper (never a hard-coded `en`), `auto` resolves to the system
+/// locale's language, and the accented French that comes back is not filtered
+/// as "mixed-script".
+#[tokio::test]
+async fn groq_sends_user_language_and_french_survives_filter() {
+    use always::stt::Transcriber;
+    let _guard = SERIAL.lock().await;
+    reset_circuit_breaker_for_test();
+
+    let server = MockServer::start().await;
+    let french = "Est-ce que tu peux régénérer la réponse en français ?";
+    Mock::given(method("POST"))
+        .and(path("/openai/v1/audio/transcriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "text": french, "duration": 4.0, "language": "french", "segments": []
+        })))
+        .mount(&server)
+        .await;
+
+    let base_url = server.uri();
+    let results = tokio::task::spawn_blocking(move || {
+        let _env_guard = always::stt::GROQ_BASE_URL_ENV_LOCK
+            .lock()
+            .expect("GROQ_BASE_URL_ENV_LOCK poisoned");
+        unsafe { std::env::set_var("ALWAYS_GROQ_BASE_URL", base_url) };
+        let out: Vec<_> = ["fr", "fr-FR", "auto"]
+            .iter()
+            .map(|lang| {
+                always::stt::GroqTranscriber::new("test_key")
+                    .with_language(lang)
+                    .transcribe_from_bytes(dummy_wav_bytes())
+            })
+            .collect();
+        unsafe { std::env::remove_var("ALWAYS_GROQ_BASE_URL") };
+        out
+    })
+    .await
+    .expect("blocking task panicked");
+
+    let requests = server.received_requests().await.expect("recording on");
+    assert_eq!(requests.len(), 3);
+    let body = |i: usize| String::from_utf8_lossy(&requests[i].body).to_string();
+    let sent =
+        |i: usize, code: &str| body(i).contains(&format!("name=\"language\"\r\n\r\n{code}\r\n"));
+    assert!(sent(0, "fr"), "fr sent as fr");
+    assert!(sent(1, "fr"), "fr-FR normalized to fr");
+    // `auto` is the system locale's language (`en` when unknown) — never
+    // omitted. The pure resolver is covered deterministically in stt.rs.
+    assert!(
+        sent(2, &always::stt::whisper_language("auto")),
+        "auto sends the resolved system language"
+    );
+
+    for r in results {
+        let r = r.expect("mock transcription");
+        assert_eq!(r.text, french);
+        assert_eq!(
+            always::always::hallucination::is_hallucination_in(&r, "fr"),
+            None
+        );
+        assert_eq!(
+            always::always::hallucination::is_hallucination_in(&r, "auto"),
+            None
+        );
+    }
+}

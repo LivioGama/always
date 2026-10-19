@@ -14,8 +14,20 @@
 // polling. Measured 2026-10-14 on the user's MacBook Air (60 s windows, same
 // room): VPIO active 15.1 CPU-s/min, VPIO bypassed 3.0 CPU-s/min.
 //
-// Usage: always-capture [--no-vp] [--aec-always] [--agc] [--duck]
-//   --no-vp  plain capture (no echo cancellation) — measurement baseline
+// 2026-10-16: VPIO is OFF by default — plain mic capture unless `--vp` (or
+// env ALWAYS_CAPTURE_AEC=vp). Starting a voice-processing unit changes what
+// EVERY app plays: measured on a MacBook Air (macOS 27, built-in speakers),
+// coreaudiod restarts the OUTPUT device's IO when the unit starts and again
+// when it stops (an audible cut in Apple Music / Spotify), logs Audio IO
+// Overloads at both edges, ducks every other client to 0.178 (−15 dB) for
+// ~2 s and then holds them at 0.631 (−4 dB) for as long as it runs — even at
+// duckingLevel .min. A plain (`--no-vp`) helper caused none of these. User
+// report (v0.1.0): micro-cuts / crackling in music and on a speaker while
+// Always ran.
+//
+// Usage: always-capture [--vp] [--no-vp] [--aec-always] [--agc] [--duck]
+//   --vp     voice-processing echo canceller (opt-in, see above)
+//   --no-vp  plain capture (no echo cancellation) — the default; wins over --vp
 //   --aec-always  never bypass the echo canceller (pre-2026-10-14 behaviour)
 //   --agc    keep VPIO's automatic gain control on (default off: the daemon's
 //            energy thresholds are calibrated on un-gained mic levels)
@@ -29,7 +41,8 @@ import Foundation
 
 signal(SIGPIPE, SIG_IGN)
 let args = Set(CommandLine.arguments.dropFirst())
-let useVP = !args.contains("--no-vp")
+let useVP = (args.contains("--vp") || ProcessInfo.processInfo.environment["ALWAYS_CAPTURE_AEC"] == "vp")
+    && !args.contains("--no-vp")
 let parentPid = getppid()
 
 func log(_ s: String) {
@@ -194,7 +207,13 @@ input.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { buffer, _ in
 // sends `play <path>` lines on stdin (2026-10-14: cues played from the daemon
 // process were inaudible while this unit ran).
 let cueFormat = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
-let cuePlayers: [AVAudioPlayerNode] = (0..<6).map { _ in AVAudioPlayerNode() }
+// Cue players attach only in voice-processing mode (`--vp`). A permanently
+// connected player chain makes engine.start() run the OUTPUT device for the
+// helper's whole lifetime: coreaudiod restarts output IO at launch (an
+// audible cut in whatever the user is playing) and the device stays
+// "running" forever. Plain (`--no-vp`) capture is input-only; nothing ducks
+// cues then, so the daemon plays them through its own player pool.
+let cuePlayers: [AVAudioPlayerNode] = useVP ? (0..<6).map { _ in AVAudioPlayerNode() } : []
 for p in cuePlayers {
     engine.attach(p)
     engine.connect(p, to: engine.mainMixerNode, format: cueFormat)
@@ -274,7 +293,7 @@ func dryRenderCue(_ path: String) {
 Thread {
     while let line = readLine(strippingNewline: true) {
         let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
-        guard parts.count == 2 else { continue }
+        guard parts.count == 2, useVP else { continue }
         switch parts[0] {
         case "play": cueQueue.async { playCue(parts[1]) }
         case "load": cueQueue.async { _ = loadCue(parts[1]) }

@@ -25,6 +25,10 @@ final class AudioInputMonitor {
     private let logger = Logger(subsystem: "com.always.app", category: "audio-input")
     private var listenerInstalled = false
     private weak var stateMonitor: StateMonitor?
+    /// Coalesces bursts of default-input changes (a USB re-enumeration or
+    /// Bluetooth handoff fires several in a row) into one `RespawnRecorder`.
+    private var pendingRespawn: DispatchWorkItem?
+    private let respawnDebounce: TimeInterval = 1.5
 
     private init() {}
 
@@ -33,6 +37,19 @@ final class AudioInputMonitor {
     func start(stateMonitor: StateMonitor) {
         self.stateMonitor = stateMonitor
         installListener()
+    }
+
+    /// Trailing debounce: send one `RespawnRecorder` once the default input
+    /// has been quiet for `respawnDebounce`.
+    private func scheduleRespawn() {
+        DispatchQueue.main.async {
+            self.pendingRespawn?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                self?.stateMonitor?.sendCommand("RespawnRecorder")
+            }
+            self.pendingRespawn = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + self.respawnDebounce, execute: work)
+        }
     }
 
     /// Install a property listener on the system object for the
@@ -49,7 +66,7 @@ final class AudioInputMonitor {
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self = self else { return }
             self.logger.info("Default input device changed — notifying daemon to respawn recorder")
-            self.stateMonitor?.sendCommand("RespawnRecorder")
+            self.scheduleRespawn()
         }
         let status = AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &addr,

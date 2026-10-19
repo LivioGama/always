@@ -259,10 +259,12 @@ pub enum TranscriberBackendChoice {
     /// Remote Groq Whisper API. Requires `GROQ_API_KEY`.
     #[default]
     Groq,
+    /// No usable backend has been configured. The settings app stays available
+    /// so the user can download a local model or configure cloud credentials.
+    Unconfigured,
     /// Local model identified by the registry id (e.g.
     /// `parakeet-tdt-0.6b-v3`). Must be downloaded before it can be
-    /// activated — [`build_transcriber`] falls back to Groq when the
-    /// model file is missing on disk.
+    /// activated. A local selection never depends on Groq credentials.
     Local { model_id: String },
     /// On-device Apple SFSpeechRecognizer. Requires macOS and a
     /// downloaded on-device language model.
@@ -292,6 +294,7 @@ impl std::fmt::Display for TranscriberBackendChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Groq => f.write_str("groq"),
+            Self::Unconfigured => f.write_str("none"),
             Self::Local { model_id } => write!(f, "local:{model_id}"),
             Self::Apple => f.write_str("apple"),
         }
@@ -305,6 +308,9 @@ impl FromStr for TranscriberBackendChoice {
         if s == "groq" {
             return Ok(Self::Groq);
         }
+        if s == "none" {
+            return Ok(Self::Unconfigured);
+        }
         if s == "apple" {
             return Ok(Self::Apple);
         }
@@ -317,7 +323,7 @@ impl FromStr for TranscriberBackendChoice {
             });
         }
         anyhow::bail!(
-            "invalid transcriber backend: {s} (expected 'groq', 'apple', or 'local:<id>')"
+            "invalid transcriber backend: {s} (expected 'none', 'groq', 'apple', or 'local:<id>')"
         );
     }
 }
@@ -329,9 +335,8 @@ impl FromStr for TranscriberBackendChoice {
 /// Fallback policy:
 ///
 /// * Local backend, model on disk → `LocalTranscriber`.
-/// * Local backend, model missing or `local-stt` feature off →
-///   Groq (with a warning). The alternative — refusing to start —
-///   leaves users stranded if they delete a downloaded model.
+/// * Local backend, model missing or `local-stt` feature off → a local-model
+///   error. An explicit offline selection never redirects to a cloud service.
 /// * Groq backend → [`GroqTranscriber`] using the config's API key,
 ///   wrapped in a [`FallbackTranscriber`] when a verified local model
 ///   is on disk so an open circuit breaker degrades to offline
@@ -341,41 +346,21 @@ pub fn build_transcriber(
     registry: &ModelRegistry,
 ) -> Result<Arc<dyn Transcriber>> {
     match &cfg.transcriber_backend {
+        TranscriberBackendChoice::Unconfigured => Ok(Arc::new(UnconfiguredTranscriber)),
         TranscriberBackendChoice::Groq => {
-            // A Groq selection with no key must never leave the daemon with
-            // NO transcriber: the boot placeholder then blocks every
-            // utterance for 30 s and fails — during that window the audio
-            // pipe overruns, speech is discarded, and the app reads as
-            // deaf (observed live: 150 CoreAudio overruns + 124 dropped
-            // utterances in one session). Degrade to on-device Apple STT
-            // instead.
-            match build_groq(cfg) {
-                Ok(t) => Ok(wrap_with_local_fallback(t, cfg, registry)),
-                Err(groq_err) => match build_apple(cfg) {
-                    Ok(t) => {
-                        tracing::warn!(
-                            error = %groq_err,
-                            "groq_unavailable_degraded_to_apple"
-                        );
-                        Ok(t)
-                    }
-                    Err(apple_err) => Err(groq_err.context(format!(
-                        "Groq unavailable and Apple STT fallback failed: {apple_err}"
-                    ))),
-                },
-            }
-        }
-        TranscriberBackendChoice::Apple => build_apple(cfg),
-        TranscriberBackendChoice::Local { model_id } => {
-            let info = registry
-                .get(model_id)
-                .with_context(|| format!("unknown local model id: {model_id}"))?;
-            if !info.is_downloaded {
-                tracing::warn!(
-                    model = %model_id,
-                    "local model not downloaded, falling back to remote Groq"
-                );
-                return match build_groq(cfg) {
+            #[cfg(target_os = "linux")]
+            return build_groq(cfg).map(|t| wrap_with_local_fallback(t, cfg, registry));
+
+            #[cfg(not(target_os = "linux"))]
+            {
+                // A Groq selection with no key must never leave the daemon with
+                // NO transcriber: the boot placeholder then blocks every
+                // utterance for 30 s and fails — during that window the audio
+                // pipe overruns, speech is discarded, and the app reads as
+                // deaf (observed live: 150 CoreAudio overruns + 124 dropped
+                // utterances in one session). Degrade to on-device Apple STT
+                // instead.
+                match build_groq(cfg) {
                     Ok(t) => Ok(wrap_with_local_fallback(t, cfg, registry)),
                     Err(groq_err) => match build_apple(cfg) {
                         Ok(t) => {
@@ -389,10 +374,91 @@ pub fn build_transcriber(
                             "Groq unavailable and Apple STT fallback failed: {apple_err}"
                         ))),
                     },
-                };
+                }
+            }
+        }
+        TranscriberBackendChoice::Apple => build_apple(cfg),
+        TranscriberBackendChoice::Local { model_id } => {
+            let info = registry
+                .get(model_id)
+                .with_context(|| format!("unknown local model id: {model_id}"))?;
+            if !info.is_downloaded {
+                anyhow::bail!(
+                    "Local model {model_id} is not downloaded. Download it in Settings → Models before selecting it."
+                );
             }
             build_local(cfg, registry, &info)
         }
+    }
+}
+
+/// Fail immediately while Settings has no selected backend, rather than
+/// leaving utterances waiting on an initialization placeholder that cannot
+/// ever become ready without a user's model/key selection.
+struct UnconfiguredTranscriber;
+
+impl Transcriber for UnconfiguredTranscriber {
+    fn transcribe_from_bytes(&self, _audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
+        Err(SttError::Other(anyhow::anyhow!(
+            "No transcription model selected. Choose a downloaded local model or add a Groq API key in Settings → Models."
+        )))
+    }
+
+    fn transcribe_streaming(
+        &self,
+        audio: Vec<u8>,
+    ) -> Pin<Box<dyn Stream<Item = Result<StreamingTranscriptionResult, SttError>> + Send>> {
+        let result = self
+            .transcribe_from_bytes(audio)
+            .map(|result| StreamingTranscriptionResult {
+                text: result.text,
+                is_final: true,
+                is_interim: false,
+            });
+        Box::pin(futures::stream::once(async move { result }))
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn linux_startup_backend(
+    cfg: &AlwaysConfig,
+    registry: &ModelRegistry,
+) -> TranscriberBackendChoice {
+    let has_key = cfg
+        .groq_stt_api_key
+        .as_deref()
+        .is_some_and(|key| !key.trim().is_empty());
+    #[cfg(feature = "local-stt")]
+    let local = if !has_key {
+        pick_fallback_model(registry).map(|model| model.id)
+    } else {
+        None
+    };
+    #[cfg(not(feature = "local-stt"))]
+    let local = {
+        let _ = registry;
+        None
+    };
+    available_startup_backend(&cfg.transcriber_backend, has_key, local)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn available_startup_backend(
+    requested: &TranscriberBackendChoice,
+    has_groq_key: bool,
+    downloaded_local: Option<String>,
+) -> TranscriberBackendChoice {
+    match requested {
+        TranscriberBackendChoice::Groq | TranscriberBackendChoice::Unconfigured => {
+            if has_groq_key {
+                TranscriberBackendChoice::Groq
+            } else if let Some(model_id) = downloaded_local {
+                TranscriberBackendChoice::Local { model_id }
+            } else {
+                TranscriberBackendChoice::Unconfigured
+            }
+        }
+        selected => selected.clone(),
     }
 }
 
@@ -472,10 +538,13 @@ fn build_groq(cfg: &AlwaysConfig) -> Result<Arc<dyn Transcriber>> {
                  select a downloaded local model in Settings → Models."
             )
         })?;
-    let t = Arc::new(GroqTranscriber::new(key));
+    let groq = GroqTranscriber::new(key).with_language(&cfg.lang);
+    let language = groq.language().to_string();
+    let t = Arc::new(groq);
     tracing::info!(
         backend = "groq",
         model = crate::stt::GROQ_MODEL_NAME,
+        language,
         "transcriber_ready"
     );
     Ok(t)
@@ -532,20 +601,63 @@ fn build_local(
 
 #[cfg(not(feature = "local-stt"))]
 fn build_local(
-    cfg: &AlwaysConfig,
+    _cfg: &AlwaysConfig,
     _registry: &ModelRegistry,
     info: &crate::managers::model_registry::ModelInfo,
 ) -> Result<Arc<dyn Transcriber>> {
-    tracing::error!(
-        model = %info.id,
-        "local-stt feature not compiled in; falling back to Groq"
-    );
-    build_groq(cfg)
+    anyhow::bail!(
+        "Cannot load local model {}: this daemon was built without local STT support. Rebuild with --features local-stt.",
+        info.id
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_without_groq_key_uses_local_or_requires_setup() {
+        let local = TranscriberBackendChoice::Local {
+            model_id: "offline-model".into(),
+        };
+        assert_eq!(
+            available_startup_backend(
+                &TranscriberBackendChoice::Groq,
+                false,
+                Some("offline-model".into())
+            ),
+            local
+        );
+        assert_eq!(
+            available_startup_backend(&TranscriberBackendChoice::Groq, false, None),
+            TranscriberBackendChoice::Unconfigured
+        );
+        assert_eq!(available_startup_backend(&local, false, None), local);
+        assert_eq!(
+            available_startup_backend(
+                &TranscriberBackendChoice::Groq,
+                true,
+                Some("offline-model".into())
+            ),
+            TranscriberBackendChoice::Groq
+        );
+    }
+
+    #[test]
+    fn unconfigured_backend_reports_setup_instead_of_cloud_credentials() {
+        let error = UnconfiguredTranscriber
+            .transcribe_from_bytes(Vec::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("No transcription model selected"), "{error}");
+        assert_eq!(
+            "none"
+                .parse::<TranscriberBackendChoice>()
+                .unwrap()
+                .to_string(),
+            "none"
+        );
+    }
 
     #[test]
     fn parse_groq() {

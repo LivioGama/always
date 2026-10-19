@@ -61,7 +61,7 @@ struct GeneralPanel: View {
                 Text("Listening / transcribing indicator")
                     .font(.body)
                     .help(
-                        "The floating indicator shown while you dictate. Compact shrinks it to a small pill; Hidden never shows it — the menu bar icon still reflects listening and transcribing."
+                        "The floating indicator shown while you dictate: centred near the bottom of the screen your pointer is on, just above the Dock. Compact shrinks it to a small pill; Hidden never shows it — the menu bar icon still reflects listening and transcribing."
                     )
                 Spacer()
                 Picker("", selection: $overlayDisplayMode) {
@@ -73,7 +73,7 @@ struct GeneralPanel: View {
                 .labelsHidden()
                 .frame(width: 280)
             }
-            Text("Takes effect the next time the indicator appears — no restart needed. The menu bar icon always shows the live state (mic while hearing you, waveform circle while transcribing).")
+            Text("Appears centred near the bottom of the screen your pointer is on, just above the Dock, while Always hears you and transcribes. Changes apply immediately — no restart needed. The menu bar icon always shows the live state (mic while hearing you, waveform circle while transcribing).")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }

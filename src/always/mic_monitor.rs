@@ -60,8 +60,14 @@ impl MicrophoneMonitor {
 
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            // Fallback for other platforms - just return false for now
-            tracing::warn!("microphone_monitoring_not_implemented");
+            // Fallback for other platforms - just return false for now.
+            // Log once, not on every 1 s poll: the fallback is permanent,
+            // not a transient condition the user can act on.
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!("microphone_monitoring_not_implemented");
+            }
             Ok(false)
         }
     }

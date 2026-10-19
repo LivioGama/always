@@ -1,23 +1,24 @@
 import { useState } from "react";
-import { CorrectionPendingData } from "../types/uds";
 
-interface CorrectionDialogProps {
-  pending: CorrectionPendingData;
-  onApprove: () => void;
-  onReject: () => void;
+export interface CorrectionPending {
+  id: string;
+  wrong: string;
+  right: string;
 }
 
+/// "You misheard me" dialog — mirrors the daemon's CorrectionPending event:
+/// it proposes `wrong` → `right`; the user can edit `right`, accept, or reject.
 export function CorrectionDialog({
   pending,
   onApprove,
   onReject,
-}: CorrectionDialogProps) {
-  const [intended, setIntended] = useState("");
-
-  // Auto-fill the suspected correction
-  const guessedCorrection = findGuessedCorrection(pending);
-
-  if (!guessedCorrection) return null;
+}: {
+  pending: CorrectionPending;
+  onApprove: () => void;
+  onReject: () => void;
+}) {
+  const [intended, setIntended] = useState(pending.right);
+  const value = intended.trim();
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in">
@@ -29,35 +30,24 @@ export function CorrectionDialog({
           <h3 className="text-lg font-semibold text-white">Correct transcription</h3>
         </div>
 
-        {/* Last transcript */}
-        <div className="mb-4">
-          <p className="text-xs text-surface-400 mb-1">Last transcript</p>
-          <p className="text-sm text-surface-200 bg-surface-800 rounded-lg p-3">
-            {pending.lastTranscript}
-          </p>
-        </div>
-
-        {/* Correction input */}
         <div className="mb-4">
           <p className="text-xs text-surface-400 mb-1">
-            Replace <span className="text-red-400 font-medium line-through">{pending.wrong}</span> with
+            Always heard <span className="text-red-400 font-medium line-through">{pending.wrong}</span> — it should be:
           </p>
           <input
             type="text"
-            value={intended || guessedCorrection}
+            value={intended}
             onChange={(e) => setIntended(e.target.value)}
-            placeholder="Type correct spelling…"
+            placeholder="Type the correct word…"
             className="w-full bg-surface-800 border border-surface-600 rounded-lg px-3 py-2 text-white text-sm placeholder-surface-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
             autoFocus
             onKeyDown={(e) => {
-              if (e.key === "Enter" && intended.trim()) {
-                onApprove();
-              }
+              if (e.key === "Enter" && value) onApprove();
+              if (e.key === "Escape") onReject();
             }}
           />
         </div>
 
-        {/* Quick actions */}
         <div className="flex gap-2">
           <button
             onClick={onReject}
@@ -66,20 +56,8 @@ export function CorrectionDialog({
             Reject
           </button>
           <button
-            onClick={() => {
-              if (guessedCorrection.trim()) {
-                setIntended(guessedCorrection);
-              }
-            }}
-            className="flex-1 px-3 py-2 text-sm font-medium text-primary-300 bg-primary-600/20 hover:bg-primary-600/30 rounded-lg transition-colors"
-          >
-            Use "{guessedCorrection}"
-          </button>
-          <button
-            onClick={() => {
-              if (intended.trim()) onApprove();
-            }}
-            disabled={!intended.trim()}
+            onClick={() => value && onApprove()}
+            disabled={!value}
             className="flex-1 px-3 py-2 text-sm font-semibold text-white bg-primary-600 hover:bg-primary-500 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Accept
@@ -88,16 +66,4 @@ export function CorrectionDialog({
       </div>
     </div>
   );
-}
-
-function findGuessedCorrection(pending: CorrectionPendingData): string | null {
-  // Simple heuristic: suggest the last word of the last transcript as
-  // a starting point for correction, since users typically fix the
-  // most recently pasted word.
-  const words = pending.lastTranscript.trim().split(/\s+/);
-  const lastWord = words[words.length - 1];
-  if (lastWord && lastWord !== pending.wrong) {
-    return lastWord;
-  }
-  return null;
 }

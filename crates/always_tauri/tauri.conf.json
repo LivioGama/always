@@ -1,0 +1,58 @@
+{
+  "productName": "Always",
+  "version": "0.1.1",
+  "identifier": "com.always.stt",
+  "build": {
+    "frontendDist": "../../always-gui/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "settings",
+        "title": "Always Settings",
+        "width": 900,
+        "height": 920,
+        "minWidth": 860,
+        "minHeight": 560,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "visible": false
+      },
+      {
+        "label": "onboarding",
+        "title": "Always Setup",
+        "width": 580,
+        "height": 640,
+        "resizable": false,
+        "fullscreen": false,
+        "center": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": null,
+      "capabilities": [
+        {
+          "identifier": "main",
+          "windows": ["*"],
+          "permissions": ["core:event:default"]
+        }
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "app", "deb", "appimage", "msi", "nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ]
+  }
+}

@@ -1,46 +1,18 @@
-<!-- pixel:start -->
-# Pixel — Agent Workflow Contract
-
-> Before the first file read of any feature/bug task, run
-> `pixel targets "<task>"`. It returns a closed prioritized file list
-> (P0/P1/P2) and activates `.pixel/targets.json`. Work P0 first; P2 is
-> droppable. While the manifest is active, never read, grep, or edit repo
-> files outside the list — if a file seems missing, the task description was
-> wrong: re-run `pixel targets` with a refined task. Run
-> `pixel targets --clear` when the task ends.
-> When the user says something **was working before** (or the fix is in git
-> history), run `pixel rescue "<problem>"` — never `git reset --hard`,
-> never raw historical checkouts over in-progress work.
-
-Claude Code additionally enforces all of this mechanically via the
-`pixel-targets-guard` PreToolUse hook (off-list reads/edits blocked,
-edits without an active manifest blocked, `git reset --hard` blocked).
-Kill switch for debugging the guard: `PIXEL_TARGETS_GUARD=0`.
-
-## CLI Reference
-
-| Task                                         | Command                                              |
-| -------------------------------------------- | ---------------------------------------------------- |
-| Rebuild index + graph                        | `pixel ready . --no-daemon`                       |
-| Regex search                                 | `pixel search '<regex>' .`                        |
-| Symbol lookup                                | `pixel symbol <name> .`                           |
-| 360° context (token-budgeted)                | `pixel context <uid> . --budget 4000`             |
-| Blast radius / "What breaks if I change X?"  | `pixel impact <symbol> . --direction upstream`    |
-| Callers / callees                            | `pixel uses <symbol> . --role callers`            |
-| Trace A→B                                    | `pixel trace <a> <b> .`                           |
-| Execution flows                              | `pixel processes .`                               |
-| Functional clusters                          | `pixel clusters .`                                |
-| Git-diff → affected flows                    | `pixel changes .`                                 |
-| Task scoping (closed file list)              | `pixel targets "<task>" .`                        |
-| Surgical revert planner                      | `pixel rescue "<problem>" .`                      |
-| Error capture (wrap a command)               | `pixel sniper run -- <cmd>`                       |
-| Newest errors                                | `pixel sniper last`                               |
-
-`lower_bound: true` in a response = the resolver gave up on N same-name call sites; returned edges are a **lower bound**, not the full set. Treat "0 callers" + `lower_bound: true` as "unknown", not "unused".
-
-<!-- pixel:end -->
-
 # Always Project Rules
+
+## Opening pull requests
+
+PR-Gate is optional. Use it when you explicitly want its review-and-fix flow,
+real CI on a merge-preview branch, and signed PR submission. The
+`.github/workflows/pr-gate-guard.yml` only checks PRs whose body contains a
+`pr-gate:v1` marker; ordinary PRs without that marker are left alone.
+
+- To opt in, run `pr-gate submit` or `PR_GATE_OPT_IN=1 gh pr create ...`.
+  Plain `gh pr create` submits directly to GitHub.
+- Release PRs (`release-x.y.z` -> `main`) are exempt; the `release` skill opens
+  them directly.
+- Maintainers can bypass signature checks with the `pr-gate-bypass` label (then
+  reopen).
 
 ## 🚨 `SPEC.md` is normative — keep it in sync with the code
 
@@ -103,31 +75,31 @@ that kills it cuts the user's voice mid-sentence. Therefore:**
 
 ## 🚨 Rebuild After Changes — nothing is "done" until the new build is RUNNING
 
-**Every change to any `.rs` or `.swift` file MUST end with `scripts/dev-rebuild.sh`
-completing successfully, before the work is reported as finished.**
+**Every change to any `.rs` or `.swift` file MUST end with the platform's
+development rebuild script completing successfully before the work is reported
+as finished.**
 
 Not "deployed". Not "built". **Running.** Those are different claims, and only the
 last one lets a human test what you did.
 
 ```bash
-./scripts/dev-rebuild.sh
+./scripts/dev-rebuild-macos.sh  # macOS development app
+./scripts/dev-rebuild-linux.sh  # Linux daemon + settings app
 ```
 
-The script kills the DEV app AND its daemon (unconditionally — a Swift-only
-change still needs the GUI restarted to load it), builds Rust with the
-`local-stt` feature, builds and bundles the Swift app as `Always Dev.app`,
-deploys to `/Applications/Always Dev.app`, relaunches, and then **verifies the
-running dev processes are the ones just built** — plus confirms the production
-GUI is still alive at the end.
+On macOS, `dev-rebuild-macos.sh` kills the DEV app and its daemon, builds Rust
+with `local-stt`, bundles and deploys `Always Dev.app`, relaunches, and verifies
+the running dev processes use the new binaries. On Linux,
+`dev-rebuild-linux.sh` builds the daemon, frontend, and Tauri settings app,
+launches the app, and verifies its process is running from this checkout.
 
 ### The verification is the point
 
-After launching, the script compares each process's start time against its
-binary's mtime and **exits non-zero** with `✗ REBUILD NOT LIVE` if a process
-predates the code it was built from. If you see that, the change is NOT testable.
-Fix it before saying anything else — never report the work as shipped.
+After launching, each script verifies the rebuilt application is running and
+exits non-zero if it cannot verify that. If it fails, the change is NOT
+testable. Fix it before saying anything else — never report the work as shipped.
 
-Check by hand any time:
+On macOS, check by hand any time:
 
 ```bash
 stat -f "%Sm %N" -t "%H:%M:%S" "/Applications/Always Dev.app/Contents/MacOS/Always"
@@ -138,164 +110,27 @@ ps -o pid,lstart,comm -p $(pgrep -f "Always Dev.app/Contents/MacOS/Always$" | he
 ### Never do these
 
 - Do NOT say done / fixed / shipped / ready while the old dev process is still alive.
-- Do NOT rely on `open` alone. If the app is already running, `open`
+- On macOS, do NOT rely on `open` alone. If the app is already running, `open`
   re-focuses the live instance and the new binary never executes.
-- Do NOT skip the script for a "small" Swift change. That is exactly the case
+- Do NOT skip the macOS script for a "small" Swift change. That is exactly the case
   that broke.
-- Do NOT substitute `promote.sh` for `dev-rebuild.sh` to satisfy this rule.
+- Do NOT substitute `promote.sh` for `dev-rebuild-macos.sh` to satisfy this rule.
 
-**Why this rule exists**: the kill step used to be gated on Rust having changed.
+**Why this rule exists**: on macOS the kill step used to be gated on Rust having changed.
 A Swift-only fix was therefore built, deployed, and reported as shipped while the
 GUI had been running since 100 minutes earlier — `open` simply re-focused the
 stale instance. The user tested a build that was never running and correctly
 reported "I see no change". Hours were lost on both sides.
 
 **Options**:
-- `./scripts/dev-rebuild.sh release` - Release build instead of debug
-- `./scripts/dev-rebuild.sh --no-daemon` - Skip daemon restart (use sparingly; the
+- `./scripts/dev-rebuild-macos.sh release` - Release build instead of debug
+- `./scripts/dev-rebuild-macos.sh --no-daemon` - Skip daemon restart (use sparingly; the
   GUI is still restarted and verified)
 
 ### Shipping to production
 
 `./scripts/promote.sh [debug|release]` — run by the user only. Kills production,
 rebuilds, deploys over `/Applications/Always.app`, relaunches, verifies.
-
-# Pixel Index-Powered Development
-
-## Golden Rule: Think in Processes, Not Files
-
-After running `pixel ready .`, **always use the `pixel` CLI instead of grep/find/manual exploration**. The index understands execution flows, dependencies, and impact — grep does not.
-
-## Required Before Any Edit
-
-### 1. Impact Analysis (MUST run before editing)
-
-Before modifying ANY function, class, method, or file:
-
-```bash
-pixel impact <symbol> . --direction upstream
-```
-
-**Report to user**: Direct callers (d1 WILL BREAK), affected flows, risk level.
-
-**Why**: A 1-line change might break 5 distant call sites. Without impact analysis, you ship silent bugs.
-
-### 2. Change Detection (MUST run before commit)
-
-After making changes:
-
-```bash
-pixel changes .
-```
-
-Verify your changes only touch expected symbols and execution flows.
-
-**Why**: Prevents accidental scope creep and unintended modifications.
-
-## Replacing grep/find with Pixel
-
-### Never Do This Anymore
-
-```bash
-# grep for code patterns
-grep -r "handleClick" src/
-
-# find files by name/path
-find . -name "*Auth*" -type f
-
-# manual symbol hunting
-grep -r "getUserData" --include="*.ts"
-```
-
-### Use Pixel Instead
-
-**Search** (replaces grep — trigram-indexed, sound by construction):
-
-```bash
-pixel search 'handleClick' .
-```
-
-**Understand a symbol** (replaces manual exploration):
-
-```bash
-pixel symbol getUserData .
-pixel uses getUserData . --role callers
-```
-
-Returns: all callers, callees, with confidence tiers.
-
-**Find related code** (replaces find + grep):
-
-```bash
-pixel clusters .    # All functional areas
-pixel processes .   # All execution flows by business logic
-```
-
-## Debugging with Pixel
-
-When tracing a bug:
-
-**Don't**: Grep for error message, manually trace call stacks.
-**Do**:
-
-```bash
-pixel search 'null pointer' .
-pixel sniper last    # check the error sink for recent failures
-```
-
-**Trace execution from entry point**:
-
-```bash
-pixel processes .
-pixel trace <entrySymbol> <targetSymbol> .
-```
-
-## Task Scoping
-
-Before the first file read of any feature/bug task:
-
-```bash
-pixel targets "<task description>" .
-```
-
-Returns a closed prioritized file list (P0 = start here, P1 = likely, P2 = droppable). Clear with `pixel targets --clear .` when done.
-
-## Surgical Revert ("was working before")
-
-```bash
-pixel rescue "<problem>" .
-```
-
-Never `git reset --hard` — use `rescue` to find and revert the breaking commit.
-
-## Enforcement Rules (NEVER violate)
-
-1. NEVER grep for symbols — use `pixel symbol` or `pixel search`.
-2. NEVER use find for code exploration — use `pixel clusters` or `pixel processes`.
-3. NEVER edit a symbol without `pixel impact` first.
-4. NEVER commit without `pixel changes .` to verify scope.
-5. NEVER manually trace code flows — use `pixel trace` or `pixel processes`.
-6. NEVER `git reset --hard` over in-progress work — use `pixel rescue`.
-
-## Quick Reference
-
-| Task | Command | Bad Alternative |
-|------|---------|-----------------|
-| Find callers of a function | `pixel uses foo . --role callers` | `grep -r "foo(" src/` |
-| Search by regex | `pixel search 'auth' .` | `grep -r "auth" src/` |
-| Understand a flow | `pixel processes .` | Read files manually |
-| Find impact before edit | `pixel impact foo . --direction upstream` | Change + test + pray |
-| Verify changes are scoped | `pixel changes .` | Manual review |
-| Explore architecture | `pixel clusters .` | Read file tree |
-| Scope a task | `pixel targets "<task>" .` | Read everything |
-| Revert surgically | `pixel rescue "<problem>" .` | `git reset --hard` |
-
-## Why This Matters
-
-**Before Pixel**: code exploration = slow grep sessions, missed dependencies, silent bugs.
-**After Pixel**: code exploration = indexed regex search, call graph, blast-radius analysis, task scoping, surgical reverts.
-
-The index understands your code's execution model. Use it.
 
 ## Daemon Memory Profile (investigated 2026-08-30)
 

@@ -42,6 +42,8 @@ curl -H "Authorization: Bearer $GROQ_API_KEY" https://api.groq.com/openai/v1/mod
 ### Linux
 - Ensure user is in `audio` group
 - Check PulseAudio/ALSA permissions
+- Paste needs `xclip` and `xdotool` on X11; Wayland uses `wl-clipboard` and `ydotool` when available.
+- Global shortcuts require X11. On Wayland, use `always toggle-pause` and `always toggle-auto-enter`.
 
 ### Windows
 - Grant microphone permissions in Privacy Settings

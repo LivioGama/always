@@ -97,6 +97,17 @@ struct MenuBarView: View {
                 iconColor: statusColor
             )
 
+            if stateMonitor.isMicUnavailable {
+                Divider()
+
+                MenuRow(
+                    label: "Mic stuck — Fix",
+                    systemImage: "exclamationmark.triangle.fill",
+                    isDisabled: false,
+                    action: { stateMonitor.fixStuckMic() }
+                )
+            }
+
             Divider()
 
             // The master pause toggle lives in Settings → Voice Typing

@@ -169,7 +169,7 @@ impl OverlayStateReducer {
     /// Returns Some(new_state) if the overlay should change, None if no change
     pub fn process_event(&mut self, event: &DaemonEvent) -> Option<OverlayState> {
         match event {
-            DaemonEvent::Hello { version: _ } => {
+            DaemonEvent::Hello { .. } => {
                 // Start initial sync window to suppress overlay flashes
                 self.state.is_daemon_connected = true;
                 self.initial_sync_deadline = Some(Instant::now() + Duration::from_millis(300));
@@ -410,6 +410,7 @@ impl OverlayStateReducer {
                 error: _,
             }
             | DaemonEvent::ActiveTranscriberChanged { backend: _ }
+            | DaemonEvent::ActiveTranscriberFailed { .. }
             | DaemonEvent::SttFallbackEngaged { model: _ }
             | DaemonEvent::VoiceEnrollmentPreparing { .. }
             | DaemonEvent::VoiceEnrollmentStarted { .. }
@@ -423,7 +424,9 @@ impl OverlayStateReducer {
             | DaemonEvent::UpdateFailed { .. }
             | DaemonEvent::ShortcutListenerStatus {
                 input_monitoring_granted: _,
-            } => None,
+            }
+            | DaemonEvent::MicUnavailable { unavailable: _ }
+            | DaemonEvent::PeerPauseLeaseResult { .. } => None,
 
             DaemonEvent::ProcessingStarted | DaemonEvent::ProcessingStopped => {
                 // Not used in current overlay logic
@@ -595,7 +598,11 @@ mod tests {
         let mut reducer = OverlayStateReducer::new();
 
         // Simulate daemon connection
-        reducer.process_event(&DaemonEvent::Hello { version: 7 });
+        reducer.process_event(&DaemonEvent::Hello {
+            version: 7,
+            build_id: None,
+            capabilities: Vec::new(),
+        });
 
         // Voice activity should show overlay
         let state = reducer.process_event(&DaemonEvent::VoiceActivityDetected);
@@ -606,7 +613,11 @@ mod tests {
     fn test_transcribing_shows_overlay() {
         let mut reducer = OverlayStateReducer::new();
 
-        reducer.process_event(&DaemonEvent::Hello { version: 7 });
+        reducer.process_event(&DaemonEvent::Hello {
+            version: 7,
+            build_id: None,
+            capabilities: Vec::new(),
+        });
 
         let state = reducer.process_event(&DaemonEvent::TranscribingStarted);
         assert_eq!(state, Some(OverlayState::Transcribing));
@@ -616,7 +627,11 @@ mod tests {
     fn test_transcribing_waits_for_minimum_listening_display() {
         let mut reducer = OverlayStateReducer::new();
 
-        reducer.process_event(&DaemonEvent::Hello { version: 7 });
+        reducer.process_event(&DaemonEvent::Hello {
+            version: 7,
+            build_id: None,
+            capabilities: Vec::new(),
+        });
         assert_eq!(
             reducer.process_event(&DaemonEvent::VoiceActivityDetected),
             Some(OverlayState::VoiceActivity)
@@ -636,7 +651,11 @@ mod tests {
     fn test_pause_hides_overlay() {
         let mut reducer = OverlayStateReducer::new();
 
-        reducer.process_event(&DaemonEvent::Hello { version: 7 });
+        reducer.process_event(&DaemonEvent::Hello {
+            version: 7,
+            build_id: None,
+            capabilities: Vec::new(),
+        });
         reducer.process_event(&DaemonEvent::VoiceActivityDetected);
 
         // Pause should hide overlay
@@ -652,7 +671,11 @@ mod tests {
     fn test_initial_sync_suppression() {
         let mut reducer = OverlayStateReducer::new();
 
-        reducer.process_event(&DaemonEvent::Hello { version: 7 });
+        reducer.process_event(&DaemonEvent::Hello {
+            version: 7,
+            build_id: None,
+            capabilities: Vec::new(),
+        });
 
         // AutoEnterEnabled right after Hello should not flash (initial sync)
         let state = reducer.process_event(&DaemonEvent::AutoEnterEnabled);
@@ -663,7 +686,11 @@ mod tests {
     fn test_filtered_clears_ongoing() {
         let mut reducer = OverlayStateReducer::new();
 
-        reducer.process_event(&DaemonEvent::Hello { version: 7 });
+        reducer.process_event(&DaemonEvent::Hello {
+            version: 7,
+            build_id: None,
+            capabilities: Vec::new(),
+        });
         reducer.process_event(&DaemonEvent::TranscribingStarted);
 
         // Filtered should clear transcribing and show filtered overlay
@@ -682,7 +709,11 @@ mod tests {
     fn test_auto_enter_countdown() {
         let mut reducer = OverlayStateReducer::new();
 
-        reducer.process_event(&DaemonEvent::Hello { version: 7 });
+        reducer.process_event(&DaemonEvent::Hello {
+            version: 7,
+            build_id: None,
+            capabilities: Vec::new(),
+        });
 
         // Countdown started should show countdown overlay
         let state = reducer.process_event(&DaemonEvent::AutoEnterCountdownStarted {
@@ -715,7 +746,11 @@ mod tests {
     fn test_transcription_failed() {
         let mut reducer = OverlayStateReducer::new();
 
-        reducer.process_event(&DaemonEvent::Hello { version: 7 });
+        reducer.process_event(&DaemonEvent::Hello {
+            version: 7,
+            build_id: None,
+            capabilities: Vec::new(),
+        });
         reducer.process_event(&DaemonEvent::TranscribingStarted);
 
         // Transcription failed should clear ongoing and show error (flash state)
@@ -735,7 +770,11 @@ mod tests {
     fn test_low_microphone_volume() {
         let mut reducer = OverlayStateReducer::new();
 
-        reducer.process_event(&DaemonEvent::Hello { version: 7 });
+        reducer.process_event(&DaemonEvent::Hello {
+            version: 7,
+            build_id: None,
+            capabilities: Vec::new(),
+        });
 
         // Low mic volume should show warning overlay (flash state)
         let state = reducer.process_event(&DaemonEvent::LowMicrophoneVolume { energy: 0.001 });
@@ -749,7 +788,11 @@ mod tests {
     fn test_idle_auto_pause() {
         let mut reducer = OverlayStateReducer::new();
 
-        reducer.process_event(&DaemonEvent::Hello { version: 7 });
+        reducer.process_event(&DaemonEvent::Hello {
+            version: 7,
+            build_id: None,
+            capabilities: Vec::new(),
+        });
         reducer.process_event(&DaemonEvent::VoiceActivityDetected);
 
         // Idle auto pause should show notice (flash state)
@@ -761,7 +804,11 @@ mod tests {
     fn test_flash_auto_hide() {
         let mut reducer = OverlayStateReducer::new();
 
-        reducer.process_event(&DaemonEvent::Hello { version: 7 });
+        reducer.process_event(&DaemonEvent::Hello {
+            version: 7,
+            build_id: None,
+            capabilities: Vec::new(),
+        });
         reducer.process_event(&DaemonEvent::VoiceActivityDetected);
 
         // Start a flash state (paused)
@@ -784,7 +831,7 @@ mod tests {
         // Test JSON parsing of daemon events
         let json = r#"{"type":"Hello","data":{"version":7}}"#;
         let event = parse_daemon_event(json).unwrap();
-        assert!(matches!(event, DaemonEvent::Hello { version: 7 }));
+        assert!(matches!(event, DaemonEvent::Hello { version: 7, .. }));
 
         let json = r#"{"type":"VoiceActivityDetected","data":null}"#;
         let event = parse_daemon_event(json).unwrap();
@@ -841,7 +888,11 @@ mod tests {
     fn test_connection_lost_hides_overlay() {
         let mut reducer = OverlayStateReducer::new();
 
-        reducer.process_event(&DaemonEvent::Hello { version: 7 });
+        reducer.process_event(&DaemonEvent::Hello {
+            version: 7,
+            build_id: None,
+            capabilities: Vec::new(),
+        });
         reducer.process_event(&DaemonEvent::VoiceActivityDetected);
 
         // Simulate connection loss by setting daemon connected to false

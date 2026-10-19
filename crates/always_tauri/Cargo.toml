@@ -1,6 +1,6 @@
 [package]
 name = "always-tauri"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Tauri v2 frontend for the Always speech-to-text daemon"
 license = "AGPL-3.0-only"
@@ -13,9 +13,12 @@ crate-type = ["staticlib", "cdylib", "lib"]
 name = "always-tauri"
 path = "src/main.rs"
 
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
 # Tauri v2 (stable)
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["custom-protocol", "tray-icon"] }
 
 # Note: tauri-plugin-autostart and tauri-plugin-updater are in 3.x alpha for
 # the Tauri v2 ecosystem.  The stable 2.x releases are for Tauri v1 only.
@@ -42,3 +45,6 @@ dirs = "6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[patch.crates-io]
+glib = { path = "../../vendor/glib-0.18.5" }

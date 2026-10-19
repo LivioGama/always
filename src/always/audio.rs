@@ -401,6 +401,10 @@ pub struct RecChild {
     spawned_at: std::time::Instant,
     /// Fed by the stderr drainer on CoreAudio buffer overruns.
     overruns: Arc<OverrunWindow>,
+    /// The child leads its own process group (SoX `rec`), so `Drop` kills
+    /// the whole group and no `sox` helper process outlives it. The capture
+    /// helper is not a group leader: it has its own parent watchdog.
+    own_group: bool,
 }
 
 /// Executable name of the echo-cancelling capture helper inside
@@ -414,18 +418,52 @@ pub const CAPTURE_HELPER_NAME: &str = "always-capture";
 #[cfg(target_os = "macos")]
 const CAPTURE_HELPER_FIRST_BYTES_MS: i32 = 4_000;
 
-/// Set after the capture helper failed to start or stay alive; the daemon
-/// then uses `rec` for the rest of its life instead of paying the start-up
-/// timeout on every respawn. Cleared by a default-input-device change.
+/// How long a recorded capture-helper failure is honoured. A failure is
+/// usually transient (an input-device switch in flight: VPIO -10875, then
+/// the plain helper's `'what'` 2003329396), so the failure is remembered
+/// only long enough to spare the 4 s start-up wait on every immediate
+/// retry; after this the next spawn tries the native helper again before
+/// SoX. (2026-10-17: one transient failure condemned the helper for the
+/// daemon's whole life and the `rec` fallback delivered no audio.)
 #[cfg(target_os = "macos")]
-static CAPTURE_HELPER_FAILED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+const CAPTURE_FAILURE_TTL: Duration = Duration::from_secs(60);
+
+/// A capture-helper failure remembered for [`CAPTURE_FAILURE_TTL`].
+#[cfg(target_os = "macos")]
+struct CaptureFailure(Mutex<Option<Instant>>);
+
+#[cfg(target_os = "macos")]
+impl CaptureFailure {
+    const fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    fn is_active(&self) -> bool {
+        self.0
+            .lock()
+            .is_some_and(|at| at.elapsed() < CAPTURE_FAILURE_TTL)
+    }
+
+    fn mark(&self) {
+        *self.0.lock() = Some(Instant::now());
+    }
+
+    fn clear(&self) {
+        *self.0.lock() = None;
+    }
+}
+
+/// Set after the capture helper (echo-cancelling mode) failed to start or
+/// stay alive; the spawn then skips it for [`CAPTURE_FAILURE_TTL`] instead
+/// of paying the start-up timeout on every respawn. Cleared by a
+/// default-input-device change.
+#[cfg(target_os = "macos")]
+static CAPTURE_HELPER_FAILED: CaptureFailure = CaptureFailure::new();
 
 /// Same, for the helper's plain (`--no-vp`) mode: set when even plain
-/// capture failed, so the daemon goes straight to `rec` if one exists.
+/// capture failed, so the spawn goes straight to `rec` if one exists.
 #[cfg(target_os = "macos")]
-static CAPTURE_PLAIN_FAILED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static CAPTURE_PLAIN_FAILED: CaptureFailure = CaptureFailure::new();
 
 /// SoX `rec`, if installed: Homebrew (Apple Silicon, then Intel), the
 /// system, then `PATH`. Never required on macOS — the bundled capture
@@ -451,33 +489,55 @@ pub fn find_rec() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// Pref `capture_aec` (applied at config load). Default on.
-static AEC_PREF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Pref `capture_aec` (applied at config load). Default OFF.
+static AEC_PREF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Apply the `capture_aec` preference (NULL/None = on — the user confirmed
-/// dictation over a playing video works with it, 2026-10-14). Takes effect
-/// at the next recorder spawn. Status cues are rendered through the
-/// helper's own voice-processing output while it runs (see
-/// `capture_cue_send`), so its ducking of other audio cannot silence them.
+/// Apply the `capture_aec` preference (NULL/None = OFF). Takes effect at
+/// the next recorder spawn.
+///
+/// Off by default since 2026-10-16 (v0.1.0 user report: micro-cuts and
+/// crackling in Apple Music / on a speaker while Always ran). The
+/// voice-processing (VPIO) canceller changes what every app plays: measured
+/// on a MacBook Air, coreaudiod restarts the OUTPUT device's IO when the
+/// unit starts and again when it stops (an audible cut), logs Audio IO
+/// Overloads at both edges, and ducks every other app to −15 dB for ~2 s,
+/// then −4 dB for as long as it runs — even at the minimum ducking level.
+/// `capture_aec true`
+/// still opts in (the helper is then started with `--vp`).
 pub fn set_aec_pref(enabled: Option<bool>) {
     AEC_PREF.store(
-        enabled.unwrap_or(true),
+        enabled.unwrap_or(false),
         std::sync::atomic::Ordering::Relaxed,
     );
 }
 
-/// Acoustic echo cancellation against the Mac's own output (default ON,
-/// see `set_aec_pref`).
+/// Voice-processing echo cancellation (opt-in, see `set_aec_pref`).
 /// Env `ALWAYS_AEC` overrides the pref either way (`0/false/off`,
 /// `1/true/on`); an explicit `ALWAYS_CAPTURE_BIN` (tests, replay) implies on.
 pub fn aec_enabled() -> bool {
-    match std::env::var("ALWAYS_AEC").as_deref() {
-        Ok("0") | Ok("false") | Ok("off") => return false,
-        Ok("1") | Ok("true") | Ok("on") => return true,
+    aec_decision(
+        std::env::var("ALWAYS_AEC").ok().as_deref(),
+        std::env::var_os("ALWAYS_CAPTURE_BIN").is_some(),
+        AEC_PREF.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// [`aec_enabled`] with its inputs explicit (env `ALWAYS_AEC`, whether
+/// `ALWAYS_CAPTURE_BIN` is set, the pref).
+fn aec_decision(env_aec: Option<&str>, capture_bin_set: bool, pref: bool) -> bool {
+    match env_aec {
+        Some("0") | Some("false") | Some("off") => return false,
+        Some("1") | Some("true") | Some("on") => return true,
         _ => {}
     }
-    std::env::var_os("ALWAYS_CAPTURE_BIN").is_some()
-        || AEC_PREF.load(std::sync::atomic::Ordering::Relaxed)
+    capture_bin_set || pref
+}
+
+/// Capture-helper arguments: the voice-processing canceller only when echo
+/// cancellation was asked for, otherwise plain capture. Plain is explicit
+/// (`--no-vp`), never implied by an empty argument list.
+fn capture_helper_args(aec: bool) -> &'static [&'static str] {
+    if aec { &["--vp"] } else { &["--no-vp"] }
 }
 
 /// Locate the capture helper: `ALWAYS_CAPTURE_BIN`, then next to the
@@ -598,8 +658,9 @@ pub(crate) fn note_capture_helper_line_for_test(line: &str) {
 #[cfg(target_os = "macos")]
 impl RecChild {
     /// Spawn the recorder. Order:
-    /// 1. the capture helper with echo cancellation (AEC on, helper healthy);
-    /// 2. the same helper in plain mode (`--no-vp`) — AEC off, or VPIO
+    /// 1. the capture helper with echo cancellation (`--vp`) — only when
+    ///    AEC was opted into (off by default, see `set_aec_pref`);
+    /// 2. the same helper in plain mode (`--no-vp`) — the default, or VPIO
     ///    unavailable on this Mac/device;
     /// 3. SoX `rec`, only if it happens to be installed (dev machines).
     ///
@@ -610,26 +671,32 @@ impl RecChild {
     /// chosen, exactly ONE recorder process exists (I4) — a helper that
     /// fails its start-up check is killed and reaped before the next try.
     pub fn spawn() -> Result<Self> {
+        // First spawn of this daemon: audio children a previous (killed)
+        // daemon left behind still hold the mic and starve the new one.
+        static REAPED: std::sync::Once = std::sync::Once::new();
+        REAPED.call_once(|| {
+            reap_orphaned_audio_children(locate_capture_helper().as_deref());
+        });
         Self::spawn_from(locate_capture_helper(), aec_enabled())
     }
 
     /// [`Self::spawn`] with the helper location and AEC choice explicit.
     fn spawn_from(helper: Option<PathBuf>, aec: bool) -> Result<Self> {
         if let Some(helper) = helper.as_deref() {
-            if aec && !CAPTURE_HELPER_FAILED.load(Ordering::Relaxed) {
-                match Self::spawn_capture_helper(helper, &[]) {
+            if aec && !CAPTURE_HELPER_FAILED.is_active() {
+                match Self::spawn_capture_helper(helper, capture_helper_args(true)) {
                     Ok(rec) => return Ok(rec),
                     Err(error) => {
-                        CAPTURE_HELPER_FAILED.store(true, Ordering::Relaxed);
+                        CAPTURE_HELPER_FAILED.mark();
                         tracing::warn!(error = %error, "capture_helper_fallback_to_plain");
                     }
                 }
             }
-            if !CAPTURE_PLAIN_FAILED.load(Ordering::Relaxed) {
-                match Self::spawn_capture_helper(helper, &["--no-vp"]) {
+            if !CAPTURE_PLAIN_FAILED.is_active() {
+                match Self::spawn_capture_helper(helper, capture_helper_args(false)) {
                     Ok(rec) => return Ok(rec),
                     Err(error) => {
-                        CAPTURE_PLAIN_FAILED.store(true, Ordering::Relaxed);
+                        CAPTURE_PLAIN_FAILED.mark();
                         tracing::warn!(error = %error, "capture_helper_plain_fallback_to_rec");
                     }
                 }
@@ -644,7 +711,7 @@ impl RecChild {
                 // exits at once); echo cancellation stays off until the next
                 // input-device change (`force_respawn`) so the gated loop's
                 // 100 ms retries never each wait out the 4 s VPIO start-up.
-                CAPTURE_PLAIN_FAILED.store(false, Ordering::Relaxed);
+                CAPTURE_PLAIN_FAILED.clear();
                 match helper {
                     Some(h) => anyhow::bail!(
                         "microphone capture failed: '{}' produced no audio (check System Settings → Privacy & Security → Microphone, and that an input device is connected)",
@@ -668,7 +735,9 @@ impl RecChild {
             .args(args)
             // stdin carries status-cue commands (`play <path>`): cues are
             // rendered through the helper's voice-processing output so they
-            // are never ducked by it (see `capture_cue_play`).
+            // are never ducked by it (see `capture_cue_play`). A `--no-vp`
+            // helper has no output side — the sink below stays empty and
+            // cues take the in-process player pool instead.
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -710,7 +779,13 @@ impl RecChild {
             "capture_helper_spawned"
         );
         let ring = Self::start_reader(stdout, started, "capture-reader")?;
-        *CAPTURE_CUE_SINK.lock() = cue_stdin.map(|s| (child.id(), s));
+        // Only a voice-processing (`--vp`) helper renders cues — a plain
+        // one runs input-only and ignores its stdin.
+        *CAPTURE_CUE_SINK.lock() = if args.contains(&"--vp") {
+            cue_stdin.map(|s| (child.id(), s))
+        } else {
+            None
+        };
         crate::always::status_sound::capture_route_changed();
         Ok(Self {
             child,
@@ -719,6 +794,7 @@ impl RecChild {
             reuse_count: 0,
             spawned_at: std::time::Instant::now(),
             overruns: Arc::new(OverrunWindow::new()),
+            own_group: false,
         })
     }
 
@@ -753,7 +829,12 @@ impl RecChild {
         tracing::info!(path = %rec_path.display(), "rec_spawn_starting");
         let overruns = Arc::new(OverrunWindow::new());
         let buffer_arg = SOX_BUFFER_BYTES.to_string();
+        use std::os::unix::process::CommandExt as _;
         let mut child = std::process::Command::new(rec_path)
+            // Own process group: `Drop` can then kill SoX and anything it
+            // forked in one `killpg`, and a Ctrl-C aimed at the daemon's
+            // terminal does not reach it half-way.
+            .process_group(0)
             // Capture at the device's native rate/channels (typically 48 kHz
             // stereo on USB mics), then resample to 16 kHz mono on the
             // output side. Requesting `-c 1 -r 16000` on input makes
@@ -836,6 +917,7 @@ impl RecChild {
             reuse_count: 0,
             spawned_at: std::time::Instant::now(),
             overruns,
+            own_group: true,
         })
     }
 
@@ -846,39 +928,63 @@ impl RecChild {
 
     pub fn get_or_spawn() -> Result<Arc<Mutex<Option<RecChild>>>> {
         let recorder_lock = Arc::clone(&GLOBAL_RECORDER);
-        let mut recorder = recorder_lock.lock();
+        loop {
+            let mut recorder = recorder_lock.lock();
 
-        let needs_respawn = match recorder.as_mut() {
-            Some(rec) => {
-                if rec.is_healthy() {
-                    rec.reuse_count += 1;
-                    // Time-based hygiene cap ONLY. The previous guard
-                    // recycled after 1000 *calls* — but the gated loop
-                    // calls get_or_spawn every 100 ms tick (wake-on-voice
-                    // probe, pipe drain), so a user with media playing
-                    // recycled a healthy recorder every ~100 s, each time
-                    // paying the ~4.5 s device cold start and dropping
-                    // audio mid-window. Real failure modes are covered
-                    // below and in `is_healthy`: process death, wedge
-                    // timeout, overrun storms, device switches. A daily
-                    // quiet recycle remains as a conservative backstop
-                    // against slow SoX memory growth.
-                    rec.age() > REC_MAX_LIFETIME
-                } else {
-                    true
+            let needs_respawn = match recorder.as_mut() {
+                Some(rec) => {
+                    if rec.is_healthy() {
+                        rec.reuse_count += 1;
+                        // Time-based hygiene cap ONLY. The previous guard
+                        // recycled after 1000 *calls* — but the gated loop
+                        // calls get_or_spawn every 100 ms tick (wake-on-voice
+                        // probe, pipe drain), so a user with media playing
+                        // recycled a healthy recorder every ~100 s, each time
+                        // paying the ~4.5 s device cold start and dropping
+                        // audio mid-window. Real failure modes are covered
+                        // below and in `is_healthy`: process death, wedge
+                        // timeout, overrun storms, device switches. A daily
+                        // quiet recycle remains as a conservative backstop
+                        // against slow SoX memory growth.
+                        rec.age() > REC_MAX_LIFETIME
+                    } else {
+                        true
+                    }
                 }
+                None => true,
+            };
+            if !needs_respawn {
+                return Ok(Arc::clone(&GLOBAL_RECORDER));
             }
-            None => true,
-        };
-        if needs_respawn {
             // Drop (kill + wait) the old recorder BEFORE spawning the
             // replacement, so two `rec` processes never hold the input
             // device at the same time — spawning first briefly ran both
             // against the same CoreAudio device.
             *recorder = None;
-            *recorder = Some(Self::spawn()?);
+            let supervisor = mic_supervisor();
+            if supervisor.should_exit() {
+                supervisor.exit_for_respawn();
+            }
+            // Back off between respawns of a recorder that keeps failing,
+            // instead of respawning the instant it is evicted. Waits OUTSIDE
+            // the recorder lock (a device switch calls `force_respawn`, which
+            // clears the backoff and must be able to take the lock).
+            if let Some(wait) = supervisor.backoff_remaining() {
+                drop(recorder);
+                std::thread::sleep(wait.min(Duration::from_millis(100)));
+                continue;
+            }
+            return match Self::spawn() {
+                Ok(rec) => {
+                    *recorder = Some(rec);
+                    Ok(Arc::clone(&GLOBAL_RECORDER))
+                }
+                Err(e) => {
+                    supervisor.note_failure();
+                    Err(e)
+                }
+            };
         }
-        Ok(Arc::clone(&GLOBAL_RECORDER))
     }
 
     /// Force-evict the current recorder and spawn a fresh one bound to
@@ -901,8 +1007,11 @@ impl RecChild {
             tracing::info!("rec_respawn_due_to_default_input_change");
         }
         // A new input device gets a fresh chance at echo cancellation.
-        CAPTURE_HELPER_FAILED.store(false, Ordering::Relaxed);
-        CAPTURE_PLAIN_FAILED.store(false, Ordering::Relaxed);
+        CAPTURE_HELPER_FAILED.clear();
+        CAPTURE_PLAIN_FAILED.clear();
+        // The user (or macOS) just changed the device: drop the failure
+        // backoff too, so the new mic is tried at once.
+        mic_supervisor().clear_backoff();
         // Drop (kill + wait) the old recorder BEFORE spawning the
         // replacement — same I4 invariant as `get_or_spawn`.
         *recorder = None;
@@ -995,6 +1104,7 @@ impl RecChild {
             Ok(Some(frame)) => {
                 buf.copy_from_slice(&frame.bytes);
                 self.last_captured_at = Some(frame.captured_at);
+                mic_supervisor().note_audio();
                 Ok(FRAME_BYTES)
             }
             Ok(None) => {
@@ -1002,10 +1112,12 @@ impl RecChild {
                 // permission was denied (TCC), the audio device was
                 // unplugged, or the user killed `rec`.
                 tracing::warn!("rec_eof_on_read_frame");
+                mic_supervisor().note_failure();
                 Ok(0)
             }
             Err(e) => {
                 tracing::warn!("rec_read_frame_timeout");
+                mic_supervisor().note_failure();
                 Err(e)
             }
         }
@@ -1099,6 +1211,195 @@ impl<R: Read> Read for FirstRead<R> {
     }
 }
 
+/// Waits between respawns of a recorder that keeps failing, by consecutive
+/// failure count (the last entry repeats). Each failure already cost one
+/// 15 s read timeout (`READ_FRAME_TIMEOUT_MS`), so the backoff only spaces
+/// out the respawns — it never delays the first recovery by much.
+#[cfg(target_os = "macos")]
+const MIC_BACKOFF_SECS: [u64; 5] = [1, 2, 5, 15, 30];
+
+/// Consecutive recorder failures after which the mic is reported stuck
+/// (`mic_stuck` log + `DaemonEvent::MicUnavailable`).
+#[cfg(target_os = "macos")]
+const MIC_STUCK_AFTER: u32 = 3;
+
+/// Consecutive recorder failures after which a GUI-owned daemon exits so
+/// the app respawns it with fresh state (and reaps leftover audio children).
+#[cfg(target_os = "macos")]
+const MIC_EXIT_AFTER: u32 = 6;
+
+/// Exit status of that deliberate exit (`EX_TEMPFAIL`).
+#[cfg(target_os = "macos")]
+const MIC_EXIT_CODE: i32 = 75;
+
+/// Backoff before respawn number `failures + 1`; none before the first.
+#[cfg(target_os = "macos")]
+fn mic_backoff(failures: u32) -> Duration {
+    match failures {
+        0 => Duration::ZERO,
+        n => {
+            Duration::from_secs(MIC_BACKOFF_SECS[(n as usize - 1).min(MIC_BACKOFF_SECS.len() - 1)])
+        }
+    }
+}
+
+/// Counts consecutive recorder failures (read timeout, EOF, failed spawn),
+/// spaces out the respawns and escalates: report the mic stuck, then exit
+/// the daemon. Any delivered audio frame resets it.
+#[cfg(target_os = "macos")]
+pub(crate) struct MicSupervisor {
+    failures: AtomicU32,
+    retry_at: Mutex<Option<Instant>>,
+    stuck: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(target_os = "macos")]
+impl MicSupervisor {
+    const fn new() -> Self {
+        Self {
+            failures: AtomicU32::new(0),
+            retry_at: Mutex::new(None),
+            stuck: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Called per delivered frame: a counter load when healthy.
+    fn note_audio(&self) {
+        if self.failures.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        self.failures.store(0, Ordering::Relaxed);
+        *self.retry_at.lock() = None;
+        if self.stuck.swap(false, Ordering::Relaxed) {
+            tracing::info!("mic_recovered");
+            crate::always::event::global_broadcaster().mic_unavailable(false);
+        }
+    }
+
+    fn note_failure(&self) {
+        let failures = self.failures.fetch_add(1, Ordering::Relaxed) + 1;
+        *self.retry_at.lock() = Some(Instant::now() + mic_backoff(failures));
+        tracing::warn!(failures, "mic_recorder_failure");
+        if failures >= MIC_STUCK_AFTER && !self.stuck.swap(true, Ordering::Relaxed) {
+            tracing::error!(failures, "mic_stuck");
+            crate::always::event::global_broadcaster().mic_unavailable(true);
+        }
+    }
+
+    fn backoff_remaining(&self) -> Option<Duration> {
+        let at = (*self.retry_at.lock())?;
+        at.checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+    }
+
+    /// Forget the pending backoff (default input changed: new device, new chance).
+    fn clear_backoff(&self) {
+        *self.retry_at.lock() = None;
+    }
+
+    /// Only a GUI-owned daemon exits: the app respawns it, a terminal-launched
+    /// `always run` would just vanish.
+    fn should_exit(&self) -> bool {
+        self.failures.load(Ordering::Relaxed) >= MIC_EXIT_AFTER
+            && std::env::var("ALWAYS_SPAWNED_BY_GUI").ok().as_deref() == Some("1")
+    }
+
+    /// Exit so the app respawns a fresh daemon. The caller has already
+    /// dropped the recorder (no audio child outlives us). Mirrors the
+    /// orphan watchdog's cleanup: `process::exit` skips `PidGuard::Drop`.
+    fn exit_for_respawn(&self) -> ! {
+        tracing::error!(
+            failures = self.failures.load(Ordering::Relaxed),
+            exit_code = MIC_EXIT_CODE,
+            "mic_stuck_exiting_for_respawn"
+        );
+        let _ = std::fs::remove_file(crate::always::daemon::pid_path());
+        if let Some(sock) = crate::always::daemon::socket_path() {
+            let _ = std::fs::remove_file(sock);
+        }
+        std::process::exit(MIC_EXIT_CODE)
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn mic_supervisor() -> &'static MicSupervisor {
+    static SUPERVISOR: MicSupervisor = MicSupervisor::new();
+    &SUPERVISOR
+}
+
+/// True while the recorder has failed [`MIC_STUCK_AFTER`] times in a row.
+#[cfg(target_os = "macos")]
+pub fn mic_unavailable() -> bool {
+    mic_supervisor().stuck.load(Ordering::Relaxed)
+}
+
+/// Other platforms have no `rec` supervisor.
+#[cfg(not(target_os = "macos"))]
+pub fn mic_unavailable() -> bool {
+    false
+}
+
+/// Does `cmd` (a `ps command=` line) run our capture helper? The exact
+/// located helper, or any `…app/Contents/MacOS/always-capture` bundle copy.
+#[cfg(target_os = "macos")]
+fn is_capture_helper_command(cmd: &str, helper: Option<&std::path::Path>) -> bool {
+    let Some(idx) = cmd.find(&format!("/{CAPTURE_HELPER_NAME}")) else {
+        return false;
+    };
+    let end = idx + 1 + CAPTURE_HELPER_NAME.len();
+    if !(cmd.len() == end || cmd[end..].starts_with(' ')) {
+        return false;
+    }
+    let exe = &cmd[..end];
+    helper.is_some_and(|h| h.to_str() == Some(exe))
+        || (exe.starts_with('/') && exe.ends_with(".app/Contents/MacOS/always-capture"))
+}
+
+/// Does `cmd` run SoX `rec`/`sox` with exactly the argument signature
+/// `spawn_rec` uses? An unrelated user `sox` never matches.
+#[cfg(target_os = "macos")]
+fn is_our_sox_command(cmd: &str) -> bool {
+    let argv0 = cmd.split_whitespace().next().unwrap_or("");
+    let base = argv0.rsplit('/').next().unwrap_or("");
+    matches!(base, "rec" | "sox")
+        && cmd.contains(" --no-show-progress --buffer ")
+        && cmd.contains(" remix - rate 16000 channels 1")
+}
+
+/// PIDs in `ps -axo pid=,ppid=,command=` output that are orphaned (parent
+/// is launchd) copies of our own audio children.
+#[cfg(target_os = "macos")]
+fn orphaned_audio_pids(ps: &str, helper: Option<&std::path::Path>) -> Vec<i32> {
+    ps.lines()
+        .filter_map(|line| {
+            let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
+            let (ppid, cmd) = rest.trim_start().split_once(char::is_whitespace)?;
+            let (pid, ppid) = (pid.parse::<i32>().ok()?, ppid.parse::<i32>().ok()?);
+            let cmd = cmd.trim();
+            (ppid == 1 && (is_capture_helper_command(cmd, helper) || is_our_sox_command(cmd)))
+                .then_some(pid)
+        })
+        .collect()
+}
+
+/// Kill audio children (`always-capture`, our `rec`/`sox`) whose daemon is
+/// gone. A SIGKILLed daemon cannot run `Drop`, and SoX has no parent
+/// watchdog, so such children keep the mic and starve the next daemon.
+#[cfg(target_os = "macos")]
+fn reap_orphaned_audio_children(helper: Option<&std::path::Path>) {
+    let Ok(out) = std::process::Command::new("/bin/ps")
+        .args(["-axo", "pid=,ppid=,command="])
+        .output()
+    else {
+        return;
+    };
+    for pid in orphaned_audio_pids(&String::from_utf8_lossy(&out.stdout), helper) {
+        // SAFETY: plain signal syscall on a pid we just matched as ours.
+        let killed = unsafe { libc::kill(pid, libc::SIGKILL) } == 0;
+        tracing::warn!(pid, killed, "orphaned_audio_child_reaped");
+    }
+}
+
 #[cfg(target_os = "macos")]
 impl Drop for RecChild {
     fn drop(&mut self) {
@@ -1113,6 +1414,12 @@ impl Drop for RecChild {
         }
         // Killing the child closes its stdout; the reader thread then
         // sees EOF, closes the ring and exits on its own.
+        if self.own_group {
+            // SAFETY: plain signal syscall on the group this child leads.
+            unsafe {
+                libc::killpg(self.child.id() as libc::pid_t, libc::SIGKILL);
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -1518,6 +1825,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `CAPTURE_HELPER_FAILED` / `CAPTURE_PLAIN_FAILED` are process-global;
+    /// the spawn tests below set and assert them, so they must not
+    /// interleave under the parallel test runner.
+    #[cfg(target_os = "macos")]
+    static CAPTURE_FLAGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// A helper whose echo-cancelling mode fails (VPIO unavailable — seen
     /// on a fresh macOS 26 VM: kAUInitialize -10875) must fall back to the
     /// SAME helper in plain `--no-vp` mode, never to SoX `rec` (absent on a
@@ -1525,7 +1838,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn helper_vp_failure_falls_back_to_plain_helper_not_rec() {
-        use std::sync::atomic::Ordering;
+        let _guard = CAPTURE_FLAGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("always-cap-plain-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("fake-capture");
@@ -1536,24 +1849,147 @@ mod tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        super::CAPTURE_HELPER_FAILED.store(false, Ordering::Relaxed);
-        super::CAPTURE_PLAIN_FAILED.store(false, Ordering::Relaxed);
+        super::CAPTURE_HELPER_FAILED.clear();
+        super::CAPTURE_PLAIN_FAILED.clear();
 
         let mut rec = super::RecChild::spawn_from(Some(script.clone()), true)
             .expect("plain helper must take over");
         assert!(
-            super::CAPTURE_HELPER_FAILED.load(Ordering::Relaxed),
+            super::CAPTURE_HELPER_FAILED.is_active(),
             "VP failure recorded"
         );
         assert!(
-            !super::CAPTURE_PLAIN_FAILED.load(Ordering::Relaxed),
+            !super::CAPTURE_PLAIN_FAILED.is_active(),
             "plain mode healthy"
         );
         let mut buf = [0u8; super::FRAME_BYTES];
         assert_eq!(rec.read_frame(&mut buf).expect("read"), super::FRAME_BYTES);
         assert!(rec.peek_newest_frame().is_some() || rec.read_frame(&mut buf).is_ok());
         drop(rec);
-        super::CAPTURE_HELPER_FAILED.store(false, Ordering::Relaxed);
+        super::CAPTURE_HELPER_FAILED.clear();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 2026-10-17: one transient helper failure condemned the native helper
+    /// for the daemon's whole life. A remembered failure must expire.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn capture_failure_expires_after_ttl() {
+        let flag = super::CaptureFailure::new();
+        assert!(!flag.is_active());
+        flag.mark();
+        assert!(flag.is_active());
+        *flag.0.lock() = Some(
+            std::time::Instant::now()
+                - super::CAPTURE_FAILURE_TTL
+                - std::time::Duration::from_secs(1),
+        );
+        assert!(
+            !flag.is_active(),
+            "expired failure must not skip the helper"
+        );
+        flag.mark();
+        flag.clear();
+        assert!(!flag.is_active());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mic_backoff_follows_schedule_and_caps() {
+        use std::time::Duration;
+        let secs = |n| super::mic_backoff(n).as_secs();
+        assert_eq!(super::mic_backoff(0), Duration::ZERO);
+        assert_eq!(
+            [
+                secs(1),
+                secs(2),
+                secs(3),
+                secs(4),
+                secs(5),
+                secs(6),
+                secs(40)
+            ],
+            [1, 2, 5, 15, 30, 30, 30]
+        );
+        const { assert!(super::MIC_STUCK_AFTER < super::MIC_EXIT_AFTER) };
+    }
+
+    /// Orphan reaping must hit our leftover audio children and nothing else:
+    /// not a live child (parent != launchd), not a user's own `sox`/`rec`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn orphan_reaper_matches_only_our_orphaned_audio_children() {
+        let ps = "  101     1 /Applications/Always.app/Contents/MacOS/always-capture --no-vp
+  102   555 /Applications/Always.app/Contents/MacOS/always-capture --no-vp
+  103     1 /Applications/Always Dev.app/Contents/MacOS/always-capture --vp
+  104     1 /opt/homebrew/bin/rec --no-show-progress --buffer 4096 -t raw -e signed-integer -b 16 - remix - rate 16000 channels 1
+  105     1 /opt/homebrew/bin/rec -r 44100 song.wav
+  106     1 /opt/homebrew/bin/sox in.wav out.wav
+  107     1 /tmp/evil/always-capture-fake
+  108     1 /Users/x/capture/always-capture --no-vp
+  109   777 /opt/homebrew/bin/rec --no-show-progress --buffer 4096 -t raw -e signed-integer -b 16 - remix - rate 16000 channels 1
+";
+        let helper = std::path::Path::new("/Users/x/capture/always-capture");
+        assert_eq!(
+            super::orphaned_audio_pids(ps, Some(helper)),
+            vec![101, 103, 104, 108]
+        );
+        assert_eq!(super::orphaned_audio_pids(ps, None), vec![101, 103, 104]);
+    }
+
+    /// v0.1.0 report (micro-cuts / crackling in music while Always ran): the
+    /// voice-processing canceller restarts the output device's IO and ducks
+    /// every other app, so it must never run unless asked for. Unset pref
+    /// = off; only an explicit opt-in (pref, `ALWAYS_AEC=1`, a test
+    /// `ALWAYS_CAPTURE_BIN`) turns it on, and `ALWAYS_AEC=0` always wins.
+    #[test]
+    fn echo_cancellation_is_opt_in() {
+        use super::aec_decision as d;
+        assert!(!d(None, false, false), "default: no VPIO");
+        assert!(d(None, false, true), "pref opt-in");
+        assert!(d(Some("1"), false, false), "env opt-in");
+        assert!(!d(Some("0"), true, true), "env kill switch wins");
+        assert!(d(None, true, false), "test helper implies on");
+        assert_eq!(super::capture_helper_args(false), &["--no-vp"]);
+        assert_eq!(super::capture_helper_args(true), &["--vp"]);
+    }
+
+    /// Default (AEC off): the helper is started ONCE, in plain mode, with
+    /// an explicit `--no-vp` — never first as a voice-processing unit
+    /// (which alone restarts the output device's IO: a cut in the user's
+    /// music). Stand-in helper records its arguments.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn default_spawn_is_plain_helper_without_vpio() {
+        let _guard = CAPTURE_FLAGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("always-cap-default-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-capture");
+        let argv = dir.join("argv");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$1\" in --no-vp) exec /usr/bin/yes ;; *) exit 4 ;; esac\n",
+                argv.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        super::CAPTURE_HELPER_FAILED.clear();
+        super::CAPTURE_PLAIN_FAILED.clear();
+
+        let mut rec =
+            super::RecChild::spawn_from(Some(script.clone()), false).expect("plain helper starts");
+        let mut buf = [0u8; super::FRAME_BYTES];
+        assert_eq!(rec.read_frame(&mut buf).expect("read"), super::FRAME_BYTES);
+        drop(rec);
+        assert_eq!(
+            std::fs::read_to_string(&argv).unwrap(),
+            "--no-vp\n",
+            "exactly one spawn, plain"
+        );
+        assert!(!super::CAPTURE_HELPER_FAILED.is_active());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1566,7 +2002,8 @@ mod tests {
         let Some(path) = super::locate_capture_helper() else {
             panic!("always-capture not built (capture/build.sh)");
         };
-        let mut rec = super::RecChild::spawn_capture_helper(&path, &[]).expect("helper starts");
+        let mut rec =
+            super::RecChild::spawn_capture_helper(&path, &["--vp"]).expect("helper starts");
         let mut buf = [0u8; super::FRAME_BYTES];
         // Discard start-up burst, then time 100 frames (3.0 s of audio).
         for _ in 0..10 {
@@ -1593,7 +2030,7 @@ mod tests {
             return;
         }
         let mut rec = super::RecChild::spawn().expect("fallback recorder");
-        assert!(super::CAPTURE_HELPER_FAILED.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(super::CAPTURE_HELPER_FAILED.is_active());
         let mut buf = [0u8; super::FRAME_BYTES];
         assert_eq!(rec.read_frame(&mut buf).unwrap(), super::FRAME_BYTES);
         eprintln!("fallback rec pid streaming");

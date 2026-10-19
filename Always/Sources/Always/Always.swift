@@ -186,6 +186,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        OverlayDisplayMode.registerDefault()
         cliService = CLIService()
         NSLog("Always: MenuBarExtra installed")
 
@@ -456,7 +457,55 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         usleep(100_000)
 
+        // The daemon's death (SIGKILL included) reparents its recorder to
+        // launchd, still holding the mic. Reap those before a new daemon
+        // spawns its own.
+        reapOrphanedAudioChildren()
+
         try? FileManager.default.removeItem(atPath: AppInstance.socketPath)
+    }
+
+    /// SIGKILL audio children orphaned by a dead daemon (ppid 1): our
+    /// `always-capture` helper (any `.app/Contents/MacOS/always-capture`) and
+    /// SoX `rec`/`sox` run with the daemon's exact argument signature. A
+    /// user's own `sox` never matches. SoX has no parent watchdog, so it
+    /// otherwise outlives the daemon forever.
+    static func reapOrphanedAudioChildren() {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
+        proc.arguments = ["-axo", "pid=,ppid=,command="]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        let text = String(data: data, encoding: .utf8) ?? ""
+        for line in text.split(whereSeparator: \.isNewline) {
+            let fields = line.split(maxSplits: 2, whereSeparator: { $0.isWhitespace })
+            guard fields.count == 3, let pid = pid_t(fields[0]), pid_t(fields[1]) == 1 else { continue }
+            let command = fields[2].trimmingCharacters(in: .whitespaces)
+            if isOurAudioChildCommand(command) {
+                kill(pid, SIGKILL)
+            }
+        }
+    }
+
+    private static func isOurAudioChildCommand(_ command: String) -> Bool {
+        let helper = "/always-capture"
+        if let range = command.range(of: helper) {
+            let exe = String(command[..<range.upperBound])
+            let rest = command[range.upperBound...]
+            if (rest.isEmpty || rest.hasPrefix(" ")) && exe.hasPrefix("/")
+                && exe.hasSuffix(".app/Contents/MacOS/always-capture") {
+                return true
+            }
+        }
+        let argv0 = command.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+        let base = URL(fileURLWithPath: argv0).lastPathComponent
+        return (base == "rec" || base == "sox")
+            && command.contains(" --no-show-progress --buffer ")
+            && command.contains(" remix - rate 16000 channels 1")
     }
 
     /// PIDs whose argv is `always-daemon run` for THIS instance — a dev

@@ -5,9 +5,11 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 #[cfg(unix)]
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixListener;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::Mutex;
 
 use super::event::{DaemonCommand, DaemonEvent, global_broadcaster};
@@ -50,6 +52,8 @@ const ORPHAN_TIMEOUT_SECS: u64 = 30;
 /// disconnects. Long enough to survive a GUI restart / reconnect blip,
 /// short enough that speech never pastes into windows with the app gone.
 const NO_GUI_MUTE_GRACE_SECS: u64 = 5;
+static PAUSE_HANDOFF_LOCK: std::sync::LazyLock<parking_lot::Mutex<()>> =
+    std::sync::LazyLock::new(parking_lot::Mutex::default);
 
 static CONNECTED_CLIENTS: AtomicUsize = AtomicUsize::new(0);
 
@@ -142,9 +146,13 @@ pub fn socket_path() -> Result<PathBuf> {
     } else {
         // Linux: Use XDG_RUNTIME_DIR or fallback to /tmp
         if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-            PathBuf::from(runtime_dir).join("always.sock")
+            PathBuf::from(runtime_dir)
+                .join(format!("always{}.sock", crate::config::instance_suffix()))
         } else {
-            PathBuf::from("/tmp/always.sock")
+            PathBuf::from(format!(
+                "/tmp/always{}.sock",
+                crate::config::instance_suffix()
+            ))
         }
     };
 
@@ -156,9 +164,21 @@ pub fn socket_path() -> Result<PathBuf> {
     Ok(path)
 }
 
-#[cfg(not(unix))]
+/// Windows equivalent of the UDS socket: a named pipe per instance.
+/// The `\\.\pipe\` prefix selects the local-machine pipe namespace —
+/// the pipe is reachable only from this machine, same trust boundary
+/// as the per-user socket file.
+#[cfg(windows)]
 pub fn socket_path() -> Result<PathBuf> {
-    anyhow::bail!("Unix domain sockets not supported on this platform")
+    Ok(PathBuf::from(format!(
+        r"\\.\pipe\always{}",
+        crate::config::instance_suffix()
+    )))
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn socket_path() -> Result<PathBuf> {
+    anyhow::bail!("daemon IPC not supported on this platform")
 }
 
 /// Start the Unix Domain Socket server.
@@ -209,18 +229,48 @@ pub async fn start_server(
 
     tracing::info!(socket_path = %socket_path.display(), "uds_server_listening");
 
-    // Orphan watchdog: if no UDS client is connected for ORPHAN_TIMEOUT_SECS,
-    // the Mac app is gone (quit/crashed/force-killed). Exit so we don't leave
-    // a stale daemon that the next app launch can't communicate with.
-    //
-    // Before exiting we remove the pid + socket files explicitly because
-    // `std::process::exit` does NOT run Drop, so `PidGuard::Drop` would
-    // be skipped and the next launch would have to wait for
-    // `remove_stale_pid` / `remove_stale_socket` to detect a dead PID.
-    // Only a GUI-spawned daemon mutes itself when clients vanish — a
-    // daemon started manually from a terminal (`always run`) has no GUI
-    // to wait for and keeps today's behavior.
-    let gui_spawned = std::env::var("ALWAYS_SPAWNED_BY_GUI").ok().as_deref() == Some("1");
+    spawn_orphan_watchdog();
+
+    // Accept connections in a loop
+    loop {
+        match listener.accept().await {
+            Ok((stream, _addr)) => {
+                #[cfg(unix)]
+                tune_send_buf(&stream);
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let _ = handle_client(stream, ctx).await;
+                });
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "uds_accept_failed");
+            }
+        }
+    }
+}
+
+/// Orphan watchdog: if no IPC client is connected for ORPHAN_TIMEOUT_SECS,
+/// the GUI is gone (quit/crashed/force-killed). Exit so we don't leave
+/// a stale daemon that the next app launch can't communicate with.
+///
+/// Before exiting we remove the pid + socket files explicitly because
+/// `std::process::exit` does NOT run Drop, so `PidGuard::Drop` would
+/// be skipped and the next launch would have to wait for
+/// `remove_stale_pid` / `remove_stale_socket` to detect a dead PID.
+/// Only a GUI-spawned daemon mutes itself when clients vanish — a
+/// daemon started manually from a terminal (`always run`) has no GUI
+/// to wait for and keeps today's behavior.
+///
+/// The watchdog only runs for GUI-spawned daemons — they are the only
+/// ones a vanished client can orphan. A daemon started from a terminal
+/// (`always run` / `always start`) has no client to wait for and must
+/// keep running; on Windows, where IPC clients are transient CLI
+/// invocations, an unconditional exit would kill every `always start`
+/// daemon 30 seconds in.
+fn spawn_orphan_watchdog() {
+    if std::env::var("ALWAYS_SPAWNED_BY_GUI").ok().as_deref() != Some("1") {
+        return;
+    }
     tokio::spawn(async move {
         let mut last_had_clients = Instant::now();
         loop {
@@ -233,8 +283,7 @@ pub async fn start_server(
             // Mute first (fast, reversible), exit later (cleanup). The
             // mute is what guarantees speech never pastes into windows
             // while the app is closed.
-            if gui_spawned
-                && !pause::is_no_gui_paused()
+            if !pause::is_no_gui_paused()
                 && last_had_clients.elapsed() > Duration::from_secs(NO_GUI_MUTE_GRACE_SECS)
             {
                 let (effective, changed) = pause::set_no_gui_paused(true);
@@ -243,7 +292,7 @@ pub async fn start_server(
             if last_had_clients.elapsed() > Duration::from_secs(ORPHAN_TIMEOUT_SECS) {
                 tracing::warn!(
                     timeout_secs = ORPHAN_TIMEOUT_SECS,
-                    "orphan_daemon_exit: no UDS clients for too long"
+                    "orphan_daemon_exit: no IPC clients for too long"
                 );
                 // Mirror PidGuard::Drop's cleanup so the next daemon
                 // launch sees a clean slate without needing to detect
@@ -254,6 +303,9 @@ pub async fn start_server(
                     log.write(crate::always::log::Event::Stop);
                 }
                 let _ = std::fs::remove_file(crate::always::daemon::pid_path());
+                // On Windows the pipe vanishes with the process — there is
+                // no stale endpoint file to remove.
+                #[cfg(unix)]
                 if let Some(sock) = crate::always::daemon::socket_path() {
                     let _ = std::fs::remove_file(sock);
                 }
@@ -261,18 +313,128 @@ pub async fn start_server(
             }
         }
     });
+}
 
-    // Accept connections in a loop
+/// Named-pipe server — the Windows equivalent of the UDS listener. Same
+/// JSON-lines protocol, same per-connection handler. `first_pipe_instance`
+/// makes bind a single-winner operation, mirroring the socket-file check:
+/// a second daemon cannot steal the endpoint out from under a live one.
+#[cfg(windows)]
+const PRIVATE_PIPE_SDDL: &str = "D:P(A;;GA;;;OW)(A;;GA;;;SY)";
+
+#[cfg(windows)]
+fn create_private_pipe_server(
+    path: &std::path::Path,
+    first_instance: bool,
+) -> Result<NamedPipeServer> {
+    use std::ffi::c_void;
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr::null_mut;
+
+    #[repr(C)]
+    struct SecurityAttributes {
+        length: u32,
+        descriptor: *mut c_void,
+        inherit_handle: i32,
+    }
+
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            descriptor_string: *const u16,
+            revision: u32,
+            descriptor: *mut *mut c_void,
+            descriptor_size: *mut u32,
+        ) -> i32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LocalFree(memory: *mut c_void) -> *mut c_void;
+    }
+
+    // Protected DACL: only this process token's owner and SYSTEM may access
+    // the pipe. In particular, do not inherit the default Everyone/Anonymous
+    // read ACEs: the pipe carries transcript events.
+    let sddl_wide: Vec<u16> = PRIVATE_PIPE_SDDL
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut descriptor = null_mut();
+    let converted = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl_wide.as_ptr(),
+            1,
+            &mut descriptor,
+            null_mut(),
+        )
+    };
+    if converted == 0 {
+        return Err(std::io::Error::last_os_error()).context("build private named-pipe ACL");
+    }
+
+    let mut attributes = SecurityAttributes {
+        length: size_of::<SecurityAttributes>() as u32,
+        descriptor,
+        inherit_handle: 0,
+    };
+    let mut options = ServerOptions::new();
+    options
+        .first_pipe_instance(first_instance)
+        .reject_remote_clients(true);
+    let result = unsafe {
+        options.create_with_security_attributes_raw(
+            path.as_os_str(),
+            (&mut attributes as *mut SecurityAttributes).cast(),
+        )
+    };
+    unsafe {
+        LocalFree(descriptor);
+    }
+    result.context("create per-user named pipe")
+}
+
+#[cfg(windows)]
+pub async fn start_server(
+    registry: ModelRegistry,
+    active: ActiveTranscriber,
+    cfg: ActiveConfig,
+) -> Result<()> {
+    spawn_registry_event_bridge(registry.clone());
+    let ctx = ModelCommandCtx {
+        registry,
+        active,
+        cfg,
+    };
+
+    let pipe_path = socket_path()?;
+    let mut server = create_private_pipe_server(&pipe_path, true)
+        .context("Failed to create named pipe — another always daemon may hold it")?;
+
+    spawn_orphan_watchdog();
+    tracing::info!(pipe = %pipe_path.display(), "pipe_server_listening");
+
     loop {
-        match listener.accept().await {
-            Ok((stream, _addr)) => {
-                let ctx = ctx.clone();
-                tokio::spawn(async move {
-                    let _ = handle_client(stream, ctx).await;
-                });
+        match server.connect().await {
+            Ok(()) => {
+                // The connected instance is handed to a task; a fresh
+                // instance takes its place as the listener.
+                match create_private_pipe_server(&pipe_path, false) {
+                    Ok(next) => {
+                        let conn = std::mem::replace(&mut server, next);
+                        let ctx = ctx.clone();
+                        tokio::spawn(async move {
+                            let _ = handle_client(conn, ctx).await;
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "pipe_recreate_failed");
+                        anyhow::bail!("named pipe listener lost: {e}");
+                    }
+                }
             }
             Err(e) => {
-                tracing::error!(error = %e, "uds_accept_failed");
+                tracing::error!(error = %e, "pipe_accept_failed");
             }
         }
     }
@@ -348,47 +510,59 @@ fn spawn_registry_event_bridge(registry: ModelRegistry) {
     });
 }
 
-/// Handle a single client connection
+/// Bump the UDS send buffer for the large initial-state payload.
+/// `tokio::net::UnixStream` exposes no setter (unlike TcpStream), so go
+/// through the raw fd. A failure is non-fatal: the payload is also
+/// chunked, the bigger buffer only avoids the extra round-trips.
 #[cfg(unix)]
-async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
+fn tune_send_buf<S>(stream: &S)
+where
+    S: std::os::fd::AsRawFd,
+{
+    // macOS caps SO_SNDBUF on Unix domain streams well below 1 MB —
+    // asking for it fails with EINVAL on every boot (observed live).
+    // Step down to a size the kernel accepts and log at debug: this
+    // is a throughput nicety, not a correctness requirement.
+    for size in [1024 * 1024, 256 * 1024, 64 * 1024] {
+        let size: libc::c_int = size;
+        let rc = unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                std::ptr::from_ref(&size).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc == 0 {
+            break;
+        }
+        if size == 64 * 1024 {
+            tracing::debug!(
+                error = %std::io::Error::last_os_error(),
+                "uds_send_buffer_increase_failed (kernel default in use)"
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn tune_send_buf<S>(_stream: &S) {
+    // No-op on non-Unix platforms (Windows uses named pipes)
+}
+
+/// Handle a single client connection
+async fn handle_client<S>(stream: S, ctx: ModelCommandCtx) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     CONNECTED_CLIENTS.fetch_add(1, Ordering::Relaxed);
     let consume_lease = Arc::new(AtomicBool::new(false));
     let _guard = ClientGuard {
         consume_lease: Arc::clone(&consume_lease),
     };
 
-    // Increase the socket send buffer to handle larger initial payloads.
-    // `tokio::net::UnixStream` exposes no setter for this (unlike TcpStream),
-    // so go through the raw fd. A failure is non-fatal: the payload is also
-    // chunked, the bigger buffer only avoids the extra round-trips.
-    {
-        use std::os::fd::AsRawFd;
-        // macOS caps SO_SNDBUF on Unix domain streams well below 1 MB —
-        // asking for it fails with EINVAL on every boot (observed live).
-        // Step down to a size the kernel accepts and log at debug: this
-        // is a throughput nicety, not a correctness requirement.
-        for size in [1024 * 1024, 256 * 1024, 64 * 1024] {
-            let size: libc::c_int = size;
-            let rc = unsafe {
-                libc::setsockopt(
-                    stream.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_SNDBUF,
-                    std::ptr::from_ref(&size).cast::<libc::c_void>(),
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                )
-            };
-            if rc == 0 {
-                break;
-            }
-            if size == 64 * 1024 {
-                tracing::debug!(
-                    error = %std::io::Error::last_os_error(),
-                    "uds_send_buffer_increase_failed (kernel default in use)"
-                );
-            }
-        }
-    }
+    // Skip tune_send_buf in generic handler - called in platform-specific code
 
     tracing::info!(
         clients = CONNECTED_CLIENTS.load(Ordering::Relaxed),
@@ -411,7 +585,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
     }
 
     let mut rx = global_broadcaster().subscribe();
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(stream);
     let reader = BufReader::new(reader);
     let rate_limiter = Mutex::new(RateLimiter::new());
 
@@ -424,21 +598,45 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
 
     // The Hello frame MUST be first so version-mismatched clients can
     // disconnect before reading state they may not understand.
-    let initial_events = vec![
+    let mut initial_events = vec![
         DaemonEvent::Hello {
             version: crate::always::event::PROTOCOL_VERSION,
+            build_id: Some(crate::always::event::BUILD_ID.to_string()),
+            capabilities: vec![crate::always::event::PEER_PAUSE_LEASE_CAPABILITY.to_string()],
         },
         DaemonEvent::ListeningStarted, // Send immediately after Hello
-        if is_paused {
-            DaemonEvent::Paused
-        } else {
-            DaemonEvent::Resumed
-        },
         DaemonEvent::MasterPauseChanged {
             master_paused: is_master_paused,
         },
         DaemonEvent::ResumedAppsChanged {
             bundles: resumed_bundles,
+        },
+    ];
+    // Active watchdog sources, so a (re)connecting GUI predicts with them
+    // instead of guessing "listening" over a live mic conflict. Only ACTIVE
+    // ones: `paused:false` for an inactive source would make the GUI drop a
+    // live one (`pauseSource = paused ? source : null`).
+    for (source, active) in [
+        ("mic_conflict", pause::is_mic_conflict_paused()),
+        ("audio_output", pause::is_audio_output_paused()),
+    ] {
+        if active {
+            initial_events.push(DaemonEvent::PauseSourceChanged {
+                source: source.into(),
+                paused: true,
+                detail: None,
+            });
+        }
+    }
+    initial_events.extend([
+        // Effective state AFTER the above: the GUI recomputes a local
+        // prediction on MasterPauseChanged / ResumedAppsChanged, so sending
+        // the truth first let that prediction overwrite it (icon showed
+        // "listening" while the daemon was idle- or mic-paused).
+        if is_paused {
+            DaemonEvent::Paused
+        } else {
+            DaemonEvent::Resumed
         },
         if is_auto_enter {
             DaemonEvent::AutoEnterEnabled
@@ -450,9 +648,7 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         DaemonEvent::ActiveTranscriberChanged {
             backend: active_backend,
         },
-    ];
-
-    let mut initial_events = initial_events;
+    ]);
     // Daemon-side tap health (Input Monitoring): a startup broadcast would
     // be lost (no clients yet), so each client gets the current status in
     // its initial burst.
@@ -460,6 +656,11 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
         initial_events.push(DaemonEvent::ShortcutListenerStatus {
             input_monitoring_granted: granted,
         });
+    }
+    // A stuck microphone recorder: a client connecting after the
+    // supervisor's one-shot broadcast must still learn about it.
+    if crate::always::audio::mic_unavailable() {
+        initial_events.push(DaemonEvent::MicUnavailable { unavailable: true });
     }
     // "My Voice" profile snapshot so the Settings tab renders correct
     // state on open without a request round-trip.
@@ -647,32 +848,27 @@ async fn handle_client(stream: UnixStream, ctx: ModelCommandCtx) -> Result<()> {
 fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &AtomicBool) {
     match cmd {
         DaemonCommand::TogglePause => {
-            // toggle_pause flips MASTER and returns (effective, changed).
-            // We clear idle BEFORE the toggle so the recompute inside
-            // toggle_pause sees idle=false and produces the correct
-            // effective state. The old order (toggle → set_idle) left
-            // EFFECTIVE_PAUSED stale when master flipped to false while
-            // idle was set — the daemon stayed "effectively paused" even
-            // though every source was cleared.
-            let was_master = pause::is_master_paused();
-            if was_master {
-                pause::set_idle_auto_paused(false);
-                pause::mark_voice_seen();
-            }
-            let (effective, changed) = pause::toggle_pause();
-            let master = pause::is_master_paused();
-            // Master always changed (we just toggled it) — broadcast so
-            // the UI can label the global toggle correctly.
-            global_broadcaster().master_pause_changed(master);
-            if changed {
-                if effective {
-                    pause::dictation_buffer_clear();
-                    global_broadcaster().paused();
-                } else {
-                    global_broadcaster().resumed();
-                }
-            }
-            tracing::info!(master, effective, changed, "uds_toggle_pause");
+            // Same semantics as the master chord: while anything the user
+            // may override is pausing (master, idle, mic conflict, audio
+            // output), a toggle RESUMES. It used to flip master only, so
+            // the idle pill's Play (and the tray / CLI) turned an idle or
+            // mic-conflict pause into "paused everywhere".
+            let out = crate::always::pause_commands::toggle_global();
+            tracing::info!(
+                master = out.master,
+                effective = out.effective,
+                changed = out.changed,
+                "uds_toggle_pause"
+            );
+        }
+        DaemonCommand::Resume => {
+            let out = crate::always::pause_commands::resume();
+            tracing::info!(
+                master = out.master,
+                effective = out.effective,
+                changed = out.changed,
+                "uds_resume"
+            );
         }
         DaemonCommand::ToggleAutoEnter => {
             let new_state = pause::toggle_auto_enter();
@@ -754,7 +950,25 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
         DaemonCommand::ApproveCorrection { id } => handle_approve_correction(&id),
         DaemonCommand::RejectCorrection { id } => handle_reject_correction(&id),
         DaemonCommand::CaptureCorrection => handle_capture_correction(),
+        DaemonCommand::PeerPauseLease { request_id, paused } => {
+            let _guard = PAUSE_HANDOFF_LOCK.lock();
+            let (accepted, lease_owned) = apply_peer_pause_lease(&request_id, paused);
+            global_broadcaster().send(DaemonEvent::PeerPauseLeaseResult {
+                request_id,
+                accepted,
+                lease_owned,
+            });
+        }
         DaemonCommand::SetPaused { paused, reason } => {
+            let _guard = PAUSE_HANDOFF_LOCK.lock();
+            let by_peer = reason.as_deref() == Some("peer-instance");
+            if !should_apply_peer_pause_command(paused, by_peer, pause::is_paused_by_peer()) {
+                tracing::info!(
+                    reason = "peer-pause-no-longer-owned",
+                    "uds_set_paused_ignored"
+                );
+                return;
+            }
             // Clear idle BEFORE set_paused so the recompute inside sees
             // idle=false. The old order (set_paused → set_idle) left
             // EFFECTIVE_PAUSED stale when resuming while idle was set.
@@ -766,7 +980,6 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             // pauses us with reason "peer-instance". Track the provenance
             // so the watchdog knows whether this pause is ours to lift —
             // any non-peer pause command clears it and wins.
-            let by_peer = reason.as_deref() == Some("peer-instance");
             pause::set_paused_by_peer(paused && by_peer);
             let (effective, changed) = pause::set_paused(paused);
             global_broadcaster().master_pause_changed(paused);
@@ -884,9 +1097,12 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                     tracing::info!(effective, "audio_output_auto_resumed");
                 }
             } else {
-                // Idle-paused: drop the audio source flag quietly so it
-                // can't strand a pause after idle resume.
+                // Idle-paused: drop the audio source flag (no Resumed —
+                // idle still pauses) so it can't strand a pause after idle
+                // resume. The GUI must still hear the source cleared, or
+                // its prediction keeps "audio playing" forever (#124).
                 let _ = pause::set_audio_output_paused(false);
+                global_broadcaster().pause_source_changed("audio_output", false, None);
             }
         }
         DaemonCommand::SetAppPaused { bundle_id, paused } => {
@@ -894,29 +1110,15 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             // effective state. Broadcasting is gated on `changed` so
             // setting an override for a non-focused app doesn't spam
             // the UDS bus.
-            match crate::always::per_app::set_app_paused_override(&bundle_id, paused) {
-                Ok(()) => {
-                    let (effective, changed) = pause::recompute_effective();
-                    if changed {
-                        if effective {
-                            pause::dictation_buffer_clear();
-                            global_broadcaster().paused();
-                        } else {
-                            pause::mark_voice_seen();
-                            global_broadcaster().resumed();
-                        }
-                    }
-                    // Always broadcast the updated allowlist so every
-                    // connected client (Settings UI, menu bar) sees
-                    // the same snapshot without round-tripping
-                    // through the CLI `config show` path.
-                    global_broadcaster()
-                        .resumed_apps_changed(crate::always::per_app::resumed_apps());
+            // Plain allowlist editing: does not lift idle / watchdog pauses
+            // (see `pause_commands::set_app_paused`).
+            match crate::always::pause_commands::set_app_paused(&bundle_id, paused) {
+                Ok(out) => {
                     tracing::info!(
                         bundle = %bundle_id,
                         paused = ?paused,
-                        effective,
-                        changed,
+                        effective = out.effective,
+                        changed = out.changed,
                         "uds_set_app_paused"
                     );
                 }
@@ -1128,6 +1330,13 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                 crate::always::enrollment::profile_status(ctx.cfg.read().speaker_gate_enabled);
             global_broadcaster().voice_profile_status(enrolled, enabled, steps);
         }
+        DaemonCommand::GetShortcutListenerStatus => {
+            // Re-send only a known status; "unknown" (listener not started
+            // yet) is announced by the listener itself when it reports.
+            if let Some(granted) = crate::always::keyboard::input_monitoring_status() {
+                global_broadcaster().shortcut_listener_status(granted);
+            }
+        }
         DaemonCommand::RespawnRecorder => {
             // macOS reports the default input device changed. The running
             // `rec` opened the old device at spawn time and won't follow
@@ -1166,11 +1375,101 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerPauseLeaseAction {
+    Acquire,
+    AlreadyOwned,
+    AlreadyManuallyPaused,
+    Release,
+    Reject,
+}
+
+fn peer_pause_lease_action(
+    requested_paused: bool,
+    peer_owned: bool,
+    matching_lease: bool,
+    master_paused: bool,
+) -> PeerPauseLeaseAction {
+    match (requested_paused, peer_owned, matching_lease, master_paused) {
+        (true, true, true, _) => PeerPauseLeaseAction::AlreadyOwned,
+        (true, true, false, _) => PeerPauseLeaseAction::Reject,
+        (true, false, _, true) => PeerPauseLeaseAction::AlreadyManuallyPaused,
+        (true, false, _, false) => PeerPauseLeaseAction::Acquire,
+        (false, true, true, _) => PeerPauseLeaseAction::Release,
+        (false, _, _, _) => PeerPauseLeaseAction::Reject,
+    }
+}
+
+fn apply_peer_pause_lease(request_id: &str, requested_paused: bool) -> (bool, bool) {
+    if request_id.is_empty() || request_id.len() > 128 {
+        return (false, false);
+    }
+    let peer_owned = pause::is_paused_by_peer();
+    let matching_lease = pause::paused_by_peer_lease_matches(request_id);
+    match peer_pause_lease_action(
+        requested_paused,
+        peer_owned,
+        matching_lease,
+        pause::is_master_paused(),
+    ) {
+        PeerPauseLeaseAction::Acquire => {
+            pause::set_paused_by_peer_lease(request_id.to_string());
+            let (effective, changed) = pause::set_paused(true);
+            global_broadcaster().master_pause_changed(true);
+            if changed {
+                if effective {
+                    pause::dictation_buffer_clear();
+                    global_broadcaster().paused();
+                } else {
+                    global_broadcaster().resumed();
+                }
+            }
+            (true, true)
+        }
+        PeerPauseLeaseAction::AlreadyOwned => (true, true),
+        // The peer is already manually paused. Confirm the safe state but
+        // never claim a lease that would later erase the user's choice.
+        PeerPauseLeaseAction::AlreadyManuallyPaused => (true, false),
+        PeerPauseLeaseAction::Release => {
+            pause::set_paused_by_peer(false);
+            pause::set_idle_auto_paused(false);
+            pause::mark_voice_seen();
+            let (effective, changed) = pause::set_paused(false);
+            global_broadcaster().master_pause_changed(false);
+            if changed {
+                if effective {
+                    pause::dictation_buffer_clear();
+                    global_broadcaster().paused();
+                } else {
+                    global_broadcaster().resumed();
+                }
+            }
+            (true, false)
+        }
+        PeerPauseLeaseAction::Reject => (false, false),
+    }
+}
+
+fn should_apply_peer_pause_command(paused: bool, by_peer: bool, peer_pause_owned: bool) -> bool {
+    // Older peers release the handoff with SetPaused(false). Once a manual
+    // command has cleared the ownership marker, a delayed legacy release must
+    // not override that newer user choice.
+    !(by_peer && !paused && !peer_pause_owned)
+}
+
+/// Held for the whole of `switch_active_backend` / `set_language`. The engine
+/// build runs outside the config lock (it would freeze dictation), so without
+/// this two UDS clients could interleave — `set_language` snapshotting the
+/// config mid-switch — leaving the config naming backend A while the active
+/// slot holds backend B. The main loop never takes this lock.
+static TRANSCRIBER_REBUILD: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// Update the transcription language live: write `cfg.lang`, persist to the
 /// prefs DB, and rebuild the active transcriber so engines that bake the
 /// language into their decode (Canary, Cohere, SenseVoice) pick it up
 /// without a daemon restart.
 fn set_language(ctx: &ModelCommandCtx, lang: &str) {
+    let _rebuild = TRANSCRIBER_REBUILD.lock();
     {
         let mut cfg = ctx.cfg.write();
         cfg.lang = lang.to_string();
@@ -1197,28 +1496,17 @@ fn set_language(ctx: &ModelCommandCtx, lang: &str) {
 /// DB, and emit [`DaemonEvent::ActiveTranscriberChanged`] so connected
 /// UDS clients refresh their active-model badge.
 fn switch_active_backend(ctx: &ModelCommandCtx, choice: TranscriberBackendChoice) {
-    // Selecting the backend that is already active is free. Without this
-    // guard it is anything but: each call rebuilds the transcriber, which
-    // for a local model means loading ONNX sessions from disk, and each
-    // success broadcasts `ActiveTranscriberChanged` — which the GUI's
-    // model picker observes, re-emitting the selection and driving the
-    // whole cycle again. Measured on a single user-initiated switch: ten
-    // `SetActiveTranscriber` commands and ten full transcriber rebuilds
-    // inside one second, which is the stall the user sees as the app
-    // freezing after picking a model.
-    //
-    // Idempotence here fixes it at the source regardless of how the UI
-    // binding behaves.
-    if ctx.cfg.read().transcriber_backend == choice {
-        tracing::debug!(backend = %choice, "uds_set_active_transcriber_noop");
-        return;
-    }
-
-    let mut new_cfg = ctx.cfg.write();
-    new_cfg.transcriber_backend = choice.clone();
-    match build_transcriber(&new_cfg, &ctx.registry) {
-        Ok(transcriber) => {
-            *ctx.active.write() = transcriber;
+    let _rebuild = TRANSCRIBER_REBUILD.lock();
+    let outcome = switch_backend_with(&ctx.cfg, &choice, |cfg| {
+        build_transcriber(cfg, &ctx.registry)
+    });
+    let active_now = ctx.cfg.read().transcriber_backend.to_string();
+    match &outcome {
+        SwitchOutcome::Noop => {
+            tracing::debug!(backend = %choice, "uds_set_active_transcriber_noop");
+        }
+        SwitchOutcome::Switched(transcriber) => {
+            *ctx.active.write() = Arc::clone(transcriber);
             // Persist so the next daemon start uses the same choice.
             if let Ok(conn) = crate::db::open() {
                 let value = choice.to_string();
@@ -1226,15 +1514,84 @@ fn switch_active_backend(ctx: &ModelCommandCtx, choice: TranscriberBackendChoice
                     tracing::warn!(error = %e, "persist_transcriber_backend_failed");
                 }
             }
-            global_broadcaster().send(DaemonEvent::ActiveTranscriberChanged {
-                backend: choice.to_string(),
-            });
             tracing::info!(backend = %choice, "uds_set_active_transcriber");
         }
-        Err(e) => {
-            tracing::error!(backend = %choice, error = %e, "build_new_transcriber_failed");
+        SwitchOutcome::Failed(error) => {
+            tracing::error!(backend = %choice, error = %error, "build_new_transcriber_failed");
         }
     }
+    for event in switch_events(&choice, &active_now, &outcome) {
+        global_broadcaster().send(event);
+    }
+}
+
+/// Result of a backend switch request.
+enum SwitchOutcome<T> {
+    /// Already the active backend — nothing rebuilt.
+    Noop,
+    /// The new engine built and is now the configured backend.
+    Switched(T),
+    /// The new engine failed to build; the config still names the backend
+    /// that was active before, which keeps running.
+    Failed(String),
+}
+
+/// Switch `cfg` to `choice`, building the engine with `build`.
+///
+/// The build (for a local model: loading ONNX sessions from disk and a
+/// warm-up decode, seconds on a cold disk) runs on a CLONE of the config,
+/// never under the config write lock — the main loop reads that config
+/// every utterance, so holding it froze dictation for the whole load.
+/// The config only names `choice` once the engine exists: a failed build
+/// leaves it on the backend that is still actually running, so a retry is
+/// a real retry instead of a silent "already active" no-op.
+///
+/// Selecting the backend that is already active is free (no rebuild):
+/// rebuilding on every echo was a measured ten-rebuilds-in-one-second
+/// stall when the GUI's picker re-emitted its selection.
+fn switch_backend_with<T>(
+    cfg: &ActiveConfig,
+    choice: &TranscriberBackendChoice,
+    build: impl FnOnce(&crate::always::AlwaysConfig) -> Result<T>,
+) -> SwitchOutcome<T> {
+    let mut candidate = {
+        let current = cfg.read();
+        if current.transcriber_backend == *choice {
+            return SwitchOutcome::Noop;
+        }
+        current.clone()
+    };
+    candidate.transcriber_backend = choice.clone();
+    match build(&candidate) {
+        Ok(t) => {
+            cfg.write().transcriber_backend = choice.clone();
+            SwitchOutcome::Switched(t)
+        }
+        Err(e) => SwitchOutcome::Failed(format!("{e:#}")),
+    }
+}
+
+/// What the GUI is told about a switch. EVERY outcome ends with the
+/// backend that is active now: the Models tab shows "Loading…" from the
+/// click until an `ActiveTranscriberChanged` arrives, so an outcome that
+/// sent nothing (a no-op, a failed load) left that spinner on forever.
+/// A failure first says why, so the row shows the error instead.
+fn switch_events<T>(
+    choice: &TranscriberBackendChoice,
+    active_now: &str,
+    outcome: &SwitchOutcome<T>,
+) -> Vec<DaemonEvent> {
+    let mut events = Vec::with_capacity(2);
+    if let SwitchOutcome::Failed(error) = outcome {
+        events.push(DaemonEvent::ActiveTranscriberFailed {
+            backend: choice.to_string(),
+            error: error.clone(),
+        });
+    }
+    events.push(DaemonEvent::ActiveTranscriberChanged {
+        backend: active_now.to_string(),
+    });
+    events
 }
 
 /// Hot-reload fields the main loop reads from [`AlwaysConfig`] each
@@ -1553,4 +1910,327 @@ fn best_token_match(haystack: &str, needle: &str) -> Option<(String, usize)> {
 /// Send an event to all connected clients
 pub fn send_event(event: DaemonEvent) {
     global_broadcaster().send(event);
+}
+
+#[cfg(all(test, windows))]
+mod private_pipe_security_tests {
+    use std::ffi::c_void;
+    use std::ptr::null_mut;
+
+    use super::PRIVATE_PIPE_SDDL;
+
+    #[repr(C)]
+    struct AclSizeInformation {
+        ace_count: u32,
+        acl_bytes_in_use: u32,
+        acl_bytes_free: u32,
+    }
+
+    #[repr(C)]
+    struct AceHeader {
+        ace_type: u8,
+        ace_flags: u8,
+        ace_size: u16,
+    }
+
+    #[repr(C)]
+    struct AccessAllowedAce {
+        header: AceHeader,
+        mask: u32,
+        sid_start: u32,
+    }
+
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            descriptor_string: *const u16,
+            revision: u32,
+            descriptor: *mut *mut c_void,
+            descriptor_size: *mut u32,
+        ) -> i32;
+        fn ConvertStringSidToSidW(string_sid: *const u16, sid: *mut *mut c_void) -> i32;
+        fn GetSecurityDescriptorDacl(
+            descriptor: *mut c_void,
+            dacl_present: *mut i32,
+            dacl: *mut *mut c_void,
+            dacl_defaulted: *mut i32,
+        ) -> i32;
+        fn GetSecurityDescriptorControl(
+            descriptor: *mut c_void,
+            control: *mut u16,
+            revision: *mut u32,
+        ) -> i32;
+        fn GetAclInformation(
+            acl: *mut c_void,
+            information: *mut c_void,
+            information_length: u32,
+            information_class: u32,
+        ) -> i32;
+        fn GetAce(acl: *mut c_void, ace_index: u32, ace: *mut *mut c_void) -> i32;
+        fn EqualSid(sid1: *mut c_void, sid2: *mut c_void) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LocalFree(memory: *mut c_void) -> *mut c_void;
+    }
+
+    fn wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    #[test]
+    fn generated_pipe_descriptor_allows_only_owner_and_system() {
+        let mut descriptor = null_mut();
+        let sddl = wide(PRIVATE_PIPE_SDDL);
+        assert_ne!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    1,
+                    &mut descriptor,
+                    null_mut(),
+                )
+            },
+            0
+        );
+
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut dacl = null_mut();
+        assert_ne!(
+            unsafe {
+                GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted)
+            },
+            0
+        );
+        assert_eq!(present, 1);
+        assert_eq!(defaulted, 0);
+        assert!(!dacl.is_null());
+
+        let mut control = 0;
+        let mut revision = 0;
+        assert_ne!(
+            unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) },
+            0
+        );
+        assert_ne!(
+            control & 0x1000,
+            0,
+            "DACL must be protected from inheritance"
+        );
+
+        let mut acl_info = AclSizeInformation {
+            ace_count: 0,
+            acl_bytes_in_use: 0,
+            acl_bytes_free: 0,
+        };
+        assert_ne!(
+            unsafe {
+                GetAclInformation(
+                    dacl,
+                    (&mut acl_info as *mut AclSizeInformation).cast(),
+                    std::mem::size_of::<AclSizeInformation>() as u32,
+                    2,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            acl_info.ace_count, 2,
+            "unexpected additional principals in pipe DACL"
+        );
+
+        let owner_sid_string = wide("S-1-3-4"); // OWNER RIGHTS
+        let system_sid_string = wide("S-1-5-18"); // LOCAL SYSTEM
+        let mut owner_sid = null_mut();
+        let mut system_sid = null_mut();
+        assert_ne!(
+            unsafe { ConvertStringSidToSidW(owner_sid_string.as_ptr(), &mut owner_sid) },
+            0
+        );
+        assert_ne!(
+            unsafe { ConvertStringSidToSidW(system_sid_string.as_ptr(), &mut system_sid) },
+            0
+        );
+
+        let mut saw_owner = false;
+        let mut saw_system = false;
+        for index in 0..acl_info.ace_count {
+            let mut ace_ptr = null_mut();
+            assert_ne!(unsafe { GetAce(dacl, index, &mut ace_ptr) }, 0);
+            let ace = unsafe { &*(ace_ptr as *const AccessAllowedAce) };
+            assert_eq!(
+                ace.header.ace_type, 0,
+                "pipe ACL must only contain allow ACEs"
+            );
+            assert_eq!(
+                ace.mask, 0x1000_0000,
+                "ACE must grant generic all only to private principals"
+            );
+            let sid = (&ace.sid_start as *const u32).cast_mut().cast::<c_void>();
+            if unsafe { EqualSid(sid, owner_sid) } != 0 {
+                saw_owner = true;
+            } else if unsafe { EqualSid(sid, system_sid) } != 0 {
+                saw_system = true;
+            } else {
+                panic!("pipe DACL contains an unexpected principal");
+            }
+        }
+        assert!(saw_owner && saw_system);
+
+        unsafe {
+            LocalFree(owner_sid);
+            LocalFree(system_sid);
+            LocalFree(descriptor);
+        }
+    }
+}
+
+#[cfg(test)]
+mod switch_backend_tests {
+    use super::*;
+    use parking_lot::RwLock;
+
+    fn cfg_on(choice: TranscriberBackendChoice) -> ActiveConfig {
+        Arc::new(RwLock::new(crate::always::AlwaysConfig {
+            transcriber_backend: choice,
+            ..Default::default()
+        }))
+    }
+
+    fn parakeet() -> TranscriberBackendChoice {
+        "local:parakeet-tdt-0.6b-v3".parse().unwrap()
+    }
+
+    #[test]
+    fn stale_peer_release_cannot_clear_a_later_manual_pause() {
+        let acquire = peer_pause_lease_action(true, false, false, false);
+        assert_eq!(acquire, PeerPauseLeaseAction::Acquire);
+
+        // A manual Prod pause clears the lease. Dev's delayed release then
+        // has no authority to clear the user's master pause.
+        assert_eq!(
+            peer_pause_lease_action(false, false, false, true),
+            PeerPauseLeaseAction::Reject
+        );
+        assert!(!should_apply_peer_pause_command(false, true, false));
+    }
+
+    #[test]
+    fn preexisting_manual_pause_is_confirmed_without_a_release_lease() {
+        assert_eq!(
+            peer_pause_lease_action(true, false, false, true),
+            PeerPauseLeaseAction::AlreadyManuallyPaused
+        );
+        assert_eq!(
+            peer_pause_lease_action(false, false, false, true),
+            PeerPauseLeaseAction::Reject
+        );
+    }
+
+    #[test]
+    fn peer_pause_release_requires_the_current_matching_lease() {
+        assert_eq!(
+            peer_pause_lease_action(false, true, true, true),
+            PeerPauseLeaseAction::Release
+        );
+        assert_eq!(
+            peer_pause_lease_action(false, true, false, true),
+            PeerPauseLeaseAction::Reject
+        );
+    }
+
+    fn backends(events: &[DaemonEvent]) -> Vec<String> {
+        events
+            .iter()
+            .map(|e| match e {
+                DaemonEvent::ActiveTranscriberChanged { backend } => format!("changed:{backend}"),
+                DaemonEvent::ActiveTranscriberFailed { backend, error } => {
+                    format!("failed:{backend}:{error}")
+                }
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// Ludwig (16 Oct): Parakeet v3 "Use" stuck on "Loading…". A failed
+    /// load must say why AND re-announce the backend still running, and
+    /// must not leave the config claiming the model that failed.
+    #[test]
+    fn failed_load_reports_error_and_keeps_previous_backend() {
+        let cfg = cfg_on(TranscriberBackendChoice::Groq);
+        let outcome: SwitchOutcome<()> =
+            switch_backend_with(&cfg, &parakeet(), |_| anyhow::bail!("onnx: file missing"));
+        assert!(matches!(outcome, SwitchOutcome::Failed(_)));
+        assert_eq!(
+            cfg.read().transcriber_backend,
+            TranscriberBackendChoice::Groq
+        );
+        let active = cfg.read().transcriber_backend.to_string();
+        assert_eq!(
+            backends(&switch_events(&parakeet(), &active, &outcome)),
+            vec![
+                "failed:local:parakeet-tdt-0.6b-v3:onnx: file missing".to_string(),
+                "changed:groq".to_string()
+            ]
+        );
+        // A retry is a real retry, not an "already active" no-op.
+        let retry: SwitchOutcome<()> = switch_backend_with(&cfg, &parakeet(), |_| Ok(()));
+        assert!(matches!(retry, SwitchOutcome::Switched(())));
+        assert_eq!(cfg.read().transcriber_backend, parakeet());
+    }
+
+    #[test]
+    fn failed_event_wire_shape_matches_gui() {
+        let e = DaemonEvent::ActiveTranscriberFailed {
+            backend: "local:parakeet-tdt-0.6b-v3".into(),
+            error: "file missing".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"type":"ActiveTranscriberFailed","data":{"backend":"local:parakeet-tdt-0.6b-v3","error":"file missing"}}"#
+        );
+    }
+
+    #[test]
+    fn noop_still_confirms_so_the_spinner_clears() {
+        let cfg = cfg_on(parakeet());
+        let mut built = false;
+        let outcome: SwitchOutcome<()> = switch_backend_with(&cfg, &parakeet(), |_| {
+            built = true;
+            Ok(())
+        });
+        assert!(!built, "already-active backend must not rebuild");
+        assert_eq!(
+            backends(&switch_events(
+                &parakeet(),
+                &parakeet().to_string(),
+                &outcome
+            )),
+            vec!["changed:local:parakeet-tdt-0.6b-v3".to_string()]
+        );
+    }
+
+    #[test]
+    fn build_runs_without_holding_the_config_lock() {
+        let cfg = cfg_on(TranscriberBackendChoice::Groq);
+        let probe = Arc::clone(&cfg);
+        let outcome: SwitchOutcome<()> = switch_backend_with(&cfg, &parakeet(), |candidate| {
+            assert_eq!(candidate.transcriber_backend, parakeet());
+            // The main loop must still be able to read AND write the live
+            // config while the engine loads.
+            assert!(probe.try_write().is_some(), "config locked during load");
+            Ok(())
+        });
+        assert!(matches!(outcome, SwitchOutcome::Switched(())));
+        assert_eq!(
+            backends(&switch_events(
+                &parakeet(),
+                &parakeet().to_string(),
+                &outcome
+            )),
+            vec!["changed:local:parakeet-tdt-0.6b-v3".to_string()]
+        );
+    }
 }

@@ -30,7 +30,7 @@ VERSIONED = re.compile(
     r"Cargo\.toml|Cargo\.lock"
     r"|crates/[^/]+/Cargo\.(toml|lock)"
     r"|src-tauri/Cargo\.(toml|lock)"
-    r"|tauri\.conf\.json"
+    r"|crates/[^/]+/tauri\.conf\.json"
     r"|always-gui/package\.json"
     r"|Always/Info\.plist"
 )
