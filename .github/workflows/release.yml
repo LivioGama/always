@@ -559,18 +559,52 @@ jobs:
           "$daemon" --version
           xvfb-run -a /usr/bin/always-tauri >"$RUNNER_TEMP/always-deb-gui.log" 2>&1 &
           xvfb_pid=$!
+          dump_gui_failure_diagnostics() {
+            echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}"
+            socket_path="${XDG_RUNTIME_DIR:-/tmp}/always.sock"
+            echo "expected_socket=$socket_path exists=$(test -S "$socket_path" && echo yes || echo no)"
+            pid_file="${XDG_CONFIG_HOME:-${HOME:-/root}/.config}/always/always.pid"
+            echo "expected_pid_file=$pid_file exists=$(test -f "$pid_file" && echo yes || echo no)"
+            if [ -f "$pid_file" ]; then printf 'pid_file_value='; IFS= read -r pid_value < "$pid_file" || true; printf '%s\n' "$pid_value"; fi
+            echo '--- GUI log (last 100 lines) ---'
+            tail -n 100 "$RUNNER_TEMP/always-deb-gui.log" || true
+            echo '--- GUI and bundled daemon processes ---'
+            for pid in $(pgrep -x always-tauri || true) $(pgrep -f '^/.*/daemon/always([[:space:]]|$)' || true); do
+              [ -r "/proc/$pid/cmdline" ] || continue
+              printf 'pid=%s exe=%s argv=' "$pid" "$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+              tr '\0' ' ' < "/proc/$pid/cmdline" || true
+              printf '\n'
+            done
+          }
           gui_app_pid=
           for _ in $(seq 1 20); do
-            kill -0 "$xvfb_pid" 2>/dev/null || { cat "$RUNNER_TEMP/always-deb-gui.log"; exit 1; }
+            kill -0 "$xvfb_pid" 2>/dev/null || { dump_gui_failure_diagnostics; exit 1; }
             gui_app_pid="$(pgrep -x always-tauri | sed -n '1p' || true)"
-            if [ -n "$gui_app_pid" ] && pgrep -f '^/usr/lib/Always GUI/daemon/always([[:space:]]|$)' >/dev/null; then break; fi
+            if [ -n "$gui_app_pid" ] && pgrep -f '^/usr/lib/Always GUI/daemon/always run([[:space:]]|$)' >/dev/null; then break; fi
             sleep 1
           done
-          kill -0 "$gui_app_pid"
-          pgrep -f '^/usr/lib/Always GUI/daemon/always([[:space:]]|$)' >/dev/null
-          gui_path="$(readlink -f "/proc/$gui_app_pid/exe")"
-          [ "$gui_path" = /usr/bin/always-tauri ]
-          daemon_pids="$(pgrep -f '^/usr/lib/Always GUI/daemon/always([[:space:]]|$)')"
+          if [ -z "$gui_app_pid" ] || ! kill -0 "$gui_app_pid" 2>/dev/null; then
+            dump_gui_failure_diagnostics
+            echo '::error::packaged Debian GUI did not remain alive'
+            exit 1
+          fi
+          if ! pgrep -f '^/usr/lib/Always GUI/daemon/always run([[:space:]]|$)' >/dev/null; then
+            dump_gui_failure_diagnostics
+            echo '::error::packaged Debian GUI did not start its bundled daemon run process'
+            exit 1
+          fi
+          gui_path="$(readlink -f "/proc/$gui_app_pid/exe" 2>/dev/null || true)"
+          if [ "$gui_path" != /usr/bin/always-tauri ]; then
+            dump_gui_failure_diagnostics
+            echo "::error::unexpected Debian GUI path $gui_path"
+            exit 1
+          fi
+          daemon_pids="$(pgrep -f '^/usr/lib/Always GUI/daemon/always run([[:space:]]|$)' || true)"
+          if [ -z "$daemon_pids" ]; then
+            dump_gui_failure_diagnostics
+            echo '::error::packaged Debian daemon exited before cleanup'
+            exit 1
+          fi
           kill "$xvfb_pid" "$gui_app_pid" 2>/dev/null || true
           while IFS= read -r daemon_pid; do kill "$daemon_pid" 2>/dev/null || true; done <<< "$daemon_pids"
           wait "$xvfb_pid" 2>/dev/null || true
@@ -590,21 +624,47 @@ jobs:
           chmod +x "$image"
           APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a "./$image" >"$RUNNER_TEMP/always-appimage-gui.log" 2>&1 &
           xvfb_pid=$!
+          dump_gui_failure_diagnostics() {
+            echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}"
+            socket_path="${XDG_RUNTIME_DIR:-/tmp}/always.sock"
+            echo "expected_socket=$socket_path exists=$(test -S "$socket_path" && echo yes || echo no)"
+            pid_file="${XDG_CONFIG_HOME:-${HOME:-/root}/.config}/always/always.pid"
+            echo "expected_pid_file=$pid_file exists=$(test -f "$pid_file" && echo yes || echo no)"
+            if [ -f "$pid_file" ]; then printf 'pid_file_value='; IFS= read -r pid_value < "$pid_file" || true; printf '%s\n' "$pid_value"; fi
+            echo '--- GUI log (last 100 lines) ---'
+            tail -n 100 "$RUNNER_TEMP/always-appimage-gui.log" || true
+            echo '--- GUI and bundled daemon processes ---'
+            for pid in $(pgrep -x always-tauri || true) $(pgrep -f '^/.*/daemon/always([[:space:]]|$)' || true); do
+              [ -r "/proc/$pid/cmdline" ] || continue
+              printf 'pid=%s exe=%s argv=' "$pid" "$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+              tr '\0' ' ' < "/proc/$pid/cmdline" || true
+              printf '\n'
+            done
+          }
           gui_app_pid=
           daemon_pid=
           for _ in $(seq 1 20); do
-            kill -0 "$xvfb_pid" 2>/dev/null || { cat "$RUNNER_TEMP/always-appimage-gui.log"; exit 1; }
+            kill -0 "$xvfb_pid" 2>/dev/null || { dump_gui_failure_diagnostics; exit 1; }
             gui_app_pid="$(pgrep -x always-tauri | sed -n '1p' || true)"
-            daemon_pid="$(pgrep -f '^/.*/daemon/always([[:space:]]|$)' | sed -n '1p' || true)"
+            daemon_pid="$(pgrep -f '^/.*/daemon/always run([[:space:]]|$)' | sed -n '1p' || true)"
             if [ -n "$gui_app_pid" ] && [ -n "$daemon_pid" ]; then break; fi
             sleep 1
           done
-          kill -0 "$gui_app_pid"
-          gui_path="$(readlink -f "/proc/$gui_app_pid/exe")"
-          case "$gui_path" in */always-tauri) ;; *) echo "::error::unexpected AppImage GUI path $gui_path"; exit 1 ;; esac
-          daemon_path="$(readlink -f "/proc/$daemon_pid/exe")"
-          case "$daemon_path" in */daemon/always) ;; *) echo "::error::unexpected bundled daemon path $daemon_path"; exit 1 ;; esac
-          if [ "$daemon_path" = "/usr/lib/Always GUI/daemon/always" ]; then echo "::error::AppImage reused the Debian daemon"; exit 1; fi
+          if [ -z "$gui_app_pid" ] || ! kill -0 "$gui_app_pid" 2>/dev/null; then
+            dump_gui_failure_diagnostics
+            echo '::error::packaged AppImage GUI did not remain alive'
+            exit 1
+          fi
+          if [ -z "$daemon_pid" ] || ! kill -0 "$daemon_pid" 2>/dev/null; then
+            dump_gui_failure_diagnostics
+            echo '::error::packaged AppImage GUI did not start its bundled daemon run process'
+            exit 1
+          fi
+          gui_path="$(readlink -f "/proc/$gui_app_pid/exe" 2>/dev/null || true)"
+          case "$gui_path" in */always-tauri) ;; *) dump_gui_failure_diagnostics; echo "::error::unexpected AppImage GUI path $gui_path"; exit 1 ;; esac
+          daemon_path="$(readlink -f "/proc/$daemon_pid/exe" 2>/dev/null || true)"
+          case "$daemon_path" in */daemon/always) ;; *) dump_gui_failure_diagnostics; echo "::error::unexpected bundled daemon path $daemon_path"; exit 1 ;; esac
+          if [ "$daemon_path" = "/usr/lib/Always GUI/daemon/always" ]; then dump_gui_failure_diagnostics; echo "::error::AppImage reused the Debian daemon"; exit 1; fi
           kill "$xvfb_pid" "$gui_app_pid" "$daemon_pid" 2>/dev/null || true
           wait "$xvfb_pid" 2>/dev/null || true
 
