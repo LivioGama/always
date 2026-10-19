@@ -1,10 +1,10 @@
 name: pr-gate guard
 
-# PRs in this repo are opened by `pr-gate` (an agent that reviews, fixes and
-# runs the real CI on a merge-preview branch before opening the PR). It signs
-# every PR body with `<!-- pr-gate:v1 sig=<hmac> -->`; this workflow recomputes
-# the signature with the PR_GATE_HMAC secret and closes PRs that lack a valid
-# one. Contract: HMAC-SHA256(PR_GATE_HMAC, "<owner/name>#<head branch>").
+# PR-Gate is opt-in. It signs each PR body it opens with
+# `<!-- pr-gate:v1 sig=<hmac> -->`; this workflow recomputes the signature with
+# the PR_GATE_HMAC secret and closes opted-in PRs that lack a valid signature.
+# PRs without a pr-gate:v1 marker are ordinary GitHub PRs and are left alone.
+# Contract: HMAC-SHA256(PR_GATE_HMAC, "<owner/name>#<head branch>").
 #
 # SECURITY: `pull_request_target` runs with a write token in the context of the
 # base branch. This workflow therefore NEVER checks out or executes PR code, and
@@ -68,6 +68,9 @@ jobs:
           if printf '%s' "${LABELS_JSON}" | jq -e 'index("pr-gate-bypass")' >/dev/null; then
             echo "Label pr-gate-bypass present; not gated."; exit 0
           fi
+          if ! printf '%s' "${PR_BODY}" | grep -qE '<!--[[:space:]]*pr-gate:v1([[:space:]]|-->)'; then
+            echo "No pr-gate:v1 marker; PR was not opted into PR-Gate."; exit 0
+          fi
           if [ -z "${PR_GATE_HMAC}" ]; then
             echo "::warning::PR_GATE_HMAC secret is empty; failing open (PR not checked)."; exit 0
           fi
@@ -79,12 +82,12 @@ jobs:
             echo "Valid pr-gate signature."; exit 0
           fi
 
-          echo "::error::PR #${PR_NUMBER} has a missing or invalid pr-gate signature."
+          echo "::error::PR #${PR_NUMBER} has an invalid pr-gate signature."
 
           existing="$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate --jq '.[].body' || true)"
           if ! printf '%s' "${existing}" | grep -qF "${marker}"; then
             gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${marker}
-          PRs in this repo are opened by pr-gate. Run \`pr-gate submit\` (or \`gh pr create\` with the pr-gate shim). Maintainers can add the \`pr-gate-bypass\` label and reopen to override."
+          This PR opted into pr-gate but its signature is invalid. Resubmit with \`pr-gate submit\`; maintainers can add the \`pr-gate-bypass\` label and reopen to override."
           fi
           gh pr close "${PR_NUMBER}" --repo "${REPO}"
           exit 1

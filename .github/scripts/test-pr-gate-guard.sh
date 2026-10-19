@@ -32,7 +32,7 @@ run() {
   : > "$tmp/gh.log"
   env -i PATH="$tmp/bin:$PATH" GH_LOG="$tmp/gh.log" GH_TOKEN=x PR_GATE_HMAC="$secret" \
     REPO=o/r PR_NUMBER=7 PR_STATE=open HEAD_REF=feat/x HEAD_REPO=o/r BASE_REF=develop BASE_REPO=o/r \
-    AUTHOR_TYPE=User LABELS_JSON='[]' PR_BODY="" "$@" bash "$tmp/step.sh" > "$tmp/out" 2>&1
+    AUTHOR_TYPE=User LABELS_JSON='[]' PR_BODY='<!-- pr-gate:v1 sig=invalid -->' "$@" bash "$tmp/step.sh" > "$tmp/out" 2>&1
   local rc=$? closed=no commented=no
   grep -q 'pr close' "$tmp/gh.log" && closed=yes
   grep -q 'pr comment' "$tmp/gh.log" && commented=yes
@@ -47,7 +47,8 @@ other="<!-- pr-gate:v1 sig=$(sign o/r feat/other) -->"
 
 run "valid signature"            pass  PR_BODY="hello
 $good"
-run "missing signature"          close PR_BODY="no marker"
+run "missing signature is not opted in" pass PR_BODY="no marker"
+if grep -Eq 'gh (pr comment|pr close)' "$tmp/gh.log"; then echo "FAIL unmarked PR was acted on"; fails=$((fails+1)); else echo "ok   unmarked PR has no comment or close"; fi
 run "tampered signature"         close PR_BODY="$bad"
 run "sig for another branch"     close PR_BODY="$other"
 run "release-* -> main exempt"   pass  HEAD_REF=release-0.2.0 BASE_REF=main
@@ -60,7 +61,8 @@ run "bypass added after opened"  pass  CURRENT_LABELS_JSON='["pr-gate-bypass"]'
 run "bypass restored after removal" pass LABELS_JSON='[]' CURRENT_LABELS_JSON='["pr-gate-bypass"]'
 run "bypass removed since event" close LABELS_JSON='["pr-gate-bypass"]' CURRENT_LABELS_JSON='[]'
 run "signed since event"         pass  CURRENT_BODY="$good"
-run "signature removed since event" close PR_BODY="$good" CURRENT_BODY=""
+run "marker removed since event" pass PR_BODY="$good" CURRENT_BODY=""
+if grep -Eq 'gh (pr comment|pr close)' "$tmp/gh.log"; then echo "FAIL PR without current marker was acted on"; fails=$((fails+1)); else echo "ok   removed marker is not opted in"; fi
 run "closed since event"         pass  CURRENT_STATE=closed
 run "reopened since event"       close PR_STATE=closed CURRENT_STATE=open
 run "empty secret fails open"    pass  PR_GATE_HMAC=
