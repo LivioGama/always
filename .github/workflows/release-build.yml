@@ -234,9 +234,10 @@ jobs:
           cp "${appimages[0]}" "$GUI_APPIMAGE"
           chmod +x "$GUI_APPIMAGE"
           dpkg-deb --info "$GUI_DEB"
-          dpkg-deb --contents "$GUI_DEB" | tee gui-deb-files.txt
-          grep -Fq "/usr/bin/always-tauri" gui-deb-files.txt
-          grep -Fq "/usr/lib/Always GUI/daemon/always" gui-deb-files.txt
+          dpkg-deb --contents "$GUI_DEB"
+          dpkg-deb --fsys-tarfile "$GUI_DEB" | tar -tf - | sed -e 's#^\./##' -e 's#^/##' | tee gui-deb-files.txt
+          grep -Fxq "usr/bin/always-tauri" gui-deb-files.txt
+          grep -Fxq "usr/lib/Always GUI/daemon/always" gui-deb-files.txt
           "$GUI_APPIMAGE" --appimage-extract >/dev/null
           test -x squashfs-root/usr/bin/always-tauri
           test -x "squashfs-root/usr/lib/Always GUI/daemon/always"
