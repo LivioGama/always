@@ -45,3 +45,6 @@ dirs = "6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[patch.crates-io]
+glib = { path = "../../vendor/glib-0.18.5" }
