@@ -127,12 +127,16 @@ pub fn resume() -> Outcome {
 /// anything a user may override is pausing, the press resumes — the
 /// user sees "paused" and means "resume". Otherwise it sets master.
 pub fn toggle_global() -> Outcome {
+    toggle_global_with_resume(resume)
+}
+
+fn toggle_global_with_resume(resume_fn: impl FnOnce() -> Outcome) -> Outcome {
     // A manual toggle is an explicit choice, even when a peer instance put
     // this daemon into passive standby.
-    pause::set_paused_by_peer(false);
     if pause::is_user_resumable_pause() {
-        return resume();
+        return resume_fn();
     }
+    pause::set_paused_by_peer(false);
     let (effective, changed) = pause::set_paused(true);
     let master = pause::is_master_paused();
     global_broadcaster().master_pause_changed(master);
@@ -325,6 +329,28 @@ mod tests {
 
         assert!(!out.effective);
         assert!(!pause::is_paused_by_peer());
+    }
+
+    #[test]
+    fn failed_dev_takeover_keeps_toggle_peer_standby_owned() {
+        let _g = setup(true);
+        pause::set_paused(true);
+        pause::set_paused_by_peer(true);
+
+        let out = toggle_global_with_resume(|| {
+            // Model the resume path when the live production pause request
+            // fails: it reports the still-paused state without clearing the
+            // peer-standby marker.
+            assert!(pause::is_paused_by_peer());
+            Outcome {
+                effective: pause::is_paused(),
+                changed: false,
+                master: pause::is_master_paused(),
+            }
+        });
+
+        assert!(out.effective);
+        assert!(pause::is_paused_by_peer());
     }
 
     /// The same press through the legacy TogglePause path (the released
