@@ -25,7 +25,8 @@ fn main() {
         )
         .init();
 
-    tauri::Builder::default()
+    tracing::info!("tauri_builder_start");
+    let app_builder = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             commands::cli,
             commands::send_uds_command,
@@ -66,6 +67,7 @@ fn main() {
         // with PID-guard.  We may add `tauri-plugin-autostart` once it
         // reaches a stable release for Tauri v2.
         .setup(|app| {
+            tracing::info!("tauri_setup_entered");
             // ── Windows ──────────────────────────────────────────────
             // Both start hidden (tauri.conf.json). The settings webview
             // shows one once it knows whether onboarding is done.
@@ -117,7 +119,10 @@ fn main() {
             }
 
             Ok(())
-        })
+        });
+
+    tracing::info!("tauri_run_start");
+    app_builder
         .run(tauri::generate_context!())
         .expect("error while running the Always Tauri app");
 }

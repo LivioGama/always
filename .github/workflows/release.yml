@@ -546,6 +546,7 @@ jobs:
         if: matrix.kind == 'linux'
         env:
           TARGET: ${{ matrix.target }}
+          RUST_LOG: info,always_tauri=debug
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -561,6 +562,32 @@ jobs:
           xvfb_pid=$!
           dump_gui_failure_diagnostics() {
             echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}"
+            echo '--- display and runtime diagnostics ---'
+            gui_diag_pid="${gui_app_pid:-$(pgrep -x always-tauri | sed -n '1p' || true)}"
+            for name in GDK_BACKEND WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE; do
+              value="${!name:-}"
+              if [ -n "$gui_diag_pid" ] && [ -r "/proc/$gui_diag_pid/environ" ]; then
+                process_value="$(tr '\0' '\n' < "/proc/$gui_diag_pid/environ" | sed -n "s/^${name}=//p" | sed -n '1p')"
+                [ -z "$process_value" ] || value="$process_value"
+              fi
+              [ -n "$value" ] || value='<unset>'
+              printf '%s=%s\n' "$name" "$value"
+            done
+            if [ -n "$gui_diag_pid" ] && [ -r "/proc/$gui_diag_pid/environ" ]; then
+              if tr '\0' '\n' < "/proc/$gui_diag_pid/environ" | grep -q '^DBUS_SESSION_BUS_ADDRESS='; then echo 'DBUS_SESSION_BUS_ADDRESS=set'; else echo 'DBUS_SESSION_BUS_ADDRESS=unset'; fi
+            elif [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+              echo 'DBUS_SESSION_BUS_ADDRESS=set'
+            else
+              echo 'DBUS_SESSION_BUS_ADDRESS=unset'
+            fi
+            runtime_dir="${XDG_RUNTIME_DIR:-}"
+            if [ -n "$runtime_dir" ] && [ -d "$runtime_dir" ]; then
+              stat -c 'runtime_dir_mode=%a runtime_dir_owner_uid=%u runtime_dir_owner_gid=%g' "$runtime_dir" || true
+              if [ -w "$runtime_dir" ]; then echo 'runtime_dir_writable=yes'; else echo 'runtime_dir_writable=no'; fi
+            else
+              echo 'runtime_dir_exists=no'
+            fi
+            echo "selected_bundled_daemon=$daemon executable=$(test -x "$daemon" && echo yes || echo no)"
             socket_path="${XDG_RUNTIME_DIR:-/tmp}/always.sock"
             echo "expected_socket=$socket_path exists=$(test -S "$socket_path" && echo yes || echo no)"
             pid_file="${XDG_CONFIG_HOME:-${HOME:-/root}/.config}/always/always.pid"
@@ -568,6 +595,8 @@ jobs:
             if [ -f "$pid_file" ]; then printf 'pid_file_value='; IFS= read -r pid_value < "$pid_file" || true; printf '%s\n' "$pid_value"; fi
             echo '--- GUI log (last 100 lines) ---'
             tail -n 100 "$RUNNER_TEMP/always-deb-gui.log" || true
+            echo '--- daemon start diagnostics ---'
+            grep -E 'daemon_start_(begin|succeeded|spawn_failed|nonzero_exit)' "$RUNNER_TEMP/always-deb-gui.log" || true
             echo '--- GUI and bundled daemon processes ---'
             for pid in $(pgrep -x always-tauri || true) $(pgrep -f '^/.*/daemon/always([[:space:]]|$)' || true); do
               [ -r "/proc/$pid/cmdline" ] || continue
@@ -613,6 +642,7 @@ jobs:
         if: matrix.kind == 'linux'
         env:
           TARGET: ${{ matrix.target }}
+          RUST_LOG: info,always_tauri=debug
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -626,6 +656,31 @@ jobs:
           xvfb_pid=$!
           dump_gui_failure_diagnostics() {
             echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}"
+            echo '--- display and runtime diagnostics ---'
+            gui_diag_pid="${gui_app_pid:-$(pgrep -x always-tauri | sed -n '1p' || true)}"
+            for name in GDK_BACKEND WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE; do
+              value="${!name:-}"
+              if [ -n "$gui_diag_pid" ] && [ -r "/proc/$gui_diag_pid/environ" ]; then
+                process_value="$(tr '\0' '\n' < "/proc/$gui_diag_pid/environ" | sed -n "s/^${name}=//p" | sed -n '1p')"
+                [ -z "$process_value" ] || value="$process_value"
+              fi
+              [ -n "$value" ] || value='<unset>'
+              printf '%s=%s\n' "$name" "$value"
+            done
+            if [ -n "$gui_diag_pid" ] && [ -r "/proc/$gui_diag_pid/environ" ]; then
+              if tr '\0' '\n' < "/proc/$gui_diag_pid/environ" | grep -q '^DBUS_SESSION_BUS_ADDRESS='; then echo 'DBUS_SESSION_BUS_ADDRESS=set'; else echo 'DBUS_SESSION_BUS_ADDRESS=unset'; fi
+            elif [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+              echo 'DBUS_SESSION_BUS_ADDRESS=set'
+            else
+              echo 'DBUS_SESSION_BUS_ADDRESS=unset'
+            fi
+            runtime_dir="${XDG_RUNTIME_DIR:-}"
+            if [ -n "$runtime_dir" ] && [ -d "$runtime_dir" ]; then
+              stat -c 'runtime_dir_mode=%a runtime_dir_owner_uid=%u runtime_dir_owner_gid=%g' "$runtime_dir" || true
+              if [ -w "$runtime_dir" ]; then echo 'runtime_dir_writable=yes'; else echo 'runtime_dir_writable=no'; fi
+            else
+              echo 'runtime_dir_exists=no'
+            fi
             socket_path="${XDG_RUNTIME_DIR:-/tmp}/always.sock"
             echo "expected_socket=$socket_path exists=$(test -S "$socket_path" && echo yes || echo no)"
             pid_file="${XDG_CONFIG_HOME:-${HOME:-/root}/.config}/always/always.pid"
@@ -633,6 +688,8 @@ jobs:
             if [ -f "$pid_file" ]; then printf 'pid_file_value='; IFS= read -r pid_value < "$pid_file" || true; printf '%s\n' "$pid_value"; fi
             echo '--- GUI log (last 100 lines) ---'
             tail -n 100 "$RUNNER_TEMP/always-appimage-gui.log" || true
+            echo '--- daemon start diagnostics ---'
+            grep -E 'daemon_start_(begin|succeeded|spawn_failed|nonzero_exit)' "$RUNNER_TEMP/always-appimage-gui.log" || true
             echo '--- GUI and bundled daemon processes ---'
             for pid in $(pgrep -x always-tauri || true) $(pgrep -f '^/.*/daemon/always([[:space:]]|$)' || true); do
               [ -r "/proc/$pid/cmdline" ] || continue

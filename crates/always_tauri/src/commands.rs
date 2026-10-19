@@ -9,6 +9,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Instant;
 use tauri::Manager;
 
 use crate::uds_client::UdsClient;
@@ -58,13 +59,53 @@ fn always_bin(resource_dir: Option<&std::path::Path>) -> Result<PathBuf, String>
 /// is also a no-op when an existing daemon already owns the endpoint.
 pub fn start_daemon(resource_dir: Option<&std::path::Path>) -> Result<(), String> {
     let bin = always_bin(resource_dir)?;
+    let metadata = std::fs::metadata(&bin).ok();
+    let daemon_is_file = metadata.as_ref().is_some_and(|metadata| metadata.is_file());
+    #[cfg(unix)]
+    let daemon_is_executable = {
+        use std::os::unix::fs::PermissionsExt;
+        metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+    };
+    #[cfg(not(unix))]
+    let daemon_is_executable = daemon_is_file;
+
+    let started_at = Instant::now();
+    tracing::info!(
+        daemon_path = %bin.display(),
+        daemon_is_file,
+        daemon_is_executable,
+        resource_dir = ?resource_dir.map(|path| path.display().to_string()),
+        "daemon_start_begin"
+    );
     let output = Command::new(&bin)
         .arg("start")
         .output()
-        .map_err(|e| format!("start daemon with {}: {e}", bin.display()))?;
+        .map_err(|error| {
+            tracing::warn!(
+                daemon_path = %bin.display(),
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                error = %error,
+                "daemon_start_spawn_failed"
+            );
+            format!("start daemon with {}: {error}", bin.display())
+        })?;
     if output.status.success() {
+        tracing::info!(
+            daemon_path = %bin.display(),
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            exit_status = %output.status,
+            "daemon_start_succeeded"
+        );
         Ok(())
     } else {
+        tracing::warn!(
+            daemon_path = %bin.display(),
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            exit_status = %output.status,
+            "daemon_start_nonzero_exit"
+        );
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!(
             "`always start` exited {}: {}",
