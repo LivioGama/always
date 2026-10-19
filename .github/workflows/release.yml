@@ -555,7 +555,7 @@ jobs:
           cd assets
           sha256sum -c "${debs[0]##*/}.sha256"
           sudo apt-get install -y "./${debs[0]##*/}"
-          daemon=/usr/lib/always-gui/daemon/always
+          daemon="/usr/lib/Always GUI/daemon/always"
           test -x "$daemon"
           "$daemon" --version
           xvfb-run -a /usr/bin/always-tauri >"$RUNNER_TEMP/always-deb-gui.log" 2>&1 &
@@ -564,14 +564,14 @@ jobs:
           for _ in $(seq 1 20); do
             kill -0 "$xvfb_pid" 2>/dev/null || { cat "$RUNNER_TEMP/always-deb-gui.log"; exit 1; }
             gui_app_pid="$(pgrep -x always-tauri | sed -n '1p' || true)"
-            if [ -n "$gui_app_pid" ] && pgrep -f '^/usr/lib/always-gui/daemon/always([[:space:]]|$)' >/dev/null; then break; fi
+            if [ -n "$gui_app_pid" ] && pgrep -f '^/usr/lib/Always GUI/daemon/always([[:space:]]|$)' >/dev/null; then break; fi
             sleep 1
           done
           kill -0 "$gui_app_pid"
-          pgrep -f '^/usr/lib/always-gui/daemon/always([[:space:]]|$)' >/dev/null
+          pgrep -f '^/usr/lib/Always GUI/daemon/always([[:space:]]|$)' >/dev/null
           gui_path="$(readlink -f "/proc/$gui_app_pid/exe")"
           [ "$gui_path" = /usr/bin/always-tauri ]
-          daemon_pids="$(pgrep -f '^/usr/lib/always-gui/daemon/always([[:space:]]|$)')"
+          daemon_pids="$(pgrep -f '^/usr/lib/Always GUI/daemon/always([[:space:]]|$)')"
           kill "$xvfb_pid" "$gui_app_pid" 2>/dev/null || true
           while IFS= read -r daemon_pid; do kill "$daemon_pid" 2>/dev/null || true; done <<< "$daemon_pids"
           wait "$xvfb_pid" 2>/dev/null || true
@@ -605,7 +605,7 @@ jobs:
           case "$gui_path" in */always-tauri) ;; *) echo "::error::unexpected AppImage GUI path $gui_path"; exit 1 ;; esac
           daemon_path="$(readlink -f "/proc/$daemon_pid/exe")"
           case "$daemon_path" in */daemon/always) ;; *) echo "::error::unexpected bundled daemon path $daemon_path"; exit 1 ;; esac
-          case "$daemon_path" in /usr/lib/always-gui/daemon/always) echo "::error::AppImage reused the Debian daemon"; exit 1 ;; esac
+          if [ "$daemon_path" = "/usr/lib/Always GUI/daemon/always" ]; then echo "::error::AppImage reused the Debian daemon"; exit 1; fi
           kill "$xvfb_pid" "$gui_app_pid" "$daemon_pid" 2>/dev/null || true
           wait "$xvfb_pid" 2>/dev/null || true
 

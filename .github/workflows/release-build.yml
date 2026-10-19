@@ -236,11 +236,11 @@ jobs:
           dpkg-deb --info "$GUI_DEB"
           dpkg-deb --contents "$GUI_DEB" | tee gui-deb-files.txt
           grep -Fq "/usr/bin/always-tauri" gui-deb-files.txt
-          grep -Fq "/usr/lib/always-gui/daemon/always" gui-deb-files.txt
+          grep -Fq "/usr/lib/Always GUI/daemon/always" gui-deb-files.txt
           "$GUI_APPIMAGE" --appimage-extract >/dev/null
           test -x squashfs-root/usr/bin/always-tauri
-          test -x squashfs-root/usr/lib/always-gui/daemon/always
-          squashfs-root/usr/lib/always-gui/daemon/always --version
+          test -x "squashfs-root/usr/lib/Always GUI/daemon/always"
+          "squashfs-root/usr/lib/Always GUI/daemon/always" --version
           rm -rf squashfs-root gui-deb-files.txt
           for f in "$GUI_DEB" "$GUI_APPIMAGE"; do sha256sum "$f" > "$f.sha256"; done
           ls -l always-*-gui.*
