@@ -190,6 +190,19 @@ pub fn classify_transcription(
             };
         }
 
+        // Whisper appends a canned "Thank you." / "Bye." sentence to real
+        // dictation when the audio tail is quiet. Drop only that tail.
+        if let Some(stripped) =
+            crate::always::hallucination::strip_trailing_canned(text, transcription)
+        {
+            if crate::always::telemetry::should_log_transcripts() {
+                tracing::info!(original = %text, kept = %stripped, "trailing_canned_stripped");
+            } else {
+                tracing::info!("trailing_canned_stripped");
+            }
+            return SpeechAction::Paste { text: stripped };
+        }
+
         // One garbled token never costs the sentence: remove just it, keep
         // the rest of what he said, and log what was removed.
         let (cleaned, dropped) = crate::always::hallucination::clean_suspicious_words(text);
@@ -416,6 +429,20 @@ mod tests {
             language: "en".to_string(),
             segments: vec![],
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn trailing_canned_thank_you_is_stripped_from_paste() {
+        let cfg = test_config();
+        let text = "Run the tests and fix the build. Thank you.";
+        let mut t = empty_transcription(text);
+        t.duration = 6.0;
+        let now = Instant::now();
+        let action = classify_transcription(&cfg, text, &t, now, now - Duration::from_secs(60));
+        match action {
+            SpeechAction::Paste { text } => assert_eq!(text, "Run the tests and fix the build."),
+            other => panic!("expected Paste, got {other:?}"),
         }
     }
 

@@ -61,6 +61,11 @@ fn exe_is_daemon(name: &str) -> bool {
 }
 
 fn image_basename(process: HANDLE) -> Option<String> {
+    let path = image_path(process)?;
+    path.rsplit('\\').next().map(str::to_owned)
+}
+
+fn image_path(process: HANDLE) -> Option<String> {
     let mut buf = [0u16; 260]; // MAX_PATH
     let mut len = buf.len() as u32;
     unsafe {
@@ -72,8 +77,13 @@ fn image_basename(process: HANDLE) -> Option<String> {
         )
         .ok()?;
     }
-    let path = String::from_utf16_lossy(&buf[..len as usize]);
-    path.rsplit('\\').next().map(str::to_owned)
+    Some(String::from_utf16_lossy(&buf[..len as usize]))
+}
+
+/// Kernel-reported process image path, independent of its command-line argv0.
+pub fn process_executable_path(pid: u32) -> Option<String> {
+    let guard = open(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
+    image_path(guard.0)
 }
 
 /// `kill -TERM`/`kill -KILL` equivalent — there is only one way to stop

@@ -913,9 +913,24 @@ fn send_uds_command(json: &str) -> Result<()> {
             }
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        anyhow::bail!("UDS socket communication not supported on this platform");
+        // A named pipe opens like a file — OpenOptions on `\\.\pipe\…`.
+        let mut stream = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&sock_path)
+            .with_context(|| format!("failed to connect to daemon at {}", sock_path.display()))?;
+        writeln!(stream, "{json}").context("failed to send daemon command")?;
+        stream.flush().context("failed to flush daemon command")?;
+        // No read/write timeouts on std File — sleep so the daemon's
+        // handler reads the command before our handle closes (same
+        // reason the unix path drains the initial burst).
+        std::thread::sleep(Duration::from_millis(700));
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        anyhow::bail!("daemon IPC not supported on this platform");
     }
     Ok(())
 }
@@ -978,7 +993,50 @@ fn read_daemon_state() -> Result<Value> {
         anyhow::bail!("daemon did not send complete state");
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let stream = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&sock_path)
+            .with_context(|| format!("failed to connect to daemon at {}", sock_path.display()))?;
+
+        // std File has no read timeout — read the initial-state burst
+        // on a helper thread so a silent daemon can't wedge the CLI, and
+        // forward each line as it arrives: the burst is shorter than the
+        // 16-line cap, so batching would block on read_line forever.
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            while let Ok(n) = reader.read_line(&mut line) {
+                if n == 0 || tx.send(line.clone()).is_err() {
+                    break;
+                }
+                line.clear();
+            }
+        });
+
+        let mut is_paused = None;
+        let mut is_auto_enter = None;
+        for _ in 0..16 {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(line) => {
+                    update_state_from_daemon_event(&line, &mut is_paused, &mut is_auto_enter)?;
+                    if is_paused.is_some() && is_auto_enter.is_some() {
+                        return Ok(json!({
+                            "isPaused": is_paused.unwrap_or(false),
+                            "isAutoEnter": is_auto_enter.unwrap_or(false)
+                        }));
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        anyhow::bail!("daemon did not send complete state");
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         anyhow::bail!("daemon state query not supported on this platform");
     }

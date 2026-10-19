@@ -113,6 +113,12 @@ wget https://github.com/LivioGama/always/releases/latest/download/always-vX.Y.Z-
 sudo dnf install ./always-vX.Y.Z-x86_64-unknown-linux-gnu.rpm
 ```
 
+For a manual `.tar.gz` install, install its shared runtime libraries first.
+On Debian/Ubuntu, run `sudo apt install libasound2t64 libgcc-s1 libstdc++6 libx11-6 libxtst6`;
+on Fedora, run `sudo dnf install alsa-lib libgcc libstdc++ libX11 libXtst`.
+Linux binaries also require glibc 2.39 or newer. The `.deb` and `.rpm`
+packages declare these dependencies for the package manager.
+
 ### systemd Service
 
 The DEB/RPM packages install a systemd **user** service for the Always daemon

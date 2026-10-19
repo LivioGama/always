@@ -60,9 +60,27 @@ static EFFECTIVE_PAUSED: AtomicBool = AtomicBool::new(true);
 /// command clears it, so a manual pause/unpause always wins over the
 /// handoff and the watchdog stands down.
 static PAUSED_BY_PEER: AtomicBool = AtomicBool::new(false);
+static PAUSED_BY_PEER_LEASE: std::sync::LazyLock<Mutex<Option<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
 
 pub fn set_paused_by_peer(v: bool) {
+    if !v {
+        *PAUSED_BY_PEER_LEASE.lock() = None;
+    }
     PAUSED_BY_PEER.store(v, Ordering::Relaxed);
+}
+
+pub fn set_paused_by_peer_lease(lease_id: String) {
+    *PAUSED_BY_PEER_LEASE.lock() = Some(lease_id);
+    PAUSED_BY_PEER.store(true, Ordering::Relaxed);
+}
+
+pub fn paused_by_peer_lease_matches(lease_id: &str) -> bool {
+    PAUSED_BY_PEER.load(Ordering::Relaxed)
+        && PAUSED_BY_PEER_LEASE
+            .lock()
+            .as_deref()
+            .is_some_and(|current| current == lease_id)
 }
 
 pub fn is_paused_by_peer() -> bool {
@@ -71,7 +89,9 @@ pub fn is_paused_by_peer() -> bool {
 
 /// Clear-and-get: only the caller that observes the peer's death may resume.
 pub fn take_paused_by_peer() -> bool {
-    PAUSED_BY_PEER.swap(false, Ordering::Relaxed)
+    let owned = PAUSED_BY_PEER.swap(false, Ordering::Relaxed);
+    *PAUSED_BY_PEER_LEASE.lock() = None;
+    owned
 }
 
 /// Consumer source: an external controller asked the daemon (via
@@ -669,6 +689,8 @@ pub(crate) fn reset_pause_state_for_test() {
     NO_GUI_PAUSED.store(false, Ordering::Relaxed);
     SETUP_MODE.store(false, Ordering::Relaxed);
     EFFECTIVE_PAUSED.store(true, Ordering::Relaxed);
+    PAUSED_BY_PEER.store(false, Ordering::Relaxed);
+    *PAUSED_BY_PEER_LEASE.lock() = None;
     CONSUME_MODE_LEASES.store(0, Ordering::Relaxed);
     *CURRENT_APP.lock() = None;
     crate::always::per_app::set_cache_for_test(std::collections::HashMap::new());
@@ -723,6 +745,23 @@ mod tests {
         set_paused(true);
         let (effective, _) = set_mic_conflict_paused(false);
         assert!(effective, "manual master pause must survive mic release");
+        assert!(is_master_paused());
+    }
+
+    #[test]
+    fn manual_pause_revokes_peer_pause_lease() {
+        let _guard = TEST_LOCK.lock().expect("pause test lock poisoned");
+        reset_pause_state_for_test();
+
+        set_paused_by_peer_lease("lease-1".into());
+        assert!(paused_by_peer_lease_matches("lease-1"));
+
+        // A user pause is authoritative and invalidates the peer's later
+        // release request without clearing MASTER.
+        set_paused_by_peer(false);
+        set_paused(true);
+
+        assert!(!paused_by_peer_lease_matches("lease-1"));
         assert!(is_master_paused());
     }
 

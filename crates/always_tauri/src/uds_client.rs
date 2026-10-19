@@ -8,14 +8,18 @@
 //! Reconnects with exponential backoff (1 s .. 30 s max) so transient
 //! daemon restarts or cold-start pauses do not tear down the GUI.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::future::Future;
 use std::path::PathBuf;
-use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{
+    Arc, Mutex as StdMutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::NamedPipeClient;
+#[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, Mutex};
 
@@ -39,11 +43,24 @@ pub const PROTOCOL_VERSION: u32 = 12;
 #[serde(tag = "type", content = "data")]
 pub enum DaemonEvent {
     /// First frame on every connection — carries the daemon's protocol version.
-    Hello { version: u32 },
+    Hello {
+        version: u32,
+        #[serde(default)]
+        capabilities: Vec<String>,
+    },
+    PeerPauseLeaseResult {
+        request_id: String,
+        accepted: bool,
+        lease_owned: bool,
+    },
 
     /// Ground-truth about the daemon's keyboard event tap authorisation.
     ShortcutListenerStatus {
         input_monitoring_granted: bool,
+    },
+    /// The daemon's microphone recorder is stuck (`true`) or recovered.
+    MicUnavailable {
+        unavailable: bool,
     },
     ListeningStarted,
     ListeningStopped,
@@ -51,10 +68,19 @@ pub enum DaemonEvent {
     ProcessingStopped,
     TranscribingStarted,
     TranscribingStopped,
-    TranscriptChunk { text: String },
-    TranscriptFinal { text: String },
-    TranscriptionInterim { text: String },
-    GrammarCorrected { before: String, after: String },
+    TranscriptChunk {
+        text: String,
+    },
+    TranscriptFinal {
+        text: String,
+    },
+    TranscriptionInterim {
+        text: String,
+    },
+    GrammarCorrected {
+        before: String,
+        after: String,
+    },
 
     Paused,
     Resumed,
@@ -67,50 +93,144 @@ pub enum DaemonEvent {
     VoiceActivityDetected,
     VoiceActivityEnded,
 
-    TranscriptionFiltered { reason: String },
-    CorrectionLogged { wrong: String, right: String },
-    CorrectionPending { id: String, wrong: String, right: String },
-    CorrectionCaptureResult { outcome: String },
+    TranscriptionFiltered {
+        reason: String,
+    },
+    CorrectionLogged {
+        wrong: String,
+        right: String,
+    },
+    CorrectionPending {
+        id: String,
+        wrong: String,
+        right: String,
+    },
+    CorrectionCaptureResult {
+        outcome: String,
+    },
     Heartbeat,
 
-    AutoEnterCountdownStarted { remaining_ms: u32, total_ms: u32 },
-    AutoEnterCountdownTick { remaining_ms: u32 },
+    AutoEnterCountdownStarted {
+        remaining_ms: u32,
+        total_ms: u32,
+    },
+    AutoEnterCountdownTick {
+        remaining_ms: u32,
+    },
     AutoEnterCountdownCancelled,
     AutoEnterCountdownFinished,
 
-    IdleAutoPaused { seconds: u32 },
+    IdleAutoPaused {
+        seconds: u32,
+    },
     IdleAutoResumed,
 
-    FocusedAppChanged { bundle_id: Option<String> },
-    MasterPauseChanged { master_paused: bool },
-    PauseScopeToggled { scope: String, bundle_id: Option<String>, paused: bool },
-    LongRecordingWarning { elapsed_secs: u32, cap_secs: u32 },
-    PauseSourceChanged { source: String, paused: bool, detail: Option<String> },
-    ResumedAppsChanged { bundles: Vec<String> },
-    CorrectionDialogRequested { last_transcript: String },
+    FocusedAppChanged {
+        bundle_id: Option<String>,
+    },
+    MasterPauseChanged {
+        master_paused: bool,
+    },
+    PauseScopeToggled {
+        scope: String,
+        bundle_id: Option<String>,
+        paused: bool,
+    },
+    LongRecordingWarning {
+        elapsed_secs: u32,
+        cap_secs: u32,
+    },
+    PauseSourceChanged {
+        source: String,
+        paused: bool,
+        detail: Option<String>,
+    },
+    ResumedAppsChanged {
+        bundles: Vec<String>,
+    },
+    CorrectionDialogRequested {
+        last_transcript: String,
+    },
 
-    ModelsList { models: Vec<ModelInfo> },
-    ModelDownloadProgress { model_id: String, downloaded: u64, total: u64, percentage: f64 },
-    ModelDownloadComplete { model_id: String },
-    ModelDownloadCancelled { model_id: String },
-    ModelDownloadFailed { model_id: String, error: String },
-    ModelVerificationStarted { model_id: String },
-    ModelVerificationCompleted { model_id: String },
-    ModelExtractionStarted { model_id: String },
-    ModelExtractionCompleted { model_id: String },
-    ModelExtractionFailed { model_id: String, error: String },
+    ModelsList {
+        models: Vec<ModelInfo>,
+    },
+    ModelDownloadProgress {
+        model_id: String,
+        downloaded: u64,
+        total: u64,
+        percentage: f64,
+    },
+    ModelDownloadComplete {
+        model_id: String,
+    },
+    ModelDownloadCancelled {
+        model_id: String,
+    },
+    ModelDownloadFailed {
+        model_id: String,
+        error: String,
+    },
+    ModelVerificationStarted {
+        model_id: String,
+    },
+    ModelVerificationCompleted {
+        model_id: String,
+    },
+    ModelExtractionStarted {
+        model_id: String,
+    },
+    ModelExtractionCompleted {
+        model_id: String,
+    },
+    ModelExtractionFailed {
+        model_id: String,
+        error: String,
+    },
 
-    LowMicrophoneVolume { energy: f64 },
-    ActiveTranscriberChanged { backend: String },
-    TranscriptionFailed { kind: String, message: String },
-    SttFallbackEngaged { model: String },
+    LowMicrophoneVolume {
+        energy: f64,
+    },
+    ActiveTranscriberChanged {
+        backend: String,
+    },
+    TranscriptionFailed {
+        kind: String,
+        message: String,
+    },
+    SttFallbackEngaged {
+        model: String,
+    },
 
-    VoiceEnrollmentPreparing { step: String },
-    VoiceEnrollmentStarted { step: String },
-    VoiceEnrollmentLevel { energy: f64, voiced_ms: u32, target_ms: u32 },
-    VoiceEnrollmentSampleCaptured { step: String },
-    VoiceEnrollmentFailed { step: String, message: String },
-    VoiceProfileStatus { enrolled: bool, enabled: bool, steps: Vec<String> },
+    VoiceEnrollmentPreparing {
+        step: String,
+    },
+    VoiceEnrollmentStarted {
+        step: String,
+    },
+    VoiceEnrollmentLevel {
+        energy: f64,
+        voiced_ms: u32,
+        target_ms: u32,
+    },
+    VoiceEnrollmentSampleCaptured {
+        step: String,
+    },
+    VoiceEnrollmentFailed {
+        step: String,
+        message: String,
+    },
+    VoiceProfileStatus {
+        enrolled: bool,
+        enabled: bool,
+        steps: Vec<String>,
+    },
+}
+
+impl DaemonEvent {
+    pub fn from_json_line(line: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(line)
+    }
 }
 
 /// Model information returned in the `ModelsList` event.
@@ -130,8 +250,12 @@ pub struct ModelInfo {
 pub enum DaemonCommand {
     TogglePause,
     ToggleAutoEnter,
-    SetAutoEnter { enabled: bool },
-    SetConsumeMode { enabled: bool },
+    SetAutoEnter {
+        enabled: bool,
+    },
+    SetConsumeMode {
+        enabled: bool,
+    },
     ApplyRuntimePreferences {
         auto_enter_delay_ms: u32,
         energy_threshold: f64,
@@ -145,25 +269,55 @@ pub enum DaemonCommand {
         #[serde(default)]
         stt_live_preview: Option<bool>,
     },
-    ApproveCorrection { id: String },
-    RejectCorrection { id: String },
+    ApproveCorrection {
+        id: String,
+    },
+    RejectCorrection {
+        id: String,
+    },
     CaptureCorrection,
-    SetPaused { paused: bool, reason: Option<String> },
+    SetPaused {
+        paused: bool,
+        reason: Option<String>,
+    },
     CancelAutoEnterCountdown,
-    NotifyFocusedAppChanged { bundle_id: Option<String> },
-    NotifySystemAudioState { playing: bool },
-    LogCorrection { intended: String },
-    SetAppPaused { bundle_id: String, paused: Option<bool> },
+    NotifyFocusedAppChanged {
+        bundle_id: Option<String>,
+    },
+    NotifySystemAudioState {
+        playing: bool,
+    },
+    LogCorrection {
+        intended: String,
+    },
+    SetAppPaused {
+        bundle_id: String,
+        paused: Option<bool>,
+    },
     ListModels,
-    DownloadModel { model_id: String },
-    CancelModelDownload { model_id: String },
-    DeleteModel { model_id: String },
-    SetActiveTranscriber { backend: String },
-    SetLanguage { lang: String },
-    StartVoiceEnrollment { step: String },
+    DownloadModel {
+        model_id: String,
+    },
+    CancelModelDownload {
+        model_id: String,
+    },
+    DeleteModel {
+        model_id: String,
+    },
+    SetActiveTranscriber {
+        backend: String,
+    },
+    SetLanguage {
+        lang: String,
+    },
+    StartVoiceEnrollment {
+        step: String,
+    },
     CancelVoiceEnrollment,
     DeleteVoiceProfile,
-    SetVoiceProfileEnabled { enabled: bool },
+    SetVoiceProfileEnabled {
+        enabled: bool,
+    },
     GetVoiceProfileStatus,
     RespawnRecorder,
     ReloadShortcuts,
@@ -218,7 +372,7 @@ impl DaemonStateAccumulator {
     /// Apply an incoming event and return any derived state changes.
     fn apply(&mut self, event: &DaemonEvent) {
         match event {
-            DaemonEvent::Hello { version } => {
+            DaemonEvent::Hello { version, .. } => {
                 if *version != PROTOCOL_VERSION {
                     tracing::warn!(
                         expected = PROTOCOL_VERSION,
@@ -279,22 +433,67 @@ pub fn resolve_socket_path() -> PathBuf {
             .ok()
             .map(|home| PathBuf::from(home).join("Library/Caches/Always/always.sock"))
             .or_else(|| dirs::home_dir().map(|h| h.join("Library/Caches/Always/always.sock")))
+            .unwrap_or_else(|| PathBuf::from("/tmp/always.sock"))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
+        let suffix = std::env::var("ALWAYS_INSTANCE")
+            .ok()
+            .filter(|instance| instance != "prod" && !instance.is_empty())
+            .map(|instance| format!("-{instance}"))
+            .unwrap_or_default();
         if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-            PathBuf::from(runtime_dir).join("always.sock")
-        } else if let Some(cache) = dirs::cache_dir() {
-            cache.join("always.sock")
+            PathBuf::from(runtime_dir).join(format!("always{suffix}.sock"))
         } else {
-            PathBuf::from("/tmp/always.sock")
+            PathBuf::from(format!("/tmp/always{suffix}.sock"))
         }
     }
+    #[cfg(windows)]
+    {
+        // Daemon's named pipe — the Windows equivalent of the UDS path.
+        // `ALWAYS_INSTANCE=dev` mirrors the daemon's `-dev` suffix.
+        let suffix = std::env::var("ALWAYS_INSTANCE")
+            .ok()
+            .filter(|i| i != "prod" && !i.is_empty())
+            .map(|i| format!("-{i}"))
+            .unwrap_or_default();
+        PathBuf::from(format!(r"\\.\pipe\always{suffix}"))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        PathBuf::new()
+    }
+}
+
+/// Platform stream for daemon IPC.
+#[cfg(unix)]
+type DaemonStream = UnixStream;
+#[cfg(windows)]
+type DaemonStream = NamedPipeClient;
+/// Placeholder so the `cfg(not(any(unix, windows)))` arms type-check —
+/// `connect_to_socket` bails before it is ever used.
+#[cfg(not(any(unix, windows)))]
+type DaemonStream = tokio::io::DuplexStream;
+
+/// Split a connected stream into owned read/write halves.
+#[cfg(unix)]
+fn split_stream(stream: DaemonStream) -> (impl AsyncRead + Unpin, impl AsyncWrite + Unpin) {
+    stream.into_split()
+}
+
+#[cfg(windows)]
+fn split_stream(stream: DaemonStream) -> (impl AsyncRead + Unpin, impl AsyncWrite + Unpin) {
+    tokio::io::split(stream)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn split_stream(stream: DaemonStream) -> (impl AsyncRead + Unpin, impl AsyncWrite + Unpin) {
+    tokio::io::split(stream)
 }
 
 /// Connect to the daemon socket.
 #[cfg(unix)]
-async fn connect_to_socket(path: &std::path::Path) -> Result<UnixStream> {
+async fn connect_to_socket(path: &std::path::Path) -> Result<DaemonStream> {
     use tokio::time::timeout;
 
     timeout(Duration::from_secs(5), UnixStream::connect(path))
@@ -303,9 +502,22 @@ async fn connect_to_socket(path: &std::path::Path) -> Result<UnixStream> {
         .context("failed to connect to daemon UDS socket")
 }
 
-#[cfg(not(unix))]
-async fn connect_to_socket(_: &std::path::Path) -> Result<UnixStream> {
-    bail!("Unix domain sockets are not supported on this platform")
+/// Connect to the daemon's named pipe (Windows UDS equivalent).
+#[cfg(windows)]
+async fn connect_to_socket(path: &std::path::Path) -> Result<DaemonStream> {
+    use tokio::time::timeout;
+
+    timeout(Duration::from_secs(5), async {
+        tokio::net::windows::named_pipe::ClientOptions::new().open(path)
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("connect timeout to {}", path.display()))?
+    .context("failed to connect to daemon named pipe")
+}
+
+#[cfg(not(any(unix, windows)))]
+async fn connect_to_socket(_: &std::path::Path) -> Result<DaemonStream> {
+    bail!("daemon IPC is not supported on this platform")
 }
 
 // ── UdsClient ─────────────────────────────────────────────────────────────
@@ -318,12 +530,24 @@ async fn connect_to_socket(_: &std::path::Path) -> Result<UnixStream> {
 /// 3. Reads events and dispatches them to the callback.
 ///
 /// The reconnection loop runs indefinitely until [`Self::disconnect`] is called.
+/// What the client reports to its consumer: a raw daemon event line or a
+/// connection-state change. Raw lines are forwarded verbatim so the GUI
+/// sees every `DaemonEvent` variant — including ones this crate's enum
+/// doesn't know yet.
+#[derive(Debug, Clone)]
+pub enum ClientEvent {
+    Event(String),
+    Connected,
+    Disconnected,
+}
+
 pub struct UdsClient {
-    sender: Mutex<Option<mpsc::Sender<DaemonCommand>>>,
+    sender: Mutex<Option<mpsc::Sender<String>>>,
+    connected: Arc<AtomicBool>,
     state: Arc<Mutex<DaemonStateAccumulator>>,
     #[allow(clippy::type_complexity)]
-    event_callback: Arc<Mutex<Option<Box<dyn Fn(DaemonEvent) + Send + Sync>>>>,
-    reconnect_handle: tokio::task::JoinHandle<()>,
+    event_callbacks: Arc<StdMutex<Vec<Box<dyn Fn(ClientEvent) + Send + Sync>>>>,
+    reconnect_handle: tauri::async_runtime::JoinHandle<()>,
 }
 
 // Safety: `UdsClient` is Send because all shared state is behind Arc<Mutex<>>.
@@ -337,44 +561,76 @@ impl UdsClient {
     ///   Pass `None` to discard events.
     pub fn new<F>(socket_path: PathBuf, on_event: Option<F>) -> Self
     where
-        F: Fn(DaemonEvent) + Send + Sync + 'static,
+        F: Fn(ClientEvent) + Send + Sync + 'static,
     {
         let state = Arc::new(Mutex::new(DaemonStateAccumulator::default()));
-        let event_callback = Arc::new(Mutex::new(on_event.map(|cb| Box::new(cb) as Box<dyn Fn(DaemonEvent) + Send + Sync>)));
+        let event_callback = Arc::new(StdMutex::new(
+            on_event
+                .map(|cb| vec![Box::new(cb) as Box<dyn Fn(ClientEvent) + Send + Sync>])
+                .unwrap_or_default(),
+        ));
 
-        let (tx, mut rx) = mpsc::channel::<DaemonCommand>(64);
+        let (tx, mut rx) = mpsc::channel::<String>(64);
         let state_clone = Arc::clone(&state);
         let event_cb_clone = Arc::clone(&event_callback);
+        let connected = Arc::new(AtomicBool::new(false));
+        let connected_clone = Arc::clone(&connected);
 
-        let reconnect_handle = tokio::spawn(async move {
+        // tauri::async_runtime, not tokio::spawn — `new` is called from
+        // Tauri's `setup` on the main thread, outside a Tokio context.
+        let reconnect_handle = tauri::async_runtime::spawn(async move {
             let mut retry_delay = Duration::from_secs(1);
             let mut reconnecting = false;
             let socket_path = Arc::new(socket_path);
 
             loop {
                 match connect_to_socket(&socket_path).await {
-                    Ok(stream) => {
+                    Ok(mut stream) => {
                         tracing::info!(path = %socket_path.display(), "uds_connected");
                         retry_delay = Duration::from_secs(1); // reset on success
                         reconnecting = false;
+                        connected_clone.store(true, Ordering::Relaxed);
+                        {
+                            let cb = event_cb_clone.lock().expect("event callback mutex poisoned");
+                            for callback in cb.iter() {
+                                callback(ClientEvent::Connected);
+                            }
+                        }
 
                         // Drain any buffered commands accumulated while disconnected.
                         while let Ok(cmd) = rx.try_recv() {
-                            let _ = Self::write_one(&stream, &cmd).await;
+                            let _ = Self::write_one(&mut stream, &cmd).await;
                         }
 
-                        let (reader, mut writer) = stream.into_split();
+                        let (reader, mut writer) = split_stream(stream);
                         let reader = BufReader::new(reader);
-                        if Self::read_loop(reader, &mut rx, &writer, &state_clone, &event_cb_clone).await {
+                        if Self::read_loop(
+                            reader,
+                            &mut rx,
+                            &mut writer,
+                            &state_clone,
+                            &event_cb_clone,
+                            &connected_clone,
+                        )
+                        .await
+                        {
                             tracing::info!("uds_reader_exit: clean disconnect");
                         } else {
                             tracing::warn!("uds_reader_exit: connection lost");
+                        }
+                        connected_clone.store(false, Ordering::Relaxed);
+                        {
+                            let cb = event_cb_clone.lock().expect("event callback mutex poisoned");
+                            for callback in cb.iter() {
+                                callback(ClientEvent::Disconnected);
+                            }
                         }
                         // `writer` is dropped here.
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, path = %socket_path.display(), "uds_connect_failed");
                         reconnecting = true;
+                        connected_clone.store(false, Ordering::Relaxed);
 
                         // Give the reader loop a chance to finish.
                         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -406,8 +662,9 @@ impl UdsClient {
 
         Self {
             sender: Mutex::new(Some(tx)),
+            connected,
             state,
-            event_callback,
+            event_callbacks: event_callback,
             reconnect_handle,
         }
     }
@@ -415,12 +672,19 @@ impl UdsClient {
     /// Send a command to the daemon. Queues it on the current connection,
     /// reconnecting first if necessary.
     pub async fn send_command(&self, cmd: DaemonCommand) -> Result<()> {
+        let line = serde_json::to_string(&cmd).context("serialize command")?;
+        self.send_line(line).await
+    }
+
+    /// Send a raw JSON command line verbatim — the caller decides the
+    /// command shape, so new daemon commands never need an enum update.
+    pub async fn send_line(&self, line: String) -> Result<()> {
         let sender = {
             let guard = self.sender.lock().await;
             guard.clone()
         };
         if let Some(tx) = sender {
-            tx.send(cmd).await.context("command channel closed")
+            tx.send(line).await.context("command channel closed")
         } else {
             bail!("client is disconnected")
         }
@@ -429,10 +693,10 @@ impl UdsClient {
     /// Register (or replace) an event callback.
     pub fn on_event<F>(&self, callback: F)
     where
-        F: Fn(DaemonEvent) + Send + Sync + 'static,
+        F: Fn(ClientEvent) + Send + Sync + 'static,
     {
-        let mut cb = self.event_callback.blocking_lock();
-        *cb = Some(Box::new(callback));
+        let mut cb = self.event_callbacks.lock().expect("event callback mutex poisoned");
+        cb.push(Box::new(callback));
     }
 
     /// Read the current daemon state snapshot.
@@ -443,6 +707,11 @@ impl UdsClient {
     /// Check if auto-enter is currently enabled.
     pub async fn is_auto_enter_enabled(&self) -> bool {
         self.state.lock().await.auto_enter
+    }
+
+    /// Whether the daemon IPC channel is currently connected.
+    pub async fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
     }
 
     /// Check if the daemon is currently paused.
@@ -458,23 +727,28 @@ impl UdsClient {
 
     /// Gracefully stop the background reconnection task.
     pub async fn disconnect(&self) {
+        self.connected.store(false, Ordering::Relaxed);
         {
             let mut guard = self.sender.lock().await;
             *guard = None;
         }
         self.reconnect_handle.abort();
-        let _ = self.reconnect_handle.await;
     }
 
     // ── internal helpers ───────────────────────────────────────────────
 
-    async fn read_loop(
-        mut reader: BufReader<tokio::net::unix::ReadHalf<'static>>,
-        rx: &mut mpsc::Receiver<DaemonCommand>,
-        writer: &tokio::net::unix::WriteHalf<'static>,
+    async fn read_loop<R, W>(
+        mut reader: BufReader<R>,
+        rx: &mut mpsc::Receiver<String>,
+        writer: &mut W,
         state: &Arc<Mutex<DaemonStateAccumulator>>,
-        event_cb: &Arc<Mutex<Option<Box<dyn Fn(DaemonEvent) + Send + Sync>>>>,
-    ) -> bool {
+        event_cb: &Arc<StdMutex<Vec<Box<dyn Fn(ClientEvent) + Send + Sync>>>>,
+        connected: &AtomicBool,
+    ) -> bool
+    where
+        R: AsyncRead + Unpin,
+        W: AsyncWrite + Unpin,
+    {
         // Drain initial-state burst into a buffer to avoid holding the
         // read lock for every single line.
         let mut buf = String::new();
@@ -482,38 +756,63 @@ impl UdsClient {
 
         loop {
             buf.clear();
-            match reader.read_line(&mut buf).await {
-                Ok(0) => return false, // EOF
-                Ok(_) => {
-                    let line = buf.trim().to_string();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    if let Ok(event) = DaemonEvent::from_json_line(&line) {
-                        state.apply(&event);
-                        let cb = event_cb.lock().await;
-                        if let Some(callback) = cb.as_ref() {
-                            callback(event.clone());
+            tokio::select! {
+                read = reader.read_line(&mut buf) => {
+                    match read {
+                        Ok(0) => {
+                            connected.store(false, Ordering::Relaxed);
+                            return false; // EOF
                         }
-                        drop(cb);
-                    } else {
-                        tracing::warn!(line = %line, "uds_parse_event_failed");
+                        Ok(_) => {
+                            let line = buf.trim().to_string();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            // Forward the raw line — the frontend parses JSON and
+                            // understands variants this crate's enum doesn't.
+                            {
+                                let cb = event_cb.lock().expect("event callback mutex poisoned");
+                                for callback in cb.iter() {
+                                    callback(ClientEvent::Event(line.clone()));
+                                }
+                            }
+                            if let Ok(event) = serde_json::from_str::<DaemonEvent>(&line) {
+                                state.apply(&event);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "uds_read_error");
+                            connected.store(false, Ordering::Relaxed);
+                            return false;
+                        }
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "uds_read_error");
-                    return false;
+                cmd = rx.recv() => {
+                    match cmd {
+                        Some(cmd) => {
+                            if let Err(e) = Self::write_one(writer, &cmd).await {
+                                tracing::warn!(error = %e, "uds_write_error");
+                                connected.store(false, Ordering::Relaxed);
+                                return false; // broken pipe → reconnect
+                            }
+                        }
+                        // All senders dropped (client disconnected) — leave the
+                        // loop so the reconnect cycle can re-establish.
+                        None => {
+                            connected.store(false, Ordering::Relaxed);
+                            return false;
+                        }
+                    }
                 }
             }
         }
     }
 
-    async fn write_one(
-        writer: &tokio::net::unix::WriteHalf<'static>,
-        cmd: &DaemonCommand,
-    ) -> Result<()> {
-        let json = serde_json::to_string(cmd).context("serialize command")?;
-        let mut writer = writer.clone();
+    async fn write_one<W>(writer: &mut W, cmd: &str) -> Result<()>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        let json = cmd.trim_end().to_string();
         writer
             .write_all(format!("{json}\n").as_bytes())
             .await
@@ -535,6 +834,30 @@ impl Drop for UdsClient {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn read_loop_clears_connection_state_after_peer_closes() {
+        let connected = AtomicBool::new(true);
+        let state = Arc::new(Mutex::new(DaemonStateAccumulator::default()));
+        let callbacks = Arc::new(StdMutex::new(Vec::new()));
+        let (stream, peer) = tokio::io::duplex(64);
+        let (reader, mut writer) = tokio::io::split(stream);
+        let (_tx, mut rx) = mpsc::channel(1);
+
+        drop(peer);
+        let clean = UdsClient::read_loop(
+            BufReader::new(reader),
+            &mut rx,
+            &mut writer,
+            &state,
+            &callbacks,
+            &connected,
+        )
+        .await;
+
+        assert!(!clean);
+        assert!(!connected.load(Ordering::Relaxed));
+    }
+
     #[test]
     fn toggle_pause_command_serialises() {
         let cmd = DaemonCommand::TogglePause;
@@ -548,7 +871,7 @@ mod tests {
     fn hello_event_parses() {
         let json = r#"{"type":"Hello","data":{"version":12}}"#;
         let event = DaemonEvent::from_json_line(json).unwrap();
-        assert!(matches!(event, DaemonEvent::Hello { version: 12 }));
+        assert!(matches!(event, DaemonEvent::Hello { version: 12, .. }));
     }
 
     #[test]
@@ -594,10 +917,14 @@ mod tests {
         acc.apply(&DaemonEvent::Resumed);
         assert_eq!(acc.state, DaemonState::Listening);
 
-        acc.apply(&DaemonEvent::MasterPauseChanged { master_paused: true });
+        acc.apply(&DaemonEvent::MasterPauseChanged {
+            master_paused: true,
+        });
         assert_eq!(acc.state, DaemonState::Paused);
 
-        acc.apply(&DaemonEvent::MasterPauseChanged { master_paused: false });
+        acc.apply(&DaemonEvent::MasterPauseChanged {
+            master_paused: false,
+        });
         assert_eq!(acc.state, DaemonState::Listening);
     }
 

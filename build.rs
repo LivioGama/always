@@ -6,30 +6,64 @@
 //! On macOS ARM64 we also compile the Apple Intelligence / Apple STT
 //! Swift bridges into static libraries and link them into the daemon.
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let sha = Command::new("git")
         .args(["rev-parse", "--short=12", "HEAD"])
+        .current_dir(&manifest_dir)
         .output()
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=ALWAYS_BUILD_SHA={sha}");
+    let build_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let features = ["CPAL", "MACOS", "LINUX", "WINDOWS", "OVERLAY", "LOCAL_STT"]
+        .into_iter()
+        .filter(|feature| std::env::var_os(format!("CARGO_FEATURE_{feature}")).is_some())
+        .collect::<Vec<_>>()
+        .join(",");
+    println!("cargo:rustc-env=ALWAYS_BUILD_ID={sha}-{features}-{build_nanos}");
 
-    // Re-run when HEAD moves.
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/refs/heads");
+    // Worktrees use a `.git` file pointing at a per-worktree gitdir; branch
+    // refs and packed refs live in the common gitdir. Watch both so a branch
+    // commit invalidates Cargo's cached build script in either layout.
+    watch_git_revision(&manifest_dir);
+    // Refresh the embedded artifact identity when the daemon source changes.
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=swift");
+    println!("cargo:rerun-if-changed=resources");
+    println!("cargo:rerun-if-changed=Always");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    for env in [
+        "CARGO_FEATURE_CPAL",
+        "CARGO_FEATURE_MACOS",
+        "CARGO_FEATURE_LINUX",
+        "CARGO_FEATURE_WINDOWS",
+        "CARGO_FEATURE_OVERLAY",
+        "CARGO_FEATURE_LOCAL_STT",
+        "ALWAYS_FORCE_AI_STUB",
+        "ALWAYS_FORCE_STT_STUB",
+        "SDKROOT",
+        "SWIFTC",
+    ] {
+        println!("cargo:rerun-if-env-changed={env}");
+    }
 
     // Embed an Info.plist in the daemon binary so TCC can find the
     // NSSpeechRecognitionUsageDescription / NSMicrophoneUsageDescription
     // keys when the binary runs outside the app bundle. Without this,
     // TCC crashes the process on Speech framework access.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    if target_os == "macos" && target_arch == "aarch64" {
         let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
         let info_plist = manifest_dir.join("Always/Info.plist");
         if info_plist.exists() {
@@ -41,15 +75,64 @@ fn main() {
     }
 
     // Compile Apple Intelligence and Apple STT Swift bridges on macOS ARM64.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
+    if target_os == "macos" && target_arch == "aarch64" {
         build_apple_intelligence_bridge();
         build_apple_stt_bridge();
         build_status_sound_bridge();
     }
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn watch_git_revision(manifest_dir: &Path) {
+    let dot_git = manifest_dir.join(".git");
+    println!("cargo:rerun-if-changed={}", dot_git.display());
+
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let Ok(contents) = std::fs::read_to_string(&dot_git) else {
+            return;
+        };
+        let Some(path) = contents.trim().strip_prefix("gitdir:") else {
+            return;
+        };
+        let path = PathBuf::from(path.trim());
+        if path.is_absolute() {
+            path
+        } else {
+            manifest_dir.join(path)
+        }
+    };
+    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        git_dir.join("packed-refs").display()
+    );
+
+    let common_dir = std::fs::read_to_string(git_dir.join("commondir"))
+        .ok()
+        .map(|path| {
+            let path = PathBuf::from(path.trim());
+            if path.is_absolute() {
+                path
+            } else {
+                git_dir.join(path)
+            }
+        })
+        .unwrap_or_else(|| git_dir.clone());
+    if let Ok(head) = std::fs::read_to_string(git_dir.join("HEAD"))
+        && let Some(reference) = head.trim().strip_prefix("ref:")
+    {
+        println!(
+            "cargo:rerun-if-changed={}",
+            common_dir.join(reference.trim()).display()
+        );
+    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        common_dir.join("packed-refs").display()
+    );
+}
+
 fn build_apple_intelligence_bridge() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let swift_dir = manifest_dir.join("swift");
@@ -186,7 +269,6 @@ fn build_apple_intelligence_bridge() {
     println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn build_apple_stt_bridge() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let swift_dir = manifest_dir.join("swift");
@@ -312,7 +394,6 @@ fn build_apple_stt_bridge() {
 /// In-process status-cue playback (AVAudioPlayer pools). Replaces the
 /// `afplay` subprocess so cues start without a process launch and never
 /// drop each other. See `src/always/status_sound.rs`.
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn build_status_sound_bridge() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let swift_dir = manifest_dir.join("swift");
@@ -408,7 +489,6 @@ fn build_status_sound_bridge() {
     }
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn is_command_line_tools_only() -> bool {
     Command::new("xcode-select")
         .arg("-p")

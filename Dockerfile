@@ -23,6 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl-dev \
         libsqlite3-dev \
         libasound2-dev \
+        libx11-dev \
+        libxi-dev \
+        libxtst-dev \
         sox \
         g++ \
         ca-certificates \
@@ -44,6 +47,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libasound2 \
         libssl3 \
         libsqlite3-0 \
+        libx11-6 \
+        libxi6 \
+        libxtst6 \
         ca-certificates \
         jq \
     && rm -rf /var/lib/apt/lists/*

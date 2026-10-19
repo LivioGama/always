@@ -267,7 +267,8 @@ install_tar() {
   if command -v ldd >/dev/null 2>&1 && ldd "$bindir/always" 2>&1 | grep -q 'not found'; then
     warn "Missing shared libraries for ${bindir}/always:"
     ldd "$bindir/always" 2>&1 | grep 'not found' >&2 || true
-    warn "Install the ALSA runtime: 'sudo apt install libasound2t64' (Debian/Ubuntu) or 'sudo dnf install alsa-lib' (Fedora)."
+    warn "Debian/Ubuntu runtime libraries: 'sudo apt install libasound2t64 libgcc-s1 libstdc++6 libx11-6 libxtst6'."
+    warn "Fedora runtime libraries: 'sudo dnf install alsa-lib libgcc libstdc++ libX11 libXtst'."
   elif ! "$bindir/always" --version </dev/null >/dev/null 2>&1; then
     warn "${bindir}/always did not start. It needs glibc 2.39 or newer (Ubuntu 24.04+, Fedora 40+, Debian 13+)."
   fi

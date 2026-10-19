@@ -43,6 +43,9 @@ class StateMonitor: ObservableObject {
     /// Connection state to daemon. UI can show "Reconnecting…" if degraded.
     @Published var isDaemonConnected: Bool = false
     @Published var isDaemonDegraded: Bool = false
+    /// The daemon reported its mic recorder stuck (`MicUnavailable`); drives
+    /// the menu bar's "Mic stuck — Fix" row. Cleared when audio resumes.
+    @Published var isMicUnavailable: Bool = false
     /// Bundle ids whose per-app override sets `paused: false` — i.e.
     /// the user's resumed-app allowlist. Pulled from
     /// `per_app_settings_json` and refreshed whenever the daemon
@@ -138,6 +141,8 @@ class StateMonitor: ObservableObject {
                     self?.isListeningActive = false
                     self?.isVoiceActivity = false
                     self?.isTranscribing = false
+                    // The restarted daemon re-reports it in its initial burst.
+                    self?.isMicUnavailable = false
                 }
                 if connected {
                     self?.endBootstrap()
@@ -211,6 +216,23 @@ class StateMonitor: ObservableObject {
         }
     }
     
+    /// "Mic stuck — Fix": restart the daemon. `restartDaemon` kills the stale
+    /// daemon and reaps the audio children (`always-capture`, `rec`) it left
+    /// holding the mic, then starts a fresh one.
+    func fixStuckMic() {
+        guard !respawnInFlight else { return }
+        respawnInFlight = true
+        logger.warning("Mic stuck — restarting daemon and reaping audio children")
+        Task { [weak self] in
+            defer { self?.respawnInFlight = false }
+            do {
+                _ = try await self?.cliService.restartDaemon()
+            } catch {
+                self?.logger.error("Mic fix restart failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     /// Connect as soon as the UDS socket is listening (retries until live).
     func connectToDaemon() {
         udsClient.connect()
@@ -872,6 +894,11 @@ class StateMonitor: ObservableObject {
             // Async LLM grammar patch replaced the pasted text — flash a
             // brief confirmation so the user knows their text was silently updated.
             StatusOverlayController.shared.flash(state: .grammarCorrected, duration: 1.5)
+        case .micUnavailable:
+            if let payload = event.micUnavailable, isMicUnavailable != payload.unavailable {
+                logger.warning("daemon mic unavailable=\(payload.unavailable, privacy: .public)")
+                isMicUnavailable = payload.unavailable
+            }
         case .shortcutListenerStatus:
             // Ground truth from the daemon about its event tap. Routed into
             // PermissionsManager so the Settings banner can say "shortcuts
