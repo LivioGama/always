@@ -7,8 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-20
+
+### Added
+- **windows/linux:** a usable desktop app on Windows and Linux with the same onboarding journey as macOS. Windows uses named-pipe IPC; Linux packages declare their X11, ALSA and C++ runtime dependencies. Development and production are isolated — a dev daemon starts in standby beside production and takes the microphone through an acknowledged pause lease, so exiting dev never undoes a later manual pause in production. ([#138](https://github.com/LivioGama/always/pull/138))
+
 ### Fixed
+- **windows:** `always start`, `always status` and `always stop` now work on Windows. They previously shelled out to Unix tools (`ps`, `kill`, `flock`) that don't exist there, reporting "not running" while the daemon was alive. The daemon now spawns detached and survives its terminal. ([#137](https://github.com/LivioGama/always/pull/137))
+- **chunker:** a lost chunk no longer pastes the literal marker text `[audio saved: chunk N]` into the target app. Failed chunks are retried first; if the retry also fails, the committed chunks are pasted without the marker. ([#129](https://github.com/LivioGama/always/pull/129))
+- **capture:** Always no longer cuts, crackles or ducks the music and calls playing on your Mac. Echo cancellation is now opt-in (`always config set capture_aec true`); without it, dictating over a video playing from the speakers relies on the speaker gate.
+- **pause:** the idle pill's Play button and the per-app shortcut now resume listening instead of pausing everywhere, idle no longer stacks on top of another pause, and a reconnecting GUI shows an active mic-conflict or audio-output pause.
 - **history:** Settings → History is no longer empty on a normal install. It read pasted text out of the diagnostic log, which never holds transcript text outside dev builds; the daemon now keeps a local history file (`~/Library/Application Support/always/history.jsonl`) that the tab reads, and **Delete All** clears it.
+- **status overlay:** switching Settings → Status Overlay between Normal, Compact and Hidden now changes the indicator already on screen instead of waiting for the next one, and the setting says where the indicator appears.
+- **onboarding:** the last setup page now offers the apps you are likely to dictate into (Slack, Messages, ChatGPT, Claude, Cursor, browsers, Mail, Notes…), running or installed, instead of the first eight running apps A→Z that left Slack off; password managers are never offered.
+- **dictation:** accented words (déjà, ça, réponse…) are no longer dropped as a "mixed-script word" on the Groq engine, and Groq is told your language instead of always English.
+- **models:** a model switch that fails to load now shows the error on its row instead of leaving "Loading…" spinning forever, and loading a model no longer freezes dictation.
 
 ## [0.1.0] - 2026-10-15
 
