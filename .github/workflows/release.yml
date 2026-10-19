@@ -606,7 +606,10 @@ jobs:
             done
           }
           gui_app_pid=
-          for _ in $(seq 1 20); do
+          # Headless WebKitGTK/tao may wait for desktop portals before Tauri
+          # setup runs (upstream test-api-e2e.yml documents ~30s in total).
+          # Keep the GUI + bundled-daemon assertions, with a bounded 60s budget.
+          for _ in $(seq 1 60); do
             kill -0 "$xvfb_pid" 2>/dev/null || { dump_gui_failure_diagnostics; exit 1; }
             gui_app_pid="$(pgrep -x always-tauri | sed -n '1p' || true)"
             if [ -n "$gui_app_pid" ] && pgrep -f '^/usr/lib/Always GUI/daemon/always run([[:space:]]|$)' >/dev/null; then break; fi
@@ -700,7 +703,9 @@ jobs:
           }
           gui_app_pid=
           daemon_pid=
-          for _ in $(seq 1 20); do
+          # Match the Debian launch budget: portal discovery can exceed 20s
+          # before application setup. Successful startup still needs both PIDs.
+          for _ in $(seq 1 60); do
             kill -0 "$xvfb_pid" 2>/dev/null || { dump_gui_failure_diagnostics; exit 1; }
             gui_app_pid="$(pgrep -x always-tauri | sed -n '1p' || true)"
             daemon_pid="$(pgrep -f '^/.*/daemon/always run([[:space:]]|$)' | sed -n '1p' || true)"
