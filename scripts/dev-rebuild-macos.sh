@@ -166,7 +166,7 @@ if [ ! -d "$DEV_SUPPORT_DIR" ]; then
 fi
 
 echo "▶ launching Always Dev..."
-open "$DEV_APP"
+open -g "$DEV_APP"
 
 # LaunchServices starts the GUI before the app has finished spawning the
 # bundled daemon. A fixed three-second pause can race that asynchronous
