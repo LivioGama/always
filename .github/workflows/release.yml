@@ -625,7 +625,7 @@ jobs:
           $install = Start-Process -FilePath $installers[0].FullName -ArgumentList @('/S', "/D=$installRoot") -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "NSIS installer exited $($install.ExitCode)" }
           $gui = Join-Path $installRoot 'always-tauri.exe'
-          $daemon = Join-Path $installRoot 'resources\daemon\always.exe'
+          $daemon = Join-Path $installRoot 'daemon\always.exe'
           if (-not (Test-Path -LiteralPath $gui -PathType Leaf)) { throw "GUI executable missing: $gui" }
           if (-not (Test-Path -LiteralPath $daemon -PathType Leaf)) { throw "Bundled daemon missing: $daemon" }
           & $daemon --version
