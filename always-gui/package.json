@@ -11,8 +11,8 @@
   "dependencies": {
     "@tauri-apps/api": "^2.12.3",
     "@tauri-apps/plugin-shell": "^2.5.0",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0"
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
