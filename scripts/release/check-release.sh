@@ -25,7 +25,7 @@ cd "$(git rev-parse --show-toplevel)"
 
 # The version files that move in lockstep. Keep in sync with prepare.sh.
 CARGO_MANIFESTS="Cargo.toml crates/always_tauri/Cargo.toml src-tauri/Cargo.toml"
-JSON_FILES="tauri.conf.json always-gui/package.json"
+JSON_FILES="crates/always_tauri/tauri.conf.json always-gui/package.json"
 PLIST="Always/Info.plist"
 
 cargo_version() { sed -n 's/^version *= *"\([^"]*\)".*/\1/p' "$1" | head -n 1; }

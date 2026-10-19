@@ -17,7 +17,7 @@
 #    `_highlights.md` carries no `## ` heading and fits HIGHLIGHTS_LIMIT, and
 #    `## [Unreleased]` carries no `- ` entry;
 # 3. the version is set, in lockstep, in every version file: Cargo.toml (root),
-#    crates/always_tauri, src-tauri, tauri.conf.json, always-gui/package.json
+#    crates/always_tauri, src-tauri, crates/always_tauri/tauri.conf.json, always-gui/package.json
 #    and Always/Info.plist (keep scripts/release/check-release.sh in sync);
 # 4. the fragments are folded into a new `## [x.y.z] - DATE` under a kept,
 #    empty `## [Unreleased]`, grouped by section and led by `_highlights.md`
@@ -353,7 +353,7 @@ fi
 # ── Bump every version file to one value ────────────────────────────────────
 # Keep this list in sync with scripts/release/check-release.sh.
 CARGO_MANIFESTS="Cargo.toml crates/always_tauri/Cargo.toml src-tauri/Cargo.toml"
-JSON_FILES="tauri.conf.json always-gui/package.json"
+JSON_FILES="crates/always_tauri/tauri.conf.json always-gui/package.json"
 PLIST="Always/Info.plist"
 
 for m in $CARGO_MANIFESTS; do
