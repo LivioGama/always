@@ -25,6 +25,7 @@ const FILE_FLAG_OVERLAPPED: Dword = 0x4000_0000;
 const ERROR_FILE_NOT_FOUND: Dword = 2;
 const ERROR_BROKEN_PIPE: Dword = 109;
 const ERROR_NO_DATA: Dword = 232;
+const ERROR_PIPE_NOT_CONNECTED: Dword = 233;
 const ERROR_PIPE_BUSY: Dword = 231;
 const ERROR_IO_PENDING: Dword = 997;
 const ERROR_SEM_TIMEOUT: Dword = 121;
@@ -402,7 +403,7 @@ fn timed_out() -> io::Error {
 fn is_eof_error(error: &io::Error) -> bool {
     matches!(
         error.raw_os_error().map(|code| code as Dword),
-        Some(ERROR_BROKEN_PIPE)
+        Some(ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED)
     )
 }
 
@@ -450,6 +451,20 @@ mod tests {
             path.to_string_lossy()
                 .starts_with(r"\\.\pipe\codex-peer-transport-")
         );
+    }
+
+    #[test]
+    fn eof_mapping_does_not_swallow_other_pipe_errors() {
+        assert!(is_eof_error(&io::Error::from_raw_os_error(
+            ERROR_BROKEN_PIPE as i32
+        )));
+        assert!(is_eof_error(&io::Error::from_raw_os_error(
+            ERROR_PIPE_NOT_CONNECTED as i32
+        )));
+        assert!(!is_eof_error(&io::Error::from_raw_os_error(
+            ERROR_NO_DATA as i32
+        )));
+        assert!(!is_eof_error(&io::Error::other("unrelated read failure")));
     }
 
     fn fixture_server<F>(handler: F) -> (std::path::PathBuf, thread::JoinHandle<()>)
