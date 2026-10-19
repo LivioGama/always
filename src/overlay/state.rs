@@ -169,7 +169,7 @@ impl OverlayStateReducer {
     /// Returns Some(new_state) if the overlay should change, None if no change
     pub fn process_event(&mut self, event: &DaemonEvent) -> Option<OverlayState> {
         match event {
-            DaemonEvent::Hello { version: _, .. } => {
+            DaemonEvent::Hello { .. } => {
                 // Start initial sync window to suppress overlay flashes
                 self.state.is_daemon_connected = true;
                 self.initial_sync_deadline = Some(Instant::now() + Duration::from_millis(300));
@@ -425,7 +425,8 @@ impl OverlayStateReducer {
             | DaemonEvent::ShortcutListenerStatus {
                 input_monitoring_granted: _,
             }
-            | DaemonEvent::MicUnavailable { unavailable: _ } => None,
+            | DaemonEvent::MicUnavailable { unavailable: _ }
+            | DaemonEvent::PeerPauseLeaseResult { .. } => None,
 
             DaemonEvent::ProcessingStarted | DaemonEvent::ProcessingStopped => {
                 // Not used in current overlay logic
