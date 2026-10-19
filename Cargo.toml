@@ -219,3 +219,8 @@ auto-req = "disabled"
 
 [package.metadata.generate-rpm.requires]
 alsa-lib = "*"
+glibc = ">= 2.39"
+libX11 = "*"
+libXtst = "*"
+libgcc = "*"
+"libstdc++" = "*"
