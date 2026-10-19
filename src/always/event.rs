@@ -51,6 +51,12 @@ static LAST_LOW_MIC_OVERLAY: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(||
 /// followed by final committed text. The existing `TranscriptChunk` /
 /// `TranscriptFinal` remain for non-streaming chunk-based transcription.
 pub const PROTOCOL_VERSION: u32 = 12;
+pub const PEER_PAUSE_LEASE_CAPABILITY: &str = "peer-pause-lease-v1";
+
+/// Unique identity of this compiled daemon artifact. Compared at startup to
+/// the identity recorded by a running daemon; this identifies binaries, not
+/// source files that have not yet been rebuilt.
+pub const BUILD_ID: &str = env!("ALWAYS_BUILD_ID");
 
 /// Why a recoverable transcript was not pasted (`TranscriptRejected.reason`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +101,18 @@ pub enum DaemonEvent {
     /// the version is not the one it was built with.
     Hello {
         version: u32,
+        /// Optional for compatibility with clients speaking to older daemons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        build_id: Option<String>,
+        /// Optional feature negotiation. Missing on older v12 daemons.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
+    },
+    /// Correlated result for the cross-instance pause lease command.
+    PeerPauseLeaseResult {
+        request_id: String,
+        accepted: bool,
+        lease_owned: bool,
     },
     /// Ground truth about the daemon's global-shortcut event tap. The
     /// GUI's own IOHIDCheckAccess reflects the GUI's TCC attribution —
@@ -104,6 +122,14 @@ pub enum DaemonEvent {
     /// client's initial state burst and re-emitted on change.
     ShortcutListenerStatus {
         input_monitoring_granted: bool,
+    },
+    /// The microphone capture supervisor gave up on the recorder after
+    /// repeated read timeouts / EOFs (`unavailable: true`), or audio
+    /// resumed (`false`). Lets the GUI offer a "Mic stuck — Fix" action
+    /// instead of leaving dictation silently dead. Included in every
+    /// client's initial state burst while the mic is stuck.
+    MicUnavailable {
+        unavailable: bool,
     },
     /// Daemon has started listening for voice input
     ListeningStarted,
@@ -751,6 +777,12 @@ pub enum DaemonCommand {
         paused: bool,
         reason: Option<String>,
     },
+    /// Acquire/release an ownership-tagged pause on the other Always
+    /// instance. Peers must negotiate `PEER_PAUSE_LEASE_CAPABILITY` first.
+    PeerPauseLease {
+        request_id: String,
+        paused: bool,
+    },
     /// Cancel the active auto-enter countdown (e.g. Mac app saw a
     /// keystroke land in the focused app).
     CancelAutoEnterCountdown,
@@ -834,6 +866,10 @@ pub enum DaemonCommand {
     /// Client (Settings tab open / reconnect) wants a fresh
     /// [`DaemonEvent::VoiceProfileStatus`] snapshot.
     GetVoiceProfileStatus,
+    /// Client (Settings open / reconnect) wants a fresh
+    /// [`DaemonEvent::ShortcutListenerStatus`]. The startup burst can be
+    /// missed by a client whose listeners attach late.
+    GetShortcutListenerStatus,
     /// macOS Swift app reports the system default input device changed
     /// (user picked a different mic in System Settings). Daemon kills
     /// and respawns the `rec` child so it opens the new default device
@@ -1123,6 +1159,12 @@ impl EventBroadcaster {
         });
     }
 
+    /// Report that the microphone recorder is stuck (`true`) or delivering
+    /// audio again (`false`). See [`DaemonEvent::MicUnavailable`].
+    pub fn mic_unavailable(&self, unavailable: bool) {
+        self.send(DaemonEvent::MicUnavailable { unavailable });
+    }
+
     /// Send transcription-filtered event with the human-readable reason.
     pub fn transcription_filtered(&self, reason: impl Into<String>) {
         crate::always::status_sound::cue(crate::always::status_sound::StatusSound::Cancel);
@@ -1154,6 +1196,8 @@ impl EventBroadcaster {
     pub fn hello(&self) {
         self.send(DaemonEvent::Hello {
             version: PROTOCOL_VERSION,
+            build_id: Some(BUILD_ID.to_string()),
+            capabilities: vec![PEER_PAUSE_LEASE_CAPABILITY.to_string()],
         });
     }
 
@@ -1336,6 +1380,46 @@ pub fn global_broadcaster() -> &'static EventBroadcaster {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hello_reports_the_daemon_build_identity() {
+        let hello = serde_json::to_value(DaemonEvent::Hello {
+            version: PROTOCOL_VERSION,
+            build_id: Some(BUILD_ID.to_string()),
+            capabilities: vec![PEER_PAUSE_LEASE_CAPABILITY.to_string()],
+        })
+        .expect("hello serializes");
+        assert!(hello["data"]["build_id"].is_string());
+    }
+
+    #[test]
+    fn hello_from_an_older_daemon_remains_decodable() {
+        let hello: DaemonEvent = serde_json::from_str(r#"{"type":"Hello","data":{"version":12}}"#)
+            .expect("older hello remains compatible");
+        assert!(matches!(
+            hello,
+            DaemonEvent::Hello {
+                build_id: None,
+                capabilities,
+                ..
+            } if capabilities.is_empty()
+        ));
+    }
+
+    #[test]
+    fn peer_pause_lease_command_is_correlated_and_decodable() {
+        let command = DaemonCommand::from_json_line(
+            r#"{"type":"PeerPauseLease","data":{"request_id":"lease-7","paused":true}}"#,
+        )
+        .expect("peer lease command parses");
+        assert!(matches!(
+            command,
+            DaemonCommand::PeerPauseLease {
+                request_id,
+                paused: true
+            } if request_id == "lease-7"
+        ));
+    }
 
     #[test]
     fn set_consume_mode_command_parses_from_iris_wire_format() {

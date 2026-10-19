@@ -6,11 +6,46 @@
 //! - Windows: Windows Credential Manager
 
 use anyhow::{Context, Result};
-use keyring::{Entry, Error as KeyringError};
+use keyring_core::{Entry, Error as KeyringError};
+use std::sync::LazyLock;
 
 const SERVICE_NAME: &str = "com.always.daemon";
 const GROQ_API_KEY_ACCOUNT: &str = "groq_api_key";
 const DEEPGRAM_API_KEY_ACCOUNT: &str = "deepgram_api_key";
+
+// Match keyring v1's one-time initialization semantics: the first Entry::new
+// initializes the platform store, and a failed initialization remains failed.
+static SET_CREDENTIAL_STORE_RESULT: LazyLock<std::result::Result<(), KeyringError>> =
+    LazyLock::new(set_credential_store);
+
+fn set_credential_store() -> std::result::Result<(), KeyringError> {
+    #[cfg(target_os = "macos")]
+    let store = apple_native_keyring_store::keychain::Store::new()?;
+    #[cfg(target_os = "windows")]
+    let store = windows_native_keyring_store::Store::new()?;
+    #[cfg(target_os = "linux")]
+    let store = dbus_secret_service_keyring_store::Store::new()?;
+
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    {
+        keyring_core::set_default_store(store);
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    Err(KeyringError::Invalid(
+        "platform".to_string(),
+        "must be macOS, Windows, or Linux".to_string(),
+    ))
+}
+
+fn new_entry(service: &str, account: &str) -> std::result::Result<Entry, KeyringError> {
+    if SET_CREDENTIAL_STORE_RESULT.is_err() {
+        return Err(KeyringError::NoDefaultStore);
+    }
+
+    Entry::new(service, account)
+}
 
 /// Get the Groq API key from keyring.
 pub fn get_groq_api_key() -> Result<Option<String>> {
@@ -58,7 +93,7 @@ pub fn delete_deepgram_api_key() -> Result<()> {
 
 /// Get a secret from keyring
 fn get_secret(account: &str) -> Result<Option<String>> {
-    let entry = Entry::new(SERVICE_NAME, account)?;
+    let entry = new_entry(SERVICE_NAME, account)?;
 
     match entry.get_password() {
         Ok(password) if password.is_empty() => Ok(None),
@@ -70,7 +105,7 @@ fn get_secret(account: &str) -> Result<Option<String>> {
 
 /// Set a secret in keyring
 fn set_secret(account: &str, secret: &str) -> Result<()> {
-    let entry = Entry::new(SERVICE_NAME, account)?;
+    let entry = new_entry(SERVICE_NAME, account)?;
     entry.set_password(secret)?;
     tracing::info!(account, "Secret stored in keyring");
     Ok(())
@@ -78,7 +113,7 @@ fn set_secret(account: &str, secret: &str) -> Result<()> {
 
 /// Delete a secret from keyring
 fn delete_secret(account: &str) -> Result<()> {
-    let entry = Entry::new(SERVICE_NAME, account)?;
+    let entry = new_entry(SERVICE_NAME, account)?;
     // Try to delete by setting to empty string (keyring 2.3 doesn't have delete_credential)
     match entry.set_password("") {
         Ok(()) => tracing::info!(account, "Secret deleted from keyring"),

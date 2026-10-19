@@ -22,13 +22,12 @@ Always.app/
 Always/Always.app/
 .rust_build_timestamp
 node_modules/
+.agent-visual/
 *.pem
 .p12
 
 # JetBrains IDE config
 .idea/
-
-.pixel/
 
 preview-asr/.build/
 preview-asr/.swiftpm/

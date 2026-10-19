@@ -2,10 +2,10 @@
 //!
 //! Manages the two Tauri windows:
 //!
-//! * **settings** — 900 × 700, always visible.  Opened by the tray menu
-//!   "Settings" item or when the daemon is already running.
-//! * **onboarding** — 580 × 640, initially hidden.  Shown once when the
-//!   app is first launched so the user can enter their voice profile.
+//! * **settings** — 900 × 920, initially hidden.  Shown at launch once
+//!   onboarding is done, and by the tray menu "Settings" item.
+//! * **onboarding** — 580 × 640, initially hidden.  Shown at launch until
+//!   the user finishes or skips it, and by the tray menu "Onboarding" item.
 //!
 //! The window names match the identifiers in `tauri.conf.json`.
 
@@ -53,10 +53,12 @@ impl WindowManager {
     /// Show the onboarding window (initially hidden).
     pub fn show_onboarding(&self, reason: ShowOnboardingReason) {
         if let Some(win) = self.app.get_webview_window("onboarding") {
+            // A re-invoked flow starts over from the first step.
+            if reason == ShowOnboardingReason::Reinvoked {
+                win.eval("window.location.reload()").ok();
+            }
             win.show().ok();
             win.set_focus().ok();
-            // Reload to reflect any state change (e.g. first-launch → reinvoked).
-            let _ = reason; // the frontend reads the reason from the event bus
         } else {
             tracing::warn!("onboarding window not found — is tauri.conf.json configured?");
         }

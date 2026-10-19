@@ -238,8 +238,8 @@ pub struct AlwaysConfig {
     /// The Groq backend refuses to start without one; local backends
     /// don't read this field.
     pub groq_stt_api_key: Option<String>,
-    /// Active STT backend. Defaults to [`TranscriberBackendChoice::Groq`]
-    /// so existing installs keep their current behavior on upgrade.
+    /// Requested STT backend. Linux startup resolves an unavailable Groq
+    /// selection to a downloaded local model or an unconfigured state.
     pub transcriber_backend: TranscriberBackendChoice,
     pub vad_mode: VadMode,
     pub silero_threshold: f32,

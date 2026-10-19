@@ -92,7 +92,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 tracing-appender = "0.2"
-keyring = "4.1"
+keyring-core = "1"
 humantime = "2"
 libc = "0.2"
 # Linux overlay UI dependency.
@@ -117,6 +117,8 @@ minisign-verify = "0.3"
 semver = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# macOS keychain backend for keyring-core.
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
 # `core-graphics` uses framework linking which only works on macOS.
 # Non-optional since they're target-gated and never compiled off-macOS.
 core-graphics = { version = "0.24" }
@@ -130,6 +132,8 @@ rdev = { version = "0.5" }
 transcribe-rs = { version = "=0.3.12", features = ["whisper-metal", "onnx"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# Windows Credential Manager backend for keyring-core.
+windows-native-keyring-store = "1"
 # Windows API bindings for clipboard and keyboard simulation.
 # Automatically available when targeting Windows.
 windows = { version = "0.62", features = [
@@ -153,8 +157,13 @@ windows = { version = "0.62", features = [
 transcribe-rs = { version = "=0.3.12", features = ["whisper-cpp", "onnx"], optional = true }
 
 [target.'cfg(all(target_os = "linux", not(target_os = "windows")))'.dependencies]
+# Linux Secret Service backend using maintained dbus crate rather than zbus.
+dbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust", "vendored"] }
 # Linux-only targets — transcribe-rs with whisper-cpp.
 transcribe-rs = { version = "=0.3.12", features = ["whisper-cpp", "onnx"], optional = true }
+# Linux/X11 global hotkeys. Wayland deliberately uses the CLI because
+# compositor policy prevents an ordinary daemon from observing global keys.
+rdev = "0.5"
 
 [dev-dependencies]
 assert_cmd = "2"
@@ -210,3 +219,8 @@ auto-req = "disabled"
 
 [package.metadata.generate-rpm.requires]
 alsa-lib = "*"
+glibc = ">= 2.39"
+libX11 = "*"
+libXtst = "*"
+libgcc = "*"
+"libstdc++" = "*"

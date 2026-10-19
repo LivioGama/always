@@ -132,6 +132,7 @@ mod tests {
     /// Serialised against the other RSS-growth tests via
     /// `leak_probe_lock` (they share one test process; concurrent
     /// getrusage verdicts would count each other's allocations).
+    #[cfg(unix)]
     #[test]
     fn repeated_predict_does_not_leak_resident_memory() {
         let _serial = crate::always::leak_probe_lock::LOCK.lock();

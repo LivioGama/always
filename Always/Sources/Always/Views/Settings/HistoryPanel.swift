@@ -45,7 +45,7 @@ struct HistoryPanel: View {
                 Text("No transcriptions yet today.")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                    .padding(.top, 8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 6) {
@@ -54,9 +54,11 @@ struct HistoryPanel: View {
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task { await loadHistory() }
         .confirmationDialog(
             "Delete all transcriptions from today's session?",

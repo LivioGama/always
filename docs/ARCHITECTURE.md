@@ -185,8 +185,8 @@ Tauri v2 provides a unified abstraction layer:
 |---|---|---|---|
 | **Audio** | cpal → CoreAudio | cpal → ALSA/PipeWire | cpal → WASAPI |
 | **Paste** | rdev + paste CLI | xclip / wl-clipboard | rdev + clipboard |
-| **Hotkeys** | rdev (global) | rdev (global) | rdev (global) |
-| **Overlay** | Native WebView window | X11/Wayland window | Native window |
+| **Hotkeys** | rdev (global) | rdev (X11; CLI on Wayland) | RegisterHotKey |
+| **Overlay** | Native WebView window | X11 window (native Wayland pending) | Native window |
 | **Keychain** | Keychain (keyring) | libsecret (keyring) | CNG (keyring) |
 | **Tray** | tauri::TrayIcon | tauri::TrayIcon | tauri::TrayIcon |
 | **Updates** | Reinstall via `install-always.sh` (no auto-update yet) | Package manager / reinstall via `install-always.sh` | Reinstall via `install.ps1` (no auto-update yet) |

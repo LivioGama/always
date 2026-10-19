@@ -40,6 +40,8 @@ pub mod notification;
 pub mod paste;
 pub mod pause;
 pub mod pause_commands;
+#[cfg(windows)]
+pub(crate) mod peer_transport_windows;
 pub mod per_app;
 pub mod permissions;
 pub mod postprocess;
