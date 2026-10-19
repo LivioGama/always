@@ -600,6 +600,7 @@ mod tests {
         reducer.process_event(&DaemonEvent::Hello {
             version: 7,
             build_id: None,
+            capabilities: Vec::new(),
         });
 
         // Voice activity should show overlay
@@ -614,6 +615,7 @@ mod tests {
         reducer.process_event(&DaemonEvent::Hello {
             version: 7,
             build_id: None,
+            capabilities: Vec::new(),
         });
 
         let state = reducer.process_event(&DaemonEvent::TranscribingStarted);
@@ -627,6 +629,7 @@ mod tests {
         reducer.process_event(&DaemonEvent::Hello {
             version: 7,
             build_id: None,
+            capabilities: Vec::new(),
         });
         assert_eq!(
             reducer.process_event(&DaemonEvent::VoiceActivityDetected),
@@ -650,6 +653,7 @@ mod tests {
         reducer.process_event(&DaemonEvent::Hello {
             version: 7,
             build_id: None,
+            capabilities: Vec::new(),
         });
         reducer.process_event(&DaemonEvent::VoiceActivityDetected);
 
@@ -669,6 +673,7 @@ mod tests {
         reducer.process_event(&DaemonEvent::Hello {
             version: 7,
             build_id: None,
+            capabilities: Vec::new(),
         });
 
         // AutoEnterEnabled right after Hello should not flash (initial sync)
@@ -683,6 +688,7 @@ mod tests {
         reducer.process_event(&DaemonEvent::Hello {
             version: 7,
             build_id: None,
+            capabilities: Vec::new(),
         });
         reducer.process_event(&DaemonEvent::TranscribingStarted);
 
@@ -705,6 +711,7 @@ mod tests {
         reducer.process_event(&DaemonEvent::Hello {
             version: 7,
             build_id: None,
+            capabilities: Vec::new(),
         });
 
         // Countdown started should show countdown overlay
@@ -741,6 +748,7 @@ mod tests {
         reducer.process_event(&DaemonEvent::Hello {
             version: 7,
             build_id: None,
+            capabilities: Vec::new(),
         });
         reducer.process_event(&DaemonEvent::TranscribingStarted);
 
@@ -764,6 +772,7 @@ mod tests {
         reducer.process_event(&DaemonEvent::Hello {
             version: 7,
             build_id: None,
+            capabilities: Vec::new(),
         });
 
         // Low mic volume should show warning overlay (flash state)
@@ -781,6 +790,7 @@ mod tests {
         reducer.process_event(&DaemonEvent::Hello {
             version: 7,
             build_id: None,
+            capabilities: Vec::new(),
         });
         reducer.process_event(&DaemonEvent::VoiceActivityDetected);
 
@@ -796,6 +806,7 @@ mod tests {
         reducer.process_event(&DaemonEvent::Hello {
             version: 7,
             build_id: None,
+            capabilities: Vec::new(),
         });
         reducer.process_event(&DaemonEvent::VoiceActivityDetected);
 
@@ -879,6 +890,7 @@ mod tests {
         reducer.process_event(&DaemonEvent::Hello {
             version: 7,
             build_id: None,
+            capabilities: Vec::new(),
         });
         reducer.process_event(&DaemonEvent::VoiceActivityDetected);
 

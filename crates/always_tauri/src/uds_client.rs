@@ -45,6 +45,13 @@ pub enum DaemonEvent {
     /// First frame on every connection — carries the daemon's protocol version.
     Hello {
         version: u32,
+        #[serde(default)]
+        capabilities: Vec<String>,
+    },
+    PeerPauseLeaseResult {
+        request_id: String,
+        accepted: bool,
+        lease_owned: bool,
     },
 
     /// Ground-truth about the daemon's keyboard event tap authorisation.
@@ -365,7 +372,7 @@ impl DaemonStateAccumulator {
     /// Apply an incoming event and return any derived state changes.
     fn apply(&mut self, event: &DaemonEvent) {
         match event {
-            DaemonEvent::Hello { version } => {
+            DaemonEvent::Hello { version, .. } => {
                 if *version != PROTOCOL_VERSION {
                     tracing::warn!(
                         expected = PROTOCOL_VERSION,
@@ -864,7 +871,7 @@ mod tests {
     fn hello_event_parses() {
         let json = r#"{"type":"Hello","data":{"version":12}}"#;
         let event = DaemonEvent::from_json_line(json).unwrap();
-        assert!(matches!(event, DaemonEvent::Hello { version: 12 }));
+        assert!(matches!(event, DaemonEvent::Hello { version: 12, .. }));
     }
 
     #[test]

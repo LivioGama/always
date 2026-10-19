@@ -1544,15 +1544,21 @@ copy; afterwards they diverge).
 **Peer handoff.** The microphone is still singular — two live daemons would
 both transcribe and both paste. Starting Dev while production is live keeps
 Dev passive: Dev pauses itself and watches production, without changing the
-production pause state. Starting production while Dev is live retains the
-production takeover behavior and pauses Dev over its UDS socket
-(`SetPaused{reason:"peer-instance"}`). A paused-by-peer daemon resumes when
-its peer socket dies (~1 s), covering SIGKILL where no exit cleanup runs;
-graceful exits also release a peer that this daemon paused. A user-requested
-Dev resume is an explicit takeover: it first pauses production and stays
-paused if that handoff cannot be confirmed. Explicit user pause/resume
-controls clear automatic standby ownership, so the watchdog does not undo a
-manual choice.
+production pause state. When a newer daemon starts alongside an older peer,
+it applies the same safe standby policy at socket readiness; it does not
+assume that a PID check alone completed the handoff.
+
+Cross-instance mutations use the optional `peer-pause-lease-v1` capability
+negotiated in the initial `Hello`. A pause/release request carries a unique
+request ID and requires a correlated `PeerPauseLeaseResult`; EOF, timeout,
+legacy peers, and mismatched replies fail closed. A peer already manually
+paused is acknowledged without acquiring a release lease. A matching lease
+may release only the pause it acquired; any later manual pause/resume revokes
+that lease and wins over a delayed release. A paused-by-peer daemon resumes
+when its peer endpoint dies (~1 s), covering SIGKILL where no exit cleanup
+runs; graceful exits release only a still-owned lease. An explicit Dev resume
+is a deliberate takeover: it negotiates a conditional pause first and stays
+paused if the peer cannot safely confirm it.
 
 **Commands.**
 
@@ -1591,9 +1597,9 @@ manual choice.
   which renders cues offline to a buffer. A sandbox instance
   never pauses, resumes or reaps prod/dev daemons.
 
-**Windows daemon lifecycle.** On Windows there is no GUI and no peer
-handoff, but the daemon is not CLI-only: the UDS protocol is carried
-over a named pipe instead of a unix socket. `always start` spawns
+**Windows daemon lifecycle.** On Windows the daemon is not CLI-only: the
+versioned IPC protocol is carried over a named pipe instead of a unix socket,
+including the negotiated peer pause lease. `always start` spawns
 `always run` detached (no console), single-instance is a named kernel
 mutex (`Local\always-daemon[-dev]`, released by the kernel on process
 death), liveness is the pid file + an `OpenProcess` image-name check

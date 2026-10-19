@@ -321,6 +321,9 @@ jobs:
       - name: Test generated Windows named-pipe ACL
         run: cargo test --locked --lib --no-default-features --features windows,cpal --target x86_64-pc-windows-msvc private_pipe_security_tests::generated_pipe_descriptor_allows_only_owner_and_system
 
+      - name: Test bounded Windows peer-pipe transport
+        run: cargo test --locked --lib --no-default-features --features windows,cpal --target x86_64-pc-windows-msvc peer_transport_windows::tests
+
       - name: Prepare bundled daemon for Always GUI
         shell: pwsh
         run: |

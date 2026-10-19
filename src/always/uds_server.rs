@@ -52,6 +52,8 @@ const ORPHAN_TIMEOUT_SECS: u64 = 30;
 /// disconnects. Long enough to survive a GUI restart / reconnect blip,
 /// short enough that speech never pastes into windows with the app gone.
 const NO_GUI_MUTE_GRACE_SECS: u64 = 5;
+static PAUSE_HANDOFF_LOCK: std::sync::LazyLock<parking_lot::Mutex<()>> =
+    std::sync::LazyLock::new(parking_lot::Mutex::default);
 
 static CONNECTED_CLIENTS: AtomicUsize = AtomicUsize::new(0);
 
@@ -600,6 +602,7 @@ where
         DaemonEvent::Hello {
             version: crate::always::event::PROTOCOL_VERSION,
             build_id: Some(crate::always::event::BUILD_ID.to_string()),
+            capabilities: vec![crate::always::event::PEER_PAUSE_LEASE_CAPABILITY.to_string()],
         },
         DaemonEvent::ListeningStarted, // Send immediately after Hello
         DaemonEvent::MasterPauseChanged {
@@ -947,7 +950,25 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
         DaemonCommand::ApproveCorrection { id } => handle_approve_correction(&id),
         DaemonCommand::RejectCorrection { id } => handle_reject_correction(&id),
         DaemonCommand::CaptureCorrection => handle_capture_correction(),
+        DaemonCommand::PeerPauseLease { request_id, paused } => {
+            let _guard = PAUSE_HANDOFF_LOCK.lock();
+            let (accepted, lease_owned) = apply_peer_pause_lease(&request_id, paused);
+            global_broadcaster().send(DaemonEvent::PeerPauseLeaseResult {
+                request_id,
+                accepted,
+                lease_owned,
+            });
+        }
         DaemonCommand::SetPaused { paused, reason } => {
+            let _guard = PAUSE_HANDOFF_LOCK.lock();
+            let by_peer = reason.as_deref() == Some("peer-instance");
+            if !should_apply_peer_pause_command(paused, by_peer, pause::is_paused_by_peer()) {
+                tracing::info!(
+                    reason = "peer-pause-no-longer-owned",
+                    "uds_set_paused_ignored"
+                );
+                return;
+            }
             // Clear idle BEFORE set_paused so the recompute inside sees
             // idle=false. The old order (set_paused → set_idle) left
             // EFFECTIVE_PAUSED stale when resuming while idle was set.
@@ -959,7 +980,6 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             // pauses us with reason "peer-instance". Track the provenance
             // so the watchdog knows whether this pause is ours to lift —
             // any non-peer pause command clears it and wins.
-            let by_peer = reason.as_deref() == Some("peer-instance");
             pause::set_paused_by_peer(paused && by_peer);
             let (effective, changed) = pause::set_paused(paused);
             global_broadcaster().master_pause_changed(paused);
@@ -1353,6 +1373,88 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
         DaemonCommand::CheckForUpdates => crate::always::updater::request_check(),
         DaemonCommand::InstallUpdate => crate::always::updater::request_install(),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerPauseLeaseAction {
+    Acquire,
+    AlreadyOwned,
+    AlreadyManuallyPaused,
+    Release,
+    Reject,
+}
+
+fn peer_pause_lease_action(
+    requested_paused: bool,
+    peer_owned: bool,
+    matching_lease: bool,
+    master_paused: bool,
+) -> PeerPauseLeaseAction {
+    match (requested_paused, peer_owned, matching_lease, master_paused) {
+        (true, true, true, _) => PeerPauseLeaseAction::AlreadyOwned,
+        (true, true, false, _) => PeerPauseLeaseAction::Reject,
+        (true, false, _, true) => PeerPauseLeaseAction::AlreadyManuallyPaused,
+        (true, false, _, false) => PeerPauseLeaseAction::Acquire,
+        (false, true, true, _) => PeerPauseLeaseAction::Release,
+        (false, _, _, _) => PeerPauseLeaseAction::Reject,
+    }
+}
+
+fn apply_peer_pause_lease(request_id: &str, requested_paused: bool) -> (bool, bool) {
+    if request_id.is_empty() || request_id.len() > 128 {
+        return (false, false);
+    }
+    let peer_owned = pause::is_paused_by_peer();
+    let matching_lease = pause::paused_by_peer_lease_matches(request_id);
+    match peer_pause_lease_action(
+        requested_paused,
+        peer_owned,
+        matching_lease,
+        pause::is_master_paused(),
+    ) {
+        PeerPauseLeaseAction::Acquire => {
+            pause::set_paused_by_peer_lease(request_id.to_string());
+            let (effective, changed) = pause::set_paused(true);
+            global_broadcaster().master_pause_changed(true);
+            if changed {
+                if effective {
+                    pause::dictation_buffer_clear();
+                    global_broadcaster().paused();
+                } else {
+                    global_broadcaster().resumed();
+                }
+            }
+            (true, true)
+        }
+        PeerPauseLeaseAction::AlreadyOwned => (true, true),
+        // The peer is already manually paused. Confirm the safe state but
+        // never claim a lease that would later erase the user's choice.
+        PeerPauseLeaseAction::AlreadyManuallyPaused => (true, false),
+        PeerPauseLeaseAction::Release => {
+            pause::set_paused_by_peer(false);
+            pause::set_idle_auto_paused(false);
+            pause::mark_voice_seen();
+            let (effective, changed) = pause::set_paused(false);
+            global_broadcaster().master_pause_changed(false);
+            if changed {
+                if effective {
+                    pause::dictation_buffer_clear();
+                    global_broadcaster().paused();
+                } else {
+                    global_broadcaster().resumed();
+                }
+            }
+            (true, false)
+        }
+        PeerPauseLeaseAction::Reject => (false, false),
+    }
+}
+
+fn should_apply_peer_pause_command(paused: bool, by_peer: bool, peer_pause_owned: bool) -> bool {
+    // Older peers release the handoff with SetPaused(false). Once a manual
+    // command has cleared the ownership marker, a delayed legacy release must
+    // not override that newer user choice.
+    !(by_peer && !paused && !peer_pause_owned)
 }
 
 /// Held for the whole of `switch_active_backend` / `set_language`. The engine
@@ -1999,6 +2101,44 @@ mod switch_backend_tests {
 
     fn parakeet() -> TranscriberBackendChoice {
         "local:parakeet-tdt-0.6b-v3".parse().unwrap()
+    }
+
+    #[test]
+    fn stale_peer_release_cannot_clear_a_later_manual_pause() {
+        let acquire = peer_pause_lease_action(true, false, false, false);
+        assert_eq!(acquire, PeerPauseLeaseAction::Acquire);
+
+        // A manual Prod pause clears the lease. Dev's delayed release then
+        // has no authority to clear the user's master pause.
+        assert_eq!(
+            peer_pause_lease_action(false, false, false, true),
+            PeerPauseLeaseAction::Reject
+        );
+        assert!(!should_apply_peer_pause_command(false, true, false));
+    }
+
+    #[test]
+    fn preexisting_manual_pause_is_confirmed_without_a_release_lease() {
+        assert_eq!(
+            peer_pause_lease_action(true, false, false, true),
+            PeerPauseLeaseAction::AlreadyManuallyPaused
+        );
+        assert_eq!(
+            peer_pause_lease_action(false, false, false, true),
+            PeerPauseLeaseAction::Reject
+        );
+    }
+
+    #[test]
+    fn peer_pause_release_requires_the_current_matching_lease() {
+        assert_eq!(
+            peer_pause_lease_action(false, true, true, true),
+            PeerPauseLeaseAction::Release
+        );
+        assert_eq!(
+            peer_pause_lease_action(false, true, false, true),
+            PeerPauseLeaseAction::Reject
+        );
     }
 
     fn backends(events: &[DaemonEvent]) -> Vec<String> {

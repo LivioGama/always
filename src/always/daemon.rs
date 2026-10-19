@@ -511,8 +511,13 @@ pub fn peer_socket_path() -> Option<PathBuf> {
     }
     #[cfg(target_os = "windows")]
     {
+        let pipe = match config::instance() {
+            "prod" => r"\\.\pipe\always-dev",
+            "dev" => r"\\.\pipe\always",
+            _ => return None,
+        };
         let _ = file;
-        None
+        Some(PathBuf::from(pipe))
     }
 }
 
@@ -521,7 +526,8 @@ pub fn peer_is_live() -> bool {
     peer_socket_path().is_some_and(|p| ipc_endpoint_live(&p))
 }
 
-static WE_PAUSED_PEER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static WE_PAUSED_PEER_LEASE: std::sync::LazyLock<parking_lot::Mutex<Option<String>>> =
+    std::sync::LazyLock::new(parking_lot::Mutex::default);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartupPeerAction {
@@ -543,9 +549,20 @@ fn startup_peer_action(instance: &str, peer_live: bool) -> StartupPeerAction {
     }
 }
 
-/// Send `SetPaused{paused, reason:"peer-instance"}` to the peer daemon.
-/// Returns true when the command reached a live peer. Tracks
-/// `WE_PAUSED_PEER` so `resume_peer_on_exit` only fires when WE paused.
+fn startup_peer_action_when_ready(
+    instance: &str,
+    peer_live: bool,
+    already_paused_by_peer: bool,
+) -> StartupPeerAction {
+    if already_paused_by_peer {
+        StartupPeerAction::None
+    } else {
+        startup_peer_action(instance, peer_live)
+    }
+}
+
+/// Send an ownership-tagged pause request only after negotiating the peer's
+/// conditional lease capability. Legacy daemons are never mutated here.
 pub fn set_peer_paused(paused: bool) -> bool {
     let Some(sock) = peer_socket_path() else {
         return false;
@@ -553,31 +570,218 @@ pub fn set_peer_paused(paused: bool) -> bool {
     if !ipc_endpoint_live(&sock) {
         return false;
     }
-    #[cfg(unix)]
-    {
-        use std::io::{Read as _, Write as _};
-        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&sock) {
-            let cmd = format!(
-                "{{\"type\":\"SetPaused\",\"data\":{{\"paused\":{paused},\"reason\":\"peer-instance\"}}}}\n"
-            );
-            if stream.write_all(cmd.as_bytes()).is_err() {
-                return false;
-            }
-            // Drain the initial-state burst briefly — a client that hangs
-            // up right after writing makes the daemon's burst write fail,
-            // and it may drop the connection before reading our command.
-            stream
-                .set_read_timeout(Some(Duration::from_millis(300)))
-                .ok();
-            let mut sink = [0u8; 4096];
-            let _ = stream.read(&mut sink);
-            if paused {
-                WE_PAUSED_PEER.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            return true;
+    if paused {
+        let request_id = WE_PAUSED_PEER_LEASE
+            .lock()
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let response = transact_peer_pause_lease(&sock, &request_id, true);
+        return record_peer_pause_attempt(&mut WE_PAUSED_PEER_LEASE.lock(), &request_id, response);
+    }
+
+    let Some(request_id) = WE_PAUSED_PEER_LEASE.lock().clone() else {
+        return false;
+    };
+    let accepted =
+        transact_peer_pause_lease(&sock, &request_id, false).is_some_and(|(accepted, _)| accepted);
+    if accepted {
+        let mut lease = WE_PAUSED_PEER_LEASE.lock();
+        if lease.as_deref() == Some(&request_id) {
+            *lease = None;
         }
     }
-    false
+    accepted
+}
+
+fn record_peer_pause_attempt(
+    lease: &mut Option<String>,
+    request_id: &str,
+    response: Option<(bool, bool)>,
+) -> bool {
+    match response {
+        // The command may have reached the peer even though its correlated
+        // acknowledgement did not. Keep the same id so a retry is idempotent;
+        // never unpause ourselves on this uncertain outcome.
+        None => {
+            *lease = Some(request_id.to_string());
+            false
+        }
+        Some((true, true)) => {
+            *lease = Some(request_id.to_string());
+            true
+        }
+        // A manual pause is safe for takeover, but it is not ours to release.
+        Some((true, false)) => {
+            *lease = None;
+            true
+        }
+        Some((false, _)) => {
+            *lease = None;
+            false
+        }
+    }
+}
+
+fn peer_pause_lease_command(request_id: &str, paused: bool) -> Option<String> {
+    serde_json::to_string(&serde_json::json!({
+        "type": "PeerPauseLease",
+        "data": {"request_id": request_id, "paused": paused}
+    }))
+    .ok()
+}
+
+fn peer_supports_pause_lease(line: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return false;
+    };
+    value.get("type").and_then(serde_json::Value::as_str) == Some("Hello")
+        && value
+            .get("data")
+            .and_then(|data| data.get("capabilities"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|capabilities| {
+                capabilities.iter().any(|capability| {
+                    capability.as_str() == Some(crate::always::event::PEER_PAUSE_LEASE_CAPABILITY)
+                })
+            })
+}
+
+fn peer_pause_lease_result(line: &str, request_id: &str) -> Option<(bool, bool)> {
+    let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("PeerPauseLeaseResult") {
+        return None;
+    }
+    let data = value.get("data")?;
+    if data.get("request_id").and_then(serde_json::Value::as_str) != Some(request_id) {
+        return None;
+    }
+    Some((
+        data.get("accepted")?.as_bool()?,
+        data.get("lease_owned")?.as_bool()?,
+    ))
+}
+
+const PEER_PAUSE_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+const PEER_PAUSE_MAX_HANDSHAKE_LINES: usize = 256;
+const PEER_PAUSE_MAX_LINE_BYTES: usize = 64 * 1024;
+
+fn transact_peer_pause_lease(
+    path: &std::path::Path,
+    request_id: &str,
+    paused: bool,
+) -> Option<(bool, bool)> {
+    #[cfg(unix)]
+    {
+        transact_peer_pause_lease_unix(path, request_id, paused)
+    }
+    #[cfg(windows)]
+    {
+        transact_peer_pause_lease_windows(path, request_id, paused)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (path, request_id, paused);
+        None
+    }
+}
+
+#[cfg(unix)]
+fn transact_peer_pause_lease_unix(
+    path: &std::path::Path,
+    request_id: &str,
+    paused: bool,
+) -> Option<(bool, bool)> {
+    use std::io::Write as _;
+    let deadline = Instant::now() + PEER_PAUSE_REQUEST_TIMEOUT;
+    let stream = std::os::unix::net::UnixStream::connect(path).ok()?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .ok()?;
+    let mut reader = std::io::BufReader::new(stream);
+    let mut line = String::new();
+    if !read_peer_line_until_unix(&mut reader, &mut line, deadline).ok()?
+        || !peer_supports_pause_lease(&line)
+    {
+        return None;
+    }
+    let command = peer_pause_lease_command(request_id, paused)?;
+    {
+        let stream = reader.get_mut();
+        stream.write_all(command.as_bytes()).ok()?;
+        stream.write_all(b"\n").ok()?;
+    }
+    line.clear();
+    let mut frames = 0;
+    while frames < PEER_PAUSE_MAX_HANDSHAKE_LINES && Instant::now() < deadline {
+        if !read_peer_line_until_unix(&mut reader, &mut line, deadline).ok()? {
+            return None;
+        }
+        if line.len() > PEER_PAUSE_MAX_LINE_BYTES {
+            return None;
+        }
+        frames += 1;
+        if let Some(result) = peer_pause_lease_result(&line, request_id) {
+            return Some(result);
+        }
+        line.clear();
+    }
+    None
+}
+
+#[cfg(unix)]
+fn read_peer_line_until_unix<R: std::io::Read>(
+    reader: &mut std::io::BufReader<R>,
+    line: &mut String,
+    deadline: Instant,
+) -> std::io::Result<bool> {
+    use std::io::BufRead as _;
+    while Instant::now() < deadline {
+        match reader.read_line(line) {
+            Ok(0) => return Ok(false),
+            Ok(_) => return Ok(true),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "peer pause handshake timed out",
+    ))
+}
+
+#[cfg(windows)]
+fn transact_peer_pause_lease_windows(
+    path: &std::path::Path,
+    request_id: &str,
+    paused: bool,
+) -> Option<(bool, bool)> {
+    let deadline = Instant::now() + PEER_PAUSE_REQUEST_TIMEOUT;
+    let mut pipe =
+        crate::always::peer_transport_windows::connect(path, PEER_PAUSE_REQUEST_TIMEOUT).ok()?;
+    let hello = pipe.read_line_until(deadline).ok()??;
+    if !peer_supports_pause_lease(&hello) {
+        return None;
+    }
+    let mut command = peer_pause_lease_command(request_id, paused)?;
+    command.push('\n');
+    pipe.write_all(command.as_bytes(), deadline).ok()?;
+    for _ in 0..PEER_PAUSE_MAX_HANDSHAKE_LINES {
+        let line = pipe.read_line_until(deadline).ok()??;
+        if line.len() > PEER_PAUSE_MAX_LINE_BYTES {
+            return None;
+        }
+        if let Some(result) = peer_pause_lease_result(&line, request_id) {
+            return Some(result);
+        }
+    }
+    None
 }
 
 /// Apply startup arbitration without letting a Dev launch pause production.
@@ -616,21 +820,40 @@ pub fn pause_peer_when_ready() {
         }
         if pause::is_paused_by_peer() {
             spawn_peer_resume_watchdog();
-        } else if startup_peer_action(config::instance(), peer_is_live())
-            == StartupPeerAction::PausePeer
-            && set_peer_paused(true)
-        {
-            tracing::info!("peer_instance_paused_on_startup");
+        } else {
+            match startup_peer_action_when_ready(
+                config::instance(),
+                peer_is_live(),
+                pause::is_paused_by_peer(),
+            ) {
+                StartupPeerAction::PauseSelf => {
+                    pause::set_paused_by_peer(true);
+                    let (effective, changed) = pause::set_paused(true);
+                    event::global_broadcaster().master_pause_changed(true);
+                    if changed {
+                        if effective {
+                            pause::dictation_buffer_clear();
+                            event::global_broadcaster().paused();
+                        } else {
+                            event::global_broadcaster().resumed();
+                        }
+                    }
+                    spawn_peer_resume_watchdog();
+                    tracing::info!("dev_instance_stayed_passive_for_production");
+                }
+                StartupPeerAction::PausePeer if set_peer_paused(true) => {
+                    tracing::info!("peer_instance_paused_on_startup");
+                }
+                StartupPeerAction::PausePeer | StartupPeerAction::None => {}
+            }
         }
     });
 }
 
-/// Graceful-exit counterpart: if we paused the peer, release it. No-op
-/// unless `set_peer_paused(true)` previously succeeded, so a daemon that
-/// never touched the peer can't wrongly resume a user-paused peer.
+/// Graceful-exit counterpart: release only the lease we acquired and only
+/// through a correlated peer acknowledgement.
 pub fn resume_peer_on_exit() {
-    if WE_PAUSED_PEER.swap(false, std::sync::atomic::Ordering::Relaxed) {
-        let _ = set_peer_paused(false);
+    if WE_PAUSED_PEER_LEASE.lock().is_some() && set_peer_paused(false) {
         tracing::info!("peer_instance_resumed_on_exit");
     }
 }
@@ -1233,6 +1456,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn peer_pause_lease_requires_explicit_capability_negotiation() {
+        let capable = serde_json::json!({
+            "type": "Hello",
+            "data": {"version": 12, "capabilities": [event::PEER_PAUSE_LEASE_CAPABILITY]}
+        })
+        .to_string();
+        let legacy = serde_json::json!({"type": "Hello", "data": {"version": 12}}).to_string();
+
+        assert!(peer_supports_pause_lease(&capable));
+        assert!(!peer_supports_pause_lease(&legacy));
+        assert!(!peer_supports_pause_lease(r#"{"type":"ListeningStarted"}"#));
+    }
+
+    #[test]
+    fn peer_pause_lease_ack_must_match_request_id_and_schema() {
+        let matching = serde_json::json!({
+            "type": "PeerPauseLeaseResult",
+            "data": {"request_id": "request-a", "accepted": true, "lease_owned": true}
+        })
+        .to_string();
+        let stale = matching.replace("request-a", "request-b");
+        let malformed = serde_json::json!({
+            "type": "PeerPauseLeaseResult",
+            "data": {"request_id": "request-a", "accepted": true}
+        })
+        .to_string();
+
+        assert_eq!(
+            peer_pause_lease_result(&matching, "request-a"),
+            Some((true, true))
+        );
+        assert_eq!(peer_pause_lease_result(&stale, "request-a"), None);
+        assert_eq!(peer_pause_lease_result(&malformed, "request-a"), None);
+    }
+
+    #[test]
+    fn lost_pause_ack_keeps_a_retryable_id_without_claiming_success() {
+        let mut lease = None;
+        assert!(!record_peer_pause_attempt(&mut lease, "request-a", None));
+        assert_eq!(lease.as_deref(), Some("request-a"));
+
+        // A later matching response that says the peer is manually paused
+        // permits safe takeover but drops the uncertain release authority.
+        assert!(record_peer_pause_attempt(
+            &mut lease,
+            "request-a",
+            Some((true, false))
+        ));
+        assert_eq!(lease, None);
+    }
+
+    #[test]
     fn dev_startup_never_pauses_a_live_production_peer() {
         assert_eq!(
             startup_peer_action("dev", true),
@@ -1245,6 +1520,23 @@ mod tests {
         );
         assert_eq!(startup_peer_action("prod", false), StartupPeerAction::None);
         assert_eq!(startup_peer_action("smoke", true), StartupPeerAction::None);
+    }
+
+    #[test]
+    fn dev_startup_rechecks_prod_after_its_socket_becomes_ready() {
+        let initial = startup_peer_action("dev", false);
+        assert_eq!(initial, StartupPeerAction::None);
+
+        // Prod can appear after Dev's initial liveness check but before Dev's
+        // IPC socket is ready. Readiness must make the same safe decision.
+        assert_eq!(
+            startup_peer_action_when_ready("dev", true, false),
+            StartupPeerAction::PauseSelf
+        );
+        assert_eq!(
+            startup_peer_action_when_ready("dev", true, true),
+            StartupPeerAction::None
+        );
     }
 
     /// The 2026-09-29 leak safety net: the restart fires only when the

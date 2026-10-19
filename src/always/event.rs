@@ -51,6 +51,7 @@ static LAST_LOW_MIC_OVERLAY: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(||
 /// followed by final committed text. The existing `TranscriptChunk` /
 /// `TranscriptFinal` remain for non-streaming chunk-based transcription.
 pub const PROTOCOL_VERSION: u32 = 12;
+pub const PEER_PAUSE_LEASE_CAPABILITY: &str = "peer-pause-lease-v1";
 
 /// Unique identity of this compiled daemon artifact. Compared at startup to
 /// the identity recorded by a running daemon; this identifies binaries, not
@@ -103,6 +104,15 @@ pub enum DaemonEvent {
         /// Optional for compatibility with clients speaking to older daemons.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         build_id: Option<String>,
+        /// Optional feature negotiation. Missing on older v12 daemons.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
+    },
+    /// Correlated result for the cross-instance pause lease command.
+    PeerPauseLeaseResult {
+        request_id: String,
+        accepted: bool,
+        lease_owned: bool,
     },
     /// Ground truth about the daemon's global-shortcut event tap. The
     /// GUI's own IOHIDCheckAccess reflects the GUI's TCC attribution —
@@ -767,6 +777,12 @@ pub enum DaemonCommand {
         paused: bool,
         reason: Option<String>,
     },
+    /// Acquire/release an ownership-tagged pause on the other Always
+    /// instance. Peers must negotiate `PEER_PAUSE_LEASE_CAPABILITY` first.
+    PeerPauseLease {
+        request_id: String,
+        paused: bool,
+    },
     /// Cancel the active auto-enter countdown (e.g. Mac app saw a
     /// keystroke land in the focused app).
     CancelAutoEnterCountdown,
@@ -1181,6 +1197,7 @@ impl EventBroadcaster {
         self.send(DaemonEvent::Hello {
             version: PROTOCOL_VERSION,
             build_id: Some(BUILD_ID.to_string()),
+            capabilities: vec![PEER_PAUSE_LEASE_CAPABILITY.to_string()],
         });
     }
 
@@ -1369,6 +1386,7 @@ mod tests {
         let hello = serde_json::to_value(DaemonEvent::Hello {
             version: PROTOCOL_VERSION,
             build_id: Some(BUILD_ID.to_string()),
+            capabilities: vec![PEER_PAUSE_LEASE_CAPABILITY.to_string()],
         })
         .expect("hello serializes");
         assert!(hello["data"]["build_id"].is_string());
@@ -1378,7 +1396,29 @@ mod tests {
     fn hello_from_an_older_daemon_remains_decodable() {
         let hello: DaemonEvent = serde_json::from_str(r#"{"type":"Hello","data":{"version":12}}"#)
             .expect("older hello remains compatible");
-        assert!(matches!(hello, DaemonEvent::Hello { build_id: None, .. }));
+        assert!(matches!(
+            hello,
+            DaemonEvent::Hello {
+                build_id: None,
+                capabilities,
+                ..
+            } if capabilities.is_empty()
+        ));
+    }
+
+    #[test]
+    fn peer_pause_lease_command_is_correlated_and_decodable() {
+        let command = DaemonCommand::from_json_line(
+            r#"{"type":"PeerPauseLease","data":{"request_id":"lease-7","paused":true}}"#,
+        )
+        .expect("peer lease command parses");
+        assert!(matches!(
+            command,
+            DaemonCommand::PeerPauseLease {
+                request_id,
+                paused: true
+            } if request_id == "lease-7"
+        ));
     }
 
     #[test]
