@@ -1542,14 +1542,17 @@ seeds its state dir from production's db/voiceprint/vocabulary (one-time
 copy; afterwards they diverge).
 
 **Peer handoff.** The microphone is still singular — two live daemons would
-both transcribe and both paste. So whichever daemon starts last pauses its
-peer over the peer's UDS socket (`SetPaused{reason:"peer-instance"}`): the
-paused instance stops listening, no audio is transcribed or pasted. A
-paused-by-peer daemon runs a watchdog that self-resumes the moment the
-peer's socket dies (~1 s), covering SIGKILL where no cleanup runs;
-graceful exits resume the peer directly. A user pause/unpause of either
-instance always overrides the handoff — the watchdog stands down and the
-user's choice wins.
+both transcribe and both paste. Starting Dev while production is live keeps
+Dev passive: Dev pauses itself and watches production, without changing the
+production pause state. Starting production while Dev is live retains the
+production takeover behavior and pauses Dev over its UDS socket
+(`SetPaused{reason:"peer-instance"}`). A paused-by-peer daemon resumes when
+its peer socket dies (~1 s), covering SIGKILL where no exit cleanup runs;
+graceful exits also release a peer that this daemon paused. A user-requested
+Dev resume is an explicit takeover: it first pauses production and stays
+paused if that handoff cannot be confirmed. Explicit user pause/resume
+controls clear automatic standby ownership, so the watchdog does not undo a
+manual choice.
 
 **Commands.**
 

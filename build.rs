@@ -11,8 +11,10 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let sha = Command::new("git")
         .args(["rev-parse", "--short=12", "HEAD"])
+        .current_dir(&manifest_dir)
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -30,9 +32,10 @@ fn main() {
         .join(",");
     println!("cargo:rustc-env=ALWAYS_BUILD_ID={sha}-{features}-{build_nanos}");
 
-    // Re-run when HEAD moves.
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/refs/heads");
+    // Worktrees use a `.git` file pointing at a per-worktree gitdir; branch
+    // refs and packed refs live in the common gitdir. Watch both so a branch
+    // commit invalidates Cargo's cached build script in either layout.
+    watch_git_revision(&manifest_dir);
     // Refresh the embedded artifact identity when the daemon source changes.
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=swift");
@@ -77,6 +80,57 @@ fn main() {
         build_apple_stt_bridge();
         build_status_sound_bridge();
     }
+}
+
+fn watch_git_revision(manifest_dir: &Path) {
+    let dot_git = manifest_dir.join(".git");
+    println!("cargo:rerun-if-changed={}", dot_git.display());
+
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let Ok(contents) = std::fs::read_to_string(&dot_git) else {
+            return;
+        };
+        let Some(path) = contents.trim().strip_prefix("gitdir:") else {
+            return;
+        };
+        let path = PathBuf::from(path.trim());
+        if path.is_absolute() {
+            path
+        } else {
+            manifest_dir.join(path)
+        }
+    };
+    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        git_dir.join("packed-refs").display()
+    );
+
+    let common_dir = std::fs::read_to_string(git_dir.join("commondir"))
+        .ok()
+        .map(|path| {
+            let path = PathBuf::from(path.trim());
+            if path.is_absolute() {
+                path
+            } else {
+                git_dir.join(path)
+            }
+        })
+        .unwrap_or_else(|| git_dir.clone());
+    if let Ok(head) = std::fs::read_to_string(git_dir.join("HEAD"))
+        && let Some(reference) = head.trim().strip_prefix("ref:")
+    {
+        println!(
+            "cargo:rerun-if-changed={}",
+            common_dir.join(reference.trim()).display()
+        );
+    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        common_dir.join("packed-refs").display()
+    );
 }
 
 fn build_apple_intelligence_bridge() {

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
-use crate::always::{AlwaysConfig, config as always_config};
+use crate::always::{AlwaysConfig, config as always_config, event, pause};
 use crate::config;
 
 pub fn pid_path() -> PathBuf {
@@ -473,13 +473,13 @@ fn ipc_endpoint_live(sock: &std::path::Path) -> bool {
 // ── Dev/prod peer handoff ────────────────────────────────────────────────
 //
 // Two instances can coexist (`Always.app` prod, `Always Dev.app` dev) but
-// the machine has ONE microphone: two live daemons both transcribe and
-// both paste — the "double transcript" failure. So whichever daemon
-// starts last pauses its peer over the peer's UDS socket
-// (`SetPaused{reason:"peer-instance"}`), and a paused-by-peer daemon runs
-// a watchdog that self-resumes the moment the peer's socket dies — which
-// covers SIGKILL, where no exit cleanup runs. Graceful exits resume the
-// peer directly via `resume_peer_on_exit`.
+// the machine has ONE microphone. Production wins automatic startup
+// arbitration: when Dev starts beside a live Prod daemon, Dev pauses itself
+// without changing Prod's user preference. When Prod starts beside Dev, it
+// pauses Dev over the peer's UDS socket (`SetPaused{reason:"peer-instance"}`).
+// An explicit Dev resume requests a confirmed pause of Prod before taking
+// over. A paused-by-peer daemon watches its peer socket and resumes when the
+// peer dies; graceful exits also release a peer this process paused.
 
 /// The OTHER instance's UDS socket: prod↔dev.
 pub fn peer_socket_path() -> Option<PathBuf> {
@@ -523,6 +523,26 @@ pub fn peer_is_live() -> bool {
 
 static WE_PAUSED_PEER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupPeerAction {
+    None,
+    PauseSelf,
+    PausePeer,
+}
+
+fn startup_peer_action(instance: &str, peer_live: bool) -> StartupPeerAction {
+    if !peer_live {
+        return StartupPeerAction::None;
+    }
+    match instance {
+        // Dev is a passive candidate when production is already running.
+        // Never let a development launch change the user's production pause state.
+        "dev" => StartupPeerAction::PauseSelf,
+        "prod" => StartupPeerAction::PausePeer,
+        _ => StartupPeerAction::None,
+    }
+}
+
 /// Send `SetPaused{paused, reason:"peer-instance"}` to the peer daemon.
 /// Returns true when the command reached a live peer. Tracks
 /// `WE_PAUSED_PEER` so `resume_peer_on_exit` only fires when WE paused.
@@ -560,11 +580,32 @@ pub fn set_peer_paused(paused: bool) -> bool {
     false
 }
 
-/// Startup handshake: pause the peer instance so it stops transcribing the
-/// same mic input. Must run AFTER our own socket is live — the peer's
-/// resume watchdog polls it, so pausing before we're live would let the
-/// peer self-resume immediately.
+/// Apply startup arbitration without letting a Dev launch pause production.
+/// Dev's self-standby is applied immediately, before transcriber startup;
+/// peer requests are sent only after our socket is live so the peer's
+/// resume watchdog will not immediately undo the handoff.
 pub fn pause_peer_when_ready() {
+    // A dev launch must not take microphone ownership from production. Pause
+    // dev immediately when prod is already live, before transcriber startup;
+    // its watchdog will resume dev if production exits. Prod retains the
+    // existing handoff behavior when it starts after dev.
+    let pause_self =
+        startup_peer_action(config::instance(), peer_is_live()) == StartupPeerAction::PauseSelf;
+    if pause_self {
+        pause::set_paused_by_peer(true);
+        let (effective, changed) = pause::set_paused(true);
+        event::global_broadcaster().master_pause_changed(true);
+        if changed {
+            if effective {
+                pause::dictation_buffer_clear();
+                event::global_broadcaster().paused();
+            } else {
+                event::global_broadcaster().resumed();
+            }
+        }
+        tracing::info!("dev_instance_stayed_passive_for_production");
+    }
+
     std::thread::spawn(|| {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
@@ -573,7 +614,12 @@ pub fn pause_peer_when_ready() {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        if peer_is_live() && set_peer_paused(true) {
+        if pause::is_paused_by_peer() {
+            spawn_peer_resume_watchdog();
+        } else if startup_peer_action(config::instance(), peer_is_live())
+            == StartupPeerAction::PausePeer
+            && set_peer_paused(true)
+        {
             tracing::info!("peer_instance_paused_on_startup");
         }
     });
@@ -1185,6 +1231,21 @@ fn process_is_running(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dev_startup_never_pauses_a_live_production_peer() {
+        assert_eq!(
+            startup_peer_action("dev", true),
+            StartupPeerAction::PauseSelf
+        );
+        assert_eq!(startup_peer_action("dev", false), StartupPeerAction::None);
+        assert_eq!(
+            startup_peer_action("prod", true),
+            StartupPeerAction::PausePeer
+        );
+        assert_eq!(startup_peer_action("prod", false), StartupPeerAction::None);
+        assert_eq!(startup_peer_action("smoke", true), StartupPeerAction::None);
+    }
 
     /// The 2026-09-29 leak safety net: the restart fires only when the
     /// footprint is past the ceiling AND the daemon is not actively

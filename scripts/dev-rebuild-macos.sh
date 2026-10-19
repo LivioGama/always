@@ -239,9 +239,10 @@ if [ "$VERIFY_OK" != true ]; then
     exit 1
 fi
 
-# Belt-and-suspenders audit: prove production is still alive. Cheap check,
-# catches any future regression where a dev path accidentally kills prod.
-if ! pgrep -f "Always.app/Contents/MacOS/Always$" >/dev/null; then
+# Belt-and-suspenders audit: prove production is still alive. Match its
+# absolute executable path case-insensitively because the signed bundle's
+# executable is `always` on disk, and may be invoked with arguments.
+if ! pgrep -if '^/Applications/Always\.app/Contents/MacOS/always( |$)' >/dev/null; then
     echo "⚠️  production Always GUI is not running — nothing was killed by"
     echo "    this script, but prod won't come back on its own."
 fi

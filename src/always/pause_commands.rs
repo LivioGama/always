@@ -83,9 +83,34 @@ fn announce_effective(effective: bool, changed: bool) {
     }
 }
 
+fn should_pause_peer_before_resume(instance: &str, peer_live: bool) -> bool {
+    instance == "dev" && peer_live
+}
+
+fn dev_can_take_over_microphone() -> bool {
+    !should_pause_peer_before_resume(
+        crate::config::instance(),
+        crate::always::daemon::peer_is_live(),
+    ) || crate::always::daemon::set_peer_paused(true)
+}
+
 /// Explicit "resume listening" (idle pill Play, `Resume` UDS command).
 /// Idempotent: never pauses, whatever the current state.
 pub fn resume() -> Outcome {
+    // An explicit Dev resume is a deliberate takeover. Pause production
+    // first, and keep Dev passive if the live peer cannot be reached.
+    if !dev_can_take_over_microphone() {
+        tracing::warn!("dev_takeover_blocked_peer_pause_failed");
+        let effective = pause::is_paused();
+        announce_effective(effective, false);
+        return Outcome {
+            effective,
+            changed: false,
+            master: pause::is_master_paused(),
+        };
+    }
+    // An explicit user action takes ownership from startup handoff policy.
+    pause::set_paused_by_peer(false);
     let (effective, changed, cleared) = clear_overridable_sources(false);
     let master = pause::is_master_paused();
     global_broadcaster().master_pause_changed(master);
@@ -102,6 +127,9 @@ pub fn resume() -> Outcome {
 /// anything a user may override is pausing, the press resumes — the
 /// user sees "paused" and means "resume". Otherwise it sets master.
 pub fn toggle_global() -> Outcome {
+    // A manual toggle is an explicit choice, even when a peer instance put
+    // this daemon into passive standby.
+    pause::set_paused_by_peer(false);
     if pause::is_user_resumable_pause() {
         return resume();
     }
@@ -240,6 +268,14 @@ mod tests {
         g
     }
 
+    #[test]
+    fn only_explicit_dev_resume_requires_a_live_peer_pause() {
+        assert!(should_pause_peer_before_resume("dev", true));
+        assert!(!should_pause_peer_before_resume("dev", false));
+        assert!(!should_pause_peer_before_resume("prod", true));
+        assert!(!should_pause_peer_before_resume("smoke", true));
+    }
+
     fn drain(rx: &mut tokio::sync::broadcast::Receiver<DaemonEvent>) -> Vec<DaemonEvent> {
         let mut v = Vec::new();
         while let Ok(e) = rx.try_recv() {
@@ -276,6 +312,19 @@ mod tests {
             evs.iter()
                 .any(|e| matches!(e, DaemonEvent::IdleAutoResumed))
         );
+    }
+
+    #[test]
+    fn explicit_resume_takes_over_peer_standby() {
+        let _g = setup(true);
+        pause::set_paused(true);
+        pause::set_paused_by_peer(true);
+        assert!(pause::is_paused_by_peer());
+
+        let out = resume();
+
+        assert!(!out.effective);
+        assert!(!pause::is_paused_by_peer());
     }
 
     /// The same press through the legacy TogglePause path (the released

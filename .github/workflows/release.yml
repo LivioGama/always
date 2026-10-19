@@ -10,9 +10,9 @@ name: Release
 #   test     the ci.yml test suite on macOS
 #   assets   release-build.yml: macOS arm64 / Linux x86_64+aarch64 / Windows
 #            builds, checksums, build-provenance attestation, minisign
-#            signatures (*.minisig) for every archive/package and the two
-#            installer scripts (secret ALWAYS_MINISIGN_SECRET_KEY; a tag run
-#            without it fails, a dry run without it skips signing)
+#            signatures (*.minisig) for every archive/package/GUI installer
+#            and both CLI installer scripts (secret ALWAYS_MINISIGN_SECRET_KEY;
+#            a tag run without it fails, a dry run without it skips signing)
 #   release  publishes a NON-draft GitHub Release; body = the CHANGELOG section
 #   smoke    installs from the published release on macOS, Linux and Windows,
 #            and checks every *.minisig against resources/update-signing.pub
@@ -170,9 +170,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # The files release-build.yml built and attested: archives, packages,
-      # their .sha256, install.sh, install.ps1, the provenance bundle and the
-      # minisign signatures (*.minisig) the updater verifies.
+      # The files release-build.yml built and attested: archives, CLI packages,
+      # GUI installers, their .sha256 files, install.sh, install.ps1, the
+      # provenance bundle and minisign signatures (*.minisig) the updater verifies.
       - name: Download the release assets
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
@@ -211,6 +211,8 @@ jobs:
             assets/always-*.zip
             assets/always-*.deb
             assets/always-*.rpm
+            assets/always-*.AppImage
+            assets/always-*-gui-setup.exe
             assets/always-*.sha256
             assets/always-*.intoto.jsonl
             assets/install.sh
@@ -227,8 +229,6 @@ jobs:
     # `release` is skipped on a dry run; run anyway unless something failed.
     if: ${{ !failure() && !cancelled() }}
     runs-on: ${{ matrix.os }}
-    # A branch dry run has no Windows asset while the Windows build is broken.
-    continue-on-error: ${{ matrix.kind == 'windows' && github.ref_type != 'tag' }}
     strategy:
       # One broken platform must not hide the state of the others.
       fail-fast: false
@@ -291,8 +291,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/published" && cd "$RUNNER_TEMP/published"
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
             --pattern 'install.sh' --pattern 'install.ps1' --pattern '*.intoto.jsonl' --pattern '*.sha256' --pattern '*.minisig' \
-            --pattern 'always-*.tar.gz' --pattern 'always-*.zip' --pattern 'always-*.deb' --pattern 'always-*.rpm'
-          for subject in always-*.tar.gz always-*.zip always-*.deb always-*.rpm install.sh install.ps1; do
+            --pattern 'always-*.tar.gz' --pattern 'always-*.zip' --pattern 'always-*.deb' --pattern 'always-*.rpm' \
+            --pattern 'always-*.AppImage' --pattern 'always-*-gui-setup.exe'
+          for subject in always-*.tar.gz always-*.zip always-*.deb always-*.rpm always-*.AppImage always-*-gui-setup.exe install.sh install.ps1; do
             gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-build.yml" \
               --source-ref "$GITHUB_REF" --deny-self-hosted-runners
@@ -383,13 +384,14 @@ jobs:
             New-Item -ItemType Directory -Force -Path $dir | Out-Null
             gh release download $env:TAG --repo $env:GITHUB_REPOSITORY --dir $dir `
               --pattern 'install.ps1' --pattern 'install.ps1.minisig' `
-              --pattern 'always-*-x86_64-pc-windows-msvc.zip' --pattern 'always-*-x86_64-pc-windows-msvc.zip.minisig'
+              --pattern 'always-*-x86_64-pc-windows-msvc.zip' --pattern 'always-*-x86_64-pc-windows-msvc.zip.minisig' `
+              --pattern 'always-*-x86_64-pc-windows-msvc-gui-setup.exe' --pattern 'always-*-x86_64-pc-windows-msvc-gui-setup.exe.minisig'
             if ($LASTEXITCODE -ne 0) { throw 'gh release download failed' }
           } else {
             $dir = (Resolve-Path assets).Path
           }
           $sigs = @(Get-ChildItem -LiteralPath $dir -Filter '*.minisig' |
-            Where-Object { $_.Name -eq 'install.ps1.minisig' -or $_.Name -like 'always-*-x86_64-pc-windows-msvc.zip.minisig' })
+            Where-Object { $_.Name -eq 'install.ps1.minisig' -or $_.Name -like 'always-*-x86_64-pc-windows-msvc.zip.minisig' -or $_.Name -like 'always-*-x86_64-pc-windows-msvc-gui-setup.exe.minisig' })
           if ($sigs.Count -eq 0) {
             if ($env:IS_RELEASE -eq 'true') { throw 'the published release has no .minisig files' }
             Write-Host '::notice::no .minisig files in this dry run (signing was skipped); nothing to verify'
@@ -479,3 +481,164 @@ jobs:
           }
           & (Join-Path $env:ALWAYS_INSTALL_DIR 'always.exe') --version
           if ($LASTEXITCODE -ne 0) { throw 'installed always.exe failed to run' }
+
+  # Install and launch the native GUI packages separately from the CLI
+  # installer checks above. This proves each packaged UI can resolve and start
+  # its colocated/resource daemon on its target operating system.
+  smoke-gui:
+    name: GUI install ${{ matrix.name }}
+    needs: [verify, assets, release]
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64 deb and AppImage
+            os: ubuntu-24.04
+            kind: linux
+            target: x86_64-unknown-linux-gnu
+          - name: Linux aarch64 deb and AppImage
+            os: ubuntu-24.04-arm
+            kind: linux
+            target: aarch64-unknown-linux-gnu
+          - name: Windows x86_64 NSIS
+            os: windows-latest
+            kind: windows
+            target: x86_64-pc-windows-msvc
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.verify.outputs.tag }}
+      IS_RELEASE: ${{ github.ref_type == 'tag' }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download GUI packages (dry run)
+        if: env.IS_RELEASE != 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-assets
+          path: assets
+
+      - name: Download GUI packages (release)
+        if: env.IS_RELEASE == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets \
+            --pattern "always-*-${{ matrix.target }}-gui.deb" \
+            --pattern "always-*-${{ matrix.target }}-gui.deb.sha256" \
+            --pattern "always-*-${{ matrix.target }}-gui.AppImage" \
+            --pattern "always-*-${{ matrix.target }}-gui.AppImage.sha256" \
+            --pattern "always-*-${{ matrix.target }}-gui-setup.exe" \
+            --pattern "always-*-${{ matrix.target }}-gui-setup.exe.sha256"
+
+      - name: Install GUI runtime dependencies (Linux)
+        if: matrix.kind == 'linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-0 libayatana-appindicator3-1 xvfb xauth
+
+      - name: Install and launch Debian GUI package
+        if: matrix.kind == 'linux'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          debs=(assets/always-"$TAG"-"$TARGET"-gui.deb)
+          [ "${#debs[@]}" -eq 1 ] || { echo "::error::expected one GUI deb, found ${#debs[@]}"; exit 1; }
+          cd assets
+          sha256sum -c "${debs[0]##*/}.sha256"
+          sudo apt-get install -y "./${debs[0]##*/}"
+          daemon=/usr/lib/always-gui/daemon/always
+          test -x "$daemon"
+          "$daemon" --version
+          xvfb-run -a /usr/bin/always-tauri >"$RUNNER_TEMP/always-deb-gui.log" 2>&1 &
+          xvfb_pid=$!
+          gui_app_pid=
+          for _ in $(seq 1 20); do
+            kill -0 "$xvfb_pid" 2>/dev/null || { cat "$RUNNER_TEMP/always-deb-gui.log"; exit 1; }
+            gui_app_pid="$(pgrep -x always-tauri | sed -n '1p' || true)"
+            if [ -n "$gui_app_pid" ] && pgrep -f '^/usr/lib/always-gui/daemon/always([[:space:]]|$)' >/dev/null; then break; fi
+            sleep 1
+          done
+          kill -0 "$gui_app_pid"
+          pgrep -f '^/usr/lib/always-gui/daemon/always([[:space:]]|$)' >/dev/null
+          gui_path="$(readlink -f "/proc/$gui_app_pid/exe")"
+          [ "$gui_path" = /usr/bin/always-tauri ]
+          daemon_pids="$(pgrep -f '^/usr/lib/always-gui/daemon/always([[:space:]]|$)')"
+          kill "$xvfb_pid" "$gui_app_pid" 2>/dev/null || true
+          while IFS= read -r daemon_pid; do kill "$daemon_pid" 2>/dev/null || true; done <<< "$daemon_pids"
+          wait "$xvfb_pid" 2>/dev/null || true
+
+      - name: Launch packaged AppImage and its bundled daemon
+        if: matrix.kind == 'linux'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          images=(assets/always-"$TAG"-"$TARGET"-gui.AppImage)
+          [ "${#images[@]}" -eq 1 ] || { echo "::error::expected one GUI AppImage, found ${#images[@]}"; exit 1; }
+          cd assets
+          image="${images[0]##*/}"
+          sha256sum -c "$image.sha256"
+          chmod +x "$image"
+          APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a "./$image" >"$RUNNER_TEMP/always-appimage-gui.log" 2>&1 &
+          xvfb_pid=$!
+          gui_app_pid=
+          daemon_pid=
+          for _ in $(seq 1 20); do
+            kill -0 "$xvfb_pid" 2>/dev/null || { cat "$RUNNER_TEMP/always-appimage-gui.log"; exit 1; }
+            gui_app_pid="$(pgrep -x always-tauri | sed -n '1p' || true)"
+            daemon_pid="$(pgrep -f '^/.*/daemon/always([[:space:]]|$)' | sed -n '1p' || true)"
+            if [ -n "$gui_app_pid" ] && [ -n "$daemon_pid" ]; then break; fi
+            sleep 1
+          done
+          kill -0 "$gui_app_pid"
+          gui_path="$(readlink -f "/proc/$gui_app_pid/exe")"
+          case "$gui_path" in */always-tauri) ;; *) echo "::error::unexpected AppImage GUI path $gui_path"; exit 1 ;; esac
+          daemon_path="$(readlink -f "/proc/$daemon_pid/exe")"
+          case "$daemon_path" in */daemon/always) ;; *) echo "::error::unexpected bundled daemon path $daemon_path"; exit 1 ;; esac
+          case "$daemon_path" in /usr/lib/always-gui/daemon/always) echo "::error::AppImage reused the Debian daemon"; exit 1 ;; esac
+          kill "$xvfb_pid" "$gui_app_pid" "$daemon_pid" 2>/dev/null || true
+          wait "$xvfb_pid" 2>/dev/null || true
+
+      - name: Install and launch NSIS GUI package
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installerPattern = "always-$env:TAG-$env:TARGET-gui-setup.exe"
+          $installers = @(Get-ChildItem assets -Filter $installerPattern)
+          if ($installers.Count -ne 1) { throw "Expected one GUI installer, found $($installers.Count)" }
+          $hashLine = (Get-Content -Raw "$($installers[0].FullName).sha256").Trim()
+          $expectedHash = ($hashLine -split '\s+')[0].ToLowerInvariant()
+          $actualHash = (Get-FileHash -Algorithm SHA256 $installers[0].FullName).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) { throw "GUI installer checksum mismatch: $actualHash" }
+          $installRoot = Join-Path $env:RUNNER_TEMP 'AlwaysGui'
+          $install = Start-Process -FilePath $installers[0].FullName -ArgumentList @('/S', "/D=$installRoot") -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "NSIS installer exited $($install.ExitCode)" }
+          $gui = Join-Path $installRoot 'always-tauri.exe'
+          $daemon = Join-Path $installRoot 'resources\daemon\always.exe'
+          if (-not (Test-Path -LiteralPath $gui -PathType Leaf)) { throw "GUI executable missing: $gui" }
+          if (-not (Test-Path -LiteralPath $daemon -PathType Leaf)) { throw "Bundled daemon missing: $daemon" }
+          & $daemon --version
+          if ($LASTEXITCODE -ne 0) { throw 'bundled daemon failed to run' }
+          $app = Start-Process -FilePath $gui -PassThru
+          Start-Sleep -Seconds 10
+          if ($app.HasExited) { throw "GUI exited early with code $($app.ExitCode)" }
+          $daemonProcess = $null
+          for ($i = 0; $i -lt 20; $i++) {
+            $daemonProcess = Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -ieq $daemon } | Select-Object -First 1
+            if ($daemonProcess) { break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $daemonProcess) { throw "GUI did not start bundled daemon $daemon" }
+          Stop-Process -Id $app.Id -Force
+          Stop-Process -Id $daemonProcess.ProcessId -Force

@@ -182,34 +182,23 @@ jobs:
     name: Tauri GUI (check)
     needs: changes
     if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.base_ref == 'main' || needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
-    # Only runs `tsc` on always-gui (pure JS toolchain, platform-independent
-    # lockfile) — no Rust or macOS needed, so use the cheaper Linux runner.
+    # Builds the production frontend with Bun and TypeScript 7's native
+    # compiler; no Rust or macOS is needed, so use the cheaper Linux runner.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 20
-
-      - name: Cache npm dependencies
-        uses: actions/cache@v4
-        with:
-          path: always-gui/node_modules
-          key: ${{ runner.os }}-npm-${{ hashFiles('always-gui/package-lock.json', 'always-gui/yarn.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
 
       - name: Install frontend deps
         working-directory: always-gui
-        run: npm ci --ignore-scripts || npm install --ignore-scripts
+        run: bun install --frozen-lockfile
 
-      # Tauri v2 CLI — check-only (no binary bundling).  Builds the Vite
-      # frontend so we catch TS/TSX errors, missing imports, etc.
-      - name: TypeScript check (always-gui)
+      # Tauri v2 frontend build: typecheck and compile the actual webview assets.
+      - name: Build frontend (always-gui)
         working-directory: always-gui
-        run: npx tsc --noEmit
+        run: bun run build
 
   # ─── Docker (Linux CLI build + test) ─────────────────────────────────────
 

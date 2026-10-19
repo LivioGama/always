@@ -1,0 +1,9 @@
+{
+  "productName": "Always GUI",
+  "bundle": {
+    "targets": ["deb", "appimage"],
+    "resources": {
+      "bundle/daemon/always": "daemon/always"
+    }
+  }
+}
