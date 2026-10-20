@@ -102,6 +102,12 @@ enum Commands {
         #[command(subcommand)]
         action: VoiceAction,
     },
+    /// Local speech models: list, download, select (Settings → Models
+    /// without the Settings app)
+    Model {
+        #[command(subcommand)]
+        action: cli::ModelAction,
+    },
     /// View and manage Always logs
     Logs {
         #[command(flatten)]
@@ -258,6 +264,7 @@ fn main() -> Result<()> {
         Some(Commands::Voice { action }) => handle_voice(action),
         Some(Commands::TogglePause) => handle_toggle_pause(),
         Some(Commands::ToggleAutoEnter) => handle_toggle_auto_enter(),
+        Some(Commands::Model { action }) => cli::handle_model(action),
         Some(Commands::Logs { args }) => cli::handle_logs(args),
         Some(Commands::Update { check }) => {
             let code = cli::update::run(check)?;

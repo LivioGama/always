@@ -820,6 +820,13 @@ offline; the cloud backend is faster to start and needs an API key.
   and Settings shows “No model selected” with setup guidance. A saved local
   selection takes precedence. A failed startup load reports its error and
   returns to `none`, rather than showing an unavailable backend as active.
+- Installs without the Settings app (the Linux tarball, headless machines) use
+  `always model list | download <id> | use <id>`, which send the panel's own
+  daemon commands (`ListModels`, `DownloadModel`, `SetActiveTranscriber`).
+  `download` returns once the catalogue shows the model installed and
+  verified; `use` once the daemon names that backend as running. Both exit
+  non-zero on the daemon's failure events, and `use` rejects a malformed id
+  before sending it (the daemon would only log it and never answer).
 - A switch loads the new engine before the config names it, and never under
   the config lock the main loop reads, so a slow load does not block dictation.
   Engine rebuilds (a switch, a language change) run one at a time.
