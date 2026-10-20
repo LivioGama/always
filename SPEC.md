@@ -94,8 +94,17 @@ the selected device's supported sample rate and channel layout to the pipeline's
 16 kHz mono frames; Linux exposes the capture device through ALSA, including
 PipeWire/PulseAudio ALSA compatibility layers. Linux uses `wl-copy`/`wl-paste`
 for clipboard access on Wayland when installed, falling back to `xclip`, and
-uses `xclip` on X11. It simulates paste with `ydotool` on Wayland when installed,
-falling back to `xdotool`; X11 uses `xdotool`. Linux global
+uses `xclip` on X11. On Wayland it sends the paste chord with `wtype` (the
+virtual-keyboard protocol of wlroots compositors such as Hyprland and Sway; no
+daemon or `/dev/uinput` access needed), then `ydotool` (needs `ydotoold`), then
+`xdotool` (XWayland windows only); an injector that exits non-zero hands over to
+the next. `ydotool` is driven with raw evdev keycodes
+(`ydotool key -d 3 29:1 47:1 47:0 29:0`): ydotool 1.0 rejects key names and
+exits 0 while doing so, which until 2026-10-20 meant nothing was pasted on
+Wayland. Terminals receive Ctrl+Shift+V instead of Ctrl+V — on X11 from the
+active window's class, on Hyprland from `hyprctl activewindow` (class or process
+name); other Wayland compositors offer no portable query and receive Ctrl+V.
+X11 uses `xdotool`. Linux global
 shortcuts are available in X11 sessions; Wayland compositors do not let the
 daemon observe global key events, so users there control pause and auto-enter
 through the CLI.
