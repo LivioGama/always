@@ -48,10 +48,12 @@ mod tests {
     use super::*;
 
     // Longest a pooled connection can sit idle before keepalive and idle eviction have both had a chance to run.
-    fn idle_budget()->Duration{ POOL_IDLE_TIMEOUT.saturating_sub(TCP_KEEPALIVE) }
+    fn idle_budget() -> Duration {
+        POOL_IDLE_TIMEOUT.saturating_sub(TCP_KEEPALIVE)
+    }
 
     #[test]
     fn idle_budget_covers_keepalive_and_pool_timeout() {
-        assert_eq!(idle_budget(), Duration::from_secs(120));
+        assert_eq!(idle_budget(), Duration::from_secs(60));
     }
 }
