@@ -387,6 +387,7 @@ export function useDaemonState() {
           adaptive_silence: prefs.adaptive_silence,
           audible_status_sound: prefs.audible_status_sound,
           stt_live_preview: prefs.stt_live_preview,
+          live_typing: prefs.live_typing,
         },
       }),
     reloadShortcuts: () => cmd({ type: "ReloadShortcuts" }),

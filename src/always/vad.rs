@@ -948,6 +948,28 @@ fn preview_cadence(
     None
 }
 
+/// Live typing wants words on screen within about a second of being said:
+/// local engines (≈10× real time on a laptop CPU) preview at least this
+/// often while it is on. Cloud cadences are left alone (API round trips).
+const LIVE_TYPING_INTERVAL_MS: u64 = 350;
+const LIVE_TYPING_MIN_NEW_SAMPLES: usize = 4_000;
+
+fn live_typing_cadence(
+    mut c: PreviewCadence,
+    live_typing: bool,
+    local_engine: bool,
+) -> PreviewCadence {
+    if live_typing {
+        // The typer needs committed chunks in front of the open speech.
+        c.prefix_settled_chunks = true;
+        if local_engine {
+            c.interval_ms = c.interval_ms.min(LIVE_TYPING_INTERVAL_MS);
+            c.min_new_samples = c.min_new_samples.min(LIVE_TYPING_MIN_NEW_SAMPLES);
+        }
+    }
+    c
+}
+
 /// StateMonitor replaces its partial transcript on every event, so streaming
 /// producers must send the cumulative text rather than the latest chunk only.
 fn append_streaming_preview(accumulated: &mut String, chunk: &str) -> bool {
@@ -1110,6 +1132,10 @@ fn record_with_local_vad(
     rt: &tokio::runtime::Handle,
 ) -> Result<RecordResult> {
     let silence_frames = normal_silence_frames(cfg);
+    // Live typing (opt-in): the session opens at voice onset; previews
+    // carry its generation so they can only type into this utterance.
+    let live_typing = crate::always::live_type::enabled(cfg.live_typing);
+    let mut live_generation = 0u64;
     // Two distinct timeouts:
     // - `max_pre_voice_frames`: hard cap on the initial wait for voice
     //   onset. Uses `cfg.timeout_secs` (default 30s) so a stale recorder
@@ -1861,6 +1887,9 @@ fn record_with_local_vad(
                             audio_delivery_lag_ms: frame_captured_at.elapsed().as_millis() as u64,
                         });
                         voice_logged = true;
+                        if live_typing {
+                            live_generation = crate::always::live_type::begin(cfg.localization);
+                        }
 
                         // Warn if energy is barely above threshold (within 20% margin)
                         // Use the already-calculated frame_energy to avoid redundant computation
@@ -2046,7 +2075,9 @@ fn record_with_local_vad(
                     cfg.transcriber_backend.is_local(),
                     cfg.transcriber_backend.is_apple(),
                     cfg.stt_live_preview,
-                ) && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
+                )
+                .map(|c| live_typing_cadence(c, live_typing, cfg.transcriber_backend.is_local()))
+                    && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
                     && speech_samples.len() >= CONSUME_STREAM_MIN_SAMPLES
                     && committed_samples + speech_samples.len()
                         >= samples_at_last_preview + cadence.min_new_samples
@@ -2077,6 +2108,10 @@ fn record_with_local_vad(
                     } else {
                         None
                     };
+                    // Live typing needs the whole sentence: committed chunks
+                    // + open speech. While a chunk is in flight that is
+                    // unknown (`settled_prefix` None), so nothing is typed.
+                    let live = live_typing.then_some((live_generation, !chunker.is_empty()));
                     let transcriber_for_preview = Arc::clone(transcriber);
                     let rt_for_preview = rt.clone();
                     let flag = Arc::clone(&preview_pending);
@@ -2109,11 +2144,22 @@ fn record_with_local_vad(
                             },
                         ));
                         match outcome {
-                            Ok(Ok(result)) => tracing::info!(
-                                chars = result.text.len(),
-                                preview_ms = preview_started.elapsed().as_millis() as u64,
-                                "live_preview_sent"
-                            ),
+                            Ok(Ok(result)) => {
+                                tracing::info!(
+                                    chars = result.text.len(),
+                                    preview_ms = preview_started.elapsed().as_millis() as u64,
+                                    "live_preview_sent"
+                                );
+                                if let Some((generation, chunks_present)) = live
+                                    && !(chunks_present && settled_prefix.is_none())
+                                {
+                                    crate::always::live_type::preview(
+                                        generation,
+                                        settled_prefix.as_deref(),
+                                        &result.text,
+                                    );
+                                }
+                            }
                             Ok(Err(error)) => {
                                 tracing::warn!(error = ?error, "streaming_preview_failed")
                             }

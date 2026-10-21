@@ -138,6 +138,8 @@ impl LivePreview {
             let b = crate::always::event::global_broadcaster();
             if verified {
                 b.transcription_interim(text.to_string());
+                // Live typing (opt-in): only verified previews are typed.
+                crate::always::live_type::preview_latest(text);
             } else {
                 b.transcription_interim_pending(text.to_string());
             }

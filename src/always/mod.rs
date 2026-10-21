@@ -32,6 +32,7 @@ pub mod keyboard;
 pub mod keyring;
 pub mod level_meter;
 pub mod live_preview;
+pub mod live_type;
 pub mod localization;
 pub mod log;
 pub mod mic_monitor;

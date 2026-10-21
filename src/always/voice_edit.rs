@@ -183,7 +183,7 @@ pub fn note_user_input() {
     st.user_input_at = Some(now);
 }
 
-fn mark_self_post() {
+pub(crate) fn mark_self_post() {
     STATE.lock().self_post_until = Some(Instant::now() + SELF_POST_GRACE);
 }
 
@@ -1480,6 +1480,7 @@ pub fn replace_target(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn field(v: &str) -> Field {

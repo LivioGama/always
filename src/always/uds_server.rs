@@ -934,6 +934,7 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             adaptive_silence,
             audible_status_sound,
             stt_live_preview,
+            live_typing,
         } => {
             apply_runtime_preferences(
                 ctx,
@@ -945,6 +946,7 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                 adaptive_silence,
                 audible_status_sound,
                 stt_live_preview,
+                live_typing,
             );
         }
         DaemonCommand::ApproveCorrection { id } => handle_approve_correction(&id),
@@ -1608,6 +1610,7 @@ fn apply_runtime_preferences(
     adaptive_silence: Option<bool>,
     audible_status_sound: Option<String>,
     stt_live_preview: Option<bool>,
+    live_typing: Option<bool>,
 ) {
     let mut cfg = ctx.cfg.write();
     cfg.auto_enter_delay_ms = auto_enter_delay_ms.min(60_000);
@@ -1631,6 +1634,9 @@ fn apply_runtime_preferences(
     if let Some(live_preview) = stt_live_preview {
         cfg.stt_live_preview = live_preview;
     }
+    if let Some(live_typing) = live_typing {
+        cfg.live_typing = live_typing;
+    }
     tracing::info!(
         auto_enter_delay_ms = cfg.auto_enter_delay_ms,
         energy_threshold = cfg.energy_threshold,
@@ -1640,6 +1646,7 @@ fn apply_runtime_preferences(
         adaptive_silence = cfg.adaptive_silence_enabled,
         audible_status_sound = cfg.audible_status_sound.as_str(),
         stt_live_preview = cfg.stt_live_preview,
+        live_typing = cfg.live_typing,
         "uds_apply_runtime_preferences"
     );
 }

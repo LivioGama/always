@@ -99,6 +99,9 @@ pub struct Preferences {
     /// `always config set update_check false`; `ALWAYS_UPDATE_CHECK=0` also
     /// disables it. Explicit `always update` / `CheckForUpdates` ignore it.
     pub update_check: Option<bool>,
+    /// Live typing (Linux): words are typed while the user speaks and the
+    /// final transcript corrects them (SPEC §6.1). NULL = off.
+    pub live_typing: Option<bool>,
 }
 
 pub fn open() -> Result<Connection> {
@@ -397,6 +400,13 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN update_check INTEGER;")?;
     }
 
+    let has_live_typing = conn
+        .prepare("SELECT live_typing FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_live_typing {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN live_typing INTEGER;")?;
+    }
+
     encode_plaintext_groq_key(conn)?;
 
     Ok(())
@@ -428,7 +438,7 @@ fn encode_plaintext_groq_key(conn: &Connection) -> Result<()> {
 
 pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
     let mut stmt = conn.prepare(
-        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream, stt_adaptive_silence, speaker_gate_enabled, speaker_gate_threshold, audible_status_sound, stt_live_preview, auto_learn_corrections, correction_model, postprocess_provider, mic_conflict_exclusion_bundles, postprocess_mode, capture_aec, foreign_speech_confidence_enforce, update_check FROM preferences WHERE id = 1",
+        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream, stt_adaptive_silence, speaker_gate_enabled, speaker_gate_threshold, audible_status_sound, stt_live_preview, auto_learn_corrections, correction_model, postprocess_provider, mic_conflict_exclusion_bundles, postprocess_mode, capture_aec, foreign_speech_confidence_enforce, update_check, live_typing FROM preferences WHERE id = 1",
     )?;
     let result = stmt.query_row([], |row| {
         Ok(Preferences {
@@ -471,6 +481,7 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             capture_aec: row.get::<_, Option<i64>>(36)?.map(|v| v != 0),
             foreign_speech_confidence_enforce: row.get::<_, Option<i64>>(37)?.map(|v| v != 0),
             update_check: row.get::<_, Option<i64>>(38)?.map(|v| v != 0),
+            live_typing: row.get::<_, Option<i64>>(39)?.map(|v| v != 0),
         })
     });
     match result {
@@ -525,6 +536,7 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "capture_aec",
         "foreign_speech_confidence_enforce",
         "update_check",
+        "live_typing",
     ];
     if !valid_keys.contains(&key) {
         anyhow::bail!(
@@ -609,6 +621,7 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         | "capture_aec"
         | "foreign_speech_confidence_enforce"
         | "update_check"
+        | "live_typing"
         | "speaker_gate_enabled" => {
             if !matches!(value, "true" | "false" | "1" | "0") {
                 anyhow::bail!("{key} must be one of: true, false, 1, 0");
@@ -710,6 +723,7 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         | "capture_aec"
         | "foreign_speech_confidence_enforce"
         | "update_check"
+        | "live_typing"
         | "speaker_gate_enabled" => {
             if matches!(value, "true" | "1") {
                 "1".to_string()

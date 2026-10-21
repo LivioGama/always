@@ -268,6 +268,8 @@ pub enum DaemonCommand {
         audible_status_sound: Option<String>,
         #[serde(default)]
         stt_live_preview: Option<bool>,
+        #[serde(default)]
+        live_typing: Option<bool>,
     },
     ApproveCorrection {
         id: String,

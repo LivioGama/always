@@ -490,6 +490,7 @@ fn handle_config(action: ConfigAction) -> Result<()> {
             );
             println!("capture_aec: {}", prefs.capture_aec.unwrap_or(false));
             println!("update_check: {}", prefs.update_check.unwrap_or(true));
+            println!("live_typing: {}", prefs.live_typing.unwrap_or(false));
             #[cfg(target_os = "macos")]
             println!(
                 "apple_intelligence_available: {}",
