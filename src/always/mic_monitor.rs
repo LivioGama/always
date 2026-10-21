@@ -982,9 +982,13 @@ use anyhow::Context;
 #[cfg(target_os = "linux")]
 impl MicrophoneMonitor {
     fn check_microphone_usage_linux(&self) -> Result<bool> {
-        // Method 1: Check PulseAudio/PipeWire sources
-        if let Ok(true) = self.check_pulseaudio_sources() {
-            return Ok(true);
+        // Method 1: Check PulseAudio/PipeWire sources. When the sound server
+        // answers, its answer is final: falling through to the process-name
+        // guess below on a "no" meant any running browser (chrome_crashpad,
+        // firefox) counted as a microphone user, so Always paused at every
+        // start and never resumed after a call.
+        if let Ok(in_use) = self.check_pulseaudio_sources() {
+            return Ok(in_use);
         }
 
         // Method 2: Check /proc/asound/cards for active audio
@@ -1017,7 +1021,7 @@ impl MicrophoneMonitor {
             _ => {}
         }
 
-        Ok(false)
+        anyhow::bail!("pactl unavailable")
     }
 
     fn check_alsa_devices(&self) -> Result<bool> {
