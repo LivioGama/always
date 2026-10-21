@@ -716,10 +716,26 @@ pub fn press_return() -> Result<()> {
     win32::press_return()
 }
 
+/// Auto-Enter's Return. On Wayland it uses the paste path's injectors
+/// (`xdotool` reaches XWayland windows only, so Return never arrived in
+/// native Wayland apps — terminals included); a failing one falls through.
 #[cfg(target_os = "linux")]
 pub fn press_return() -> Result<()> {
     if no_paste_env() {
         return Ok(());
+    }
+    if is_wayland_session() {
+        for (bin, _, enter_args) in wayland_injectors(false) {
+            if !which_present(bin) {
+                continue;
+            }
+            match run_injector(bin, &enter_args) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    tracing::warn!(injector = bin, error = %e, "wayland_return_injector_failed")
+                }
+            }
+        }
     }
     post_xdotool_key(["key", "--clearmodifiers", "Return"])
 }
