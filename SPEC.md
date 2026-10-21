@@ -598,7 +598,10 @@ and swaps the live keyboard listener's combo set without a restart.
 - **An explicit user resume** (global chord, idle pill Play, `Resume` or
   `TogglePause` over UDS, CLI, tray) clears master, idle, audio-output and
   mic-conflict at once, and never pauses. A global toggle resumes whenever any
-  of those is active, and only otherwise sets master. The watchdogs re-arm on
+  of those is active — or when Always is still in its paused-by-default start
+  state with no source active (platforms without a focus monitor, e.g. Linux:
+  otherwise the first press set master and the user had to press twice) —
+  and only otherwise sets master. The watchdogs re-arm on
   their next transition, so the user can force dictation while music plays or
   another app holds the mic. This is a deliberate user override of the
   watchdogs; I7 still holds: when another app takes the mic Always stops
