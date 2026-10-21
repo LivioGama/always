@@ -270,6 +270,12 @@ pub enum DaemonCommand {
         stt_live_preview: Option<bool>,
         #[serde(default)]
         live_typing: Option<bool>,
+        #[serde(default)]
+        spoken_enter: Option<bool>,
+        #[serde(default)]
+        spoken_enter_phrases: Option<String>,
+        #[serde(default)]
+        spoken_enter_at_end: Option<bool>,
     },
     ApproveCorrection {
         id: String,

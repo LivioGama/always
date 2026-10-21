@@ -66,6 +66,10 @@ pub enum EditCommand {
     Rewrite {
         style: String,
     },
+    /// Press Return — submits in chat apps and agent prompts. Opt-in
+    /// (`spoken_enter`); the phrases are the user's (`spoken_enter_phrases`,
+    /// default [`DEFAULT_ENTER_PHRASES`]); off, the words are dictated.
+    PressEnter,
 }
 
 impl EditCommand {
@@ -93,6 +97,7 @@ impl EditCommand {
             EditCommand::GoTo(Place::End) => "go_to_end",
             EditCommand::GoTo(Place::Start) => "go_to_start",
             EditCommand::Rewrite { .. } => "rewrite",
+            EditCommand::PressEnter => "press_enter",
         }
     }
 }
@@ -130,6 +135,85 @@ fn normalize_with(text: &str, lower: bool) -> String {
     }
     let joined = out.split_whitespace().collect::<Vec<_>>().join(" ");
     joined.trim_matches(|c| c == '-' || c == '\'').to_string()
+}
+
+/// Phrases that press Return when `spoken_enter` is on and the user has not
+/// set `spoken_enter_phrases`. No bare "enter": a lone short word is the
+/// commonest mis-hearing, and Return sends.
+pub const DEFAULT_ENTER_PHRASES: &[&str] = &[
+    "press enter",
+    "hit enter",
+    "press return",
+    "hit return",
+    "send it",
+    "send that",
+    "submit it",
+    "submit that",
+];
+
+/// The user's `spoken_enter_phrases` value (comma-separated) as normalized
+/// phrases; unset, blank or only invalid entries → the defaults. A phrase
+/// longer than a command can be ([`MAX_COMMAND_WORDS`]) is dropped.
+pub fn enter_phrases(setting: Option<&str>) -> Vec<String> {
+    let custom: Vec<String> = setting
+        .unwrap_or("")
+        .split(',')
+        .map(normalize)
+        .filter(|p| !p.is_empty() && p.split(' ').count() <= MAX_COMMAND_WORDS)
+        .collect();
+    if custom.is_empty() {
+        DEFAULT_ENTER_PHRASES
+            .iter()
+            .map(|p| p.to_string())
+            .collect()
+    } else {
+        custom
+    }
+}
+
+/// The whole utterance is one of `phrases` (as returned by
+/// [`enter_phrases`]), after the same normalisation and polite affixes as
+/// every command ("Okay, send it." matches "send it").
+pub fn is_enter_phrase(utterance: &str, phrases: &[String]) -> bool {
+    if utterance.len() > 120 || utterance.split_whitespace().count() > MAX_COMMAND_WORDS {
+        return false;
+    }
+    let norm = normalize(utterance);
+    let core = strip_polite(&norm);
+    !core.is_empty() && phrases.iter().any(|p| p == core)
+}
+
+/// `text` ends with one of `phrases` after some dictation ("…and run it, go
+/// go."): the dictation without the phrase and the punctuation joining them,
+/// in the speaker's own casing. `None` when no phrase ends the text or
+/// nothing precedes it (a phrase alone is the voice-edit command).
+pub fn split_trailing_enter(text: &str, phrases: &[String]) -> Option<String> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    // (index into `words`, normalized word) for every word with letters.
+    let norm: Vec<(usize, String)> = words
+        .iter()
+        .enumerate()
+        .map(|(i, w)| (i, normalize(w)))
+        .filter(|(_, n)| !n.is_empty())
+        .collect();
+    let cut = phrases
+        .iter()
+        .filter_map(|p| {
+            let pw: Vec<&str> = p.split(' ').collect();
+            let k = pw.len();
+            (norm.len() > k
+                && norm[norm.len() - k..]
+                    .iter()
+                    .map(|(_, n)| n.as_str())
+                    .eq(pw.iter().copied()))
+            .then(|| norm[norm.len() - k].0)
+        })
+        .min()?;
+    let rest = words[..cut].join(" ");
+    let rest = rest.trim_end_matches(|c: char| {
+        matches!(c, ',' | ';' | ':' | '-' | '—' | '–') || c.is_whitespace()
+    });
+    (!rest.is_empty()).then(|| rest.to_string())
 }
 
 const POLITE_PREFIX: &[&str] = &["please ", "okay ", "ok "];
@@ -434,6 +518,9 @@ mod tests {
             "Change the API to use REST and then deploy it to production please now",
             "I want to change the color to blue so it matches the header design",
             "new line of code",
+            "Press enter to continue",
+            "Enter your password",
+            "Send it to John tomorrow",
             "Okay so delete that and start again",
             "change that to something nicer",
             "",
@@ -441,6 +528,89 @@ mod tests {
         ] {
             assert_eq!(parse(s), None, "{s:?}");
         }
+    }
+
+    #[test]
+    fn press_enter_phrases() {
+        let defaults = enter_phrases(None);
+        for s in [
+            "Press enter.",
+            "press enter",
+            "Hit enter!",
+            "Send it.",
+            "Submit that",
+            "Okay, send it.",
+        ] {
+            assert!(is_enter_phrase(s, &defaults), "{s:?}");
+        }
+        // A bare "enter" is dictation: a lone short word is the most common
+        // mis-hearing, and pressing Return on it would send.
+        assert!(!is_enter_phrase("Enter.", &defaults));
+        for s in [
+            "Press enter to continue",
+            "Enter your password",
+            "Send it to John tomorrow",
+        ] {
+            assert!(!is_enter_phrase(s, &defaults), "{s:?}");
+        }
+        // Never a fixed-grammar command: only through the setting.
+        assert_eq!(parse("Press enter."), None);
+    }
+
+    #[test]
+    fn a_phrase_ending_the_dictation_is_split_off() {
+        let mine = enter_phrases(Some("go go"));
+        let split = |t: &str| split_trailing_enter(t, &mine);
+        assert_eq!(
+            split("Please add a test and run it go go").as_deref(),
+            Some("Please add a test and run it")
+        );
+        assert_eq!(
+            split("Please add a test and run it, go go.").as_deref(),
+            Some("Please add a test and run it")
+        );
+        assert_eq!(
+            split("Run the tests. Go, go!").as_deref(),
+            Some("Run the tests.")
+        );
+        // A phrase alone is the voice-edit command, not a split.
+        assert_eq!(split("Go go."), None);
+        // Not at the end: dictation.
+        assert_eq!(split("go go gadget is a cartoon"), None);
+        assert_eq!(split("Let it go"), None);
+        // With the defaults, the multi-word phrase that ends it is cut.
+        let defaults = enter_phrases(None);
+        assert_eq!(
+            split_trailing_enter("Looks good, send it.", &defaults).as_deref(),
+            Some("Looks good")
+        );
+    }
+
+    /// Why event_loop matches the phrase BEFORE `local_cleanup`: the cleanup
+    /// removes adjacent repeats, and a user's phrase may be one ("go go").
+    #[test]
+    fn a_repeated_word_phrase_matches_only_before_cleanup() {
+        let mine = enter_phrases(Some("go go"));
+        assert!(is_enter_phrase("Go go.", &mine));
+        let cleaned = crate::always::postprocess::local_cleanup("Go go.");
+        assert!(
+            !is_enter_phrase(&cleaned, &mine),
+            "cleanup gave {cleaned:?}"
+        );
+    }
+
+    #[test]
+    fn enter_phrases_are_the_users() {
+        let mine = enter_phrases(Some(" Go ahead!, ship it ,, "));
+        assert_eq!(mine, ["go ahead", "ship it"]);
+        assert!(is_enter_phrase("Go ahead.", &mine));
+        assert!(is_enter_phrase("Okay, ship it", &mine));
+        // The defaults no longer apply once the user chose their own.
+        assert!(!is_enter_phrase("Press enter.", &mine));
+        // Blank or only over-long entries fall back to the defaults.
+        assert_eq!(enter_phrases(Some(" , ")), enter_phrases(None));
+        let long = "one two three four five six seven eight nine ten eleven twelve thirteen";
+        assert_eq!(enter_phrases(Some(long)), enter_phrases(None));
     }
 
     #[test]

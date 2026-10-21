@@ -491,6 +491,18 @@ fn handle_config(action: ConfigAction) -> Result<()> {
             println!("capture_aec: {}", prefs.capture_aec.unwrap_or(false));
             println!("update_check: {}", prefs.update_check.unwrap_or(true));
             println!("live_typing: {}", prefs.live_typing.unwrap_or(false));
+            println!("spoken_enter: {}", prefs.spoken_enter.unwrap_or(false));
+            println!(
+                "spoken_enter_at_end: {}",
+                prefs.spoken_enter_at_end.unwrap_or(false)
+            );
+            println!(
+                "spoken_enter_phrases: {}",
+                always::always::voice_edit_grammar::enter_phrases(
+                    prefs.spoken_enter_phrases.as_deref()
+                )
+                .join(", ")
+            );
             #[cfg(target_os = "macos")]
             println!(
                 "apple_intelligence_available: {}",

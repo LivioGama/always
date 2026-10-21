@@ -1337,13 +1337,37 @@ optional leading "please"/"okay" or trailing "please"):
 | case | capitalise that, uppercase that, lowercase that | title / upper / lower case of the last paste |
 | list | make that a list | last paste → "- item" lines (sentences; else commas/"and") |
 | new line / new paragraph | new line, new paragraph | inserts "\n" / "\n\n" at the caret (never a bare Return: no accidental send) |
+| press enter (opt-in `spoken_enter`) | the user's `spoken_enter_phrases`; default: press enter, hit enter, press return, hit return, send it, send that, submit it/that | presses Return — submits in chat apps and agent prompts. Off (default): the words are dictated. No bare "enter" by default |
 | undo / redo | undo (that), redo (that) | ⌘Z / ⇧⌘Z |
 | select | select that, select the last word, select the last sentence, select all | selection |
 | delete | delete the last word, delete the last sentence | removes it (plus trailing space) |
 | go to | go to the end / start | caret |
 | rewrite | make that shorter / more formal / friendlier, fix the grammar, translate that to <language> | handed to Iris (on-device model) — see below |
 
+**Press enter** is the one command that sends: it is off unless the user turns
+on `spoken_enter`. Its phrases are the user's (`spoken_enter_phrases`,
+comma-separated, matched after the same normalisation and polite affixes as
+every command; blank = the defaults above); they are checked before the fixed
+grammar, so a phrase the user picks wins over a built-in command. It passes
+the same gate as every command — said on its
+own, right after a paste into the same field, nothing committed since. Once it
+has pressed Return the paste counts as committed, so a second "send it" is
+dictated rather than pressing Return on an empty field. With live typing on,
+the command's own words are removed before Return is pressed.
 
+**At the end of a dictation** (opt-in `spoken_enter_at_end`, needs
+`spoken_enter`): "…and run the tests, go go" — the phrase ending the
+utterance (matched word by word, punctuation ignored, before the
+repeat-removing cleanup) is cut with the punctuation joining it, the rest is
+pasted as usual, and Return follows the paste through auto-Enter's 0 ms path
+(regardless of the auto-Enter setting and its minimum word count; never for an
+incomplete dictation, a withheld or paused paste, or after focus moved). A
+phrase must be chosen that is never dictated: with the defaults, any sentence
+ending in "send it" is sent — hence off by default.
+
+**Linux:** there is no Accessibility API to verify the field or the caret, so
+only `press enter` runs there (same window, ≤ 30 s after the paste); every
+other command is dictated as before.
 
 **Gate — dictation is never swallowed.** An utterance is claimed only when
 all hold, otherwise it pastes as normal dictation:
@@ -1543,6 +1567,9 @@ the app has identified the platform, avoiding a Windows warning flash on Linux.
 | `per_app_settings_json` | — | Per-application pause rules |
 | `update_check` | true | Background GitHub release check (§12a); `ALWAYS_UPDATE_CHECK=0` also disables it |
 | `live_typing` | false | Type words while the user speaks and correct them to the final transcript (§5, Live typing) |
+| `spoken_enter` | false | "press enter" / "send it" on its own right after dictating presses Return (§9c) |
+| `spoken_enter_at_end` | false | The Return phrase also works at the end of a dictation, without a pause (§9c) |
+| `spoken_enter_phrases` | (built-in list) | What presses Return, comma-separated — e.g. `go ahead, ship it`; blank = defaults (§9c) |
 
 Shortcuts: pause `ctrl+alt+p` · master pause/mute `ctrl+alt+shift+p` ·
 auto-enter `ctrl+alt+a` · force paste `ctrl+alt+v` · log correction

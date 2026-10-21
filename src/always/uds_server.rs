@@ -935,6 +935,9 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             audible_status_sound,
             stt_live_preview,
             live_typing,
+            spoken_enter,
+            spoken_enter_phrases,
+            spoken_enter_at_end,
         } => {
             apply_runtime_preferences(
                 ctx,
@@ -947,6 +950,9 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                 audible_status_sound,
                 stt_live_preview,
                 live_typing,
+                spoken_enter,
+                spoken_enter_phrases,
+                spoken_enter_at_end,
             );
         }
         DaemonCommand::ApproveCorrection { id } => handle_approve_correction(&id),
@@ -1134,6 +1140,7 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
             command,
             force,
         } => {
+            let enter_phrases = ctx.cfg.read().active_enter_phrases().to_vec();
             std::thread::spawn(move || {
                 let o = crate::always::voice_edit::run(
                     &command,
@@ -1141,6 +1148,7 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                     "iris",
                     crate::always::ax_edit::KeyTarget::Hid,
                     None,
+                    &enter_phrases,
                 );
                 // Claimed edits already broadcast; answer declines too so
                 // the requester never waits on silence.
@@ -1611,6 +1619,9 @@ fn apply_runtime_preferences(
     audible_status_sound: Option<String>,
     stt_live_preview: Option<bool>,
     live_typing: Option<bool>,
+    spoken_enter: Option<bool>,
+    spoken_enter_phrases: Option<String>,
+    spoken_enter_at_end: Option<bool>,
 ) {
     let mut cfg = ctx.cfg.write();
     cfg.auto_enter_delay_ms = auto_enter_delay_ms.min(60_000);
@@ -1637,6 +1648,15 @@ fn apply_runtime_preferences(
     if let Some(live_typing) = live_typing {
         cfg.live_typing = live_typing;
     }
+    if let Some(spoken_enter) = spoken_enter {
+        cfg.spoken_enter = spoken_enter;
+    }
+    if let Some(at_end) = spoken_enter_at_end {
+        cfg.spoken_enter_at_end = at_end;
+    }
+    if let Some(phrases) = spoken_enter_phrases {
+        cfg.spoken_enter_phrases = crate::always::voice_edit_grammar::enter_phrases(Some(&phrases));
+    }
     tracing::info!(
         auto_enter_delay_ms = cfg.auto_enter_delay_ms,
         energy_threshold = cfg.energy_threshold,
@@ -1647,6 +1667,9 @@ fn apply_runtime_preferences(
         audible_status_sound = cfg.audible_status_sound.as_str(),
         stt_live_preview = cfg.stt_live_preview,
         live_typing = cfg.live_typing,
+        spoken_enter = cfg.spoken_enter,
+        spoken_enter_phrases = %cfg.spoken_enter_phrases.join(", "),
+        spoken_enter_at_end = cfg.spoken_enter_at_end,
         "uds_apply_runtime_preferences"
     );
 }
