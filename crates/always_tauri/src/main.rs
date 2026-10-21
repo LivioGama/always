@@ -45,6 +45,7 @@ fn main() {
             commands::platform,
             commands::show_settings_window,
             commands::show_onboarding_window,
+            commands::launched_hidden,
             commands::finish_onboarding,
         ])
         // Closing onboarding counts as skipping it: hide instead of destroy

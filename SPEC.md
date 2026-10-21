@@ -1487,7 +1487,8 @@ the settings window afterwards. Completion lives in the webview's
 `always_onboarding_done` flag. A saved Groq key or a recorded voice profile
 (`always config show`, `always voice status`) retro-marks it. Finishing,
 skipping, or closing the onboarding window records completion and shows
-Settings. The tray's Settings → Onboarding item re-opens the flow from its first
+Settings. Launched with `--hidden` (launch at login) the app starts in the tray
+with no window once completion is recorded; Settings stay in the tray menu. The tray's Settings → Onboarding item re-opens the flow from its first
 step.
 The Tauri app starts the sibling `always` daemon with `always start` before
 creating its reconnecting IPC client. The daemon's single-instance guard makes

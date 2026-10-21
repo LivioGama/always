@@ -48,6 +48,10 @@ export default function App() {
         }
         if (done) markOnboardingDone();
       }
+      // `--hidden` (launch at login): tray only, no window. A fresh install
+      // still gets onboarding — it cannot be finished from the tray.
+      const hidden = await invoke<boolean>("launched_hidden").catch(() => false);
+      if (done && hidden) return;
       invoke(done ? "show_settings_window" : "show_onboarding_window").catch(() => {});
     })();
     return () => unlisten();
