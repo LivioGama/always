@@ -5,17 +5,43 @@
 //! and Quit.
 //!
 //! Menu items are updated reactively when the daemon state changes.
+//!
+//! macOS is excluded: the Swift menu bar in `Always.app` owns the only
+//! menu-bar surface there and opens the Tauri settings window directly
+//! (launching/focusing the bundled `always-gui` binary), so a Tauri tray
+//! icon would show up as a duplicate menu.  `build_tray` stays callable
+//! on macOS as a no-op stub so `main` remains platform-uniform.
 
 use std::sync::Arc;
+
+#[cfg(not(target_os = "macos"))]
 use tauri::menu::{Menu, MenuBuilder, MenuItem, PredefinedMenuItem, Submenu};
+#[cfg(not(target_os = "macos"))]
 use tauri::tray::{TrayIcon, TrayIconBuilder, TrayIconEvent};
+#[cfg(not(target_os = "macos"))]
 use tauri::{AppHandle, Wry};
+#[cfg(not(target_os = "macos"))]
 use tokio::sync::mpsc;
 
+#[cfg(not(target_os = "macos"))]
 use crate::uds_client::{ClientEvent, DaemonEvent, DaemonState, UdsClient};
+#[cfg(not(target_os = "macos"))]
 use crate::window_manager::{ShowOnboardingReason, WindowManager};
 
+/// macOS stub — no tray icon is created (see module docs).
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+pub fn build_tray(
+    app: &tauri::AppHandle,
+    uds: Arc<crate::uds_client::UdsClient>,
+) -> Result<(), tauri::Error> {
+    let _ = (app, uds);
+    tracing::info!("tray_disabled_on_macos_swift_menu_bar_owns_surface");
+    Ok(())
+}
+
 /// Build the system tray with the menu and connect event-driven updates.
+#[cfg(not(target_os = "macos"))]
 pub fn build_tray(app: &AppHandle, uds: Arc<UdsClient>) -> Result<TrayIcon<Wry>, tauri::Error> {
     // Initial menu state — updated reactively once the first event arrives.
     let initial_pause = MenuItem::new(app, "Pause", true, None::<&str>)?;
@@ -61,6 +87,7 @@ pub fn build_tray(app: &AppHandle, uds: Arc<UdsClient>) -> Result<TrayIcon<Wry>,
 }
 
 /// Build the tray menu from the given pause / auto-enter items.
+#[cfg(not(target_os = "macos"))]
 fn build_menu(
     app: &AppHandle,
     pause_item: &MenuItem<Wry>,
@@ -89,6 +116,7 @@ fn build_menu(
 /// Registers a callback on `uds` that fires a channel token whenever
 /// the pause or auto-enter state changes.  The main loop then reads
 /// tokens and rebuilds the menu.
+#[cfg(not(target_os = "macos"))]
 async fn update_menu_loop(tray: &TrayIcon<Wry>, uds: &Arc<UdsClient>) {
     let (tx, mut rx) = mpsc::channel::<()>(16);
 

@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import type { DaemonApi } from "../../hooks/useDaemonState";
-import { appVersion, openUrl, platform } from "../../lib/tauri";
+import { appVersion, cli, openUrl, platform } from "../../lib/tauri";
 import { Btn, Caption, Divider, PanelTitle, Spinner } from "../controls";
 
 const REPOSITORY_URL = "https://github.com/LivioGama/always";
 const DONATE_URL = "https://donate.stripe.com/aFa7sN1jZdHD6b82dY4Ja00";
 const LICENSE = "AGPL-3.0";
 
-/// Settings → About. Mirrors AboutPanel.swift exactly: app info, updates,
+/// Settings → About. Mirrors AboutPanel.swift exactly: app info, updates
+/// (daemon state, plus the `always update` CLI flow via the `cli` bridge),
 /// description, links, support-development (Donate), license.
 export function AboutPanel({ daemon }: { daemon: DaemonApi }) {
   const [version, setVersion] = useState("");
@@ -133,9 +134,81 @@ function LinkIcon({ kind }: { kind: "globe" | "book" | "bug" | "heart" }) {
   }
 }
 
-/// Mirrors UpdateSection.swift — check / available / install / progress / fail.
+/// One `always update --check` verdict. The cli bridge reports non-zero
+/// exits as errors, and exit 10 only means "update available"
+/// (`cli::update::EXIT_UPDATE_AVAILABLE`) — parse the verdict back out.
+interface CliCheck {
+  available: boolean;
+  text: string;
+}
+
+async function cliUpdateCheck(): Promise<CliCheck> {
+  try {
+    const out = await cli(["update", "--check"]);
+    return { available: false, text: out.trim() || "Always is up to date." };
+  } catch (e: any) {
+    const msg = String(e?.message ?? e);
+    if (!msg.includes("exited 10")) throw new Error(msg);
+    return {
+      available: true,
+      text: msg.replace(/^`always update --check` exited 10:\s*/, "").trim() || "Update available.",
+    };
+  }
+}
+
+/// Mirrors UpdateSection.swift — check / available / install / progress /
+/// fail — with the `always update` CLI flow folded in (SPEC §12a: the
+/// updater must also work with no daemon connected). Connected ⇒ the
+/// daemon's UDS path stays canonical; otherwise `always update --check`
+/// and `always update` run through the `cli` bridge, which is also the
+/// only install path where the daemon refuses to apply.
 function UpdateSection({ daemon }: { daemon: DaemonApi }) {
   const u = daemon.state.update;
+  const connected = daemon.state.isDaemonConnected;
+  const [cliCheck, setCliCheck] = useState<CliCheck | null>(null);
+  const [cliPhase, setCliPhase] = useState<"idle" | "checking" | "installing">("idle");
+  const [cliError, setCliError] = useState<string | null>(null);
+
+  const checking = u.kind === "checking" || cliPhase === "checking";
+  const busy = checking || u.kind === "installing" || cliPhase === "installing";
+
+  /// Daemon absent: ask the sibling CLI instead (`always update --check`).
+  const runCliCheck = async () => {
+    setCliPhase("checking");
+    setCliError(null);
+    try {
+      setCliCheck(await cliUpdateCheck());
+    } catch (e: any) {
+      setCliCheck(null);
+      setCliError(String(e?.message ?? e));
+    } finally {
+      setCliPhase("idle");
+    }
+  };
+
+  /// The `always update` install — download + verify, then (macOS) quit
+  /// and relaunch. Same confirmation as Swift's UpdateInstallPrompt:
+  /// installing interrupts dictation, so it is never one stray click.
+  const runCliInstall = async () => {
+    const ok = window.confirm(
+      "Install the Always update?\n\n" +
+        "Always will download and verify the update, then quit and relaunch. " +
+        "Dictation pauses for a few seconds.",
+    );
+    if (!ok) return;
+    setCliPhase("installing");
+    setCliError(null);
+    try {
+      // On macOS the verified installer quits this app before the CLI
+      // returns, so the "installing…" row can be the last thing rendered.
+      const out = await cli(["update"]);
+      setCliCheck({ available: false, text: out.trim() || "Always updated." });
+    } catch (e: any) {
+      setCliError(String(e?.message ?? e));
+    } finally {
+      setCliPhase("idle");
+    }
+  };
 
   return (
     <div className="space-y-2">
@@ -146,19 +219,23 @@ function UpdateSection({ daemon }: { daemon: DaemonApi }) {
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <Btn
           small
-          onClick={daemon.checkForUpdates}
-          disabled={!daemon.state.isDaemonConnected || u.kind === "checking" || u.kind === "installing"}
+          onClick={() => (connected ? daemon.checkForUpdates() : void runCliCheck())}
+          disabled={busy}
         >
-          {u.kind === "checking" ? <Spinner /> : (
+          {checking ? <Spinner /> : (
             <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M20 7v5h-5M4 17v-5h5m10-1a7 7 0 00-12.4-4L4 9m16 6-2.6 2a7 7 0 01-12.4-4" /></svg>
           )}
           Check for Updates
         </Btn>
 
-        {u.kind === "unknown" && (
-          <Caption>The daemon checks GitHub releases. Click to check now.</Caption>
+        {u.kind === "unknown" && cliPhase === "idle" && !cliCheck && (
+          <Caption>
+            {connected
+              ? "The daemon checks GitHub releases. Click to check now."
+              : "Daemon not connected — the check runs `always update --check` directly."}
+          </Caption>
         )}
-        {u.kind === "checking" && <Caption>Checking for updates…</Caption>}
+        {checking && <Caption>Checking for updates…</Caption>}
         {u.kind === "upToDate" && (
           <div className="flex items-center gap-1.5 text-green-500">
             <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
@@ -207,6 +284,36 @@ function UpdateSection({ daemon }: { daemon: DaemonApi }) {
           </div>
         </div>
       )}
+
+      {cliCheck && cliPhase === "idle" && (
+        <Caption className={cliCheck.available ? "!text-primary-300" : ""}>{cliCheck.text}</Caption>
+      )}
+      {cliError && <Caption className="!text-red-400">{cliError}</Caption>}
+
+      {/* `always update` CLI flow (SPEC §12a): the same updater the
+          terminal runs, through the bundled `always` binary — and the
+          only install path where the daemon refuses to apply. */}
+      <div className="rounded-lg bg-white/[0.04] border border-white/10 p-2.5 space-y-2">
+        <div className="text-[13px] font-medium text-surface-200">Command-line updater</div>
+        <Caption>
+          Runs `always update` with the bundled CLI: it downloads the release, verifies every
+          file against the signing key built into the app, and on macOS relaunches Always once
+          the installer finishes. Works without the daemon.
+        </Caption>
+        <div className="flex flex-wrap items-center gap-2">
+          <Btn small onClick={() => void runCliInstall()} disabled={busy}>
+            {cliPhase === "installing" ? <Spinner /> : (
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                <path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
+              </svg>
+            )}
+            Run `always update`
+          </Btn>
+          {cliPhase === "installing" && (
+            <Caption>Downloading and verifying… Always relaunches when the installer finishes.</Caption>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

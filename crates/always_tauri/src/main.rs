@@ -1,6 +1,18 @@
-//! Always Tauri — system tray application that talks to the Always daemon
-//! over Unix Domain Socket.
+//! Always Tauri — GUI frontend for the Always speech-to-text daemon,
+//! talking to it over a Unix Domain Socket.
 //!
+//! macOS: the Swift menu-bar app (`Always.app`) is the only menu-bar
+//! surface. Its "Settings…" item launches/focuses the bundled
+//! `always-tauri` binary, whose windows serve Settings and Onboarding;
+//! the tray icon is gated off in `tray` (`build_tray` is a macOS stub) so
+//! the user never sees a duplicate menu-bar item. Always-tauri keeps a
+//! regular Dock icon (right-click → Quit is the escape hatch), and Dock /
+//! Finder / `open` re-opens surface the Settings window — the same
+//! "click the icon → settings" affordance the tray menu provides
+//! elsewhere.
+//!
+//! Other desktops: system-tray mode, same as before.
+
 #![warn(clippy::print_stdout, clippy::print_stderr)]
 
 use std::sync::Arc;
@@ -70,7 +82,9 @@ fn main() {
             tracing::info!("tauri_setup_entered");
             // ── Windows ──────────────────────────────────────────────
             // Both start hidden (tauri.conf.json). The settings webview
-            // shows one once it knows whether onboarding is done.
+            // shows one once it knows whether onboarding is done — so a
+            // fresh launch by the Swift menu bar surfaces the right
+            // window without any extra flag passing.
 
             // Start the sibling daemon before connecting. `always start` is
             // detached and single-instance safe, and leaves the UI available
@@ -105,14 +119,12 @@ fn main() {
             });
             app.manage(Arc::clone(&uds));
 
-            // ── WindowManager ────────────────────────────────────────
-            let wm = Arc::new(WindowManager::new(app.handle().clone()));
-
             // ── System Tray ──────────────────────────────────────────
+            // Built on every desktop so `main` stays platform-uniform:
+            // non-macOS gets the tray menu with Settings/Onboarding
+            // entries, macOS gets a no-op stub (Swift owns that surface).
             match tray::build_tray(app.handle(), Arc::clone(&uds)) {
-                Ok(t) => {
-                    let _ = t;
-                }
+                Ok(_) => tracing::info!("tray_built"),
                 Err(e) => {
                     tracing::warn!(error = %e, "failed_to_build_tray");
                 }
@@ -122,7 +134,28 @@ fn main() {
         });
 
     tracing::info!("tauri_run_start");
-    app_builder
-        .run(tauri::generate_context!())
-        .expect("error while running the Always Tauri app");
+
+    // macOS has no tray icon (the Swift menu bar owns that surface), so
+    // give it a run-event loop instead: Dock icon clicks and Finder/`open`
+    // activations on the already-running process surface Settings — the
+    // "focus its window if already running" half of the Swift contract.
+    #[cfg(target_os = "macos")]
+    {
+        app_builder
+            .build(tauri::generate_context!())
+            .expect("error while building the Always Tauri app")
+            .run(|app, event| {
+                if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
+                    tracing::info!(has_visible_windows, "macos_reopen_show_settings");
+                    WindowManager::new(app.clone()).show_settings();
+                }
+            });
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        app_builder
+            .run(tauri::generate_context!())
+            .expect("error while running the Always Tauri app");
+    }
 }
