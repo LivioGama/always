@@ -399,6 +399,7 @@ class StateMonitor: ObservableObject {
             let adaptive_silence: Bool
             let audible_status_sound: String
             let stt_live_preview: Bool
+            let live_typing: Bool
         }
         let payload = Payload(
             auto_enter_delay_ms: UInt32(max(0, config.autoEnterDelayMs)),
@@ -408,7 +409,8 @@ class StateMonitor: ObservableObject {
             silero_threshold: config.sileroThreshold,
             adaptive_silence: config.sttAdaptiveSilence,
             audible_status_sound: config.audibleStatusSound,
-            stt_live_preview: config.sttLivePreview
+            stt_live_preview: config.sttLivePreview,
+            live_typing: config.liveTyping ?? false
         )
         udsClient.sendCommandWithData("ApplyRuntimePreferences", payload)
     }

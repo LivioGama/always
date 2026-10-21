@@ -83,6 +83,17 @@ struct BehaviorPanel: View {
                 "Periodically transcribes what you've said so far and shows the provisional text in the overlay while you're still talking. Uses a few extra transcription calls per utterance on the cloud backend."
             )
             .font(.caption)
+            Toggle(
+                "Type words while you speak",
+                isOn: Binding(
+                    get: { config.liveTyping ?? false },
+                    set: { config.liveTyping = $0 }
+                )
+            )
+            .help(
+                "Types into the focused app as you talk instead of pasting when you stop, then corrects the words to the final transcript. Typing stops if you pause, switch window, or another app takes the microphone."
+            )
+            .font(.caption)
 
             DisclosureGroup("Advanced thresholds") {
                 advancedThresholdsContent

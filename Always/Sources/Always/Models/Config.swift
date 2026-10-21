@@ -60,6 +60,10 @@ struct Config: Codable {
     /// utterance on non-streaming backends). Default on; decodes to
     /// `true` for JSON written before the field existed.
     @DefaultTrue var sttLivePreview: Bool
+    /// Type words into the focused app while speaking (daemon `live_typing`).
+    /// Default off; SPEC §5 Live typing. Optional so JSON written before the
+    /// field existed still decodes (mirrors `DefaultTrue` leniency).
+    var liveTyping: Bool?
     var sttAutoEnter: Bool
     /// Auto-enter delay in milliseconds. Single source of truth — UI
     /// displays as seconds via `Double(autoEnterDelayMs) / 1000` but the
@@ -110,6 +114,7 @@ struct Config: Codable {
         sttSilence: 0.9,
         sttAdaptiveSilence: true,
         sttLivePreview: DefaultTrue(wrappedValue: true),
+        liveTyping: false,
         sttAutoEnter: true,
         autoEnterDelayMs: 4000,
         groqApiKey: nil,
@@ -167,6 +172,8 @@ struct Config: Codable {
                     config.sttAdaptiveSilence = (value == "true" || value == "1")
                 case "stt_live_preview":
                     config.sttLivePreview = (value == "true" || value == "1")
+                case "live_typing":
+                    config.liveTyping = (value == "true" || value == "1")
                 case "stt_auto_enter":
                     config.sttAutoEnter = (value == "true" || value == "1")
                 case "auto_enter_delay_ms":
