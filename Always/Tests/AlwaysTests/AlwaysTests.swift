@@ -62,6 +62,7 @@ final class AlwaysTests: XCTestCase {
             "sttSilence": 0.4,
             "sttAdaptiveSilence": true,
             "sttAutoEnter": true,
+            "liveTyping": false,
             "autoEnterDelayMs": 4000,
             "groqApiKey": null,
             "groqKeySaved": false,
