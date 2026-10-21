@@ -456,8 +456,9 @@ mod stub {
     /// Linux: text, Backspace and Return — what live typing and spoken
     /// Return send (focused window; `KeyTarget::Pid` has no meaning here).
     /// Other keys or modifiers are refused, so plans needing them fail as
-    /// before. Injectors as for paste: `wtype` (virtual keyboard, layout
-    /// independent), then `ydotool`, then `xdotool` (X11 / XWayland).
+    /// before. Browser-engine windows get real key presses for the layout
+    /// (`linux_keys`); elsewhere `wtype` (virtual keyboard, layout
+    /// independent), then real key presses, then `xdotool` (X11 / XWayland).
     #[cfg(target_os = "linux")]
     pub fn post_strokes(_: KeyTarget, strokes: &[Stroke]) -> anyhow::Result<()> {
         // Sandbox guard (`ALWAYS_NO_PASTE=1`): never type into the user's
@@ -473,6 +474,9 @@ mod stub {
             }
             return Ok(());
         }
+        // Browser engines read the physical key, which wtype's invented
+        // keymap gets wrong: real key presses for the layout there.
+        let browser = crate::always::linux_keys::focused_window_runs_browser_engine();
         for stroke in strokes {
             match stroke {
                 Stroke::Key { code, mods, repeat } => {
@@ -481,6 +485,9 @@ mod stub {
                         .ok_or_else(|| anyhow::anyhow!("key {code} is not sent on Linux"))?;
                     let n = *repeat;
                     if n == 0 {
+                        continue;
+                    }
+                    if browser && crate::always::linux_keys::tap(evdev, n).is_ok() {
                         continue;
                     }
                     let wtype: Vec<String> =
@@ -498,15 +505,21 @@ mod stub {
                 }
                 Stroke::Text(text) if text.is_empty() => {}
                 Stroke::Text(text) => {
+                    if browser && crate::always::linux_keys::type_text(text).is_ok() {
+                        continue;
+                    }
+                    // No `ydotool type`: it presses US key positions, so on
+                    // other layouts it types other letters (German: y/z).
+                    if first_injector(&[("wtype", vec!["--".into(), text.clone()])]).is_ok()
+                        || crate::always::linux_keys::type_text(text).is_ok()
+                    {
+                        continue;
+                    }
                     let t = text.clone();
-                    first_injector(&[
-                        ("wtype", vec!["--".into(), t.clone()]),
-                        ("ydotool", vec!["type".into(), "--".into(), t.clone()]),
-                        (
-                            "xdotool",
-                            vec!["type".into(), "--clearmodifiers".into(), "--".into(), t],
-                        ),
-                    ])?;
+                    first_injector(&[(
+                        "xdotool",
+                        vec!["type".into(), "--clearmodifiers".into(), "--".into(), t],
+                    )])?;
                 }
             }
         }

@@ -462,6 +462,20 @@ pub fn is_wayland_session() -> bool {
 #[cfg(target_os = "linux")]
 fn paste_wayland(auto_enter: bool) -> Result<()> {
     let terminal = hyprland_focused_window_is_terminal().unwrap_or(false);
+    // Browser engines read the physical key, which wtype's invented keymap
+    // gets wrong (see `linux_keys`): press the real Ctrl+V for the layout.
+    if crate::always::linux_keys::focused_window_runs_browser_engine() {
+        match crate::always::linux_keys::ctrl_chord('v', terminal) {
+            Ok(()) => {
+                if auto_enter {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    crate::always::linux_keys::tap(crate::always::linux_keys::KEY_ENTER, 1)?;
+                }
+                return Ok(());
+            }
+            Err(e) => tracing::warn!(error = %e, "browser_paste_real_keys_failed"),
+        }
+    }
     for (bin, paste_args, enter_args) in wayland_injectors(terminal) {
         if !which_present(bin) {
             continue;
@@ -725,6 +739,12 @@ pub fn press_return() -> Result<()> {
         return Ok(());
     }
     if is_wayland_session() {
+        if crate::always::linux_keys::focused_window_runs_browser_engine() {
+            match crate::always::linux_keys::tap(crate::always::linux_keys::KEY_ENTER, 1) {
+                Ok(()) => return Ok(()),
+                Err(e) => tracing::warn!(error = %e, "browser_return_real_keys_failed"),
+            }
+        }
         for (bin, _, enter_args) in wayland_injectors(false) {
             if !which_present(bin) {
                 continue;
