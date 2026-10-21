@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { ENROLLMENT_STEPS, type DaemonApi } from "../hooks/useDaemonState";
-import { openUrl, platform } from "../lib/tauri";
+import { configShow, openUrl, platform } from "../lib/tauri";
+import { DEFAULT_CONFIG, parseConfig, type Config } from "../lib/config";
+import { shortcutsNeedDesktop, visibleShortcuts } from "../lib/shortcuts";
 import { Btn, Caption, LevelMeter, Spinner } from "./controls";
 
 type Step = "welcome" | "permissions" | "voice" | "tips" | "ready";
@@ -68,7 +70,7 @@ export function OnboardingView({
           {step === "welcome" && <StepWelcome />}
           {step === "permissions" && <StepPermissions daemon={daemon} />}
           {step === "voice" && <StepVoice daemon={daemon} />}
-          {step === "tips" && <StepTips />}
+          {step === "tips" && <StepTips daemon={daemon} />}
           {step === "ready" && <StepReady daemon={daemon} />}
         </div>
 
@@ -386,21 +388,36 @@ function StepVoice({ daemon }: { daemon: DaemonApi }) {
   );
 }
 
-function StepTips() {
+function StepTips({ daemon }: { daemon: DaemonApi }) {
+  const [os, setOs] = useState("windows");
+  const [config, setConfig] = useState<Config>(DEFAULT_CONFIG);
+  useEffect(() => {
+    platform().then(setOs).catch(() => {});
+    configShow().then((out) => setConfig(parseConfig(out))).catch(() => {});
+  }, []);
+  // The keys actually configured, not a fixed list. On Wayland Always cannot
+  // listen for keys: show the command each one has to run instead.
+  const needDesktop = shortcutsNeedDesktop(os, daemon.state.inputMonitoringGranted);
+  const rows = visibleShortcuts(config, os, needDesktop);
+
   return (
     <div className="animate-slide-up space-y-3">
       <h2 className="text-xl font-semibold text-white mb-2">Tips & shortcuts</h2>
-      <Caption>Auto-enter is on by default. You can adjust it and remap shortcuts any time in Settings.</Caption>
-      {[
-        ["Ctrl+Alt+P", "Pause or resume for this app", "Pause dictation in the focused app without changing the rest of your allowlist."],
-        ["Ctrl+Alt+Shift+P", "Pause everywhere", "Use the master pause when you want Always silent in every app."],
-        ["Ctrl+Alt+A", "Toggle auto-enter", "When enabled, Always presses Enter after typing your words."],
-        ["Ctrl+Alt+V", "Paste filtered text anyway", "Use this when you want the raw transcript instead of filtered text."],
-        ["Ctrl+Alt+W", "Correct & improve your vocabulary", "Fix the last transcript; Always can learn the correction for next time."],
-      ].map(([shortcut, title, detail]) => (
-        <div key={shortcut} className="flex items-start gap-3 rounded-lg bg-white/[0.06] p-3">
-          <kbd className="shrink-0 text-primary-200 bg-primary-500/20 px-2 py-1 rounded text-xs">{shortcut}</kbd>
-          <div><div className="text-sm font-medium text-surface-100">{title}</div><Caption>{detail}</Caption></div>
+      <Caption>
+        {needDesktop
+          ? "On Wayland Always cannot listen for keys itself. Add these to your desktop's keyboard shortcuts (on Hyprland: a bind per line in your config) — the keys are suggestions, choose your own."
+          : "Auto-enter is on by default. You can adjust it and remap shortcuts any time in Settings."}
+      </Caption>
+      {rows.map((a) => (
+        <div key={a.key} className="flex items-start gap-3 rounded-lg bg-white/[0.06] p-3">
+          <kbd className="shrink-0 text-primary-200 bg-primary-500/20 px-2 py-1 rounded text-xs">{a.combo}</kbd>
+          <div>
+            <div className="text-sm font-medium text-surface-100">{a.label}</div>
+            <Caption>{a.detail}</Caption>
+            {needDesktop && a.command && (
+              <code className="mt-1 inline-block text-[11px] text-surface-200 bg-black/30 px-1.5 py-0.5 rounded">{a.command}</code>
+            )}
+          </div>
         </div>
       ))}
     </div>
