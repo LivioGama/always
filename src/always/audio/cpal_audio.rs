@@ -167,44 +167,8 @@ impl SharedAudioSource {
             .supported_input_configs()
             .map_err(|e| anyhow::anyhow!("Failed to list configs: {}", e))?
             .collect();
-
-        // Prefer exact 16 kHz mono, then exact 16 kHz on any channel
-        // layout. The capture callback downmixes/resamples as needed.
-        for cfg in &supported {
-            if cfg.channels() == 1 && cfg.min_sample_rate() <= RATE && RATE <= cfg.max_sample_rate()
-            {
-                let sc = cfg.with_sample_rate(RATE);
-                return Ok((sc.config(), cfg.sample_format()));
-            }
-        }
-        for cfg in &supported {
-            if cfg.min_sample_rate() <= RATE && RATE <= cfg.max_sample_rate() {
-                let sc = cfg.with_sample_rate(RATE);
-                return Ok((sc.config(), cfg.sample_format()));
-            }
-        }
-
-        // Fallback: closest supported format, preferring mono on ties.
-        let best = supported
-            .iter()
-            .min_by_key(|c| {
-                let lo = c.min_sample_rate();
-                let hi = c.max_sample_rate();
-                let distance = if RATE >= lo && RATE <= hi {
-                    0u32
-                } else if RATE < lo {
-                    lo - RATE
-                } else {
-                    RATE - hi
-                };
-                distance.saturating_mul(2) + u32::from(c.channels() != 1)
-            })
-            .context("No compatible input config")?;
-
-        let selected_rate = RATE.clamp(best.min_sample_rate(), best.max_sample_rate());
-        let sc = best.with_sample_rate(selected_rate);
-
-        Ok((sc.config(), best.sample_format()))
+        pick_config(&supported)
+            .context("No input config Always can read (needs an i16, u16 or f32 sample format)")
     }
 
     /// Run the capture stream + channel drainer in one thread.
@@ -228,6 +192,11 @@ impl SharedAudioSource {
         let config = Arc::new(config);
 
         thread::spawn(move || {
+            // Drain concurrently: the stream functions below block for as
+            // long as capture runs, so draining afterwards (as before
+            // 2026-10-20) meant no frame reached the ring while recording.
+            // Returning drops the last sender, which ends the drain.
+            thread::spawn(move || Self::drain_loop(rx, ring));
             match sample_format {
                 cpal::SampleFormat::I16 => {
                     let tx = Arc::clone(&tx_clone);
@@ -251,7 +220,6 @@ impl SharedAudioSource {
                     tracing::error!(format = ?sample_format, "unsupported sample format");
                 }
             }
-            Self::drain_loop(rx, ring);
         })
     }
 
@@ -380,7 +348,10 @@ impl SharedAudioSource {
                 if let Some(receiver) = &*rx_lock {
                     match receiver.recv_timeout(Duration::from_millis(100)) {
                         Ok(f) => f,
-                        Err(_) => continue,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        // The stream ended: without this the loop spun at full
+                        // CPU forever, one thread per recorder respawn.
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 } else {
                     break;
@@ -495,13 +466,21 @@ impl SharedAudioSource {
     /// Also updates `last_captured_at` to match the moment the ring
     /// last had a frame pushed (approximating wall-clock capture time).
     pub fn read_frame(&mut self, buf: &mut [u8; FRAME_BYTES]) -> io::Result<usize> {
-        let frame = self.ring.lock().pop(Duration::from_millis(15_000))?;
-        match frame {
-            Some(f) => {
-                buf.copy_from_slice(&f);
-                Ok(FRAME_BYTES)
+        // Wait WITHOUT holding the ring: the drain thread needs its lock to
+        // push. Waiting inside `pop` under the lock starved it until the
+        // 15 s timeout, so every read timed out and the recorder reset.
+        let deadline = std::time::Instant::now() + Duration::from_millis(15_000);
+        loop {
+            match self.ring.lock().pop(Duration::ZERO) {
+                Ok(Some(f)) => {
+                    buf.copy_from_slice(&f);
+                    return Ok(FRAME_BYTES);
+                }
+                Ok(None) => return Ok(0),
+                Err(e) if std::time::Instant::now() >= deadline => return Err(e),
+                Err(_) => {}
             }
-            None => Ok(0),
+            thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -577,21 +556,132 @@ impl AudioFrameSource for CpalsAudioSource {
                 "audio recorder not initialized",
             )
         })?;
+        // Same wait as the shared source: never block the drain thread.
+        rec.read_frame(buf)
+    }
+}
 
-        let mut ring = rec.ring.lock();
-        let frame = ring.pop(Duration::from_millis(15_000))?;
-        match frame {
-            Some(f) => {
-                buf.copy_from_slice(&f);
-                Ok(FRAME_BYTES)
-            }
-            None => Ok(0),
+/// Choose the capture format. Only formats the capture callbacks can read
+/// are considered: PipeWire's ALSA plugin lists U8 first, and taking it left
+/// the daemon with a stream it could not decode — no audio, an error every
+/// 100 ms (2026-10-20).
+fn pick_config(
+    supported: &[cpal::SupportedStreamConfigRange],
+) -> Option<(cpal::StreamConfig, cpal::SampleFormat)> {
+    let supported: Vec<_> = supported
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.sample_format(),
+                cpal::SampleFormat::I16 | cpal::SampleFormat::U16 | cpal::SampleFormat::F32
+            )
+        })
+        .collect();
+
+    // Prefer exact 16 kHz mono, then exact 16 kHz on any channel
+    // layout. The capture callback downmixes/resamples as needed.
+    for cfg in &supported {
+        if cfg.channels() == 1 && cfg.min_sample_rate() <= RATE && RATE <= cfg.max_sample_rate() {
+            let sc = cfg.with_sample_rate(RATE);
+            return Some((sc.config(), cfg.sample_format()));
         }
     }
+    for cfg in &supported {
+        if cfg.min_sample_rate() <= RATE && RATE <= cfg.max_sample_rate() {
+            let sc = cfg.with_sample_rate(RATE);
+            return Some((sc.config(), cfg.sample_format()));
+        }
+    }
+
+    // Fallback: closest supported format, preferring mono on ties.
+    let best = supported
+        .iter()
+        .min_by_key(|c| {
+            let lo = c.min_sample_rate();
+            let hi = c.max_sample_rate();
+            let distance = if RATE >= lo && RATE <= hi {
+                0u32
+            } else if RATE < lo {
+                lo - RATE
+            } else {
+                RATE - hi
+            };
+            distance.saturating_mul(2) + u32::from(c.channels() != 1)
+        })
+        .copied()?;
+
+    let selected_rate = RATE.clamp(best.min_sample_rate(), best.max_sample_rate());
+    let sc = best.with_sample_rate(selected_rate);
+
+    Some((sc.config(), best.sample_format()))
 }
 
 impl Default for CpalsAudioSource {
     fn default() -> Self {
         Self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cpal::{SampleFormat as F, SupportedBufferSize::Unknown, SupportedStreamConfigRange as R};
+
+    #[test]
+    fn frames_reach_a_waiting_reader_and_the_drain_ends_with_the_stream() {
+        let (tx, rx) = mpsc::channel::<[u8; FRAME_BYTES]>();
+        let ring = Arc::new(Mutex::new(FrameRing::new()));
+        let drain = {
+            let ring = Arc::clone(&ring);
+            thread::spawn(move || {
+                SharedAudioSource::drain_loop(Arc::new(Mutex::new(Some(rx))), ring)
+            })
+        };
+        let mut source = SharedAudioSource {
+            ring,
+            running: Arc::new(AtomicBool::new(true)),
+            stream_drop: None,
+        };
+        // The live order: the reader is already waiting when the frame lands.
+        let producer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            tx.send([7; FRAME_BYTES]).unwrap();
+            tx
+        });
+        let mut buf = [0u8; FRAME_BYTES];
+        let started = std::time::Instant::now();
+        assert_eq!(source.read_frame(&mut buf).unwrap(), FRAME_BYTES);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "reader starved the drain"
+        );
+        assert_eq!(buf[0], 7);
+        // The last sender goes away with the stream: the drain must stop.
+        drop(producer.join().unwrap());
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            drain.join().ok();
+            done_tx.send(()).ok();
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "drain loop kept running after the stream ended"
+        );
+    }
+
+    #[test]
+    fn pick_config_skips_formats_capture_cannot_read() {
+        // PipeWire's ALSA plugin, abridged: U8 is listed first.
+        let pipewire = [
+            R::new(1, 1, 384_000, Unknown, F::U8),
+            R::new(1, 1, 384_000, Unknown, F::I16),
+            R::new(1, 1, 384_000, Unknown, F::F32),
+        ];
+        let (cfg, format) = pick_config(&pipewire).unwrap();
+        assert_eq!((format, cfg.channels, cfg.sample_rate), (F::I16, 1, RATE));
+        assert!(pick_config(&[R::new(1, 1, 384_000, Unknown, F::U8)]).is_none());
+        // Stereo-only F32 at 48 kHz: still chosen, downmixed/resampled later.
+        let (cfg, format) = pick_config(&[R::new(2, 48_000, 48_000, Unknown, F::F32)]).unwrap();
+        assert_eq!((format, cfg.channels, cfg.sample_rate), (F::F32, 2, 48_000));
     }
 }
