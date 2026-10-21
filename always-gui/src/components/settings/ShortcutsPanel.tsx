@@ -1,5 +1,8 @@
 import type { DaemonApi } from "../../hooks/useDaemonState";
 import type { Config } from "../../lib/config";
+import { useEffect, useState } from "react";
+import { platform } from "../../lib/tauri";
+import { shortcutsNeedDesktop } from "../../lib/shortcuts";
 import { Caption, KeyCaptureButton, PanelTitle } from "../controls";
 
 /// Settings → Shortcuts: global hotkey remapping. Mirrors ShortcutsPanel.swift —
@@ -14,6 +17,13 @@ export function ShortcutsPanel({
   config: Config;
   onConfigChange: (patch: Partial<Config>) => void;
 }) {
+  const [os, setOs] = useState("windows");
+  useEffect(() => {
+    platform().then(setOs).catch(() => {});
+  }, []);
+  // Linux on Wayland: Always cannot grab keys; the keys here are only recorded.
+  const needDesktop = shortcutsNeedDesktop(os, daemon.state.inputMonitoringGranted);
+
   const save = (key: keyof Config) => (value: string) => {
     onConfigChange({ [key]: value } as Partial<Config>);
     daemon.reloadShortcuts();
@@ -25,6 +35,13 @@ export function ShortcutsPanel({
       {!sReady(daemon) && (
         <div className="rounded-md bg-orange-500/10 border border-orange-500/30 px-3 py-2 text-xs text-orange-400">
           Daemon not connected — new shortcuts are saved but won't take effect until the daemon is running.
+        </div>
+      )}
+      {needDesktop && (
+        <div className="rounded-md bg-primary-500/10 border border-primary-500/30 px-3 py-2 text-xs text-surface-200">
+          On Wayland Always cannot listen for keys itself. Bind keys in your desktop's settings to{" "}
+          <code>always toggle-pause</code> (pause everywhere) and <code>always toggle-auto-enter</code>. Keys
+          recorded here are what the setup tips show; they do not take effect by themselves.
         </div>
       )}
       <div>
@@ -62,7 +79,9 @@ export function ShortcutsPanel({
           />
         </div>
       </div>
-      <Caption className="pt-1">Changes take effect immediately.</Caption>
+      <Caption className="pt-1">
+        {needDesktop ? "Changes are recorded only — bind the keys in your desktop." : "Changes take effect immediately."}
+      </Caption>
     </div>
   );
 }

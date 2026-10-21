@@ -109,7 +109,14 @@ name); other Wayland compositors offer no portable query and receive Ctrl+V.
 X11 uses `xdotool`. Linux global
 shortcuts are available in X11 sessions; Wayland compositors do not let the
 daemon observe global key events, so users there control pause and auto-enter
-through the CLI.
+through the CLI. The GUI shows this instead of pretending the keys work: on
+Linux with the shortcut listener unavailable (`ShortcutListenerStatus` false =
+Wayland), onboarding's tips list only the bindable actions — pause everywhere
+(`always toggle-pause`) and auto-enter (`always toggle-auto-enter`) — with the
+user's configured keys as suggestions for the desktop's own bindings, and
+Settings → Shortcuts says keys there are recorded, not active. Everywhere,
+both read the configured shortcuts (never a fixed list), and the per-app pause
+(focused-app monitor, macOS only) is not offered on Linux.
 
 The GUI talks to the daemon over a Unix domain socket using newline-delimited
 JSON. On macOS it is `~/Library/Caches/Always/always{suffix}.sock`; on Linux it
