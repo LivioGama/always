@@ -400,7 +400,9 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                 prefs
                     .stt_auto_enter
                     .map(|v| v.to_string())
-                    .unwrap_or_else(|| "false".to_string())
+                    // Unset means the daemon's default, which is ON
+                    // (`AlwaysConfig::from_cli`); printing "false" hid that.
+                    .unwrap_or_else(|| "true".to_string())
             );
             println!(
                 "auto_enter_delay_ms: {}",
