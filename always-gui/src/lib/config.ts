@@ -8,6 +8,7 @@ export interface Config {
   sttSilence: number;
   sttAdaptiveSilence: boolean;
   sttLivePreview: boolean;
+  liveTyping: boolean;
   sttAutoEnter: boolean;
   autoEnterDelayMs: number;
   groqApiKey: string | null;
@@ -36,6 +37,7 @@ export const DEFAULT_CONFIG: Config = {
   sttSilence: 0.9,
   sttAdaptiveSilence: true,
   sttLivePreview: true,
+  liveTyping: false,
   sttAutoEnter: true,
   autoEnterDelayMs: 4000,
   groqApiKey: null,
@@ -100,6 +102,7 @@ export function parseConfig(output: string): Config {
       case "stt_silence_secs": c.sttSilence = num(c.sttSilence); break;
       case "stt_adaptive_silence": c.sttAdaptiveSilence = bool(); break;
       case "stt_live_preview": c.sttLivePreview = bool(); break;
+      case "live_typing": c.liveTyping = bool(); break;
       case "stt_auto_enter": c.sttAutoEnter = bool(); break;
       case "auto_enter_delay_ms": c.autoEnterDelayMs = int(c.autoEnterDelayMs); break;
       case "auto_enter_delay_secs":

@@ -448,8 +448,92 @@ mod stub {
     pub fn focused_element_of(_: i32) -> Option<AxElem> {
         None
     }
+    #[cfg(not(target_os = "linux"))]
     pub fn post_strokes(_: KeyTarget, _: &[Stroke]) -> anyhow::Result<()> {
         anyhow::bail!("keystrokes not implemented on this platform")
+    }
+
+    /// Linux: text, Backspace and Return — what live typing sends (focused
+    /// window; `KeyTarget::Pid` has no meaning here).
+    /// Other keys or modifiers are refused, so plans needing them fail as
+    /// before. Injectors as for paste: `wtype` (virtual keyboard, layout
+    /// independent), then `ydotool`, then `xdotool` (X11 / XWayland).
+    #[cfg(target_os = "linux")]
+    pub fn post_strokes(_: KeyTarget, strokes: &[Stroke]) -> anyhow::Result<()> {
+        // Sandbox guard (`ALWAYS_NO_PASTE=1`): never type into the user's
+        // apps; with `ALWAYS_LIVE_TYPE_LOG` the strokes are recorded instead.
+        if std::env::var("ALWAYS_NO_PASTE").as_deref() == Ok("1") {
+            if let Ok(path) = std::env::var("ALWAYS_LIVE_TYPE_LOG") {
+                use std::io::Write as _;
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)?;
+                writeln!(f, "STROKES {strokes:?}")?;
+            }
+            return Ok(());
+        }
+        for stroke in strokes {
+            match stroke {
+                Stroke::Key { code, mods, repeat } => {
+                    anyhow::ensure!(*mods == Mods::NONE, "modifier keys are not sent on Linux");
+                    let (name, evdev) = linux_key(*code)
+                        .ok_or_else(|| anyhow::anyhow!("key {code} is not sent on Linux"))?;
+                    let n = *repeat;
+                    if n == 0 {
+                        continue;
+                    }
+                    let wtype: Vec<String> =
+                        (0..n).flat_map(|_| ["-k".into(), name.into()]).collect();
+                    let mut ydotool = vec!["key".to_string(), "-d".into(), "2".into()];
+                    ydotool
+                        .extend((0..n).flat_map(|_| [format!("{evdev}:1"), format!("{evdev}:0")]));
+                    let mut xdotool = vec!["key".to_string(), "--clearmodifiers".into()];
+                    xdotool.extend((0..n).map(|_| name.to_string()));
+                    first_injector(&[
+                        ("wtype", wtype),
+                        ("ydotool", ydotool),
+                        ("xdotool", xdotool),
+                    ])?;
+                }
+                Stroke::Text(text) if text.is_empty() => {}
+                Stroke::Text(text) => {
+                    let t = text.clone();
+                    first_injector(&[
+                        ("wtype", vec!["--".into(), t.clone()]),
+                        ("ydotool", vec!["type".into(), "--".into(), t.clone()]),
+                        (
+                            "xdotool",
+                            vec!["type".into(), "--clearmodifiers".into(), "--".into(), t],
+                        ),
+                    ])?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Key code (`keys`) → (xkb keysym name, evdev code).
+    #[cfg(target_os = "linux")]
+    pub(super) fn linux_key(code: u16) -> Option<(&'static str, u16)> {
+        match code {
+            keys::DELETE => Some(("BackSpace", 14)),
+            keys::RETURN => Some(("Return", 28)),
+            _ => None,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn first_injector(candidates: &[(&str, Vec<String>)]) -> anyhow::Result<()> {
+        let mut last = anyhow::anyhow!("no keystroke tool found (install wtype or ydotool)");
+        for (bin, args) in candidates {
+            match std::process::Command::new(bin).args(args).status() {
+                Ok(status) if status.success() => return Ok(()),
+                Ok(status) => last = anyhow::anyhow!("{bin} exited with {status}"),
+                Err(e) => last = anyhow::anyhow!("{bin}: {e}"),
+            }
+        }
+        Err(last)
     }
 }
 #[cfg(not(target_os = "macos"))]

@@ -21,6 +21,7 @@ const FIELD_KEYS: Record<string, { key: string; fmt: (v: any) => string }> = {
   sttSilence: { key: "stt_silence_secs", fmt: (v) => String(v) },
   sttAdaptiveSilence: { key: "stt_adaptive_silence", fmt: (v) => String(v) },
   sttLivePreview: { key: "stt_live_preview", fmt: (v) => String(v) },
+  liveTyping: { key: "live_typing", fmt: (v) => String(v) },
   sttAutoEnter: { key: "stt_auto_enter", fmt: (v) => String(v) },
   autoEnterDelayMs: { key: "auto_enter_delay_ms", fmt: (v) => String(Math.round(v)) },
   sileroThreshold: { key: "silero_threshold", fmt: (v) => String(v) },

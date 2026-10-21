@@ -608,12 +608,22 @@ fn process_one(
     let record_result = match vad::record_utterance(&cfg, log, transcriber, rt) {
         Ok(r) => r,
         Err(e) => {
+            // Live typing: the final is lost; leave what was typed, no keys.
+            crate::always::live_type::abandon();
             let (kind, message) = classify_transcription_error(&e);
             event::global_broadcaster().transcription_failed(kind, message);
             emit_utterance_terminal();
             return Err(e).context("failed to record/transcribe utterance");
         }
     };
+    // Live typing: only speech can deliver typed words. Another app took
+    // the microphone → not one more keystroke (I7); any other non-speech
+    // outcome (too quiet, noise, not the user's voice) removes them.
+    match &record_result {
+        vad::RecordResult::Speech { .. } => {}
+        vad::RecordResult::PreemptedByMicConflict { .. } => crate::always::live_type::abandon(),
+        _ => crate::always::live_type::retract(),
+    }
     let outcome = match record_result {
         vad::RecordResult::Speech {
             text,
@@ -794,6 +804,11 @@ fn handle_speech(
 ) -> Result<()> {
     let now = Instant::now();
     let action = classify_transcription(cfg, text, transcription, now, *last_process);
+    // Live typing: only a paste delivers the typed words; any other outcome
+    // (cooldown, rejected, hallucinated, foreign speech) removes them first.
+    if !matches!(action, SpeechAction::Paste { .. }) {
+        crate::always::live_type::retract();
+    }
 
     // Cooldown is observable in the decision but does not advance
     // last_process — let the next utterance re-check.
@@ -1213,6 +1228,10 @@ fn deliver_paste(
 ) -> Result<()> {
     // Sandbox guard (launch smoke test): never type into the user's apps.
     if std::env::var("ALWAYS_NO_PASTE").as_deref() == Ok("1") {
+        // Sandbox with a live-typing dry-run log: record the correction too.
+        if crate::always::live_type::dry_run() {
+            let _ = crate::always::live_type::finish(&format!("{final_text} "));
+        }
         tracing::info!(
             chars = final_text.chars().count(),
             "paste_suppressed_no_paste_env"
@@ -1277,6 +1296,7 @@ fn deliver_paste(
             dup_window_ms = dup_window.as_millis() as u64,
             "duplicate_paste_suppressed"
         );
+        crate::always::live_type::retract();
         event::global_broadcaster().voice_activity_ended();
         return Ok(());
     }
@@ -1286,6 +1306,7 @@ fn deliver_paste(
             text = %paste_payload,
             "duplicate_paste_suppressed_in_flight"
         );
+        crate::always::live_type::retract();
         event::global_broadcaster().voice_activity_ended();
         return Ok(());
     }
@@ -1333,6 +1354,7 @@ fn deliver_paste(
                     chars = paste_payload.chars().count(),
                     "paused_mid_utterance_withheld_recoverable"
                 );
+                crate::always::live_type::abandon();
                 pause::set_last_filtered(final_text.clone());
                 event::global_broadcaster()
                     .transcription_filtered("App paused — press ⌃⌥V to paste anyway");
@@ -1367,6 +1389,7 @@ fn deliver_paste(
     let copy_result = paste::copy_to_clipboard(paste_clipboard);
     if let Err(err) = copy_result {
         tracing::warn!(error = %err, "clipboard_copy_failed");
+        crate::always::live_type::abandon();
         log.write(Event::Error {
             message: "Skipped paste: clipboard copy failed",
         });
@@ -1384,6 +1407,7 @@ fn deliver_paste(
     // their utterance was heard but intentionally not pasted.
     if keyboard::is_cmd_held() {
         tracing::debug!("skipped_paste_cmd_held");
+        crate::always::live_type::abandon();
         log.write(Event::Error {
             message: "Skipped paste: Command key held",
         });
@@ -1399,9 +1423,32 @@ fn deliver_paste(
     // the user can intercept (any key cancels). When
     // `auto_enter_delay_ms == 0` the countdown helper presses
     // Return immediately, preserving the legacy behavior.
-    if let Err(err) = paste::paste_text(false) {
-        pause::end_paste();
-        return Err(err);
+    // Live typing: the words are already on screen — correct them to this
+    // exact payload instead of pasting it again.
+    match crate::always::live_type::finish(&written_clipboard) {
+        crate::always::live_type::Finish::Corrected => {}
+        crate::always::live_type::Finish::NotTyped => {
+            if let Err(err) = paste::paste_text(false) {
+                pause::end_paste();
+                return Err(err);
+            }
+        }
+        crate::always::live_type::Finish::FocusMoved => {
+            // Typed words stay where they were spoken; nothing is sent into
+            // the window the user moved to. Same recovery as a paused
+            // utterance whose focus changed (⌃⌥V).
+            let recoverable_id = crate::always::rejected::keep_withheld(
+                &final_text,
+                "focus moved during live typing",
+            );
+            tracing::info!(recoverable_id, "live_type_final_withheld_focus_moved");
+            pause::set_last_filtered(final_text.clone());
+            event::global_broadcaster()
+                .transcription_filtered("Window changed — press ⌃⌥V to paste the rest");
+            pause::dictation_buffer_clear();
+            pause::end_paste();
+            return Ok(());
+        }
     }
     let pasted_at = Instant::now();
     // Remember exactly what was pasted, for voice editing.

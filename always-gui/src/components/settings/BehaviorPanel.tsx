@@ -73,6 +73,7 @@ export function BehaviorPanel({
       silero_threshold: next.sileroThreshold,
       adaptive_silence: next.sttAdaptiveSilence,
       stt_live_preview: next.sttLivePreview,
+      live_typing: next.liveTyping,
     });
   };
 
@@ -133,6 +134,12 @@ export function BehaviorPanel({
           help="Periodically transcribes what you've said so far and shows the provisional text in the overlay while you're still talking."
           on={config.sttLivePreview}
           onChange={(v) => changeRuntimeSetting({ sttLivePreview: v })}
+        />
+        <ToggleRow
+          label="Type words while you speak"
+          help="Types into the focused app as you talk instead of pasting when you stop, then corrects the words to the final transcript. Typing stops if you pause, switch window, or another app takes the microphone."
+          on={config.liveTyping}
+          onChange={(v) => changeRuntimeSetting({ liveTyping: v })}
         />
 
         {/* Advanced thresholds disclosure */}

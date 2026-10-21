@@ -271,6 +271,10 @@ pub struct AlwaysConfig {
     /// cadence is much slower than the streaming-engine preview loop
     /// (see `LIVE_PREVIEW_INTERVAL_MS` in vad.rs). Default on.
     pub stt_live_preview: bool,
+    /// Live typing (Linux, opt-in): type the words two consecutive live
+    /// previews agree on while the user is still speaking, then correct
+    /// them to the final transcript (`live_type.rs`, SPEC §6.1).
+    pub live_typing: bool,
     /// Enforce the foreign-speech LOW-CONFIDENCE rule (mean Apple word
     /// confidence < 0.40 → not pasted, kept recoverable). Default false:
     /// log-only (`foreign_speech_would_reject`) — dictation is never
@@ -553,6 +557,7 @@ impl AlwaysConfig {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or_default(),
             stt_live_preview: resolve_stt_live_preview(&prefs),
+            live_typing: prefs.live_typing.unwrap_or(false),
             foreign_speech_confidence_enforce: resolve_foreign_speech_confidence_enforce(&prefs),
             mic_conflict_exclusion_bundles: resolve_mic_conflict_exclusion_bundles(&prefs),
         };
@@ -635,6 +640,7 @@ impl Default for AlwaysConfig {
             transcript_stream_enabled: false,
             audible_status_sound: StatusSoundSetting::default(),
             stt_live_preview: true,
+            live_typing: false,
             foreign_speech_confidence_enforce: false,
             mic_conflict_exclusion_bundles: DEFAULT_MIC_CONFLICT_EXCLUSION_BUNDLES
                 .iter()

@@ -484,6 +484,50 @@ path (speculation → final cut → paste) is untouched by all three arms.
 With `stt_live_preview` off, Groq dictation shows no mid-speech previews;
 the free speculative preview at a pause (below) still renders once.
 
+### Live typing (opt-in: `live_typing`)
+
+Words appear in the focused application while the user is still speaking.
+Off by default; the paste-at-the-end behaviour above is unchanged when off.
+
+- **Source:** the live preview of this section — committed chunks (final
+  quality) followed by the preview of the speech after them. While a chunk is
+  in flight its text is unknown and nothing is typed. With the Apple backend
+  the source is the instant-preview merger (Parakeet + Apple partials) — its
+  verified previews only; Parakeet's words are typed provisionally and, like
+  every typed word, corrected to the Apple final.
+- **What is typed:** the committed text, then the words two consecutive
+  previews agree on. The newest word of a preview is never typed early. Local
+  engines preview at least every 350 ms while live typing is on (cloud
+  cadences are unchanged).
+- **Corrections:** when the committed text, or an agreed word, differs from
+  what was typed, the difference is corrected at once (Backspace, then type),
+  so typing never stalls behind one changed word. The final payload — merge,
+  dedupe and post-processing exactly as `deliver_paste` computes it — is the
+  last correction; it replaces the paste keystroke. The payload still goes to
+  the clipboard (history), and auto-enter, the dictation buffer and voice edit
+  behave as after a paste.
+- **Outcomes that are not a paste** (cooldown, rejected, hallucinated, foreign
+  speech, too quiet, noise, not the user's voice, duplicate) remove what was
+  typed for the utterance.
+- **Invariants:** previews exist only for speech captured while listening and,
+  with My Voice on, verified — I3 and I6 hold for typed words as for pasted
+  ones. Any pause stops typing for the rest of the utterance. When another
+  application takes the microphone the session ends without one more
+  keystroke (I7); words already typed stay, as speech authorised at capture
+  time (I3).
+- **Focus:** no keystroke is ever sent anywhere but where typing started,
+  checked before every keystroke batch — macOS: the frontmost app and its
+  focused Accessibility element; Linux: the focused window (Hyprland). If
+  focus moved, the typed words stay where they were spoken and the final is
+  kept recoverable (⌃⌥V), as for a paused utterance whose focus changed.
+  Linux compositors without a focus query: focus is assumed unchanged ❓.
+- **Typing:** voice editing's keystroke path (`ax_edit::post_strokes`):
+  macOS posts Unicode text and Backspace events; Linux uses `wtype` (virtual
+  keyboard: layout independent, works in terminals without a paste chord),
+  else `ydotool`, else `xdotool`. The keystrokes are marked as Always's own,
+  so they never count as user input (voice-edit gate, §9c).
+- **Consume mode** (Iris holds the line) never types.
+
 ---
 
 ## 6. My Voice (speaker verification)
@@ -1299,6 +1343,8 @@ optional leading "please"/"okay" or trailing "please"):
 | go to | go to the end / start | caret |
 | rewrite | make that shorter / more formal / friendlier, fix the grammar, translate that to <language> | handed to Iris (on-device model) — see below |
 
+
+
 **Gate — dictation is never swallowed.** An utterance is claimed only when
 all hold, otherwise it pastes as normal dictation:
 
@@ -1496,6 +1542,7 @@ the app has identified the platform, avoiding a Windows warning flash on Linux.
 | `audible_status_sound` | off | Sound cues (off/low/medium/high; see §10.1) |
 | `per_app_settings_json` | — | Per-application pause rules |
 | `update_check` | true | Background GitHub release check (§12a); `ALWAYS_UPDATE_CHECK=0` also disables it |
+| `live_typing` | false | Type words while the user speaks and correct them to the final transcript (§5, Live typing) |
 
 Shortcuts: pause `ctrl+alt+p` · master pause/mute `ctrl+alt+shift+p` ·
 auto-enter `ctrl+alt+a` · force paste `ctrl+alt+v` · log correction
