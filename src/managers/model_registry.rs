@@ -1937,6 +1937,85 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             is_verifying: false,
         },
     );
+
+    // Parakeet Ultra — moondream's post-trained Parakeet TDT 0.6B v3
+    // (CC-BY-4.0): same architecture as v3, so the existing transcribe-rs
+    // Parakeet engine loads it (int8 encoder + decoder, nemo128 preprocessor,
+    // vocab.txt). 25 European languages; the model detects the language
+    // itself, so no hint is passed (transcribe-rs ignores Parakeet's anyway).
+    // ONNX export: Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx, pinned below.
+    let parakeet_ultra_languages: Vec<String> = [
+        "en", "de", "fr", "es", "it", "pt", "ru", "uk", "hr", "sl", "lv", "lt", "et", "fi", "sv",
+        "da", "nl", "pl", "cs", "sk", "hu", "ro", "bg", "el", "mt",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+
+    map.insert(
+        "parakeet-ultra".into(),
+        ModelInfo {
+            id: "parakeet-ultra".into(),
+            name: "Parakeet Ultra".into(),
+            description: "25 European languages, detects the language by itself. Post-trained Parakeet V3; fast on the processor.".into(),
+            filename: "parakeet-ultra-int8".into(),
+            // Loose files on HuggingFace, like Nemotron: `files`, no archive.
+            url: None,
+            sha256: None,
+            // 667_974_518 bytes across the four files below.
+            size_mb: 637,
+            is_downloaded: false,
+            is_downloading: false,
+            partial_size: 0,
+            is_directory: true,
+            engine_type: EngineType::Parakeet,
+            accuracy_score: 0.85,
+            speed_score: 0.85,
+            supports_translation: false,
+            supports_streaming: false,
+            is_recommended: false,
+            supported_languages: parakeet_ultra_languages,
+            supports_language_selection: false,
+            is_custom: false,
+            // Names are load-bearing: `ParakeetModel::load(dir, Int8)` opens
+            // `encoder-model.int8.onnx`, `decoder_joint-model.int8.onnx`,
+            // `nemo128.onnx` and `vocab.txt` in the model directory. The
+            // export keeps the int8 pair under `int8/`; they land flat here.
+            // LFS checksums for the pinned revision; vocab.txt is a plain git
+            // file, hashed from that revision.
+            files: vec![
+                ModelFile {
+                    name: "encoder-model.int8.onnx".into(),
+                    url: PARAKEET_ULTRA_FILE_BASE.to_string() + "int8/encoder-model.int8.onnx",
+                    sha256: "8a2b47169cf3f1b114010e12c0221bc6f07203289477a65a44847b9e3f1e01ed"
+                        .into(),
+                    size_bytes: 649_537_325,
+                },
+                ModelFile {
+                    name: "decoder_joint-model.int8.onnx".into(),
+                    url: PARAKEET_ULTRA_FILE_BASE.to_string() + "int8/decoder_joint-model.int8.onnx",
+                    sha256: "667ffde2242a560923cba6bc7f69ef03d736f8a36ca9588f2e6f9fa818cf2fc1"
+                        .into(),
+                    size_bytes: 18_203_490,
+                },
+                ModelFile {
+                    name: "nemo128.onnx".into(),
+                    url: PARAKEET_ULTRA_FILE_BASE.to_string() + "nemo128.onnx",
+                    sha256: "a9fde1486ebfcc08f328d75ad4610c67835fea58c73ba57e3209a6f6cf019e9f"
+                        .into(),
+                    size_bytes: 139_764,
+                },
+                ModelFile {
+                    name: "vocab.txt".into(),
+                    url: PARAKEET_ULTRA_FILE_BASE.to_string() + "vocab.txt",
+                    sha256: "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"
+                        .into(),
+                    size_bytes: 93_939,
+                },
+            ],
+            is_verifying: false,
+        },
+    );
 }
 
 /// Remove `path` whether it is a file, a directory, or absent.
@@ -1957,6 +2036,10 @@ fn remove_path_any_kind(path: &Path) -> std::io::Result<()> {
 /// Where the Nemotron ONNX export's files live.
 const NEMOTRON_FILE_BASE: &str =
     "https://huggingface.co/pantinor/nemotron-3.5-asr-streaming-0.6b-onnx/resolve/main/";
+
+/// Where the Parakeet Ultra ONNX export's files live, pinned to one revision
+/// so the checksums above stay true.
+const PARAKEET_ULTRA_FILE_BASE: &str = "https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx/resolve/3b80a92332b5d34c364a35a880ef049c7fede9f2/";
 
 #[cfg(test)]
 mod tests {
