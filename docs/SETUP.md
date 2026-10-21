@@ -184,6 +184,56 @@ sudo usermod -aG audio $USER
 # Log out and back in for the group change to take effect
 ```
 
+### Wayland
+
+On Wayland the daemon cannot see global key events, and compositors differ in
+how another program may type into a window.
+
+**Typing the transcript.** Always puts the transcript on the clipboard
+(`wl-copy`) and sends the paste chord with the first tool that works:
+
+| Tool | Works on | Setup |
+|---|---|---|
+| `wtype` | wlroots compositors: Hyprland (Omarchy ships it), Sway | none |
+| `ydotool` | any compositor (kernel uinput) | `ydotoold` running, and access to `/dev/uinput` |
+| `xdotool` | XWayland windows only | none |
+
+For `ydotool` (GNOME, KDE):
+
+```bash
+systemctl --user enable --now ydotool.service
+sudo usermod -aG input $USER   # /dev/uinput is root:input 0660; log out and back in
+```
+
+On Hyprland the focused window is detected, so terminals receive Ctrl+Shift+V.
+Other compositors receive Ctrl+V, which most terminals do not paste with.
+
+**Pause shortcut.** Bind `always toggle-pause` (and `always toggle-auto-enter`)
+in the compositor:
+
+```bash
+# Hyprland (hyprland.conf)
+bind = CTRL ALT, P, exec, always toggle-pause
+# Omarchy (~/.config/hypr/bindings.lua)
+o.bind("CTRL + ALT + P", "Always dictation pause/resume", "always toggle-pause")
+# Sway
+bindsym Ctrl+Alt+p exec always toggle-pause
+```
+
+**Choosing the microphone.** Always records from the system's default input.
+Audio interfaces with several inputs can make that a mix: on a GoXLR the
+default is often *Stream Mix* (your voice plus music and calls) rather than
+*Chat Mic*. With PipeWire you can point Always alone at one source and leave the
+system default unchanged:
+
+```bash
+pactl list short sources   # node names, e.g. ...GoXLRMini-00.HiFi__Headset__source (Chat Mic)
+systemctl --user edit always-daemon
+#   [Service]
+#   Environment=PIPEWIRE_NODE=alsa_input.usb-TC-Helicon_GoXLRMini-00.HiFi__Headset__source
+systemctl --user restart always-daemon
+```
+
 ### First Launch Workflow
 
 1. **Install** with the one-liner or the DEB/RPM package.
