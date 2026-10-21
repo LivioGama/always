@@ -562,6 +562,46 @@ const SPEAKER_GATE_REJECT_STREAK: usize = 4;
 /// partial is used instead of re-transcribing from scratch.
 const APPLE_STREAM_FINISH_MS: u32 = 1500;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use crate::always::{apple_stt, stt_apple};
+
+/// Stand-ins for Apple's speech engine where it does not exist (Linux).
+/// `StreamSession` is uninhabited: the capture pipeline's Apple-only
+/// branches type-check here but can never run, and macOS is untouched.
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+mod apple_stt {
+    pub enum StreamSession {}
+    impl StreamSession {
+        pub fn start(_lang: Option<&str>, _phrases: &[String]) -> Option<Self> {
+            None
+        }
+        pub fn feed(&mut self, _samples: &[i16]) {
+            match *self {}
+        }
+        pub fn finish_with_outcome(
+            self,
+            _timeout_ms: u32,
+        ) -> (Option<String>, crate::stt::LiveStreamOutcome) {
+            match self {}
+        }
+    }
+    // The pipeline drops a session explicitly; mirror the real type's Drop.
+    impl Drop for StreamSession {
+        fn drop(&mut self) {
+            match *self {}
+        }
+    }
+    pub fn check_availability() -> bool {
+        false
+    }
+}
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+mod stt_apple {
+    pub fn context_phrases() -> Vec<String> {
+        Vec::new()
+    }
+}
+
 /// Speaker-aware end-of-utterance. Generic VAD keeps the utterance open
 /// as long as ANY speech-like audio continues — background media held
 /// recordings hostage until the user paused the video (observed live:
@@ -953,13 +993,13 @@ const PREVIEW_PREROLL_FRAMES: usize = 16;
 impl UtterancePreview {
     /// Arm the preview for an Apple streaming session. Parakeet joins
     /// when the dictation language is English and the helper is warm.
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    fn start(&mut self, session: &mut apple_stt::StreamSession, _lang: &str, _verified: bool) {
+        match *session {}
+    }
+
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    fn start(
-        &mut self,
-        session: &mut crate::always::apple_stt::StreamSession,
-        lang: &str,
-        verified: bool,
-    ) {
+    fn start(&mut self, session: &mut apple_stt::StreamSession, lang: &str, verified: bool) {
         if self.preview.is_some() {
             return;
         }
@@ -1062,7 +1102,7 @@ impl Drop for UtterancePreview {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 fn record_with_local_vad(
     cfg: &AlwaysConfig,
     log: &mut Logger,
@@ -1541,7 +1581,7 @@ fn record_with_local_vad(
     // transcripts and the final result replaces the end-of-utterance WAV
     // round trip. `None` on other backends or when the engine is
     // unavailable — everything below degrades to the existing paths.
-    let mut stream_session: Option<crate::always::apple_stt::StreamSession> = None;
+    let mut stream_session: Option<apple_stt::StreamSession> = None;
     // Live preview (both engines push into it) + Parakeet feed + voice
     // level. Declared AFTER `stream_session` so it drops FIRST on every
     // exit path: the preview closes before the Apple session is freed.
@@ -1787,11 +1827,11 @@ fn record_with_local_vad(
                         cfg.transcriber_backend,
                         crate::stt_dispatch::TranscriberBackendChoice::Apple
                     )
-                    && crate::always::apple_stt::check_availability()
+                    && apple_stt::check_availability()
                 {
-                    stream_session = crate::always::apple_stt::StreamSession::start(
+                    stream_session = apple_stt::StreamSession::start(
                         stream_session_lang,
-                        &crate::always::stt_apple::context_phrases(),
+                        &stt_apple::context_phrases(),
                     );
                     if stream_session.is_none() {
                         tracing::debug!("apple_stream_session_unavailable");
@@ -3053,7 +3093,7 @@ fn record_with_local_vad(
 ///
 /// Non-speech outcomes (silence, noise, a speaker-gate drop) pass
 /// through unchanged — there is nothing to keep and nothing to suppress.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 fn apply_mic_conflict_preemption(result: RecordResult, preempted: bool) -> RecordResult {
     if !preempted {
         return result;
@@ -3064,8 +3104,8 @@ fn apply_mic_conflict_preemption(result: RecordResult, preempted: bool) -> Recor
     }
 }
 
-/// Non-macOS stub.
-#[cfg(not(target_os = "macos"))]
+/// Stub where the capture pipeline is not built (Windows; Linux without `cpal`).
+#[cfg(not(any(target_os = "macos", all(target_os = "linux", feature = "cpal"))))]
 fn record_with_local_vad(
     _cfg: &AlwaysConfig,
     _log: &mut Logger,
@@ -3087,7 +3127,7 @@ fn record_with_local_vad(
 /// `None`: the tail is left out — never replaced by marker text, which
 /// would be pasted (2026-10-16: a user got `[audio saved: chunk 2]` in his
 /// message) — and the committed chunks are still assembled and pasted.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 fn recover_failed_chunked_tail(
     tail: &[i16],
     err: &anyhow::Error,
@@ -3112,7 +3152,7 @@ fn recover_failed_chunked_tail(
 }
 
 /// One fresh transcription of a failed chunked tail by the pasting engine.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 fn retry_tail_once(transcriber: &Arc<dyn Transcriber>, span: &[i16]) -> Option<String> {
     let wav = audio::create_wav_bytes_i16_mono_16k(span).ok()?;
     match transcriber.transcribe_from_bytes(wav) {
@@ -3135,15 +3175,15 @@ fn retry_tail_once(transcriber: &Arc<dyn Transcriber>, span: &[i16]) -> Option<S
 /// running past it means trouble (Apple times out at 12 s), so the
 /// Parakeet rescue of the tail starts here, in parallel, and is usually
 /// done before the recognizer gives up.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 const TAIL_RESCUE_ARM_MS: u64 = 4_000;
 /// Extra wait for the rescue text once the recognizer has failed. Bounds
 /// what a failure can add on top of the recognizer's own timeout.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 const TAIL_RESCUE_MAX_EXTRA_MS: u64 = 1_500;
 /// Ceiling for the helper's own decode of one span (it runs off-thread;
 /// the paste never waits on it longer than `TAIL_RESCUE_MAX_EXTRA_MS`).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 const TAIL_RESCUE_DECODE_MS: u64 = 15_000;
 
 /// Parakeet recovery of a chunked utterance's tail, armed alongside the
@@ -3151,13 +3191,13 @@ const TAIL_RESCUE_DECODE_MS: u64 = 15_000;
 /// `TAIL_RESCUE_ARM_MS` (or at once when the recognizer fails sooner), so
 /// the normal path never shares the Neural Engine with it; only where the
 /// Parakeet helper already runs (Apple backend, English) and is warm.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 struct TailRescue {
     go: std::sync::mpsc::Sender<bool>,
     text: std::sync::mpsc::Receiver<Option<String>>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 impl TailRescue {
     fn arm(cfg: &AlwaysConfig, tail: &[i16]) -> Self {
         let (go, go_rx) = std::sync::mpsc::channel::<bool>();
@@ -3215,7 +3255,7 @@ pub const CHUNKS_LOST_ERROR: &str = "dictation could not be transcribed, audio s
 /// Assemble a chunked utterance: wait for committed chunks, join them in
 /// flush order, and append the (already transcribed) tail text.
 /// `tail_lost`: the tail's speech could not be transcribed (left out).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 #[allow(clippy::too_many_arguments)]
 fn finalize_chunked(
     chunker: &crate::always::chunker::ChunkAccumulator,

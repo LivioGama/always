@@ -982,9 +982,13 @@ use anyhow::Context;
 #[cfg(target_os = "linux")]
 impl MicrophoneMonitor {
     fn check_microphone_usage_linux(&self) -> Result<bool> {
-        // Method 1: Check PulseAudio/PipeWire sources
-        if let Ok(true) = self.check_pulseaudio_sources() {
-            return Ok(true);
+        // Method 1: Check PulseAudio/PipeWire sources. When the sound server
+        // answers, its answer is final: falling through to the process-name
+        // guess below on a "no" meant any running browser (chrome_crashpad,
+        // firefox) counted as a microphone user, so Always paused at every
+        // start and never resumed after a call.
+        if let Ok(in_use) = self.check_pulseaudio_sources() {
+            return Ok(in_use);
         }
 
         // Method 2: Check /proc/asound/cards for active audio
@@ -1017,7 +1021,7 @@ impl MicrophoneMonitor {
             _ => {}
         }
 
-        Ok(false)
+        anyhow::bail!("pactl unavailable")
     }
 
     fn check_alsa_devices(&self) -> Result<bool> {
@@ -1106,7 +1110,18 @@ impl MicrophoneMonitor {
     }
 
     fn is_own_recorder_app(app_name: &str) -> bool {
-        matches!(app_name.to_ascii_lowercase().as_str(), "sox" | "rec")
+        // The ALSA plugins name a capture client after its process: on Linux
+        // Always's own cpal stream is "PipeWire ALSA [always]" (PulseAudio:
+        // "ALSA plug-in [always]"). Counting it as another app paused Always
+        // at every start, and the watcher, never seeing the mic free, never
+        // re-armed after the user resumed — so I7 never fired again.
+        let name = app_name.trim();
+        let inner = ["PipeWire ALSA [", "ALSA plug-in ["]
+            .iter()
+            .find_map(|prefix| name.strip_prefix(prefix)?.strip_suffix(']'))
+            .unwrap_or(name);
+        matches!(inner.to_ascii_lowercase().as_str(), "sox" | "rec")
+            || crate::always::mic_monitor::label_is_self(inner)
     }
 
     fn get_common_audio_apps_linux(&self) -> Result<Vec<String>> {
@@ -1149,6 +1164,20 @@ impl MicrophoneMonitor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_own_capture_stream_is_never_a_conflict() {
+        use super::MicrophoneMonitor as M;
+        assert!(M::is_own_recorder_app("PipeWire ALSA [always]"));
+        assert!(M::is_own_recorder_app("ALSA plug-in [always]"));
+        assert!(M::is_own_recorder_app("sox"));
+        // Teams/Meet in Chromium, and any other ALSA client, are conflicts.
+        assert!(!M::is_own_recorder_app("Chromium input"));
+        assert!(!M::is_own_recorder_app("PipeWire ALSA [aplay]"));
+        let pactl = "Source Output #1\n\tapplication.name = \"PipeWire ALSA [always]\"\n";
+        assert!(M::is_own_recorder_source(pactl));
+    }
+
     #[test]
     fn mic_self_helpers_are_never_a_conflict() {
         // The 2026-10-14 prod regression: the daemon's own always-capture

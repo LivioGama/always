@@ -94,8 +94,17 @@ the selected device's supported sample rate and channel layout to the pipeline's
 16 kHz mono frames; Linux exposes the capture device through ALSA, including
 PipeWire/PulseAudio ALSA compatibility layers. Linux uses `wl-copy`/`wl-paste`
 for clipboard access on Wayland when installed, falling back to `xclip`, and
-uses `xclip` on X11. It simulates paste with `ydotool` on Wayland when installed,
-falling back to `xdotool`; X11 uses `xdotool`. Linux global
+uses `xclip` on X11. On Wayland it sends the paste chord with `wtype` (the
+virtual-keyboard protocol of wlroots compositors such as Hyprland and Sway; no
+daemon or `/dev/uinput` access needed), then `ydotool` (needs `ydotoold`), then
+`xdotool` (XWayland windows only); an injector that exits non-zero hands over to
+the next. `ydotool` is driven with raw evdev keycodes
+(`ydotool key -d 3 29:1 47:1 47:0 29:0`): ydotool 1.0 rejects key names and
+exits 0 while doing so, which until 2026-10-20 meant nothing was pasted on
+Wayland. Terminals receive Ctrl+Shift+V instead of Ctrl+V — on X11 from the
+active window's class, on Hyprland from `hyprctl activewindow` (class or process
+name); other Wayland compositors offer no portable query and receive Ctrl+V.
+X11 uses `xdotool`. Linux global
 shortcuts are available in X11 sessions; Wayland compositors do not let the
 daemon observe global key events, so users there control pause and auto-enter
 through the CLI.
@@ -589,7 +598,10 @@ and swaps the live keyboard listener's combo set without a restart.
 - **An explicit user resume** (global chord, idle pill Play, `Resume` or
   `TogglePause` over UDS, CLI, tray) clears master, idle, audio-output and
   mic-conflict at once, and never pauses. A global toggle resumes whenever any
-  of those is active, and only otherwise sets master. The watchdogs re-arm on
+  of those is active — or when Always is still in its paused-by-default start
+  state with no source active (platforms without a focus monitor, e.g. Linux:
+  otherwise the first press set master and the user had to press twice) —
+  and only otherwise sets master. The watchdogs re-arm on
   their next transition, so the user can force dictation while music plays or
   another app holds the mic. This is a deliberate user override of the
   watchdogs; I7 still holds: when another app takes the mic Always stops
@@ -811,6 +823,13 @@ offline; the cloud backend is faster to start and needs an API key.
   and Settings shows “No model selected” with setup guidance. A saved local
   selection takes precedence. A failed startup load reports its error and
   returns to `none`, rather than showing an unavailable backend as active.
+- Installs without the Settings app (the Linux tarball, headless machines) use
+  `always model list | download <id> | use <id>`, which send the panel's own
+  daemon commands (`ListModels`, `DownloadModel`, `SetActiveTranscriber`).
+  `download` returns once the catalogue shows the model installed and
+  verified; `use` once the daemon names that backend as running. Both exit
+  non-zero on the daemon's failure events, and `use` rejects a malformed id
+  before sending it (the daemon would only log it and never answer).
 - A switch loads the new engine before the config names it, and never under
   the config lock the main loop reads, so a slow load does not block dictation.
   Engine rebuilds (a switch, a language change) run one at a time.

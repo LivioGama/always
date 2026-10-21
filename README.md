@@ -130,6 +130,17 @@ always config set groq_api_key <your-groq-key>
 systemctl --user enable --now always-daemon.service
 ```
 
+Or transcribe on your own CPU, with no key and nothing leaving the machine:
+
+```bash
+systemctl --user enable --now always-daemon.service
+always model list                                   # the catalogue
+always model download moonshine-medium-streaming-en # English; nemotron-3.5-asr-streaming-0.6b is multilingual
+always model use moonshine-medium-streaming-en
+```
+
+Wayland setup (Hyprland/Omarchy, Sway, GNOME, KDE): see [docs/SETUP.md](docs/SETUP.md#wayland).
+
 **🪟 Windows:** allow microphone access (**Settings → Privacy & security → Microphone → Let desktop apps access your microphone**), then in a new terminal:
 
 ```powershell
@@ -192,7 +203,7 @@ If you are an AI agent setting Always up for a user, do this, in order. Only ins
 3. **Install** with the one-liner for the OS from [Install](#-install). On macOS and Windows it needs no admin rights; on Linux, installing the package may ask for `sudo`.
 4. **Finish setup.**
    - **macOS:** the installer opens Always. Tell the user the first-launch window asks for Microphone, Accessibility and (macOS 26+) Speech Recognition, and that only they can grant these.
-   - **Linux and Windows:** ask the user for their Groq API key (free at https://console.groq.com/keys) and run `always config set groq_api_key <key>`. Then start it: on Linux `systemctl --user enable --now always-daemon.service`; on Windows `always run` in a new terminal.
+   - **Linux and Windows:** ask the user for their Groq API key (free at https://console.groq.com/keys) and run `always config set groq_api_key <key>` — or, with no key, transcribe locally: `always model download moonshine-medium-streaming-en && always model use moonshine-medium-streaming-en`. Then start it: on Linux `systemctl --user enable --now always-daemon.service`; on Windows `always run` in a new terminal.
 5. **Verify** with `always status` (on macOS: `/Applications/Always.app/Contents/MacOS/always-daemon status`). It must print `Always-on daemon running`. Report what it printed, and do not claim success otherwise.
 6. **Tell the user** they can start talking, and that on macOS Always only types into the apps they picked during setup (<kbd>⌃⌥P</kbd> adds the current one).
 

@@ -152,10 +152,13 @@ pub fn socket_path() -> Option<PathBuf> {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
+        // Same per-instance name the server binds: without the suffix a dev
+        // CLI on Linux reached the production daemon.
+        let name = format!("always{}.sock", config::instance_suffix());
         if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-            Some(PathBuf::from(runtime_dir).join("always.sock"))
+            Some(PathBuf::from(runtime_dir).join(name))
         } else {
-            Some(PathBuf::from("/tmp/always.sock"))
+            Some(PathBuf::from("/tmp").join(name))
         }
     }
     #[cfg(target_os = "windows")]
@@ -223,7 +226,9 @@ fn first_argv(command: &str) -> Option<(&str, &str)> {
         let end = rest.find('"')?;
         Some((&rest[..end], rest[end + 1..].trim_start()))
     } else {
-        let end = c.find(char::is_whitespace)?;
+        // A bare last word is the whole argv[0]: the Linux systemd unit runs
+        // `always run`, which `ps` prints with nothing after `run`.
+        let end = c.find(char::is_whitespace).unwrap_or(c.len());
         Some((&c[..end], c[end..].trim_start()))
     }
 }
@@ -1655,6 +1660,37 @@ mod tests {
         assert!(daemon_is_running(false, true));
         assert!(daemon_is_running(true, false));
         assert!(!daemon_is_running(false, false));
+    }
+
+    #[test]
+    fn bare_run_command_line_is_a_daemon() {
+        // The Linux systemd unit's `ExecStart=always run`, as `ps` prints it.
+        let exe = "/home/u/.local/bin/always";
+        assert!(daemon_process_matches(
+            "prod",
+            exe,
+            exe,
+            &format!("{exe} run")
+        ));
+        assert!(daemon_process_matches(
+            "smoke",
+            exe,
+            exe,
+            &format!("{exe} run")
+        ));
+        assert!(!daemon_process_matches(
+            "prod",
+            exe,
+            exe,
+            &format!("{exe} status")
+        ));
+        assert!(!daemon_process_matches(
+            "prod",
+            exe,
+            exe,
+            &format!("{exe} runner")
+        ));
+        assert_eq!(first_argv("run"), Some(("run", "")));
     }
 
     #[test]

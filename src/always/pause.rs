@@ -283,6 +283,15 @@ pub fn is_user_resumable_pause() -> bool {
     is_any_global_pause() || is_idle_auto_paused()
 }
 
+/// Paused only by the paused-by-default start value: nothing is actually
+/// pausing. On macOS the focus monitor recomputes the state at launch; on
+/// platforms without one (Linux, CLI) nothing does, so the first toggle used
+/// to set MASTER and leave Always exactly as paused as before — the user had
+/// to press twice to turn it on.
+pub fn is_startup_default_pause() -> bool {
+    EFFECTIVE_PAUSED.load(Ordering::Relaxed) && !compute_effective()
+}
+
 /// Setup mode: when true, bypasses per-app pause rules so the daemon
 /// allows recording and pasting while onboarding is visible. This lets
 /// users test voice typing during setup without needing a resumed app.

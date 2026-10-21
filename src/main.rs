@@ -102,6 +102,12 @@ enum Commands {
         #[command(subcommand)]
         action: VoiceAction,
     },
+    /// Local speech models: list, download, select (Settings → Models
+    /// without the Settings app)
+    Model {
+        #[command(subcommand)]
+        action: cli::ModelAction,
+    },
     /// View and manage Always logs
     Logs {
         #[command(flatten)]
@@ -258,6 +264,7 @@ fn main() -> Result<()> {
         Some(Commands::Voice { action }) => handle_voice(action),
         Some(Commands::TogglePause) => handle_toggle_pause(),
         Some(Commands::ToggleAutoEnter) => handle_toggle_auto_enter(),
+        Some(Commands::Model { action }) => cli::handle_model(action),
         Some(Commands::Logs { args }) => cli::handle_logs(args),
         Some(Commands::Update { check }) => {
             let code = cli::update::run(check)?;
@@ -393,7 +400,9 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                 prefs
                     .stt_auto_enter
                     .map(|v| v.to_string())
-                    .unwrap_or_else(|| "false".to_string())
+                    // Unset means the daemon's default, which is ON
+                    // (`AlwaysConfig::from_cli`); printing "false" hid that.
+                    .unwrap_or_else(|| "true".to_string())
             );
             println!(
                 "auto_enter_delay_ms: {}",
