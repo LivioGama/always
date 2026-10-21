@@ -1505,6 +1505,8 @@ the Swift app's window (permissions, the three enrollment recordings, the
 apps page): permissions belong to the menu-bar bundle's TCC grants and are
 requested on its behalf. On Linux and Windows onboarding is the Tauri app's
 window (both start hidden; the settings webview decides which one to show).
+Launched with `--hidden` (launch at login) the Tauri app starts in the tray
+with no window once completion is recorded; Settings stay in the tray menu.
 Completion on the webview side lives in the webview's `always_onboarding_done`
 flag, retro-marked from a saved Groq key or a recorded voice profile
 (`always config show`, `always voice status`); the Tauri app's tray (non-macOS
