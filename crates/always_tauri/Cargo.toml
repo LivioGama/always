@@ -46,5 +46,10 @@ dirs = "6"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Tray title (libayatana-appindicator reads the GLib application name). Same
+# vendored glib the [patch] below pins - already in the dependency tree.
+[target.'cfg(target_os = "linux")'.dependencies]
+glib = "0.18"
+
 [patch.crates-io]
 glib = { path = "../../vendor/glib-0.18.5" }

@@ -28,6 +28,12 @@ use uds_client::ClientEvent;
 use window_manager::WindowManager;
 
 fn main() {
+    // The Linux tray (StatusNotifierItem via libayatana-appindicator) takes
+    // its title from the GLib application name and shows it as the tooltip;
+    // unset, that is the executable name, "always-tauri".
+    #[cfg(target_os = "linux")]
+    glib::set_application_name("Always");
+
     // Initialise tracing — same env-filter pattern the daemon uses.
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -62,10 +68,15 @@ fn main() {
         ])
         // Closing onboarding counts as skipping it: hide instead of destroy
         // (the tray can re-open it), show Settings, and let the settings
-        // webview record completion.
+        // webview record completion. Closing Settings hides it too: a
+        // destroyed window cannot be shown again, so the tray's Settings item
+        // did nothing for the rest of the session.
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "onboarding" {
+                if window.label() == "settings" {
+                    api.prevent_close();
+                    WindowManager::new(window.app_handle().clone()).hide_settings();
+                } else if window.label() == "onboarding" {
                     api.prevent_close();
                     let app = window.app_handle();
                     let wm = WindowManager::new(app.clone());
