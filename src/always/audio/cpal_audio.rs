@@ -31,6 +31,9 @@ struct FrameRing {
     closed: bool,
     /// Timestamp of the most recently pushed frame.
     last_captured_at: Option<std::time::Instant>,
+    /// Frames dropped in the current overflow episode (nobody reading:
+    /// paused, or the event loop busy).
+    dropped: u64,
 }
 
 impl FrameRing {
@@ -39,13 +42,23 @@ impl FrameRing {
             frames: std::collections::VecDeque::with_capacity(1_000),
             closed: false,
             last_captured_at: None,
+            dropped: 0,
         }
     }
 
     fn push(&mut self, frame: [u8; FRAME_BYTES]) {
+        // While paused nobody reads, so the ring stays full and drops a
+        // frame every 30 ms: log the episode once at each end, not per
+        // frame (2,000 lines a minute while paused).
         if self.frames.len() >= 1000 {
             self.frames.pop_front();
-            tracing::info!(capacity = 1000, "audio_ring_full_dropping_oldest");
+            if self.dropped == 0 {
+                tracing::info!(capacity = 1000, "audio_ring_full_dropping_oldest");
+            }
+            self.dropped += 1;
+        } else if self.dropped > 0 {
+            tracing::info!(dropped_frames = self.dropped, "audio_ring_overflow_ended");
+            self.dropped = 0;
         }
         self.frames.push_back(frame);
         self.last_captured_at = Some(std::time::Instant::now());
@@ -626,6 +639,23 @@ impl Default for CpalsAudioSource {
 mod tests {
     use super::*;
     use cpal::{SampleFormat as F, SupportedBufferSize::Unknown, SupportedStreamConfigRange as R};
+
+    #[test]
+    fn a_full_ring_keeps_the_newest_frames_and_counts_one_overflow_episode() {
+        let mut ring = FrameRing::new();
+        for i in 0..1_005u32 {
+            let mut f = [0u8; FRAME_BYTES];
+            f[..4].copy_from_slice(&i.to_le_bytes());
+            ring.push(f);
+        }
+        assert_eq!(ring.frames.len(), 1_000);
+        assert_eq!(ring.dropped, 5, "one episode, counted");
+        assert_eq!(&ring.frames.front().unwrap()[..4], &5u32.to_le_bytes());
+        // A reader catches up: the next push ends the episode.
+        ring.frames.pop_front();
+        ring.push([0u8; FRAME_BYTES]);
+        assert_eq!(ring.dropped, 0);
+    }
 
     #[test]
     fn frames_reach_a_waiting_reader_and_the_drain_ends_with_the_stream() {
