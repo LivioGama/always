@@ -102,6 +102,15 @@ pub struct Preferences {
     /// Live typing (Linux): words are typed while the user speaks and the
     /// final transcript corrects them (SPEC §6.1). NULL = off.
     pub live_typing: Option<bool>,
+    /// Spoken Return: "press enter" / "send it", said on its own right after
+    /// dictating, presses Return (SPEC §9c). NULL = off (dictated as words).
+    pub spoken_enter: Option<bool>,
+    /// What presses Return, comma-separated ("send it, go ahead"). NULL or
+    /// blank = the built-in phrases (SPEC §9c).
+    pub spoken_enter_phrases: Option<String>,
+    /// Spoken Return also at the end of a dictation ("…run it, go go"): the
+    /// phrase is cut and Return follows the paste (SPEC §9c). NULL = off.
+    pub spoken_enter_at_end: Option<bool>,
 }
 
 pub fn open() -> Result<Connection> {
@@ -407,6 +416,27 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE preferences ADD COLUMN live_typing INTEGER;")?;
     }
 
+    let has_spoken_enter = conn
+        .prepare("SELECT spoken_enter FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_spoken_enter {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN spoken_enter INTEGER;")?;
+    }
+
+    let has_spoken_enter_phrases = conn
+        .prepare("SELECT spoken_enter_phrases FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_spoken_enter_phrases {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN spoken_enter_phrases TEXT;")?;
+    }
+
+    let has_spoken_enter_at_end = conn
+        .prepare("SELECT spoken_enter_at_end FROM preferences LIMIT 0")
+        .is_ok();
+    if !has_spoken_enter_at_end {
+        conn.execute_batch("ALTER TABLE preferences ADD COLUMN spoken_enter_at_end INTEGER;")?;
+    }
+
     encode_plaintext_groq_key(conn)?;
 
     Ok(())
@@ -438,7 +468,7 @@ fn encode_plaintext_groq_key(conn: &Connection) -> Result<()> {
 
 pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
     let mut stmt = conn.prepare(
-        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream, stt_adaptive_silence, speaker_gate_enabled, speaker_gate_threshold, audible_status_sound, stt_live_preview, auto_learn_corrections, correction_model, postprocess_provider, mic_conflict_exclusion_bundles, postprocess_mode, capture_aec, foreign_speech_confidence_enforce, update_check, live_typing FROM preferences WHERE id = 1",
+        "SELECT lang, stt_threshold, stt_energy_threshold, stt_cooldown_ms, always_log_path, hear_energy_threshold, stt_silence, stt_trim_silence, stt_auto_enter, deepgram_api_key, groq_api_key, deepgram_model, silero_threshold, shortcut_pause, shortcut_auto_enter, shortcut_force_paste, postprocess_enabled, shortcut_log_correction, passive_correction_capture, auto_enter_delay_ms, idle_pause_secs, shortcut_correction_dialog, per_app_settings_json, transcriber_backend, shortcut_master_pause, transcript_stream, stt_adaptive_silence, speaker_gate_enabled, speaker_gate_threshold, audible_status_sound, stt_live_preview, auto_learn_corrections, correction_model, postprocess_provider, mic_conflict_exclusion_bundles, postprocess_mode, capture_aec, foreign_speech_confidence_enforce, update_check, live_typing, spoken_enter, spoken_enter_phrases, spoken_enter_at_end FROM preferences WHERE id = 1",
     )?;
     let result = stmt.query_row([], |row| {
         Ok(Preferences {
@@ -482,6 +512,9 @@ pub fn get_preferences(conn: &Connection) -> Result<Preferences> {
             foreign_speech_confidence_enforce: row.get::<_, Option<i64>>(37)?.map(|v| v != 0),
             update_check: row.get::<_, Option<i64>>(38)?.map(|v| v != 0),
             live_typing: row.get::<_, Option<i64>>(39)?.map(|v| v != 0),
+            spoken_enter: row.get::<_, Option<i64>>(40)?.map(|v| v != 0),
+            spoken_enter_phrases: row.get(41)?,
+            spoken_enter_at_end: row.get::<_, Option<i64>>(42)?.map(|v| v != 0),
         })
     });
     match result {
@@ -537,6 +570,9 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "foreign_speech_confidence_enforce",
         "update_check",
         "live_typing",
+        "spoken_enter",
+        "spoken_enter_phrases",
+        "spoken_enter_at_end",
     ];
     if !valid_keys.contains(&key) {
         anyhow::bail!(
@@ -622,6 +658,8 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         | "foreign_speech_confidence_enforce"
         | "update_check"
         | "live_typing"
+        | "spoken_enter"
+        | "spoken_enter_at_end"
         | "speaker_gate_enabled" => {
             if !matches!(value, "true" | "false" | "1" | "0") {
                 anyhow::bail!("{key} must be one of: true, false, 1, 0");
@@ -724,6 +762,8 @@ pub fn set_preference(conn: &Connection, key: &str, value: &str) -> Result<()> {
         | "foreign_speech_confidence_enforce"
         | "update_check"
         | "live_typing"
+        | "spoken_enter"
+        | "spoken_enter_at_end"
         | "speaker_gate_enabled" => {
             if matches!(value, "true" | "1") {
                 "1".to_string()
@@ -913,5 +953,28 @@ mod update_check_tests {
         set_preference(&conn, "update_check", "true").unwrap();
         assert_eq!(get_preferences(&conn).unwrap().update_check, Some(true));
         assert!(set_preference(&conn, "update_check", "never").is_err());
+    }
+}
+
+#[cfg(test)]
+mod spoken_enter_tests {
+    use super::{get_preferences, migrate, set_preference};
+    use rusqlite::Connection;
+
+    #[test]
+    fn spoken_enter_and_its_phrases_round_trip() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let prefs = get_preferences(&conn).unwrap();
+        assert_eq!(prefs.spoken_enter, None);
+        assert_eq!(prefs.spoken_enter_phrases, None);
+        set_preference(&conn, "spoken_enter", "true").unwrap();
+        set_preference(&conn, "spoken_enter_phrases", "go ahead, ship it").unwrap();
+        let prefs = get_preferences(&conn).unwrap();
+        assert_eq!(prefs.spoken_enter, Some(true));
+        assert_eq!(
+            prefs.spoken_enter_phrases.as_deref(),
+            Some("go ahead, ship it")
+        );
     }
 }

@@ -75,7 +75,14 @@ mod tests {
     }
 
     fn say(pid: i32, utterance: &str) -> Outcome {
-        let o = voice_edit::run(utterance, false, "live", KeyTarget::Pid(pid), Some(pid));
+        let o = voice_edit::run(
+            utterance,
+            false,
+            "live",
+            KeyTarget::Pid(pid),
+            Some(pid),
+            &[],
+        );
         eprintln!(
             "  {utterance:<34} claimed={} op={} method={} reason={} run_ms={:.1}",
             o.claimed, o.op, o.method, o.reason, o.ms

@@ -761,6 +761,18 @@ pub enum DaemonCommand {
         /// still decode.
         #[serde(default)]
         live_typing: Option<bool>,
+        /// Spoken Return (§9c). Optional so payloads from older GUI builds
+        /// still decode.
+        #[serde(default)]
+        spoken_enter: Option<bool>,
+        /// Spoken Return phrases, comma-separated (§9c). Optional so payloads
+        /// from older GUI builds still decode.
+        #[serde(default)]
+        spoken_enter_phrases: Option<String>,
+        /// Spoken Return at the end of a dictation (§9c). Optional so
+        /// payloads from older GUI builds still decode.
+        #[serde(default)]
+        spoken_enter_at_end: Option<bool>,
     },
     /// Approve a pending correction in the queue and apply it to the
     /// glossary. The daemon emits `CorrectionLogged` on success.

@@ -9,6 +9,9 @@ export interface Config {
   sttAdaptiveSilence: boolean;
   sttLivePreview: boolean;
   liveTyping: boolean;
+  spokenEnter: boolean;
+  spokenEnterPhrases: string;
+  spokenEnterAtEnd: boolean;
   sttAutoEnter: boolean;
   autoEnterDelayMs: number;
   groqApiKey: string | null;
@@ -38,6 +41,9 @@ export const DEFAULT_CONFIG: Config = {
   sttAdaptiveSilence: true,
   sttLivePreview: true,
   liveTyping: false,
+  spokenEnter: false,
+  spokenEnterPhrases: "press enter, hit enter, press return, hit return, send it, send that, submit it, submit that",
+  spokenEnterAtEnd: false,
   sttAutoEnter: true,
   autoEnterDelayMs: 4000,
   groqApiKey: null,
@@ -103,6 +109,9 @@ export function parseConfig(output: string): Config {
       case "stt_adaptive_silence": c.sttAdaptiveSilence = bool(); break;
       case "stt_live_preview": c.sttLivePreview = bool(); break;
       case "live_typing": c.liveTyping = bool(); break;
+      case "spoken_enter": c.spokenEnter = bool(); break;
+      case "spoken_enter_phrases": c.spokenEnterPhrases = value; break;
+      case "spoken_enter_at_end": c.spokenEnterAtEnd = bool(); break;
       case "stt_auto_enter": c.sttAutoEnter = bool(); break;
       case "auto_enter_delay_ms": c.autoEnterDelayMs = int(c.autoEnterDelayMs); break;
       case "auto_enter_delay_secs":

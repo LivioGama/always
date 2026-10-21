@@ -772,6 +772,7 @@ pub fn paste_rejected(id: u64) -> bool {
                 false,
                 lat,
                 0,
+                false,
             ) {
                 tracing::warn!(error = %error, "rejected_paste_failed");
             }
@@ -941,6 +942,28 @@ fn handle_speech(
             // Deterministic local cleanup first: removes adjacent repeats and
             // fillers before snippet matching / grammar so they never reach the
             // paste buffer or the LLM prompt.
+            // The user's spoken-Enter phrase is matched before this cleanup:
+            // a chosen phrase like "go go" is exactly an adjacent repeat.
+            let enter_phrases = cfg.active_enter_phrases();
+            // Opt-in: the phrase ENDING a dictation ("…run it, go go") is cut
+            // here and Return follows this paste (`deliver_paste`).
+            let (transformed, send_after) = match cfg
+                .spoken_enter_at_end
+                .then(|| {
+                    crate::always::voice_edit_grammar::split_trailing_enter(
+                        &transformed,
+                        enter_phrases,
+                    )
+                })
+                .flatten()
+            {
+                Some(rest) => {
+                    tracing::info!("spoken_enter_at_end_detected");
+                    (rest, true)
+                }
+                None => (transformed, false),
+            };
+            let before_cleanup = transformed.clone();
             let transformed = crate::always::postprocess::local_cleanup(&transformed);
             // A misheard leading "Iris" ("Irish what time is it", "IRS what
             // time is it") becomes the name the user said — only at the very
@@ -952,7 +975,15 @@ fn handle_speech(
             // claimed ONLY when the whole utterance is an edit command right
             // after a paste into this same field (voice_edit.rs gate);
             // otherwise this is a no-op and the utterance pastes as usual.
-            if crate::always::voice_edit::try_claim(&transformed) {
+            let claim_text = if crate::always::voice_edit_grammar::is_enter_phrase(
+                &before_cleanup,
+                enter_phrases,
+            ) {
+                &before_cleanup
+            } else {
+                &transformed
+            };
+            if crate::always::voice_edit::try_claim(claim_text, enter_phrases) {
                 pause::dictation_buffer_clear();
                 event::global_broadcaster().voice_activity_ended();
                 return Ok(());
@@ -1154,6 +1185,7 @@ fn handle_speech(
                             false,
                             lat,
                             unrecovered_parts,
+                            false,
                         ) {
                             tracing::warn!(error = %error, "held_final_paste_failed");
                         }
@@ -1186,6 +1218,7 @@ fn handle_speech(
                 grammar_patch_async,
                 lat,
                 transcription.evidence.unrecovered_parts,
+                send_after,
             )
         }
     }
@@ -1225,12 +1258,29 @@ fn deliver_paste(
     grammar_patch_async: bool,
     lat: PasteLatency,
     unrecovered_parts: usize,
+    send_after: bool,
 ) -> Result<()> {
     // Sandbox guard (launch smoke test): never type into the user's apps.
     if std::env::var("ALWAYS_NO_PASTE").as_deref() == Ok("1") {
-        // Sandbox with a live-typing dry-run log: record the correction too.
+        // Sandbox with a dry-run keystroke log: record the live-typing
+        // correction, and anchor the "paste" so voice commands can be tested.
         if crate::always::live_type::dry_run() {
-            let _ = crate::always::live_type::finish(&format!("{final_text} "));
+            let payload = format!("{final_text} ");
+            let _ = crate::always::live_type::finish(&payload);
+            crate::always::voice_edit::note_paste(&payload);
+            // Recorded, not sent: the Linux `post_strokes` honours
+            // ALWAYS_NO_PASTE (the macOS one does not, so not there).
+            #[cfg(target_os = "linux")]
+            if send_after && unrecovered_parts == 0 {
+                let _ = crate::always::ax_edit::post_strokes(
+                    crate::always::ax_edit::KeyTarget::Hid,
+                    &[crate::always::ax_edit::Stroke::Key {
+                        code: crate::always::ax_edit::keys::RETURN,
+                        mods: crate::always::ax_edit::Mods::NONE,
+                        repeat: 1,
+                    }],
+                );
+            }
         }
         tracing::info!(
             chars = final_text.chars().count(),
@@ -1244,6 +1294,7 @@ fn deliver_paste(
             grammar_patch_async,
             lat,
             unrecovered_parts,
+            send_after,
         );
         return Ok(());
     }
@@ -1502,13 +1553,30 @@ fn deliver_paste(
         event::global_broadcaster()
             .transcription_failed(DICTATION_PART_LOST_KIND, DICTATION_PART_LOST_MESSAGE);
     }
-    if should_press_return(auto_enter_effective, &buffer_text, unrecovered_parts) {
+    // Spoken Return at the end of this dictation: Return now, whatever the
+    // auto-Enter setting — but never for an incomplete dictation.
+    let press_return = if send_after {
+        if unrecovered_parts > 0 {
+            tracing::info!(
+                unrecovered_parts,
+                "spoken_enter_suppressed_incomplete_dictation"
+            );
+        }
+        unrecovered_parts == 0
+    } else {
+        should_press_return(auto_enter_effective, &buffer_text, unrecovered_parts)
+    };
+    if press_return {
         // Hold the merged buffer so the NEXT utterance can
         // append again if it arrives before the countdown
         // fires. Set BEFORE schedule() so even a 0-delay
         // immediate-Return path sees the buffer for clearing.
         pause::dictation_buffer_set(buffer_text.clone());
-        let delay = per_app::effective_auto_enter_delay_ms(cfg.auto_enter_delay_ms);
+        let delay = if send_after {
+            0
+        } else {
+            per_app::effective_auto_enter_delay_ms(cfg.auto_enter_delay_ms)
+        };
         auto_enter_countdown::schedule(rt, delay);
         if delay == 0 {
             // 0-delay presses Return synchronously inside schedule().

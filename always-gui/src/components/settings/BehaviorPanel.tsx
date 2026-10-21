@@ -74,6 +74,9 @@ export function BehaviorPanel({
       adaptive_silence: next.sttAdaptiveSilence,
       stt_live_preview: next.sttLivePreview,
       live_typing: next.liveTyping,
+      spoken_enter: next.spokenEnter,
+      spoken_enter_phrases: next.spokenEnterPhrases,
+      spoken_enter_at_end: next.spokenEnterAtEnd,
     });
   };
 
@@ -244,6 +247,31 @@ export function BehaviorPanel({
           max={60}
           decimals={0}
         />
+        <ToggleRow
+          label={'Say "press enter" to send'}
+          help={'Saying "press enter" or "send it" on its own, right after dictating, presses Return. Off: those words are typed like any others.'}
+          on={config.spokenEnter}
+          onChange={(v) => changeRuntimeSetting({ spokenEnter: v })}
+        />
+        {config.spokenEnter && (
+          <div className="space-y-1">
+            <input
+              value={config.spokenEnterPhrases}
+              onChange={(e) => onConfigChange({ spokenEnterPhrases: e.target.value })}
+              onBlur={() => changeRuntimeSetting({})}
+              placeholder="press enter, send it"
+              aria-label="Phrases that press Return"
+              className="w-full bg-surface-800 border border-surface-700 rounded px-2.5 py-1.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-primary-500"
+            />
+            <Caption>Phrases that press Return, separated by commas. Leave empty for the defaults.</Caption>
+            <ToggleRow
+              label="Also at the end of a sentence"
+              help={'"…and run the tests, go go" types the sentence without the phrase, then presses Return — no pause needed. Pick a phrase you would never dictate: with "send it", a sentence ending in "send it" is sent.'}
+              on={config.spokenEnterAtEnd}
+              onChange={(v) => changeRuntimeSetting({ spokenEnterAtEnd: v })}
+            />
+          </div>
+        )}
       </div>
 
       <Divider />

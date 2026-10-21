@@ -418,6 +418,9 @@ mod tests {
             audible_status_sound: crate::always::status_sound::StatusSoundSetting::default(),
             stt_live_preview: true,
             live_typing: false,
+            spoken_enter: false,
+            spoken_enter_phrases: Vec::new(),
+            spoken_enter_at_end: false,
             foreign_speech_confidence_enforce: false,
             mic_conflict_exclusion_bundles: Vec::new(),
         }
