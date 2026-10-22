@@ -102,6 +102,12 @@ enum Commands {
         #[command(subcommand)]
         action: VoiceAction,
     },
+    /// Local speech models: list, download, select (Settings → Models
+    /// without the Settings app)
+    Model {
+        #[command(subcommand)]
+        action: cli::ModelAction,
+    },
     /// View and manage Always logs
     Logs {
         #[command(flatten)]
@@ -258,6 +264,7 @@ fn main() -> Result<()> {
         Some(Commands::Voice { action }) => handle_voice(action),
         Some(Commands::TogglePause) => handle_toggle_pause(),
         Some(Commands::ToggleAutoEnter) => handle_toggle_auto_enter(),
+        Some(Commands::Model { action }) => cli::handle_model(action),
         Some(Commands::Logs { args }) => cli::handle_logs(args),
         Some(Commands::Update { check }) => {
             let code = cli::update::run(check)?;
@@ -393,7 +400,9 @@ fn handle_config(action: ConfigAction) -> Result<()> {
                 prefs
                     .stt_auto_enter
                     .map(|v| v.to_string())
-                    .unwrap_or_else(|| "false".to_string())
+                    // Unset means the daemon's default, which is ON
+                    // (`AlwaysConfig::from_cli`); printing "false" hid that.
+                    .unwrap_or_else(|| "true".to_string())
             );
             println!(
                 "auto_enter_delay_ms: {}",
@@ -481,6 +490,19 @@ fn handle_config(action: ConfigAction) -> Result<()> {
             );
             println!("capture_aec: {}", prefs.capture_aec.unwrap_or(false));
             println!("update_check: {}", prefs.update_check.unwrap_or(true));
+            println!("live_typing: {}", prefs.live_typing.unwrap_or(false));
+            println!("spoken_enter: {}", prefs.spoken_enter.unwrap_or(false));
+            println!(
+                "spoken_enter_at_end: {}",
+                prefs.spoken_enter_at_end.unwrap_or(false)
+            );
+            println!(
+                "spoken_enter_phrases: {}",
+                always::always::voice_edit_grammar::enter_phrases(
+                    prefs.spoken_enter_phrases.as_deref()
+                )
+                .join(", ")
+            );
             #[cfg(target_os = "macos")]
             println!(
                 "apple_intelligence_available: {}",

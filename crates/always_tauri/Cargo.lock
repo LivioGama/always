@@ -34,10 +34,11 @@ dependencies = [
 
 [[package]]
 name = "always-tauri"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
+ "glib",
  "libc",
  "serde",
  "serde_json",

@@ -1,6 +1,6 @@
 [package]
 name = "always-tauri"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Always Tauri v2 backend — UDS client bridging the daemon to the web frontend"
 

@@ -183,7 +183,7 @@ pub fn note_user_input() {
     st.user_input_at = Some(now);
 }
 
-fn mark_self_post() {
+pub(crate) fn mark_self_post() {
     STATE.lock().self_post_until = Some(Instant::now() + SELF_POST_GRACE);
 }
 
@@ -900,6 +900,11 @@ pub fn plan(
             }
             Err("needs_ax")
         }
+        EditCommand::PressEnter => caret_only(
+            Plan::Keys(vec![key(keys::RETURN, Mods::NONE, 1)]),
+            AnchorEffect::None,
+            "keys",
+        ),
         EditCommand::Rewrite { style } => {
             // Something to rewrite must exist: a selection, or our paste
             // still sitting where we left it.
@@ -1183,8 +1188,18 @@ fn apply_effect(effect: &AnchorEffect) {
 
 /// Daemon entry: called with the cleaned utterance before it is pasted.
 /// `true` = claimed and executed; the caller must NOT paste it.
-pub fn try_claim(utterance: &str) -> bool {
-    run(utterance, false, "dictation", KeyTarget::Hid, None).claimed
+/// `enter_phrases`: what presses Return right now — empty while
+/// `spoken_enter` is off (`AlwaysConfig::active_enter_phrases`).
+pub fn try_claim(utterance: &str, enter_phrases: &[String]) -> bool {
+    run(
+        utterance,
+        false,
+        "dictation",
+        KeyTarget::Hid,
+        None,
+        enter_phrases,
+    )
+    .claimed
 }
 
 /// Shared runner. `forced` = Iris addressed the command explicitly (the
@@ -1196,8 +1211,16 @@ pub fn run(
     source: &str,
     target: KeyTarget,
     pid: Option<i32>,
+    enter_phrases: &[String],
 ) -> Outcome {
-    let Some((cmd, addressed)) = grammar::parse_addressed(utterance) else {
+    // Spoken Return: the user's phrases (empty while `spoken_enter` is off,
+    // so the words are dictated); never part of the fixed grammar.
+    let parsed = if grammar::is_enter_phrase(utterance, enter_phrases) {
+        Some((EditCommand::PressEnter, false))
+    } else {
+        grammar::parse_addressed(utterance)
+    };
+    let Some((cmd, addressed)) = parsed else {
         return Outcome {
             claimed: false,
             op: "none",
@@ -1275,6 +1298,12 @@ fn run_inner(
     pid: Option<i32>,
     app: Option<&str>,
 ) -> Result<&'static str, &'static str> {
+    // Off macOS there is no Accessibility API to verify the field, so only
+    // the one command that needs none runs: pressing Return. Every other
+    // command is dictated, as before.
+    if cfg!(not(target_os = "macos")) && *cmd != EditCommand::PressEnter {
+        return Err("unsupported_platform");
+    }
     let (anchor, committed, user_input, untracked) = {
         let st = STATE.lock();
         let a = st.anchors.last().cloned();
@@ -1327,6 +1356,9 @@ fn run_inner(
         keys_exact,
         forced,
     )?;
+    // Live typing already typed this utterance's words ("press enter"):
+    // remove them before the command runs.
+    crate::always::live_type::retract();
     // Serialise with the paste path: never edit while a paste is landing.
     if !crate::always::pause::try_begin_paste() {
         return Err("paste_in_flight");
@@ -1335,6 +1367,11 @@ fn run_inner(
     crate::always::pause::end_paste();
     let method = res?;
     apply_effect(&planned.effect);
+    if *cmd == EditCommand::PressEnter {
+        // Sent: nothing before the Return can be edited any more. After
+        // `apply_effect`, which re-stamps the anchor for chained edits.
+        note_committed();
+    }
     // The session / merge buffer described text that just changed; the
     // next utterance starts fresh. Keep ⌃⌥X's diff baseline honest.
     crate::always::pause::dictation_buffer_clear();
@@ -1480,6 +1517,40 @@ pub fn replace_target(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn press_enter_sends_once_then_refuses_until_the_next_paste() {
+        // SAFETY: test-only env; the sandbox guard keeps keystrokes local.
+        unsafe { std::env::set_var("ALWAYS_NO_PASTE", "1") };
+        note_paste("Please add a test for the parser. ");
+        let on = grammar::enter_phrases(None);
+        let off = run(
+            "Press enter.",
+            false,
+            "dictation",
+            KeyTarget::Hid,
+            None,
+            &[],
+        );
+        assert!(!off.claimed, "spoken_enter off: dictated");
+        let first = run(
+            "Press enter.",
+            false,
+            "dictation",
+            KeyTarget::Hid,
+            None,
+            &on,
+        );
+        assert!(first.claimed, "first: {}", first.reason);
+        let second = run("Send it.", false, "dictation", KeyTarget::Hid, None, &on);
+        assert!(
+            !second.claimed,
+            "second must be refused, got {}",
+            second.reason
+        );
+        assert_eq!(second.reason, "committed");
+        unsafe { std::env::remove_var("ALWAYS_NO_PASTE") };
+    }
+
     use super::*;
 
     fn field(v: &str) -> Field {

@@ -34,10 +34,12 @@ enum OnboardingCompletion {
 }
 
 struct OnboardingView: View {
-    /// Four steps, in order. Welcome sets the tone; permissions are
+    /// Steps, in order. Engine comes before permissions so a model
+    /// download runs while the user grants them; permissions are
     /// required; voice enrollment is optional; ready confirms.
     private enum Step: Int, CaseIterable {
         case welcome
+        case engine
         case permissions
         case voice
         case tips
@@ -47,6 +49,7 @@ struct OnboardingView: View {
             switch self {
             case .welcome:     return "Welcome"
             case .permissions: return "Permissions"
+            case .engine:      return "Engine"
             case .voice:       return "My Voice"
             case .tips:        return "Tips"
             case .ready:       return "Ready"
@@ -59,6 +62,8 @@ struct OnboardingView: View {
                 return "Welcome to Always. I'll guide you through a quick setup so I can start typing what you say. Click continue to begin."
             case .permissions:
                 return "Always needs microphone access to hear you, and accessibility access to type your words into any app. Grant each permission, and I'll continue when you're ready."
+            case .engine:
+                return "Choose how Always turns your voice into text. Groq gives the best results with a free key. A local model runs entirely on this computer, and keeps downloading while you continue."
             case .voice:
                 return "Now, let's teach me your voice. This is optional, but it lets me ignore other people, videos, and calls. Record three short samples and I'll only listen to you."
             case .tips:
@@ -214,6 +219,7 @@ struct OnboardingView: View {
         switch step {
         case .welcome:     return "waveform.circle.fill"
         case .permissions: return "lock.shield.fill"
+        case .engine:      return "cpu"
         case .voice:       return "mic.badge.xmark"
         case .tips:        return "lightbulb.fill"
         case .ready:       return "checkmark.seal.fill"
@@ -224,6 +230,7 @@ struct OnboardingView: View {
         switch step {
         case .welcome:     return .accentColor
         case .permissions: return .orange
+        case .engine:      return .teal
         case .voice:       return .purple
         case .tips:        return .yellow
         case .ready:       return .green
@@ -240,6 +247,7 @@ struct OnboardingView: View {
         switch step {
         case .welcome:     return "Welcome to Always"
         case .permissions: return "Grant Permissions"
+        case .engine:      return "Choose Your Engine"
         case .voice:       return "Teach It Your Voice"
         case .tips:        return "Tips & Shortcuts"
         case .ready:       return "You're All Set"
@@ -257,11 +265,13 @@ struct OnboardingView: View {
     private var stepSubtitleText: String {
         switch step {
         case .welcome:
-            return "Always listens to your voice and types what you say — in any app. Let's get set up in three quick steps."
+            return "Always listens to your voice and types what you say — in any app. Let's get set up in a few quick steps."
         case .permissions:
             return speech.isOnDeviceEngineAvailable
                 ? "macOS needs you to approve three permissions. This window updates automatically once you do."
                 : "macOS needs you to approve two permissions. This window updates automatically once you do."
+        case .engine:
+            return "Pick how your speech becomes text. You can change this any time."
         case .voice:
             return "Optional, but it stops Always transcribing other people, videos and calls."
         case .tips:
@@ -276,6 +286,7 @@ struct OnboardingView: View {
         switch step {
         case .welcome:     welcomeStep
         case .permissions: permissionsStep
+        case .engine:      OnboardingEngineStep()
         case .voice:       voiceStep
         case .tips:        tipsStep
         case .ready:       readyStep
@@ -751,7 +762,7 @@ struct OnboardingView: View {
             switch step {
             case .welcome:
                 Button {
-                    step = .permissions
+                    step = .engine
                 } label: {
                     Text("Continue")
                         .fontWeight(.semibold)
@@ -768,6 +779,17 @@ struct OnboardingView: View {
                         .fontWeight(.semibold)
                 }
                 .disabled(!requiredPermissionsGranted)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .frame(minWidth: 120)
+
+            case .engine:
+                Button {
+                    step = .permissions
+                } label: {
+                    Text("Continue")
+                        .fontWeight(.semibold)
+                }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .frame(minWidth: 120)

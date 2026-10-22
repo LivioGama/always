@@ -116,6 +116,7 @@ struct SettingsWindow: View {
         .onChange(of: config.idlePauseSecs) { _, _ in saveConfig() }
         .onChange(of: config.audibleStatusSound) { _, _ in saveConfig() }
         .onChange(of: config.sttLivePreview) { _, _ in saveConfig() }
+        .onChange(of: config.liveTyping) { _, _ in saveConfig() }  // Bool? — Equatable
     }
 
     @ViewBuilder
@@ -218,6 +219,7 @@ struct SettingsWindow: View {
                 _ = try await cliService.setConfig(key: "stt_silence", value: String(config.sttSilence))
                 _ = try await cliService.setConfig(key: "stt_adaptive_silence", value: String(config.sttAdaptiveSilence))
                 _ = try await cliService.setConfig(key: "stt_live_preview", value: String(config.sttLivePreview))
+                _ = try await cliService.setConfig(key: "live_typing", value: String(config.liveTyping ?? false))
                 _ = try await cliService.setConfig(key: "stt_cooldown_ms", value: String(config.sttCooldownMs))
                 _ = try await cliService.setConfig(key: "auto_enter_delay_ms", value: String(config.autoEnterDelayMs))
                 _ = try await cliService.setConfig(key: "silero_threshold", value: String(config.sileroThreshold))

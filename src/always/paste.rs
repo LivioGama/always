@@ -446,38 +446,134 @@ pub fn is_wayland_session() -> bool {
         .unwrap_or(false)
 }
 
-/// Paste on a Wayland session.
+/// Paste on a Wayland session (the transcript is already on the clipboard).
 ///
-/// Strategy:
-/// 1. Try `ydotool type <text>` — direct text injection via evdev.
-/// 2. Fall back to `xdotool ctrl+v` if ydotool is unavailable.
+/// Key injectors, in order; one that fails falls through to the next:
+/// 1. `wtype` — the compositor's virtual-keyboard protocol (wlroots
+///    compositors such as Hyprland and Sway; part of Omarchy's base install).
+///    Needs no daemon and no `/dev/uinput` access, and is keyboard-layout
+///    independent. It exits non-zero where the protocol is missing (GNOME,
+///    KDE), which is what moves us on.
+/// 2. `ydotool key` — kernel uinput; needs a running `ydotoold`.
+/// 3. `xdotool` — reaches XWayland windows only.
 ///
-/// `ydotool` works on both Wayland and X11, but when xdotool is also
-/// present (e.g. in a Wayland session with XWayland compatibility),
-/// preferring `ydotool` avoids the X11 round-trip that xdotool forces.
+/// On Hyprland the focused window is resolved, so terminals get Ctrl+Shift+V
+/// as on X11. Other compositors offer no portable query; they get Ctrl+V.
 #[cfg(target_os = "linux")]
 fn paste_wayland(auto_enter: bool) -> Result<()> {
-    // Try ydotool first — it types raw text directly into the focused window.
-    if which_present("ydotool") {
-        return paste_wayland_ydotool(auto_enter);
+    let terminal = hyprland_focused_window_is_terminal().unwrap_or(false);
+    // Browser engines read the physical key, which wtype's invented keymap
+    // gets wrong (see `linux_keys`): press the real Ctrl+V for the layout.
+    if crate::always::linux_keys::focused_window_runs_browser_engine() {
+        match crate::always::linux_keys::ctrl_chord('v', terminal) {
+            Ok(()) => {
+                if auto_enter {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    crate::always::linux_keys::tap(crate::always::linux_keys::KEY_ENTER, 1)?;
+                }
+                return Ok(());
+            }
+            Err(e) => tracing::warn!(error = %e, "browser_paste_real_keys_failed"),
+        }
     }
-
-    // Fall back to xdotool — works on Wayland via XWayland compatibility.
+    for (bin, paste_args, enter_args) in wayland_injectors(terminal) {
+        if !which_present(bin) {
+            continue;
+        }
+        match run_injector(bin, &paste_args) {
+            Ok(()) => {
+                if auto_enter {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    run_injector(bin, &enter_args)?;
+                }
+                return Ok(());
+            }
+            Err(e) => tracing::warn!(injector = bin, error = %e, "wayland_paste_injector_failed"),
+        }
+    }
     paste_x11(auto_enter)
 }
 
-/// Paste via `ydotool type` — types plain text into the focused window.
+/// `(binary, paste chord, Enter)` for each Wayland injector, in preference
+/// order. ydotool 1.0 accepts only `key [-d ms] CODE:STATE…` with raw evdev
+/// codes (29 ctrl, 42 shift, 47 v, 28 enter) and exits 0 on anything else —
+/// the 0.1-era `ctrl:v` form pasted nothing, silently. So the argument shape
+/// is the contract, and the tests pin it.
+/// ponytail: ydotool codes are positional — on layouts where V is not on the
+/// QWERTY V key (Dvorak) the chord is wrong; wtype is tried first and has no
+/// such limit.
 #[cfg(target_os = "linux")]
-fn paste_wayland_ydotool(auto_enter: bool) -> Result<()> {
-    // ydotool type sends the text as a series of key events.
-    // For clipboard paste on Wayland, we first write to clipboard via wl-copy/xdg-clipper,
-    // then simulate Ctrl+V via ydotool key codes.
-    post_ydotool_key(["--delay", "3", "ctrl:v"])?;
-    if auto_enter {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        post_ydotool_key(["--delay", "3", "Return"])?;
+fn wayland_injectors(terminal: bool) -> [(&'static str, Vec<&'static str>, Vec<&'static str>); 2] {
+    let (wtype_paste, ydotool_paste) = if terminal {
+        (
+            vec![
+                "-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl",
+            ],
+            vec![
+                "key", "-d", "3", "29:1", "42:1", "47:1", "47:0", "42:0", "29:0",
+            ],
+        )
+    } else {
+        (
+            vec!["-M", "ctrl", "-k", "v", "-m", "ctrl"],
+            vec!["key", "-d", "3", "29:1", "47:1", "47:0", "29:0"],
+        )
+    };
+    [
+        ("wtype", wtype_paste, vec!["-k", "Return"]),
+        (
+            "ydotool",
+            ydotool_paste,
+            vec!["key", "-d", "3", "28:1", "28:0"],
+        ),
+    ]
+}
+
+#[cfg(target_os = "linux")]
+fn run_injector(bin: &str, args: &[&str]) -> Result<()> {
+    let status = std::process::Command::new(bin)
+        .args(args)
+        .status()
+        .with_context(|| format!("Failed to run {bin}"))?;
+    if !status.success() {
+        anyhow::bail!("{bin} failed with status {status}");
     }
     Ok(())
+}
+
+/// On Hyprland, whether the focused window is a terminal. `None` off
+/// Hyprland or when the query fails — the caller then sends Ctrl+V.
+#[cfg(target_os = "linux")]
+fn hyprland_focused_window_is_terminal() -> Option<bool> {
+    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
+    let out = std::process::Command::new("hyprctl")
+        .args(["activewindow", "-j"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    active_window_is_terminal(&out.stdout, |pid| {
+        std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()
+    })
+}
+
+/// Classify `hyprctl activewindow -j` output. The class alone misses
+/// terminals launched under a custom app-id (`foot --app-id=…`), so the
+/// window's process name is checked as well.
+#[cfg(target_os = "linux")]
+fn active_window_is_terminal(
+    json: &[u8],
+    process_name: impl Fn(i64) -> Option<String>,
+) -> Option<bool> {
+    let window: serde_json::Value = serde_json::from_slice(json).ok()?;
+    let class = window.get("class").and_then(|c| c.as_str()).unwrap_or("");
+    let process_is_terminal = window
+        .get("pid")
+        .and_then(|p| p.as_i64())
+        .and_then(process_name)
+        .is_some_and(|name| is_terminal_window_class(name.trim()));
+    Some(is_terminal_window_class(class) || process_is_terminal)
 }
 
 /// Paste on an X11 session via xdotool.
@@ -634,10 +730,32 @@ pub fn press_return() -> Result<()> {
     win32::press_return()
 }
 
+/// Auto-Enter's Return. On Wayland it uses the paste path's injectors
+/// (`xdotool` reaches XWayland windows only, so Return never arrived in
+/// native Wayland apps — terminals included); a failing one falls through.
 #[cfg(target_os = "linux")]
 pub fn press_return() -> Result<()> {
     if no_paste_env() {
         return Ok(());
+    }
+    if is_wayland_session() {
+        if crate::always::linux_keys::focused_window_runs_browser_engine() {
+            match crate::always::linux_keys::tap(crate::always::linux_keys::KEY_ENTER, 1) {
+                Ok(()) => return Ok(()),
+                Err(e) => tracing::warn!(error = %e, "browser_return_real_keys_failed"),
+            }
+        }
+        for (bin, _, enter_args) in wayland_injectors(false) {
+            if !which_present(bin) {
+                continue;
+            }
+            match run_injector(bin, &enter_args) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    tracing::warn!(injector = bin, error = %e, "wayland_return_injector_failed")
+                }
+            }
+        }
     }
     post_xdotool_key(["key", "--clearmodifiers", "Return"])
 }
@@ -668,6 +786,7 @@ fn is_terminal_window_class(class_name: &str) -> bool {
         "alacritty"
             | "com.mitchellh.ghostty"
             | "foot"
+            | "ghostty"
             | "gnome-terminal-server"
             | "hyper"
             | "kgx"
@@ -693,18 +812,6 @@ fn post_xdotool_key<const N: usize>(args: [&str; N]) -> Result<()> {
         .context("Failed to run xdotool")?;
     if !status.success() {
         anyhow::bail!("xdotool failed with status {status}");
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn post_ydotool_key<const N: usize>(args: [&str; N]) -> Result<()> {
-    let status = std::process::Command::new("ydotool")
-        .args(args)
-        .status()
-        .context("Failed to run ydotool")?;
-    if !status.success() {
-        anyhow::bail!("ydotool failed with status {status}");
     }
     Ok(())
 }
@@ -1119,6 +1226,60 @@ mod tests {
             (true, false)
         );
         assert!(events.enter.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wayland_injector_args_match_what_the_tools_accept() {
+        for terminal in [false, true] {
+            let [
+                (wtype, wtype_paste, wtype_enter),
+                (ydotool, ydo_paste, ydo_enter),
+            ] = wayland_injectors(terminal);
+            assert_eq!((wtype, ydotool), ("wtype", "ydotool"));
+            // ydotool 1.0: `key` subcommand, then only CODE:STATE pairs.
+            for args in [&ydo_paste, &ydo_enter] {
+                assert_eq!(&args[..3], &["key", "-d", "3"]);
+                for code in &args[3..] {
+                    let (k, s) = code.split_once(':').expect("CODE:STATE");
+                    assert!(k.parse::<u16>().is_ok() && (s == "0" || s == "1"), "{code}");
+                }
+            }
+            assert_eq!(ydo_enter[3..], ["28:1", "28:0"]);
+            assert_eq!(wtype_enter, ["-k", "Return"]);
+            // Shift is in the chord exactly when the target is a terminal.
+            assert_eq!(ydo_paste.contains(&"42:1"), terminal);
+            assert_eq!(wtype_paste.contains(&"shift"), terminal);
+        }
+        let [_, (_, ydo, _)] = wayland_injectors(false);
+        assert_eq!(ydo[3..], ["29:1", "47:1", "47:0", "29:0"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hyprland_active_window_classification() {
+        let name = |n: &'static str| move |_pid: i64| Some(format!("{n}\n"));
+        let w = |class: &str| format!(r#"{{"class":"{class}","pid":42}}"#).into_bytes();
+        assert_eq!(
+            active_window_is_terminal(&w("Alacritty"), name("alacritty")),
+            Some(true)
+        );
+        // Custom app-id, but the process is foot.
+        assert_eq!(
+            active_window_is_terminal(&w("tmux-minisx"), name("foot")),
+            Some(true)
+        );
+        assert_eq!(
+            active_window_is_terminal(&w("com.mitchellh.ghostty"), |_| None),
+            Some(true)
+        );
+        assert_eq!(
+            active_window_is_terminal(&w("chromium"), name("chromium")),
+            Some(false)
+        );
+        // No focused window: hyprctl prints `{}`.
+        assert_eq!(active_window_is_terminal(b"{}", |_| None), Some(false));
+        assert_eq!(active_window_is_terminal(b"Invalid", |_| None), None);
     }
 
     #[cfg(all(not(target_os = "macos"), target_os = "linux"))]

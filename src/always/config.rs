@@ -271,6 +271,18 @@ pub struct AlwaysConfig {
     /// cadence is much slower than the streaming-engine preview loop
     /// (see `LIVE_PREVIEW_INTERVAL_MS` in vad.rs). Default on.
     pub stt_live_preview: bool,
+    /// Live typing (Linux, opt-in): type the words two consecutive live
+    /// previews agree on while the user is still speaking, then correct
+    /// them to the final transcript (`live_type.rs`, SPEC §6.1).
+    pub live_typing: bool,
+    /// Spoken Return (opt-in): "press enter" / "send it" on its own right
+    /// after dictating presses Return (`voice_edit.rs`, SPEC §9c).
+    pub spoken_enter: bool,
+    /// What the user says to press Return (`spoken_enter_phrases`,
+    /// comma-separated; default `voice_edit_grammar::DEFAULT_ENTER_PHRASES`).
+    pub spoken_enter_phrases: Vec<String>,
+    /// Spoken Return also when the phrase ends a dictation (opt-in).
+    pub spoken_enter_at_end: bool,
     /// Enforce the foreign-speech LOW-CONFIDENCE rule (mean Apple word
     /// confidence < 0.40 → not pasted, kept recoverable). Default false:
     /// log-only (`foreign_speech_would_reject`) — dictation is never
@@ -369,6 +381,16 @@ impl Default for PostprocessConfig {
 }
 
 impl AlwaysConfig {
+    /// Phrases that press Return right now: empty while `spoken_enter` is
+    /// off, so they are dictated like any other words.
+    pub fn active_enter_phrases(&self) -> &[String] {
+        if self.spoken_enter {
+            &self.spoken_enter_phrases
+        } else {
+            &[]
+        }
+    }
+
     pub fn from_cli(
         lang: String,
         timeout_secs: u32,
@@ -553,6 +575,12 @@ impl AlwaysConfig {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or_default(),
             stt_live_preview: resolve_stt_live_preview(&prefs),
+            live_typing: prefs.live_typing.unwrap_or(false),
+            spoken_enter: prefs.spoken_enter.unwrap_or(false),
+            spoken_enter_phrases: crate::always::voice_edit_grammar::enter_phrases(
+                prefs.spoken_enter_phrases.as_deref(),
+            ),
+            spoken_enter_at_end: prefs.spoken_enter_at_end.unwrap_or(false),
             foreign_speech_confidence_enforce: resolve_foreign_speech_confidence_enforce(&prefs),
             mic_conflict_exclusion_bundles: resolve_mic_conflict_exclusion_bundles(&prefs),
         };
@@ -635,6 +663,10 @@ impl Default for AlwaysConfig {
             transcript_stream_enabled: false,
             audible_status_sound: StatusSoundSetting::default(),
             stt_live_preview: true,
+            live_typing: false,
+            spoken_enter: false,
+            spoken_enter_phrases: crate::always::voice_edit_grammar::enter_phrases(None),
+            spoken_enter_at_end: false,
             foreign_speech_confidence_enforce: false,
             mic_conflict_exclusion_bundles: DEFAULT_MIC_CONFLICT_EXCLUSION_BUNDLES
                 .iter()

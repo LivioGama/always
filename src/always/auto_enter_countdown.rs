@@ -12,18 +12,30 @@ use super::event::global_broadcaster;
 use super::pause;
 
 const TICK_MS: u32 = 100;
+/// 0-delay wait between a Cmd+V paste and Return.
+const AFTER_PASTE_MS: u64 = 50;
+/// 0-delay wait after live typing's keystroke burst. Terminal UIs read a
+/// Return right behind fast typing as part of a paste: Codex inserts a
+/// newline for 120 ms after its last burst character (`paste_burst.rs`).
+const AFTER_TYPING_MS: u64 = 200;
 
 /// Schedule the auto-enter Return key for `delay_ms` from now. Spawns a
 /// tokio task on `rt` so the daemon main loop is free to record the next
 /// utterance. If a countdown is already active, the new one supersedes
 /// it (we cancel the previous so it doesn't fire after the new paste).
-pub fn schedule(rt: &Handle, delay_ms: u32) {
-    tracing::info!(delay_ms, "auto_enter_countdown_schedule");
+/// `after_typing`: the text arrived as typed keystrokes (live typing), not
+/// one Cmd+V.
+pub fn schedule(rt: &Handle, delay_ms: u32, after_typing: bool) {
+    tracing::info!(delay_ms, after_typing, "auto_enter_countdown_schedule");
     if delay_ms == 0 {
-        // Fast path: bypass the timer entirely, but wait for paste to complete.
-        // Even with 0 delay, we need a minimum wait to ensure the Cmd+V event
-        // has been delivered to the target application before Return is pressed.
-        std::thread::sleep(Duration::from_millis(50));
+        // Fast path: bypass the timer entirely, but wait for the text to land
+        // in the target application before Return is pressed.
+        let guard = if after_typing {
+            AFTER_TYPING_MS
+        } else {
+            AFTER_PASTE_MS
+        };
+        std::thread::sleep(Duration::from_millis(guard));
         let _ = press_return_now();
         // Return committed — the dictation buffer (used to merge follow-up
         // utterances) is no longer valid; the next utterance starts fresh.

@@ -8,8 +8,6 @@ struct MenuBarView: View {
     @ObservedObject private var stateMonitor = StateMonitor.shared
     @ObservedObject private var updateService = UpdateService.shared
     @ObservedObject private var focusedApp = FocusedAppMonitor.shared
-    @Environment(\.openWindow) private var openWindow
-
 
     /// Whether the focused app is on the user's resumed allowlist
     /// (override has `paused: false`).
@@ -125,7 +123,7 @@ struct MenuBarView: View {
             Divider()
 
             MenuRow(
-                label: "Settings",
+                label: "Settings…",
                 systemImage: "gear",
                 isDisabled: false,
                 action: openSettings
@@ -171,29 +169,114 @@ struct MenuBarView: View {
         stateMonitor.setAppPaused(bundleId: bundle, paused: newPaused)
     }
 
+    /// Open the Settings window served by the Tauri app (`always-tauri` +
+    /// `always-gui`). The SwiftUI Settings scene is retired — macOS gets
+    /// exactly one settings surface, the one the daemon's other platforms
+    /// already use, so panels (Snippets, Vocabulary, Update, …) are never
+    /// implemented twice.
+    ///
+    /// If a Tauri instance of *this* app instance (prod vs `Always Dev`)
+    /// is already running we simply activate it — the settings window
+    /// comes forward with the app. Otherwise the bundled binary is
+    /// spawned detached; a fresh launch shows Settings by itself once
+    /// onboarding is done (always-gui/src/App.tsx).
     private func openSettings() {
-        // Prefer focusing an existing instance over `openWindow(id:)`.
-        // The scene is declared as `Window` (singleton), so SwiftUI
-        // keeps a single Settings window alive across the app's
-        // lifetime — calling `openWindow` again would normally just
-        // raise it, but adding a focus pass after a 50ms tick is the
-        // robust path under the macOS 26 multi-screen / spaces edge
-        // cases we hit during testing.
-        if let window = NSApp.windows.first(where: {
-            $0.title == "Always Settings" || $0.identifier?.rawValue == "settings"
-        }) {
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
-            window.orderFrontRegardless()
+        if let running = Self.runningTauriApp() {
+            running.activate(options: [.activateAllWindows])
             return
         }
-        openWindow(id: "settings")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            NSApp.activate(ignoringOtherApps: true)
-            NSApp.windows.first(where: {
-                $0.title == "Always Settings" || $0.identifier?.rawValue == "settings"
-            })?.makeKeyAndOrderFront(nil)
+        launchTauriSettings()
+    }
+
+    /// A running `always-tauri` app belonging to this same instance.
+    /// Dev (`Always Dev.app`) and production must never focus each other's
+    /// settings window — AppInstance.isSameInstance keeps the split — and
+    /// binaries launched straight from a cargo `target/` dir (dev-only)
+    /// are always accepted.
+    private static func runningTauriApp() -> NSRunningApplication? {
+        return NSWorkspace.shared.runningApplications.first { app in
+            guard let url = app.executableURL,
+                  url.lastPathComponent == "always-tauri" else { return false }
+            guard url.path.contains(".app/Contents/MacOS/") else { return true }
+            return AppInstance.isSameInstance(command: url.path)
         }
+    }
+
+    /// Spawn `always-tauri` detached and bring it forward once it has a
+    /// window. Null stdio mirrors CLIService's daemon spawn: the child
+    /// must outlive this view and never hold pipes back to the menu bar.
+    private func launchTauriSettings() {
+        guard let binary = Self.tauriBinaryPath() else {
+            NSLog("openSettings: always-tauri binary not found (bundled or dev target dir)")
+            return
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binary)
+        var env = ProcessInfo.processInfo.environment
+        // Match the instance this menu bar belongs to so the Tauri app's
+        // config dir / daemon plumbing never crosses the prod↔dev split.
+        if AppInstance.isDev {
+            env["ALWAYS_INSTANCE"] = "dev"
+        } else {
+            env.removeValue(forKey: "ALWAYS_INSTANCE")
+        }
+        process.environment = env
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+        } catch {
+            NSLog("openSettings: failed to launch \(binary): \(error)")
+            return
+        }
+
+        // The Tauri app registers with the WindowServer only once its first
+        // window exists, so activation needs a few patient attempts rather
+        // than a single fixed sleep.
+        let pid = process.processIdentifier
+        for delay in [0.3, 0.6, 1.0, 1.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard NSRunningApplication(processIdentifier: pid)?.isActive != true else { return }
+                NSRunningApplication(processIdentifier: pid)?
+                    .activate(options: [.activateAllWindows])
+            }
+        }
+    }
+
+    /// Path to the bundled `always-tauri` binary next to this app's
+    /// executable (same `Contents/MacOS` layout CLIService uses for
+    /// `always-daemon`). Development fallbacks cover `swift run` builds,
+    /// where the binary lives in the crate's cargo target directory.
+    private static func tauriBinaryPath() -> String? {
+        let bundled = Bundle.main.bundleURL
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("MacOS")
+            .appendingPathComponent("always-tauri")
+            .path
+        if FileManager.default.fileExists(atPath: bundled) {
+            return bundled
+        }
+
+        // Always/Sources/Always/Views → repo root, where the crate lives.
+        let repoRoot = URL(fileURLWithPath: #file)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        for profile in ["debug", "release"] {
+            let dev = repoRoot
+                .appendingPathComponent("crates/always_tauri/target")
+                .appendingPathComponent(profile)
+                .appendingPathComponent("always-tauri")
+                .path
+            if FileManager.default.fileExists(atPath: dev) {
+                return dev
+            }
+        }
+        return nil
     }
 
     /// Open Terminal.app and stream today's daemon log with the bundled

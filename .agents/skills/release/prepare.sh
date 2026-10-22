@@ -306,6 +306,20 @@ if [ -n "$LAST_TAG" ]; then
         || incomplete_inventory "cannot resolve the canonical GitHub repository"
     [ -n "$NWO" ] || incomplete_inventory "empty canonical repository"
     SINCE="$(git log -1 --format=%cI "$LAST_TAG")"
+    # A release PR squash-merged into main (as #143 was for v0.1.1) leaves its
+    # branch commits outside the tag's ancestry although they shipped. Its
+    # head is what the tag was built from; empty for a merge-commit release.
+    TAG_HEAD=""
+    tag_pr="$(gh api "repos/$NWO/commits/$(git rev-parse "$LAST_TAG^{commit}")/pulls" \
+        --jq '.[0] | select(.base.ref == "main") | .number')" \
+        || incomplete_inventory "cannot resolve the pull request behind $LAST_TAG"
+    if [ -n "$tag_pr" ]; then
+        TAG_HEAD="$(gh pr view "$tag_pr" --repo "$NWO" --json headRefOid --jq .headRefOid)" \
+            || incomplete_inventory "cannot resolve the head of #$tag_pr"
+        git cat-file -e "$TAG_HEAD^{commit}" 2>/dev/null \
+            || git fetch -q "https://github.com/$NWO.git" "pull/$tag_pr/head" \
+            || incomplete_inventory "cannot fetch the head of #$tag_pr"
+    fi
     PR_LIMIT=1000
     # PRs merged into develop, plus any merged straight into main (a hotfix, or
     # a bot PR opened before dependabot targeted develop).
@@ -345,6 +359,11 @@ if [ -n "$LAST_TAG" ]; then
                     break
                 fi
             done
+            if [ "$represented" -eq 0 ] && [ -n "$TAG_HEAD" ] &&
+                git merge-base --is-ancestor "$sha" "$TAG_HEAD"; then
+                echo "prepare.sh: $(git log -1 --format=%h "$sha") shipped in $LAST_TAG (release #$tag_pr was squash-merged)" >&2
+                represented=1
+            fi
             [ "$represented" -eq 1 ] || incomplete_inventory "$sha belongs to a merged PR missing from the candidate inventory"
         fi
     done

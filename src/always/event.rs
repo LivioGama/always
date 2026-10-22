@@ -435,6 +435,10 @@ pub enum DaemonEvent {
     SttFallbackEngaged {
         model: String,
     },
+    /// Groq answered 429 with no daily requests left: the account's daily
+    /// (free-tier) quota is used up. At most once per UTC day; the GUI
+    /// suggests switching to an on-device model.
+    GroqQuotaExhausted,
     /// "My Voice" enrollment accepted for `step`, but the daemon is still
     /// preparing (speaker model download/load). Recording has NOT begun;
     /// the GUI must not show "speak now" until `VoiceEnrollmentStarted`.
@@ -757,6 +761,22 @@ pub enum DaemonCommand {
         /// Optional so payloads from older GUI builds still decode.
         #[serde(default)]
         stt_live_preview: Option<bool>,
+        /// Live typing (§5). Optional so payloads from older GUI builds
+        /// still decode.
+        #[serde(default)]
+        live_typing: Option<bool>,
+        /// Spoken Return (§9c). Optional so payloads from older GUI builds
+        /// still decode.
+        #[serde(default)]
+        spoken_enter: Option<bool>,
+        /// Spoken Return phrases, comma-separated (§9c). Optional so payloads
+        /// from older GUI builds still decode.
+        #[serde(default)]
+        spoken_enter_phrases: Option<String>,
+        /// Spoken Return at the end of a dictation (§9c). Optional so
+        /// payloads from older GUI builds still decode.
+        #[serde(default)]
+        spoken_enter_at_end: Option<bool>,
     },
     /// Approve a pending correction in the queue and apply it to the
     /// glossary. The daemon emits `CorrectionLogged` on success.
@@ -1189,6 +1209,11 @@ impl EventBroadcaster {
         self.send(DaemonEvent::SttFallbackEngaged {
             model: model.into(),
         });
+    }
+
+    /// See [`DaemonEvent::GroqQuotaExhausted`].
+    pub fn groq_quota_exhausted(&self) {
+        self.send(DaemonEvent::GroqQuotaExhausted);
     }
 
     /// Send the protocol-version handshake. Must be the first frame on

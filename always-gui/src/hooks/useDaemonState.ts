@@ -30,7 +30,20 @@ export type UpdateState =
   | { kind: "checkFailed"; reason: string }
   | { kind: "available"; current: string; latest: string; url: string; canApply: boolean; applyHint: string }
   | { kind: "installing"; phase: string; percent: number | null; detail: string }
-  | { kind: "failed"; message: string };
+  | { kind: "failed"; stage?: string; message: string };
+
+/// Newest release known to be newer than this build, tracked separately
+/// from the transient `update` state — mirrors `UpdateModel.offer` in
+/// Always/Sources/Always/Models/UpdateState.swift. It survives a failed
+/// install (so "Try again" works) and a failed re-check (so a known update
+/// is never hidden), and is cleared by an up-to-date / no-release answer.
+export interface UpdateOffer {
+  current: string;
+  latest: string;
+  url: string;
+  canApply: boolean;
+  applyHint: string;
+}
 
 export interface VoiceEnrollment {
   recordingStep: string | null;
@@ -60,6 +73,7 @@ export interface DaemonUiState {
   resumedApps: string[];
   pauseSource: string | null;
   correctionPending: { id: string; wrong: string; right: string } | null;
+  groqQuotaExhausted: boolean; // Groq daily quota used up; offer an on-device model (SPEC § Models)
   models: CatalogModel[];
   downloadProgress: Record<string, number>;
   downloadBytes: Record<string, { downloaded: number; total: number }>;
@@ -70,6 +84,15 @@ export interface DaemonUiState {
   loadingBackend: string | null;
   recentTranscripts: { text: string; timestamp: number }[];
   update: UpdateState;
+  updateOffer: UpdateOffer | null;
+}
+
+/// Humanized `UpdateCheckDone` failure reasons — same text as
+/// `UpdateModel.reason(for:)` so the About card reads like the Swift one.
+function checkFailedReason(result: string): string {
+  if (result === "offline") return "you appear to be offline";
+  if (result === "rate_limited") return "GitHub rate limit reached, try again later";
+  return "unexpected error";
 }
 
 function initialState(): DaemonUiState {
@@ -92,6 +115,7 @@ function initialState(): DaemonUiState {
     resumedApps: [],
     pauseSource: null,
     correctionPending: null,
+    groqQuotaExhausted: false,
     models: [],
     downloadProgress: {},
     downloadBytes: {},
@@ -102,15 +126,35 @@ function initialState(): DaemonUiState {
     loadingBackend: null,
     recentTranscripts: [],
     update: { kind: "unknown" },
+    updateOffer: null,
   };
 }
 
 export function useDaemonState() {
   const [state, setState] = useState<DaemonUiState>(initialState);
   const backendSwitchAttempt = useRef(0);
+  const checkAttempt = useRef(0);
+  const handoffAttempt = useRef(0);
 
   const setConnected = useCallback((v: boolean) => {
-    setState((prev) => ({ ...prev, isDaemonConnected: v }));
+    setState((prev) => {
+      if (v) return { ...prev, isDaemonConnected: true };
+      // Mirrors `UpdateModel.daemonDisconnected()`: a pending check is
+      // forgotten, an install that had not handed off to the installer is
+      // a failure, and the handoff itself (phase "installing") is
+      // EXPECTED — the installer quits this app and the daemon.
+      const u = prev.update;
+      let update = u;
+      if (u.kind === "checking") update = { kind: "unknown" };
+      else if (u.kind === "installing" && u.phase !== "installing") {
+        update = {
+          kind: "failed",
+          stage: "install",
+          message: "Lost the connection to the Always daemon during the update.",
+        };
+      }
+      return { ...prev, isDaemonConnected: false, update };
+    });
   }, []);
 
   // Process one raw JSON event line from the daemon.
@@ -196,6 +240,9 @@ export function useDaemonState() {
           next.enrollment.lastError = d.message ?? "Enrollment failed";
           break;
 
+        case "GroqQuotaExhausted":
+          if (prev.backend === "groq") next.groqQuotaExhausted = true;
+          break;
         case "CorrectionPending":
           next.correctionPending = { id: d.id, wrong: d.wrong, right: d.right };
           break;
@@ -322,35 +369,77 @@ export function useDaemonState() {
           break;
 
         // ── Updates (SPEC §12a) ──
-        case "UpdateAvailable":
-          next.update = {
-            kind: "available",
-            current: d.current ?? "",
-            latest: d.latest ?? "",
-            url: d.url ?? "",
-            canApply: d.can_apply === "true",
-            applyHint: d.apply_hint ?? "",
+        // Same reduction as UpdateModel.apply: the offer is tracked separately
+        // from the visible state so re-announcements and failed re-checks
+        // never hide a known update, and a live download is never flipped
+        // back to the offer card.
+        case "UpdateAvailable": {
+          const latest = String(d.latest ?? "");
+          if (!latest) break; // nothing showable
+          const offer: UpdateOffer = {
+            current: String(d.current ?? ""),
+            latest,
+            url: String(d.url ?? ""),
+            canApply: String(d.can_apply ?? "") === "true",
+            applyHint: String(d.apply_hint ?? ""),
           };
-          break;
-        case "UpdateCheckDone": {
-          const r = d.result;
-          if (r === "up_to_date") next.update = { kind: "upToDate", version: d.current ?? "" };
-          else if (r === "no_release") next.update = { kind: "noRelease" };
-          else if (r === "update_available") break; // UpdateAvailable event follows
-          else next.update = { kind: "checkFailed", reason: r ?? "error" };
+          next.updateOffer = offer;
+          const u = prev.update;
+          if (u.kind === "installing" && u.phase !== "installing") break;
+          next.update = { kind: "available", ...offer };
           break;
         }
-        case "UpdateProgress":
+        case "UpdateCheckDone": {
+          const r = String(d.result ?? "error");
+          const current = String(d.current ?? "");
+          const latest = String(d.latest ?? "");
+          const offer = prev.updateOffer;
+          if (prev.update.kind === "installing") break; // an install owns the state
+          if (r === "up_to_date") {
+            next.updateOffer = null;
+            next.update = { kind: "upToDate", version: current };
+          } else if (r === "no_release") {
+            next.updateOffer = null;
+            next.update = { kind: "noRelease" };
+          } else if (r === "update_available") {
+            // An UpdateAvailable follows; until then keep the current
+            // state, or confirm the exact release we already know.
+            if (offer && (latest === "" || offer.latest === latest)) {
+              next.update = { kind: "available", ...offer };
+            }
+          } else if (offer) {
+            // A failed re-check must not hide a known update.
+            next.update = { kind: "available", ...offer };
+          } else {
+            next.update = { kind: "checkFailed", reason: checkFailedReason(r) };
+          }
+          break;
+        }
+        case "UpdateProgress": {
+          const phase = String(d.phase ?? "");
+          const percent =
+            d.percent === "" || d.percent == null
+              ? null
+              : Math.min(100, Math.max(0, Number(d.percent)));
+          if (phase !== "downloading" && phase !== "verifying" && phase !== "installing") break;
           next.update = {
             kind: "installing",
-            phase: d.phase ?? "",
-            percent: d.percent === "" || d.percent == null ? null : Number(d.percent),
+            phase,
+            percent,
             detail: d.detail ?? "",
           };
           break;
-        case "UpdateFailed":
-          next.update = { kind: "failed", message: d.message ?? "Update failed" };
+        }
+        case "UpdateFailed": {
+          const stage = String(d.stage ?? "");
+          const message = String(d.message ?? "");
+          next.update = {
+            kind: "failed",
+            stage,
+            message: message || "The update could not be installed.",
+          };
           break;
+        }
 
         case "TranscriptionFailed": next.state = "Error"; break;
       }
@@ -387,13 +476,25 @@ export function useDaemonState() {
           adaptive_silence: prefs.adaptive_silence,
           audible_status_sound: prefs.audible_status_sound,
           stt_live_preview: prefs.stt_live_preview,
+          live_typing: prefs.live_typing,
+          spoken_enter: prefs.spoken_enter,
+          spoken_enter_phrases: prefs.spoken_enter_phrases,
+          spoken_enter_at_end: prefs.spoken_enter_at_end,
         },
       }),
     reloadShortcuts: () => cmd({ type: "ReloadShortcuts" }),
     setupMode: (enabled: boolean) => cmd({ type: "SetupMode", data: { enabled } }),
 
     listModels: () => cmd({ type: "ListModels" }),
-    downloadModel: (model_id: string) => cmd({ type: "DownloadModel", data: { model_id } }),
+    downloadModel: (model_id: string) => {
+      // Same as macOS: a retry starts clean, so a new failure reads as new.
+      setState((p) => {
+        const errors = { ...p.modelErrors };
+        delete errors[model_id];
+        return { ...p, modelErrors: errors };
+      });
+      cmd({ type: "DownloadModel", data: { model_id } });
+    },
     cancelModelDownload: (model_id: string) => cmd({ type: "CancelModelDownload", data: { model_id } }),
     deleteModel: (model_id: string) => cmd({ type: "DeleteModel", data: { model_id } }),
     setActiveTranscriber: (backend: string) => {
@@ -430,15 +531,67 @@ export function useDaemonState() {
       cmd({ type: "SetVoiceProfileEnabled", data: { enabled } });
     },
 
+    dismissGroqQuota: () => setState((p) => ({ ...p, groqQuotaExhausted: false })),
     approveCorrection: (id: string) => cmd({ type: "ApproveCorrection", data: { id } }),
     rejectCorrection: (id: string) => cmd({ type: "RejectCorrection", data: { id } }),
     logCorrection: (intended: string) => cmd({ type: "LogCorrection", data: { intended } }),
 
     checkForUpdates: () => {
-      setState((p) => ({ ...p, update: { kind: "checking" } }));
+      // Mirrors UpdateModel.beginCheck(): a known offer or a live install
+      // keeps the screen as is; everything else shows the spinner. The
+      // daemon answers in well under a second — a 20 s watchdog turns a
+      // silent loss into a visible failure (UpdateService.checkTimeout).
+      const attempt = ++checkAttempt.current;
+      setState((p) => {
+        const u = p.update;
+        if (u.kind === "available" || u.kind === "installing") return p;
+        return { ...p, update: { kind: "checking" } };
+      });
       cmd({ type: "CheckForUpdates" });
+      setTimeout(() => {
+        if (checkAttempt.current !== attempt) return;
+        setState((p) =>
+          p.update.kind === "checking"
+            ? { ...p, update: { kind: "checkFailed", reason: "no answer from the Always daemon" } }
+            : p,
+        );
+      }, 20_000);
     },
-    installUpdate: () => cmd({ type: "InstallUpdate" }),
+    installUpdate: () => {
+      // Mirrors UpdateModel.beginInstall(): only when the daemon said this
+      // install can apply, and only once. The percent-less download frame
+      // shows until UpdateProgress supplies one.
+      const attempt = ++handoffAttempt.current;
+      setState((p) => {
+        const offer = p.updateOffer;
+        if (!offer || !offer.canApply) return p;
+        if (p.update.kind === "installing") return p;
+        return {
+          ...p,
+          update: { kind: "installing", phase: "downloading", percent: null, detail: "" },
+        };
+      });
+      cmd({ type: "InstallUpdate" });
+      // The installer's handoff (phase "installing") quits this app and the
+      // daemon, so the UDS connection ending from there on is EXPECTED. If
+      // it never actually arrives (UpdateService.handoffTimeout), say so —
+      // the update-install.log holds the rest.
+      setTimeout(() => {
+        if (handoffAttempt.current !== attempt) return;
+        setState((p) => {
+          const u = p.update;
+          if (u.kind !== "installing" || u.phase !== "installing") return p;
+          return {
+            ...p,
+            update: {
+              kind: "failed",
+              stage: "install",
+              message: "The installer did not restart Always. See ~/Library/Logs/Always/update-install.log.",
+            },
+          };
+        });
+      }, 120_000);
+    },
   };
 
   return api;

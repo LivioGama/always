@@ -562,6 +562,46 @@ const SPEAKER_GATE_REJECT_STREAK: usize = 4;
 /// partial is used instead of re-transcribing from scratch.
 const APPLE_STREAM_FINISH_MS: u32 = 1500;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use crate::always::{apple_stt, stt_apple};
+
+/// Stand-ins for Apple's speech engine where it does not exist (Linux).
+/// `StreamSession` is uninhabited: the capture pipeline's Apple-only
+/// branches type-check here but can never run, and macOS is untouched.
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+mod apple_stt {
+    pub enum StreamSession {}
+    impl StreamSession {
+        pub fn start(_lang: Option<&str>, _phrases: &[String]) -> Option<Self> {
+            None
+        }
+        pub fn feed(&mut self, _samples: &[i16]) {
+            match *self {}
+        }
+        pub fn finish_with_outcome(
+            self,
+            _timeout_ms: u32,
+        ) -> (Option<String>, crate::stt::LiveStreamOutcome) {
+            match self {}
+        }
+    }
+    // The pipeline drops a session explicitly; mirror the real type's Drop.
+    impl Drop for StreamSession {
+        fn drop(&mut self) {
+            match *self {}
+        }
+    }
+    pub fn check_availability() -> bool {
+        false
+    }
+}
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+mod stt_apple {
+    pub fn context_phrases() -> Vec<String> {
+        Vec::new()
+    }
+}
+
 /// Speaker-aware end-of-utterance. Generic VAD keeps the utterance open
 /// as long as ANY speech-like audio continues — background media held
 /// recordings hostage until the user paused the video (observed live:
@@ -908,6 +948,45 @@ fn preview_cadence(
     None
 }
 
+/// Live typing wants words on screen within about a second of being said:
+/// local engines (≈10× real time on a laptop CPU) preview at least this
+/// often while it is on. Cloud cadences are left alone (API round trips).
+const LIVE_TYPING_INTERVAL_MS: u64 = 350;
+const LIVE_TYPING_MIN_NEW_SAMPLES: usize = 2_400;
+/// Fastest live-typing cadence. A word is typed once two previews agree,
+/// so the cadence is most of the delay between saying a word and seeing it.
+const LIVE_TYPING_MIN_INTERVAL_MS: u64 = 150;
+
+/// Live-typing preview interval for a local engine: twice the last pass's
+/// cost, so previews use at most half the time, between
+/// `LIVE_TYPING_MIN_INTERVAL_MS` and the cadence's own interval. A cheap
+/// engine (Parakeet: ~60-300 ms a pass) previews faster; a costly one keeps
+/// the fixed cadence. `last_cost_ms` 0 = no pass yet: the fixed cadence.
+fn live_typing_interval_ms(cadence_ms: u64, last_cost_ms: u64) -> u64 {
+    if last_cost_ms == 0 {
+        return cadence_ms;
+    }
+    last_cost_ms
+        .saturating_mul(2)
+        .clamp(LIVE_TYPING_MIN_INTERVAL_MS.min(cadence_ms), cadence_ms)
+}
+
+fn live_typing_cadence(
+    mut c: PreviewCadence,
+    live_typing: bool,
+    local_engine: bool,
+) -> PreviewCadence {
+    if live_typing {
+        // The typer needs committed chunks in front of the open speech.
+        c.prefix_settled_chunks = true;
+        if local_engine {
+            c.interval_ms = c.interval_ms.min(LIVE_TYPING_INTERVAL_MS);
+            c.min_new_samples = c.min_new_samples.min(LIVE_TYPING_MIN_NEW_SAMPLES);
+        }
+    }
+    c
+}
+
 /// StateMonitor replaces its partial transcript on every event, so streaming
 /// producers must send the cumulative text rather than the latest chunk only.
 fn append_streaming_preview(accumulated: &mut String, chunk: &str) -> bool {
@@ -953,13 +1032,13 @@ const PREVIEW_PREROLL_FRAMES: usize = 16;
 impl UtterancePreview {
     /// Arm the preview for an Apple streaming session. Parakeet joins
     /// when the dictation language is English and the helper is warm.
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    fn start(&mut self, session: &mut apple_stt::StreamSession, _lang: &str, _verified: bool) {
+        match *session {}
+    }
+
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    fn start(
-        &mut self,
-        session: &mut crate::always::apple_stt::StreamSession,
-        lang: &str,
-        verified: bool,
-    ) {
+    fn start(&mut self, session: &mut apple_stt::StreamSession, lang: &str, verified: bool) {
         if self.preview.is_some() {
             return;
         }
@@ -1062,7 +1141,7 @@ impl Drop for UtterancePreview {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 fn record_with_local_vad(
     cfg: &AlwaysConfig,
     log: &mut Logger,
@@ -1070,6 +1149,10 @@ fn record_with_local_vad(
     rt: &tokio::runtime::Handle,
 ) -> Result<RecordResult> {
     let silence_frames = normal_silence_frames(cfg);
+    // Live typing (opt-in): the session opens at voice onset; previews
+    // carry its generation so they can only type into this utterance.
+    let live_typing = crate::always::live_type::enabled(cfg.live_typing);
+    let mut live_generation = 0u64;
     // Two distinct timeouts:
     // - `max_pre_voice_frames`: hard cap on the initial wait for voice
     //   onset. Uses `cfg.timeout_secs` (default 30s) so a stale recorder
@@ -1245,6 +1328,9 @@ fn record_with_local_vad(
     // background transcribes (one round-trip at a time) and is cleared by
     // the thread on completion.
     let preview_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Wall time of the last completed preview pass, for the live-typing
+    // cadence (`live_typing_interval_ms`). 0 = none yet this session.
+    let preview_cost_ms = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let mut last_preview_at: Option<std::time::Instant> = None;
     // Total voiced-buffer size (committed + live) at the last preview
     // kickoff. Drives the slow cloud cadence's "enough NEW audio" check
@@ -1541,7 +1627,7 @@ fn record_with_local_vad(
     // transcripts and the final result replaces the end-of-utterance WAV
     // round trip. `None` on other backends or when the engine is
     // unavailable — everything below degrades to the existing paths.
-    let mut stream_session: Option<crate::always::apple_stt::StreamSession> = None;
+    let mut stream_session: Option<apple_stt::StreamSession> = None;
     // Live preview (both engines push into it) + Parakeet feed + voice
     // level. Declared AFTER `stream_session` so it drops FIRST on every
     // exit path: the preview closes before the Apple session is freed.
@@ -1787,11 +1873,11 @@ fn record_with_local_vad(
                         cfg.transcriber_backend,
                         crate::stt_dispatch::TranscriberBackendChoice::Apple
                     )
-                    && crate::always::apple_stt::check_availability()
+                    && apple_stt::check_availability()
                 {
-                    stream_session = crate::always::apple_stt::StreamSession::start(
+                    stream_session = apple_stt::StreamSession::start(
                         stream_session_lang,
-                        &crate::always::stt_apple::context_phrases(),
+                        &stt_apple::context_phrases(),
                     );
                     if stream_session.is_none() {
                         tracing::debug!("apple_stream_session_unavailable");
@@ -1821,6 +1907,9 @@ fn record_with_local_vad(
                             audio_delivery_lag_ms: frame_captured_at.elapsed().as_millis() as u64,
                         });
                         voice_logged = true;
+                        if live_typing {
+                            live_generation = crate::always::live_type::begin(cfg.localization);
+                        }
 
                         // Warn if energy is barely above threshold (within 20% margin)
                         // Use the already-calculated frame_energy to avoid redundant computation
@@ -2006,14 +2095,24 @@ fn record_with_local_vad(
                     cfg.transcriber_backend.is_local(),
                     cfg.transcriber_backend.is_apple(),
                     cfg.stt_live_preview,
-                ) && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
+                )
+                .map(|c| live_typing_cadence(c, live_typing, cfg.transcriber_backend.is_local()))
+                    && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
                     && speech_samples.len() >= CONSUME_STREAM_MIN_SAMPLES
                     && committed_samples + speech_samples.len()
                         >= samples_at_last_preview + cadence.min_new_samples
                     && !(cadence.require_speculation_idle && speculation_pending)
                     && !preview_pending.load(std::sync::atomic::Ordering::Relaxed)
                     && last_preview_at.is_none_or(|t| {
-                        t.elapsed() >= std::time::Duration::from_millis(cadence.interval_ms)
+                        let interval = if live_typing && cfg.transcriber_backend.is_local() {
+                            live_typing_interval_ms(
+                                cadence.interval_ms,
+                                preview_cost_ms.load(std::sync::atomic::Ordering::Relaxed),
+                            )
+                        } else {
+                            cadence.interval_ms
+                        };
+                        t.elapsed() >= std::time::Duration::from_millis(interval)
                     })
                 {
                     last_preview_at = Some(std::time::Instant::now());
@@ -2037,9 +2136,19 @@ fn record_with_local_vad(
                     } else {
                         None
                     };
+                    // Live typing needs the whole sentence: committed chunks
+                    // + open speech. While a chunk is in flight that is
+                    // unknown (`settled_prefix` None), so nothing is typed.
+                    let live = live_typing.then_some((live_generation, !chunker.is_empty()));
+                    // Streaming engines run this preview even with live
+                    // transcript off (live typing reuses it); the overlay
+                    // still gets no text then (SPEC §5).
+                    let show_live_text =
+                        cfg.stt_live_preview || crate::always::pause::is_consume_mode();
                     let transcriber_for_preview = Arc::clone(transcriber);
                     let rt_for_preview = rt.clone();
                     let flag = Arc::clone(&preview_pending);
+                    let cost = Arc::clone(&preview_cost_ms);
                     std::thread::spawn(move || {
                         let preview_started = std::time::Instant::now();
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
@@ -2050,7 +2159,9 @@ fn record_with_local_vad(
                                 rt_for_preview.block_on(async {
                                     while let Some(item) = stream.next().await {
                                         let item = item.map_err(anyhow::Error::from)?;
-                                        if append_streaming_preview(&mut accumulated, &item.text) {
+                                        if append_streaming_preview(&mut accumulated, &item.text)
+                                            && show_live_text
+                                        {
                                             let display = match settled_prefix.as_deref() {
                                                 Some(prefix) if !prefix.is_empty() => {
                                                     format!("{prefix} {accumulated}")
@@ -2069,11 +2180,24 @@ fn record_with_local_vad(
                             },
                         ));
                         match outcome {
-                            Ok(Ok(result)) => tracing::info!(
-                                chars = result.text.len(),
-                                preview_ms = preview_started.elapsed().as_millis() as u64,
-                                "live_preview_sent"
-                            ),
+                            Ok(Ok(result)) => {
+                                let preview_ms = preview_started.elapsed().as_millis() as u64;
+                                cost.store(preview_ms, std::sync::atomic::Ordering::Relaxed);
+                                tracing::info!(
+                                    chars = result.text.len(),
+                                    preview_ms,
+                                    "live_preview_sent"
+                                );
+                                if let Some((generation, chunks_present)) = live
+                                    && !(chunks_present && settled_prefix.is_none())
+                                {
+                                    crate::always::live_type::preview(
+                                        generation,
+                                        settled_prefix.as_deref(),
+                                        &result.text,
+                                    );
+                                }
+                            }
                             Ok(Err(error)) => {
                                 tracing::warn!(error = ?error, "streaming_preview_failed")
                             }
@@ -2120,6 +2244,8 @@ fn record_with_local_vad(
                             .saturating_sub(crate::always::chunker::SEAM_CONTEXT_SAMPLES)..]
                             .to_vec(),
                     );
+                    chunker.show_live_text =
+                        cfg.stt_live_preview || crate::always::pause::is_consume_mode();
                     chunker.flush_with_context(context, head, transcriber, grammar, rt);
                     speculation_pending = false;
                     speculation_slot.invalidate();
@@ -2203,6 +2329,8 @@ fn record_with_local_vad(
                 } else {
                     None
                 };
+                chunker.show_live_text =
+                    cfg.stt_live_preview || crate::always::pause::is_consume_mode();
                 chunker.flush_with_context(
                     std::mem::take(&mut seam_context),
                     std::mem::take(&mut speech_samples),
@@ -2288,6 +2416,10 @@ fn record_with_local_vad(
                 // the JOIN of the committed chunks + this tail, so the
                 // warm must key on that join, not the tail alone.
                 let chunk_join = chunker.join_handle();
+                // Live preview off → no live text at all (consume-mode
+                // consumers still get it).
+                let show_spec_preview =
+                    cfg.stt_live_preview || crate::always::pause::is_consume_mode();
                 std::thread::spawn(move || {
                     // Wrap in catch_unwind: a panic in transcribe_from_bytes
                     // (network, deserialization, etc.) used to poison
@@ -2316,7 +2448,8 @@ fn record_with_local_vad(
                     // overlay can show a streaming preview while we wait for
                     // final silence. If the user keeps talking, the final
                     // transcription will supersede this.
-                    if let Ok(ref r) = outcome
+                    if show_spec_preview
+                        && let Ok(ref r) = outcome
                         && !r.text.is_empty()
                     {
                         event::global_broadcaster().transcript_chunk(r.text.clone());
@@ -3053,7 +3186,7 @@ fn record_with_local_vad(
 ///
 /// Non-speech outcomes (silence, noise, a speaker-gate drop) pass
 /// through unchanged — there is nothing to keep and nothing to suppress.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 fn apply_mic_conflict_preemption(result: RecordResult, preempted: bool) -> RecordResult {
     if !preempted {
         return result;
@@ -3064,8 +3197,8 @@ fn apply_mic_conflict_preemption(result: RecordResult, preempted: bool) -> Recor
     }
 }
 
-/// Non-macOS stub.
-#[cfg(not(target_os = "macos"))]
+/// Stub where the capture pipeline is not built (Windows; Linux without `cpal`).
+#[cfg(not(any(target_os = "macos", all(target_os = "linux", feature = "cpal"))))]
 fn record_with_local_vad(
     _cfg: &AlwaysConfig,
     _log: &mut Logger,
@@ -3087,7 +3220,7 @@ fn record_with_local_vad(
 /// `None`: the tail is left out — never replaced by marker text, which
 /// would be pasted (2026-10-16: a user got `[audio saved: chunk 2]` in his
 /// message) — and the committed chunks are still assembled and pasted.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 fn recover_failed_chunked_tail(
     tail: &[i16],
     err: &anyhow::Error,
@@ -3112,7 +3245,7 @@ fn recover_failed_chunked_tail(
 }
 
 /// One fresh transcription of a failed chunked tail by the pasting engine.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 fn retry_tail_once(transcriber: &Arc<dyn Transcriber>, span: &[i16]) -> Option<String> {
     let wav = audio::create_wav_bytes_i16_mono_16k(span).ok()?;
     match transcriber.transcribe_from_bytes(wav) {
@@ -3135,15 +3268,15 @@ fn retry_tail_once(transcriber: &Arc<dyn Transcriber>, span: &[i16]) -> Option<S
 /// running past it means trouble (Apple times out at 12 s), so the
 /// Parakeet rescue of the tail starts here, in parallel, and is usually
 /// done before the recognizer gives up.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 const TAIL_RESCUE_ARM_MS: u64 = 4_000;
 /// Extra wait for the rescue text once the recognizer has failed. Bounds
 /// what a failure can add on top of the recognizer's own timeout.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 const TAIL_RESCUE_MAX_EXTRA_MS: u64 = 1_500;
 /// Ceiling for the helper's own decode of one span (it runs off-thread;
 /// the paste never waits on it longer than `TAIL_RESCUE_MAX_EXTRA_MS`).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 const TAIL_RESCUE_DECODE_MS: u64 = 15_000;
 
 /// Parakeet recovery of a chunked utterance's tail, armed alongside the
@@ -3151,13 +3284,13 @@ const TAIL_RESCUE_DECODE_MS: u64 = 15_000;
 /// `TAIL_RESCUE_ARM_MS` (or at once when the recognizer fails sooner), so
 /// the normal path never shares the Neural Engine with it; only where the
 /// Parakeet helper already runs (Apple backend, English) and is warm.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 struct TailRescue {
     go: std::sync::mpsc::Sender<bool>,
     text: std::sync::mpsc::Receiver<Option<String>>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 impl TailRescue {
     fn arm(cfg: &AlwaysConfig, tail: &[i16]) -> Self {
         let (go, go_rx) = std::sync::mpsc::channel::<bool>();
@@ -3215,7 +3348,7 @@ pub const CHUNKS_LOST_ERROR: &str = "dictation could not be transcribed, audio s
 /// Assemble a chunked utterance: wait for committed chunks, join them in
 /// flush order, and append the (already transcribed) tail text.
 /// `tail_lost`: the tail's speech could not be transcribed (left out).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
 #[allow(clippy::too_many_arguments)]
 fn finalize_chunked(
     chunker: &crate::always::chunker::ChunkAccumulator,
@@ -3512,6 +3645,20 @@ fn final_silence_cut_frames(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn live_typing_interval_follows_preview_cost() {
+        // No pass yet: the fixed cadence.
+        assert_eq!(super::live_typing_interval_ms(350, 0), 350);
+        // Cheap passes: twice the cost, never under the floor.
+        assert_eq!(super::live_typing_interval_ms(350, 100), 200);
+        assert_eq!(super::live_typing_interval_ms(350, 40), 150);
+        // Costly passes: never slower than the cadence itself.
+        assert_eq!(super::live_typing_interval_ms(350, 400), 350);
+        // A cadence already under the floor is not slowed down.
+        assert_eq!(super::live_typing_interval_ms(100, 30), 100);
+    }
+
     use super::{
         CHUNKED_TAIL_MIN_VOICED_SAMPLES, SHORT_SPEECH_MS, chunk_target_secs,
         chunked_tail_has_voice, early_voice_frame_ok, extended_silence_frames, fast_energy_check,

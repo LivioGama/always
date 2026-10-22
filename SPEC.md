@@ -81,12 +81,14 @@ See §12.
 
 ## 3. Architecture
 
-Two processes, plus a recorder:
+Three processes, plus a recorder — on macOS the settings app is launched on
+demand by the menu bar and runs until the user quits it:
 
 | Process | Role |
 |---|---|
-| `Always` (Swift, menu bar) | UI: menu bar item, overlay HUD, settings, onboarding. Owns nothing about audio. |
+| `Always` (Swift, menu bar) | UI: menu bar item, overlay HUD, onboarding, permission handling, daemon bootstrap. Owns nothing about audio. Settings is no longer one of its windows — `always-tauri` serves it (below, §10). |
 | `always-daemon` (Rust) | Audio capture, VAD, speaker verification, transcription, pasting. |
+| `always-tauri` (Rust/Tauri serving the `always-gui` React webview) | The Settings window — one surface on every desktop platform: General, Models, My Voice, Permissions, Behavior, Shortcuts, Library (Vocabulary + Snippets), History, About. On macOS the Swift menu bar opens it (§10) and it has no tray icon; on Linux and Windows it is the whole GUI. |
 | `rec` (SoX) | Raw microphone capture, 16 kHz mono 16-bit, one instance, spawned by the daemon. Its output is drained continuously by one daemon reader thread (see §4, "Audio delivery"). |
 
 On Linux and Windows, the daemon uses CPAL for microphone capture. It converts
@@ -94,18 +96,40 @@ the selected device's supported sample rate and channel layout to the pipeline's
 16 kHz mono frames; Linux exposes the capture device through ALSA, including
 PipeWire/PulseAudio ALSA compatibility layers. Linux uses `wl-copy`/`wl-paste`
 for clipboard access on Wayland when installed, falling back to `xclip`, and
-uses `xclip` on X11. It simulates paste with `ydotool` on Wayland when installed,
-falling back to `xdotool`; X11 uses `xdotool`. Linux global
+uses `xclip` on X11. On Wayland it sends the paste chord with `wtype` (the
+virtual-keyboard protocol of wlroots compositors such as Hyprland and Sway; no
+daemon or `/dev/uinput` access needed), then `ydotool` (needs `ydotoold`), then
+`xdotool` (XWayland windows only); an injector that exits non-zero hands over to
+the next. `ydotool` is driven with raw evdev keycodes
+(`ydotool key -d 3 29:1 47:1 47:0 29:0`): ydotool 1.0 rejects key names and
+exits 0 while doing so, which until 2026-10-20 meant nothing was pasted on
+Wayland. Terminals receive Ctrl+Shift+V instead of Ctrl+V — on X11 from the
+active window's class, on Hyprland from `hyprctl activewindow` (class or process
+name); other Wayland compositors offer no portable query and receive Ctrl+V.
+X11 uses `xdotool`. Linux global
 shortcuts are available in X11 sessions; Wayland compositors do not let the
 daemon observe global key events, so users there control pause and auto-enter
-through the CLI.
+through the CLI. The GUI shows this instead of pretending the keys work: on
+Linux with the shortcut listener unavailable (`ShortcutListenerStatus` false =
+Wayland), onboarding's tips list only the bindable actions — pause everywhere
+(`always toggle-pause`) and auto-enter (`always toggle-auto-enter`) — with the
+user's configured keys as suggestions for the desktop's own bindings, and
+Settings → Shortcuts says keys there are recorded, not active. Everywhere,
+both read the configured shortcuts (never a fixed list), and the per-app pause
+(focused-app monitor, macOS only) is not offered on Linux.
 
 The GUI talks to the daemon over a Unix domain socket using newline-delimited
 JSON. On macOS it is `~/Library/Caches/Always/always{suffix}.sock`; on Linux it
 is `$XDG_RUNTIME_DIR/always{suffix}.sock` (or `/tmp/always{suffix}.sock` when
 `XDG_RUNTIME_DIR` is unset). Development instances use the `-dev` suffix so
 they cannot replace the production socket. The daemon broadcasts events; the
-GUI sends commands.
+GUI sends commands. Both macOS GUIs are clients of that socket: the settings
+app resolves the same instance's socket (it inherits `ALWAYS_INSTANCE` from
+the Swift spawner), starts the sibling daemon with `always start` before
+connecting — single-instance safe, and a start failure is logged while the
+settings UI stays available — and holds a persistent reconnecting connection,
+polling the connection status because the one-shot connect event can race the
+webview's listener registration.
 
 **Always never changes what the Mac plays (2026-10-16, v0.1.0 user report:
 micro-cuts / crackling in Apple Music and on a speaker while Always ran).**
@@ -225,7 +249,11 @@ VPIO's noise suppression was not measurable on a single-speaker machine.
    manual ⌘V instead of the whole utterance.
 9. **Paste** — text is typed into the focused application. If auto-Enter is on,
    Return follows after `auto_enter_delay_ms`. With a 0 ms delay, Return is
-   posted 50 ms after Cmd+V (the Cmd-flag guard in `auto_enter_countdown`);
+   posted 50 ms after Cmd+V (the Cmd-flag guard in `auto_enter_countdown`),
+   or 200 ms after live typing's last keystroke: terminal UIs treat a Return
+   right behind fast typing as part of a paste and insert a newline (Codex
+   does for 120 ms), so 50 ms there made auto-Enter add a line instead of
+   sending the prompt (user report 2026-10-22, Codex and Claude Code);
    the 100 ms post-paste settle that holds the paste-in-flight lock runs
    *after* Return, not before it (2026-10-13, user request: "make it insanely
    fast" — previously Return landed ~155 ms after the paste). The clipboard is
@@ -350,13 +378,19 @@ Idle-paused · Low mic volume · correction confirmations.
   off-screen. Text taller than the cap is head-truncated — a leading "…"
   replaces the oldest words so the words just spoken stay visible. Compact
   mode remains a fixed single truncated line.
-- **Display mode applies live.** Settings → Status Overlay offers Normal,
-  Compact and Hidden; the default is Normal. A change takes effect at once, no
-  restart: the indicator already on screen is re-rendered in the new size, and
-  choosing Hidden removes it through the normal hide path, so invariant I2's
-  600 ms minimum on-screen time still holds. The indicator is still hidden
-  when paused or disconnected. It sits centred near the bottom of the screen
-  under the pointer, just above the Dock.
+- **Display mode applies live.** The macOS overlay's display mode offers
+  Normal, Compact and Hidden; the default is Normal. A change takes effect
+  at once, no restart: the indicator already on screen is re-rendered in
+  the new size, and choosing Hidden removes it through the normal hide
+  path, so invariant I2's 600 ms minimum on-screen time still holds. The
+  indicator is still hidden when paused or disconnected. It sits centred
+  near the bottom of the screen under the pointer, just above the Dock.
+  This preference was edited from the Swift settings panel's Status
+  Overlay picker, which is retired (§10): the shared settings window's
+  picker writes the webview's own key, not the Swift overlay's
+  `overlayDisplayMode`, so on macOS the display mode currently has no UI
+  ❓ and is settable only by hand (`defaults write`) — a §10 macOS gap
+  raised as open question 7.
 - **The idle pill** (shown when idle auto-pause fires) hides on any resume,
   whichever control caused it. Its Play button sends `Resume`, which lifts the
   pause and never pauses (§7).
@@ -472,8 +506,76 @@ It never flips the overlay to "Transcribing" — the user is still talking, so
 the partial text renders under the listening state. The final transcription
 path (speculation → final cut → paste) is untouched by all three arms.
 
-With `stt_live_preview` off, Groq dictation shows no mid-speech previews;
-the free speculative preview at a pause (below) still renders once.
+With `stt_live_preview` off, the overlay shows no live transcript text at
+all: no mid-speech previews (a streaming engine's preview still runs, for
+live typing, but shows nothing), no per-chunk rolling text on long utterances,
+and the speculative transcription at a pause is not displayed either (it
+still runs, for the final). Consume mode is exempt —
+its consumers depend on the speculative chunk (product-owner request
+2026-10-22: "if they don't activate it, it should not be present in the
+overlay either").
+
+`stt_live_preview` stays ON by default. While Groq is the active backend,
+Settings → Behavior shows a warning under the toggle: live transcript
+re-sends speech about every 1.5 s (≈5× more Groq requests), which on Groq's
+free tier (2,000 requests/day) can use up the daily quota after about 45
+minutes of speaking. On macOS it adds that Always says when the day's quota
+runs out (§ Models, Groq daily quota) (product-owner request 2026-10-22).
+
+### Live typing (opt-in: `live_typing`)
+
+Words appear in the focused application while the user is still speaking.
+Off by default; the paste-at-the-end behaviour above is unchanged when off.
+Settable from Settings → Behavior, “Type words while you speak” — on macOS
+again, now that macOS opens the shared settings window (§10); while Settings
+was the native Swift window this preference had no Mac control. ❓ The macOS
+path is type-checked but not exercised end-to-end; the tuning below was
+measured on Linux.
+
+- **Source:** the live preview of this section — committed chunks (final
+  quality) followed by the preview of the speech after them. While a chunk is
+  in flight its text is unknown and nothing is typed. With the Apple backend
+  the source is the instant-preview merger (Parakeet + Apple partials) — its
+  verified previews only; Parakeet's words are typed provisionally and, like
+  every typed word, corrected to the Apple final.
+- **What is typed:** the committed text, then the words every preview of the
+  last 600 ms agrees on (a word must read the same for 0.6 s before it is
+  typed, or before a typed word is changed). The newest word of a preview is
+  never typed early. Differences in case or punctuation alone never rewrite
+  typed text, while speaking or at the final: the typed form stays and only
+  new words are added. Local
+  engines preview at least every 350 ms while live typing is on, and sooner
+  when a preview pass is cheap: the next one starts twice the last pass's
+  duration later, never under 150 ms, so previews use at most half the time
+  (cloud cadences are unchanged).
+- **Corrections:** when the committed text, or an agreed word, differs from
+  what was typed, the difference is corrected at once (Backspace, then type),
+  so typing never stalls behind one changed word. The final payload — merge,
+  dedupe and post-processing exactly as `deliver_paste` computes it — is the
+  last correction; it replaces the paste keystroke. The payload still goes to
+  the clipboard (history), and auto-enter, the dictation buffer and voice edit
+  behave as after a paste.
+- **Outcomes that are not a paste** (cooldown, rejected, hallucinated, foreign
+  speech, too quiet, noise, not the user's voice, duplicate) remove what was
+  typed for the utterance.
+- **Invariants:** previews exist only for speech captured while listening and,
+  with My Voice on, verified — I3 and I6 hold for typed words as for pasted
+  ones. Any pause stops typing for the rest of the utterance. When another
+  application takes the microphone the session ends without one more
+  keystroke (I7); words already typed stay, as speech authorised at capture
+  time (I3).
+- **Focus:** no keystroke is ever sent anywhere but where typing started,
+  checked before every keystroke batch — macOS: the frontmost app and its
+  focused Accessibility element; Linux: the focused window (Hyprland). If
+  focus moved, the typed words stay where they were spoken and the final is
+  kept recoverable (⌃⌥V), as for a paused utterance whose focus changed.
+  Linux compositors without a focus query: focus is assumed unchanged ❓.
+- **Typing:** voice editing's keystroke path (`ax_edit::post_strokes`):
+  macOS posts Unicode text and Backspace events; Linux uses `wtype` (virtual
+  keyboard: layout independent, works in terminals without a paste chord),
+  else `ydotool`, else `xdotool`. The keystrokes are marked as Always's own,
+  so they never count as user input (voice-edit gate, §9c).
+- **Consume mode** (Iris holds the line) never types.
 
 ---
 
@@ -589,7 +691,10 @@ and swaps the live keyboard listener's combo set without a restart.
 - **An explicit user resume** (global chord, idle pill Play, `Resume` or
   `TogglePause` over UDS, CLI, tray) clears master, idle, audio-output and
   mic-conflict at once, and never pauses. A global toggle resumes whenever any
-  of those is active, and only otherwise sets master. The watchdogs re-arm on
+  of those is active — or when Always is still in its paused-by-default start
+  state with no source active (platforms without a focus monitor, e.g. Linux:
+  otherwise the first press set master and the user had to press twice) —
+  and only otherwise sets master. The watchdogs re-arm on
   their next transition, so the user can force dictation while music plays or
   another app holds the mic. This is a deliberate user override of the
   watchdogs; I7 still holds: when another app takes the mic Always stops
@@ -800,6 +905,27 @@ offline; the cloud backend is faster to start and needs an API key.
   engine with a real implementation, a correct download size, and a checksum.
 - A local model may be armed as fallback for the cloud backend; failures fall
   back silently but are logged.
+- **Groq daily quota used up (product-owner request 2026-10-22).** When Groq
+  answers 429 with `x-ratelimit-remaining-requests: 0` (Groq's request
+  headers always describe the per-day quota), the daemon sends
+  `GroqQuotaExhausted` — at most once per UTC day, and only while an app is
+  connected to receive it (otherwise the next such 429 tries again). A per-minute 429 (daily
+  requests left) sends nothing. If Groq is still the active backend, the
+  settings app asks whether to switch to an on-device engine: the best
+  downloaded local model (recommended first, then speed + accuracy — the
+  fallback pick). With none downloaded: macOS 26+ offers Apple's recognizer;
+  older macOS offers to download the best catalogue model by the same ranking
+  and switches when it is installed; Linux offers the same download, shows its
+  progress, and switches when it is installed (closing the dialog
+  mid-download leaves the download running but does not switch). "Keep Groq"
+  changes nothing; the switch takes effect like any model switch, and
+  switching back is manual (Settings → Models). macOS returns focus to the
+  previously frontmost app after the prompt (the native app asks; the Tauri
+  Settings window, which also runs on macOS, stays out of it so the prompt
+  never appears twice); Linux shows the Settings window
+  to present it, except during first-run setup (it then waits for Settings). Installs without the settings app (Linux tarball, headless)
+  get no prompt. Live preview counts against the same quota (each preview is
+  a Groq request).
 - Switching models takes effect on the next utterance.
 - Linux development and release builds include the local STT engines. Selecting a local
   model never invokes Groq or requires its API key; missing files or missing
@@ -811,6 +937,13 @@ offline; the cloud backend is faster to start and needs an API key.
   and Settings shows “No model selected” with setup guidance. A saved local
   selection takes precedence. A failed startup load reports its error and
   returns to `none`, rather than showing an unavailable backend as active.
+- Installs without the Settings app (the Linux tarball, headless machines) use
+  `always model list | download <id> | use <id>`, which send the panel's own
+  daemon commands (`ListModels`, `DownloadModel`, `SetActiveTranscriber`).
+  `download` returns once the catalogue shows the model installed and
+  verified; `use` once the daemon names that backend as running. Both exit
+  non-zero on the daemon's failure events, and `use` rejects a malformed id
+  before sending it (the daemon would only log it and never answer).
 - A switch loads the new engine before the config names it, and never under
   the config lock the main loop reads, so a slow load does not block dictation.
   Engine rebuilds (a switch, a language change) run one at a time.
@@ -881,7 +1014,7 @@ directory, and a declared `size_mb` that agrees with the sum of the parts.
 - The final paste path remains non-streaming and uses `transcribe_audio(&samples)`
 - Rust test coverage covers the chunk-splitting/padding math (560ms sizing, ragged-tail zero-padding, flush-tail count) without a loaded model; real Nemotron model inference and long-running memory behavior remain unverified by automated tests since that needs ~2.5GB of real weights this repo doesn't ship
 - The loader auto-detects English-only vs multilingual variants from the encoder ONNX graph
-- Multilingual variant accepts a target language code via `apply_nemotron_language()` → `set_target_lang()`, driven by the Settings language picker (Swift) and the daemon's existing `cfg.lang` plumbing (`uds_server.rs::set_language`). **Known format mismatch**: `cfg.lang` and this model's own catalogue entry use bare ISO 639-1 codes ("es", "ja", "zh", ...), but parakeet-rs's `PROMPT_DICTIONARY` only has bare-code entries for most languages — "ja"/"zh" require locale-tagged form ("ja-JP", "zh-CN"). A bare "ja"/"zh" selection is rejected by `set_target_lang` and falls back to auto-detect with a logged warning rather than failing the transcription. Mapping "ja"→"ja-JP"/"zh"→"zh-CN" before the call is a known follow-up, not yet done.
+- Multilingual variant accepts a target language code via `apply_nemotron_language()` → `set_target_lang()`, driven by the Settings language picker (now the shared settings window's Models panel; the retired Swift picker also offered Auto-detect) and the daemon's existing `cfg.lang` plumbing (`uds_server.rs::set_language`). **Known format mismatch**: `cfg.lang` and this model's own catalogue entry use bare ISO 639-1 codes ("es", "ja", "zh", ...), but parakeet-rs's `PROMPT_DICTIONARY` only has bare-code entries for most languages — "ja"/"zh" require locale-tagged form ("ja-JP", "zh-CN"). A bare "ja"/"zh" selection is rejected by `set_target_lang` and falls back to auto-detect with a logged warning rather than failing the transcription. Mapping "ja"→"ja-JP"/"zh"→"zh-CN" before the call is a known follow-up, not yet done.
 
 **Why it was previously absent:**
 The original implementation attempt failed because:
@@ -1274,11 +1407,37 @@ optional leading "please"/"okay" or trailing "please"):
 | case | capitalise that, uppercase that, lowercase that | title / upper / lower case of the last paste |
 | list | make that a list | last paste → "- item" lines (sentences; else commas/"and") |
 | new line / new paragraph | new line, new paragraph | inserts "\n" / "\n\n" at the caret (never a bare Return: no accidental send) |
+| press enter (opt-in `spoken_enter`) | the user's `spoken_enter_phrases`; default: press enter, hit enter, press return, hit return, send it, send that, submit it/that | presses Return — submits in chat apps and agent prompts. Off (default): the words are dictated. No bare "enter" by default |
 | undo / redo | undo (that), redo (that) | ⌘Z / ⇧⌘Z |
 | select | select that, select the last word, select the last sentence, select all | selection |
 | delete | delete the last word, delete the last sentence | removes it (plus trailing space) |
 | go to | go to the end / start | caret |
 | rewrite | make that shorter / more formal / friendlier, fix the grammar, translate that to <language> | handed to Iris (on-device model) — see below |
+
+**Press enter** is the one command that sends: it is off unless the user turns
+on `spoken_enter`. Its phrases are the user's (`spoken_enter_phrases`,
+comma-separated, matched after the same normalisation and polite affixes as
+every command; blank = the defaults above); they are checked before the fixed
+grammar, so a phrase the user picks wins over a built-in command. It passes
+the same gate as every command — said on its
+own, right after a paste into the same field, nothing committed since. Once it
+has pressed Return the paste counts as committed, so a second "send it" is
+dictated rather than pressing Return on an empty field. With live typing on,
+the command's own words are removed before Return is pressed.
+
+**At the end of a dictation** (opt-in `spoken_enter_at_end`, needs
+`spoken_enter`): "…and run the tests, go go" — the phrase ending the
+utterance (matched word by word, punctuation ignored, before the
+repeat-removing cleanup) is cut with the punctuation joining it, the rest is
+pasted as usual, and Return follows the paste through auto-Enter's 0 ms path
+(regardless of the auto-Enter setting and its minimum word count; never for an
+incomplete dictation, a withheld or paused paste, or after focus moved). A
+phrase must be chosen that is never dictated: with the defaults, any sentence
+ending in "send it" is sent — hence off by default.
+
+**Linux:** there is no Accessibility API to verify the field or the caret, so
+only `press enter` runs there (same window, ≤ 30 s after the paste); every
+other command is dictated as before.
 
 **Gate — dictation is never swallowed.** An utterance is claimed only when
 all hold, otherwise it pastes as normal dictation:
@@ -1341,14 +1500,38 @@ method, ms, detail, text }` (strings only).
 
 Shown **once**, to someone who has never been through it, and never again.
 
-Two steps:
+Three steps:
 
-1. **Permissions.** Microphone and Accessibility are required and gate the
+1. **Engine (product-owner request 2026-10-22).** First, before Permissions,
+   so a model download runs while the user grants them. "Choose Your Engine":
+   option cards, in order —
+   - **Groq (cloud):** best accuracy and speed, needs a free API key (link to
+     console.groq.com/keys). "Save & Use" saves `groq_api_key` and switches to
+     Groq once the daemon, restarted to load the key, reconnects; on macOS
+     an invalid key is rejected inline first (Linux does not check it). Caption: free tier is about
+     2,000 requests a day and live transcript uses more of it.
+   - **Local model:** private and offline. Offers the best catalogue model
+     (recommended first, then speed + accuracy); "Download & Use" downloads it
+     with progress ("Keeps downloading while you continue") and switches when
+     installed, even if the user has moved on to later steps or closed setup.
+     A daemon restart mid-download (the Groq key save, or the mic supervisor's
+     exit before the mic is granted) is survived: the app re-requests the
+     download on reconnect and it resumes from the partial file. The daemon
+     ignores a second `DownloadModel` for a model already downloading.
+     Picking another engine cancels the pending switch. If one is already downloaded,
+     "Use <name>".
+   - **Apple on-device (macOS 26+ only):** no key, no download; the card says
+     it works but results are not as good as Groq or a local model.
+   The card for the active backend shows as selected. The step never blocks
+   Continue — "Set up later in Settings → Models" continues and keeps the
+   active backend (Apple on macOS 26+). Same step, same text on Linux, minus
+   Apple.
+2. **Permissions.** Microphone and Accessibility are required and gate the
    Continue button — without them nothing works at all. Input Monitoring is
    offered but never blocks: it enables the global shortcuts, not dictation.
    The window polls permission state, so granting in System Settings updates it
    without a restart.
-2. **My Voice.** The three enrollment recordings, inline. Always skippable —
+3. **My Voice.** The three enrollment recordings, inline. Always skippable —
    "Skip for now" and "Finish without it" both complete setup.
 
 **Last page: apps to turn voice typing on in.** The final "You're all set"
@@ -1389,21 +1572,29 @@ used the app before, and the flag is retro-marked. Upgrading must not greet a
 working setup with a welcome window.
 
 **The window is always dismissable.** No step may hold a first-run user hostage.
-The Groq API key was deliberately removed from this flow for that reason — it is
-not required (local models need none) and it now lives in Settings → Models.
+The Groq API key was once removed from this flow for that reason; it is back
+only as an optional choice in the Engine step, which never blocks (local models
+need no key, and Settings → Models still holds it).
 
-**Linux and Windows (Tauri app).** Both windows start hidden. At launch the
-settings webview shows the onboarding window until completion is recorded, and
-the settings window afterwards. Completion lives in the webview's
-`always_onboarding_done` flag. A saved Groq key or a recorded voice profile
-(`always config show`, `always voice status`) retro-marks it. Finishing,
-skipping, or closing the onboarding window records completion and shows
-Settings. The tray's Settings → Onboarding item re-opens the flow from its first
-step.
-The Tauri app starts the sibling `always` daemon with `always start` before
-creating its reconnecting IPC client. The daemon's single-instance guard makes
-this safe when it is already running; a start failure is logged and leaves the
-settings UI available.
+**Linux matches macOS.** The Linux onboarding uses the macOS layout, step order,
+titles, text and buttons. Agreed differences: no Apple engine, Linux's own
+permission rows, and no spoken narration (`say` is macOS-only)
+(product-owner request 2026-10-22).
+
+**Which onboarding there is depends on the platform.** On macOS onboarding is
+the Swift app's window (permissions, the three enrollment recordings, the
+apps page): permissions belong to the menu-bar bundle's TCC grants and are
+requested on its behalf. On Linux and Windows onboarding is the Tauri app's
+window (both start hidden; the settings webview decides which one to show).
+Launched with `--hidden` (launch at login) the Tauri app starts in the tray
+with no window once completion is recorded; Settings stay in the tray menu.
+Completion on the webview side lives in the webview's `always_onboarding_done`
+flag, retro-marked from a saved Groq key or a recorded voice profile
+(`always config show`, `always voice status`); the Tauri app's tray (non-macOS
+only) re-opens the flow from its first step. These two completion records are
+not shared: a Mac user who completed the Swift flow but never opened the
+shared settings window would be offered the webview flow once ❓ (open
+question 7c).
 
 ---
 
@@ -1412,10 +1603,47 @@ settings UI available.
 Stored in the daemon's database, editable from Settings and the CLI
 (`always-daemon config set <key> <value>`).
 
+**macOS Settings is the shared Tauri window.** Every entry point — the menu
+bar's “Settings…”, the Dock icon, the `always://settings` URL — launches or
+focuses the bundled `always-tauri` binary (`always-gui` inside); if a
+same-instance settings app is already running it is activated instead.
+The settings app has its own bundle identifier, deliberately different from
+the Swift app's: a collision would let LaunchServices/TCC merge the two apps
+and void the permission grants. It shows no tray icon (the Swift menu bar is
+the only menu-bar surface) and keeps a regular Dock icon, whose clicks,
+Finder and `open` re-opens surface the settings window. The retired SwiftUI
+Settings scene is gone: macOS has exactly one settings surface, the one every
+other platform already uses, so panels are never implemented twice.
+
+**The panels are shared.** General, Models, My Voice, Permissions, Behavior,
+Shortcuts, Library (Vocabulary and Snippets — previously macOS-only Swift
+panels), History, and About (Check for Updates, Install Update) are all the
+shared webview panels on every platform, including macOS. Config edits go
+through the same `always config set` / UDS runtime-preference paths, so the
+Swift app's CLIService bridge is no longer the settings writer. ❓ On macOS
+the permissions panel reads daemon-observed state and links to System
+Settings panes rather than querying TCC itself, and Re-check is a local
+refresh — the native per-permission TCC poll of the old Swift panel is not
+replicated.
+
+**macOS gaps (known, all ❓).** The shared window is the macOS reference UI,
+but three pieces of the old native panel do not translate and need a product
+decision (open question 7): (a) the Status Overlay picker writes the webview's
+own key and not the Swift overlay's `overlayDisplayMode`, so the Mac user has
+no UI left for the §5 setting; (b) the Models language picker omits the
+Auto-detect choice the Swift picker offered; (c) onboarding completion lives
+in two unshared records, so a Mac user who completed the Swift flow can be
+offered the webview flow once. ❓ Also unverified on a Mac: that opening
+Settings while the daemon is mid-startup reaches the reconnecting client
+correctly, and that the same-instance focus check never crosses prod↔dev.
+Live typing is settable on macOS again (§5) since the shared Behavior panel
+reached it.
+
 The macOS Transcript History panel fills the available settings content height,
-including while loading or empty. With no entries, its message is centered in
-the space below the header; populated history uses that space for its list.
-The Linux and Windows Tauri History panel reads daemon history rows from
+including while loading or empty — ❓ the shared History panel does not (it
+scrolls), so this describes the retired Swift panel only. With no entries, its
+message is centered in the space below the header; populated history uses
+that space for its list. The History panel reads daemon history rows from
 `history.jsonl`, using the daemon's `ts` millisecond timestamp and `raw_text`.
 
 **Settings controls.** Settings labels and explanatory text are not selectable
@@ -1432,23 +1660,26 @@ actions instead of spinning indefinitely.
 The Fast filter includes catalog entries with `speed_score >= 0.75`, matching
 the 0–1 score scale. Model rows use accuracy and speed bars, plus globe,
 translation, streaming, and storage metadata icons. Target language selection
-appears only for an active model that supports it; Linux omits the Auto-detect
-choice from that picker.
+appears only for an active model that supports it; Linux and macOS omit the
+Auto-detect choice from that picker (on macOS the picker has no Auto-detect
+entry — the Swift one had one, §10 macOS gaps).
 
-The shared Windows/Linux settings layout follows the macOS reference in these
+The shared Windows/Linux/macOS settings layout follows the macOS reference in these
 areas: Models keeps language, capability, and sort filters in one row and uses
 an icon-only trash action for downloaded models; My Voice groups the gate label,
 current status, and switch in one tinted row without changing enrollment rules;
 Permissions puts a shield beside its heading, Re-check at the top right, and
 one inline status indicator per permission. Library centers its tabs without
-an extra content heading and puts the glossary file action and path above the
-entries. About places update status beside Check for Updates. Platform-specific
+an extra content heading and puts the glossary file action and path above
+the entries. About places update status beside Check for Updates. Platform-specific
 permission names and actions remain intact.
 
-On Linux, the Behavior switches for adaptive silence and live transcript apply
-their changes to the running daemon immediately and save them for the next
-launch. Models dropdown controls and their option menus use dark surfaces with
-readable light text.
+On every platform, the Behavior switches for adaptive silence, live transcript,
+live typing and spoken-Enter apply their changes to the running daemon
+immediately (ApplyRuntimePreferences) and persist them for the next launch
+(`always config set`, debounced) — this includes macOS now that Settings is
+the shared window. Models dropdown controls and their option menus use dark
+surfaces with readable light text.
 
 **Linux permissions.** Linux does not show the microphone-permission banner in
 General: microphone access comes from the active audio session, and the
@@ -1477,6 +1708,10 @@ the app has identified the platform, avoiding a Windows warning flash on Linux.
 | `audible_status_sound` | off | Sound cues (off/low/medium/high; see §10.1) |
 | `per_app_settings_json` | — | Per-application pause rules |
 | `update_check` | true | Background GitHub release check (§12a); `ALWAYS_UPDATE_CHECK=0` also disables it |
+| `live_typing` | false | Type words while the user speaks and correct them to the final transcript (§5, Live typing). Settable on macOS again via the shared settings window (§10) |
+| `spoken_enter` | false | "press enter" / "send it" on its own right after dictating presses Return (§9c) |
+| `spoken_enter_at_end` | false | The Return phrase also works at the end of a dictation, without a pause (§9c) |
+| `spoken_enter_phrases` | (built-in list) | What presses Return, comma-separated — e.g. `go ahead, ship it`; blank = defaults (§9c) |
 
 Shortcuts: pause `ctrl+alt+p` · master pause/mute `ctrl+alt+shift+p` ·
 auto-enter `ctrl+alt+a` · force paste `ctrl+alt+v` · log correction
@@ -1523,7 +1758,6 @@ daemon (I4/I5 hold *per instance*).
 | URL scheme | `always://` | `always-dev://` |
 | Updates (§12a) | background check + notify; apply on request | no background check; apply refused |
 | Focus-state file | `~/Library/Caches/Always/focus-state.json` | `focus-state-dev.json` |
-| Daemon build identity | `always.build-id` in the state dir | `always.build-id` in the dev state dir |
 | Daemon logs | `~/Library/Logs/Always` | `~/Library/Logs/Always-dev` |
 
 Shared deliberately: `~/Library/Application Support/always/models` and the
@@ -1531,7 +1765,10 @@ Shared deliberately: `~/Library/Application Support/always/models` and the
 
 **Instance detection.** The daemon resolves its instance once at startup:
 `ALWAYS_INSTANCE=dev` env var, else `Always Dev.app` in its own executable
-path, else prod. The GUI detects via its bundle id/path. No env plumbing is
+path, else prod. The GUIs detect via their bundle id/path — and the Swift
+menu bar passes its instance to the spawned settings app (`ALWAYS_INSTANCE`
+set for dev, removed for prod), so the settings app's socket/state-dir
+resolution never crosses the prod↔dev split. No env plumbing is
 needed for the bundled daemon — it inherits the right identity from its
 location.
 
@@ -1542,42 +1779,33 @@ seeds its state dir from production's db/voiceprint/vocabulary (one-time
 copy; afterwards they diverge).
 
 **Peer handoff.** The microphone is still singular — two live daemons would
-both transcribe and both paste. Starting Dev while production is live keeps
-Dev passive: Dev pauses itself and watches production, without changing the
-production pause state. When a newer daemon starts alongside an older peer,
-it applies the same safe standby policy at socket readiness; it does not
-assume that a PID check alone completed the handoff.
-
-Cross-instance mutations use the optional `peer-pause-lease-v1` capability
-negotiated in the initial `Hello`. A pause/release request carries a unique
-request ID and requires a correlated `PeerPauseLeaseResult`; EOF, timeout,
-legacy peers, and mismatched replies fail closed. A peer already manually
-paused is acknowledged without acquiring a release lease. A matching lease
-may release only the pause it acquired; any later manual pause/resume revokes
-that lease and wins over a delayed release. A paused-by-peer daemon resumes
-when its peer endpoint dies (~1 s), covering SIGKILL where no exit cleanup
-runs; graceful exits release only a still-owned lease. An explicit Dev resume
-is a deliberate takeover: it negotiates a conditional pause first and stays
-paused if the peer cannot safely confirm it. Similarly, if a new production
-daemon cannot safely pause a live older Dev peer, production enters standby
-and watches that peer instead of allowing both to capture.
+both transcribe and both paste. So whichever daemon starts last pauses its
+peer over the peer's UDS socket (`SetPaused{reason:"peer-instance"}`): the
+paused instance stops listening, no audio is transcribed or pasted. A
+paused-by-peer daemon runs a watchdog that self-resumes the moment the
+peer's socket dies (~1 s), covering SIGKILL where no cleanup runs;
+graceful exits resume the peer directly. A user pause/unpause of either
+instance always overrides the handoff — the watchdog stands down and the
+user's choice wins.
 
 **Commands.**
 
 - `scripts/dev-rebuild-macos.sh` — the macOS dev loop. Kills/rebuilds/relaunches only
-  `Always Dev.app`; never touches the production install. Exits non-zero
+  `Always Dev.app`; never touches the production install. It also builds the
+  settings frontend (`always-gui`) and the settings app (`always-tauri`),
+  installs the binary into `Always Dev.app/Contents/MacOS/` (the menu bar's
+  Settings action looks for exactly that path), sanity-checks
+  `tauri.conf.json` for the macOS layout (settings window exists, centered,
+  and an identifier that cannot collide with the Swift bundle id — a
+  collision would let LaunchServices/TCC merge the two apps), and verifies
+  the bundled binary is not older than the one just built, since the menu
+  action launches it on demand rather than at boot. Exits non-zero
   unless the dev GUI + daemon are running the just-built binaries, and
-  warns if production went missing.
-- `always start` compares a running daemon's recorded build identity with the
-  current executable. A mismatch or missing identity is reported as stale or
-  unknown and returns an error without stopping the live daemon; `always
-  status` reports the same state. The identity distinguishes compiled daemon
-  artifacts. Source edits that have not been built are outside this check.
-  Process ownership is established from the OS-reported executable path and
-  the daemon's `run` command, never from arbitrary argument text. A live IPC
-  endpoint without a verifiable PID is reported as running with unknown build
-  identity; `start` does not start a duplicate and `stop` never signals an
-  unverified PID.
+  warns if production went missing. `--no-tauri` skips the settings
+  frontend/binary build (stale-bundle warning included); `--no-daemon` and
+  `--force-daemon` control the daemon restart as before. A settings app
+  launched from the crate's cargo target dir (the Swift menu bar's dev
+  fallback path) is killed too — that path cannot match production.
 - `scripts/dev-rebuild-linux.sh` — builds the Linux daemon, settings frontend,
   and Tauri app, then launches and verifies the checkout's settings app.
 - `scripts/promote.sh` — manual production promotion, user-invoked only.
@@ -1599,9 +1827,9 @@ and watches that peer instead of allowing both to capture.
   which renders cues offline to a buffer. A sandbox instance
   never pauses, resumes or reaps prod/dev daemons.
 
-**Windows daemon lifecycle.** On Windows the daemon is not CLI-only: the
-versioned IPC protocol is carried over a named pipe instead of a unix socket,
-including the negotiated peer pause lease. `always start` spawns
+**Windows daemon lifecycle.** On Windows there is no GUI and no peer
+handoff, but the daemon is not CLI-only: the UDS protocol is carried
+over a named pipe instead of a unix socket. `always start` spawns
 `always run` detached (no console), single-instance is a named kernel
 mutex (`Local\always-daemon[-dev]`, released by the kernel on process
 death), liveness is the pid file + an `OpenProcess` image-name check
@@ -1614,10 +1842,8 @@ gracefully on Ctrl+C (pid file cleanup).
 
 **Windows IPC — named pipe.** The JSON-lines `DaemonCommand`/`DaemonEvent`
 protocol (same versioned schema as the UDS socket) listens on
-`\\.\pipe\always[-dev]`. Its protected DACL permits only the creating
-user and SYSTEM; remote clients are rejected. The pipe carries transcript
-events, so it must not inherit the default Everyone/Anonymous read access.
-The server creates the endpoint with `first_pipe_instance`, so bind failure is the pipe equivalent of the
+`\\.\pipe\always[-dev]`. The server creates the endpoint with
+`first_pipe_instance`, so bind failure is the pipe equivalent of the
 live-socket check — a second daemon can't steal it (the kernel mutex
 already prevents that anyway). Opening the pipe IS the liveness probe:
 `ERROR_FILE_NOT_FOUND` = no server, success/`ERROR_PIPE_BUSY` = live.
@@ -1760,14 +1986,6 @@ unregister and re-register — hotkey changes apply live. Modifier-less keys and
 isn't wired on Windows yet, the per-app pause chord falls back to the master
 toggle when no focused app is known.
 
-The Settings window learns the shortcut status from the daemon's startup burst,
-but its listeners can attach after that burst is sent. It therefore also asks
-the daemon (`GetShortcutListenerStatus`) on every connect, and the daemon
-re-sends the status it already knows. On Windows, the General banner shows a
-"Global Shortcuts" row only while the daemon is connected and hotkeys are not
-registered. The Microphone row shows only while the daemon is unreachable; a
-connected daemon with a working microphone never produces a warning.
-
 Downloaded files live only in the update directory; stale ones (older than 1 h,
 other than a running update's) are removed at daemon start and on
 `always update`.
@@ -1851,3 +2069,13 @@ tick as a fraction of full scale; `energy_db` the same in dBFS;
 6. ~~Nemotron — fix and restore, or leave out?~~ **Resolved 2026-08-15:**
    Nemotron is restored with state-reset, padded 560 ms chunk processing,
    trailing-frame flushes, and intact UTF-8 partial transcript updates.
+7. The shared settings window on macOS (§10) leaves three pieces of the old
+   native panel untranslated, and every one of them needs a product decision
+   rather than a code patch: (a) the Status Overlay picker writes only the
+   webview's own key, so the Mac overlay's `overlayDisplayMode` has no UI;
+   (b) the Models language picker lost the Auto-detect choice the Swift
+   picker offered; (c) onboarding completion lives in two unshared records
+   (`onboardingCompletedV1` for the Swift window, `always_onboarding_done`
+   for the webview), so a Mac user can be offered the second flow after
+   completing the first. Also to confirm on a Mac: live typing (§5) and the
+   other runtime switches behave the same as measured on Linux.

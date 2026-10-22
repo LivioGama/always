@@ -73,6 +73,10 @@ export function BehaviorPanel({
       silero_threshold: next.sileroThreshold,
       adaptive_silence: next.sttAdaptiveSilence,
       stt_live_preview: next.sttLivePreview,
+      live_typing: next.liveTyping,
+      spoken_enter: next.spokenEnter,
+      spoken_enter_phrases: next.spokenEnterPhrases,
+      spoken_enter_at_end: next.spokenEnterAtEnd,
     });
   };
 
@@ -133,6 +137,19 @@ export function BehaviorPanel({
           help="Periodically transcribes what you've said so far and shows the provisional text in the overlay while you're still talking."
           on={config.sttLivePreview}
           onChange={(v) => changeRuntimeSetting({ sttLivePreview: v })}
+        />
+        {daemon.state.backend === "groq" && (
+          <Caption className="text-orange-400/90">
+            ⚠ With Groq, live transcript re-sends your speech about every 1.5 s — roughly 5× more Groq requests. On
+            Groq's free tier, that can use up the daily quota after about 45 minutes of speaking. Always tells you when
+            today's quota runs out.
+          </Caption>
+        )}
+        <ToggleRow
+          label="Type words while you speak"
+          help="Types into the focused app as you talk instead of pasting when you stop, then corrects the words to the final transcript. Typing stops if you pause, switch window, or another app takes the microphone."
+          on={config.liveTyping}
+          onChange={(v) => changeRuntimeSetting({ liveTyping: v })}
         />
 
         {/* Advanced thresholds disclosure */}
@@ -237,6 +254,31 @@ export function BehaviorPanel({
           max={60}
           decimals={0}
         />
+        <ToggleRow
+          label={'Say "press enter" to send'}
+          help={'Saying "press enter" or "send it" on its own, right after dictating, presses Return. Off: those words are typed like any others.'}
+          on={config.spokenEnter}
+          onChange={(v) => changeRuntimeSetting({ spokenEnter: v })}
+        />
+        {config.spokenEnter && (
+          <div className="space-y-1">
+            <input
+              value={config.spokenEnterPhrases}
+              onChange={(e) => onConfigChange({ spokenEnterPhrases: e.target.value })}
+              onBlur={() => changeRuntimeSetting({})}
+              placeholder="press enter, send it"
+              aria-label="Phrases that press Return"
+              className="w-full bg-surface-800 border border-surface-700 rounded px-2.5 py-1.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-primary-500"
+            />
+            <Caption>Phrases that press Return, separated by commas. Leave empty for the defaults.</Caption>
+            <ToggleRow
+              label="Also at the end of a sentence"
+              help={'"…and run the tests, go go" types the sentence without the phrase, then presses Return — no pause needed. Pick a phrase you would never dictate: with "send it", a sentence ending in "send it" is sent.'}
+              on={config.spokenEnterAtEnd}
+              onChange={(v) => changeRuntimeSetting({ spokenEnterAtEnd: v })}
+            />
+          </div>
+        )}
       </div>
 
       <Divider />

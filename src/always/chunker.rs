@@ -119,6 +119,9 @@ pub struct ChunkAccumulator {
     /// chunk can inspect ALL committed chunks and warm the joined-text
     /// grammar key (see `current_join`).
     slots: Arc<Mutex<Vec<Arc<ChunkSlot>>>>,
+    /// Send each chunk's text to the overlay as a rolling preview. Off when
+    /// the user turned live transcript off (SPEC §5); set before `flush`.
+    pub show_live_text: bool,
 }
 
 /// Cheap read-only view of the committed chunks, safe to move into the
@@ -449,6 +452,7 @@ impl ChunkAccumulator {
         let transcriber = Arc::clone(transcriber);
         let rt = rt.clone();
         let all_slots = Arc::clone(&self.slots);
+        let show_live_text = self.show_live_text;
         std::thread::spawn(move || {
             // Same catch_unwind rationale as the speculation thread in
             // `vad.rs`: a panic must surface as a stored failure, not a
@@ -473,7 +477,7 @@ impl ChunkAccumulator {
             match outcome {
                 Ok(result) => {
                     let raw = result.text.trim().to_string();
-                    if !raw.is_empty() {
+                    if show_live_text && !raw.is_empty() {
                         // Rolling preview on the overlay while the user
                         // keeps talking.
                         event::global_broadcaster().transcript_chunk(raw.clone());

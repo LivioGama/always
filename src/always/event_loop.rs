@@ -608,12 +608,22 @@ fn process_one(
     let record_result = match vad::record_utterance(&cfg, log, transcriber, rt) {
         Ok(r) => r,
         Err(e) => {
+            // Live typing: the final is lost; leave what was typed, no keys.
+            crate::always::live_type::abandon();
             let (kind, message) = classify_transcription_error(&e);
             event::global_broadcaster().transcription_failed(kind, message);
             emit_utterance_terminal();
             return Err(e).context("failed to record/transcribe utterance");
         }
     };
+    // Live typing: only speech can deliver typed words. Another app took
+    // the microphone → not one more keystroke (I7); any other non-speech
+    // outcome (too quiet, noise, not the user's voice) removes them.
+    match &record_result {
+        vad::RecordResult::Speech { .. } => {}
+        vad::RecordResult::PreemptedByMicConflict { .. } => crate::always::live_type::abandon(),
+        _ => crate::always::live_type::retract(),
+    }
     let outcome = match record_result {
         vad::RecordResult::Speech {
             text,
@@ -762,6 +772,7 @@ pub fn paste_rejected(id: u64) -> bool {
                 false,
                 lat,
                 0,
+                false,
             ) {
                 tracing::warn!(error = %error, "rejected_paste_failed");
             }
@@ -794,6 +805,11 @@ fn handle_speech(
 ) -> Result<()> {
     let now = Instant::now();
     let action = classify_transcription(cfg, text, transcription, now, *last_process);
+    // Live typing: only a paste delivers the typed words; any other outcome
+    // (cooldown, rejected, hallucinated, foreign speech) removes them first.
+    if !matches!(action, SpeechAction::Paste { .. }) {
+        crate::always::live_type::retract();
+    }
 
     // Cooldown is observable in the decision but does not advance
     // last_process — let the next utterance re-check.
@@ -926,6 +942,28 @@ fn handle_speech(
             // Deterministic local cleanup first: removes adjacent repeats and
             // fillers before snippet matching / grammar so they never reach the
             // paste buffer or the LLM prompt.
+            // The user's spoken-Enter phrase is matched before this cleanup:
+            // a chosen phrase like "go go" is exactly an adjacent repeat.
+            let enter_phrases = cfg.active_enter_phrases();
+            // Opt-in: the phrase ENDING a dictation ("…run it, go go") is cut
+            // here and Return follows this paste (`deliver_paste`).
+            let (transformed, send_after) = match cfg
+                .spoken_enter_at_end
+                .then(|| {
+                    crate::always::voice_edit_grammar::split_trailing_enter(
+                        &transformed,
+                        enter_phrases,
+                    )
+                })
+                .flatten()
+            {
+                Some(rest) => {
+                    tracing::info!("spoken_enter_at_end_detected");
+                    (rest, true)
+                }
+                None => (transformed, false),
+            };
+            let before_cleanup = transformed.clone();
             let transformed = crate::always::postprocess::local_cleanup(&transformed);
             // A misheard leading "Iris" ("Irish what time is it", "IRS what
             // time is it") becomes the name the user said — only at the very
@@ -937,7 +975,15 @@ fn handle_speech(
             // claimed ONLY when the whole utterance is an edit command right
             // after a paste into this same field (voice_edit.rs gate);
             // otherwise this is a no-op and the utterance pastes as usual.
-            if crate::always::voice_edit::try_claim(&transformed) {
+            let claim_text = if crate::always::voice_edit_grammar::is_enter_phrase(
+                &before_cleanup,
+                enter_phrases,
+            ) {
+                &before_cleanup
+            } else {
+                &transformed
+            };
+            if crate::always::voice_edit::try_claim(claim_text, enter_phrases) {
                 pause::dictation_buffer_clear();
                 event::global_broadcaster().voice_activity_ended();
                 return Ok(());
@@ -1139,6 +1185,7 @@ fn handle_speech(
                             false,
                             lat,
                             unrecovered_parts,
+                            false,
                         ) {
                             tracing::warn!(error = %error, "held_final_paste_failed");
                         }
@@ -1171,6 +1218,7 @@ fn handle_speech(
                 grammar_patch_async,
                 lat,
                 transcription.evidence.unrecovered_parts,
+                send_after,
             )
         }
     }
@@ -1210,9 +1258,30 @@ fn deliver_paste(
     grammar_patch_async: bool,
     lat: PasteLatency,
     unrecovered_parts: usize,
+    send_after: bool,
 ) -> Result<()> {
     // Sandbox guard (launch smoke test): never type into the user's apps.
     if std::env::var("ALWAYS_NO_PASTE").as_deref() == Ok("1") {
+        // Sandbox with a dry-run keystroke log: record the live-typing
+        // correction, and anchor the "paste" so voice commands can be tested.
+        if crate::always::live_type::dry_run() {
+            let payload = format!("{final_text} ");
+            let _ = crate::always::live_type::finish(&payload);
+            crate::always::voice_edit::note_paste(&payload);
+            // Recorded, not sent: the Linux `post_strokes` honours
+            // ALWAYS_NO_PASTE (the macOS one does not, so not there).
+            #[cfg(target_os = "linux")]
+            if send_after && unrecovered_parts == 0 {
+                let _ = crate::always::ax_edit::post_strokes(
+                    crate::always::ax_edit::KeyTarget::Hid,
+                    &[crate::always::ax_edit::Stroke::Key {
+                        code: crate::always::ax_edit::keys::RETURN,
+                        mods: crate::always::ax_edit::Mods::NONE,
+                        repeat: 1,
+                    }],
+                );
+            }
+        }
         tracing::info!(
             chars = final_text.chars().count(),
             "paste_suppressed_no_paste_env"
@@ -1225,6 +1294,7 @@ fn deliver_paste(
             grammar_patch_async,
             lat,
             unrecovered_parts,
+            send_after,
         );
         return Ok(());
     }
@@ -1277,6 +1347,7 @@ fn deliver_paste(
             dup_window_ms = dup_window.as_millis() as u64,
             "duplicate_paste_suppressed"
         );
+        crate::always::live_type::retract();
         event::global_broadcaster().voice_activity_ended();
         return Ok(());
     }
@@ -1286,6 +1357,7 @@ fn deliver_paste(
             text = %paste_payload,
             "duplicate_paste_suppressed_in_flight"
         );
+        crate::always::live_type::retract();
         event::global_broadcaster().voice_activity_ended();
         return Ok(());
     }
@@ -1333,6 +1405,7 @@ fn deliver_paste(
                     chars = paste_payload.chars().count(),
                     "paused_mid_utterance_withheld_recoverable"
                 );
+                crate::always::live_type::abandon();
                 pause::set_last_filtered(final_text.clone());
                 event::global_broadcaster()
                     .transcription_filtered("App paused — press ⌃⌥V to paste anyway");
@@ -1367,6 +1440,7 @@ fn deliver_paste(
     let copy_result = paste::copy_to_clipboard(paste_clipboard);
     if let Err(err) = copy_result {
         tracing::warn!(error = %err, "clipboard_copy_failed");
+        crate::always::live_type::abandon();
         log.write(Event::Error {
             message: "Skipped paste: clipboard copy failed",
         });
@@ -1384,6 +1458,7 @@ fn deliver_paste(
     // their utterance was heard but intentionally not pasted.
     if keyboard::is_cmd_held() {
         tracing::debug!("skipped_paste_cmd_held");
+        crate::always::live_type::abandon();
         log.write(Event::Error {
             message: "Skipped paste: Command key held",
         });
@@ -1399,10 +1474,34 @@ fn deliver_paste(
     // the user can intercept (any key cancels). When
     // `auto_enter_delay_ms == 0` the countdown helper presses
     // Return immediately, preserving the legacy behavior.
-    if let Err(err) = paste::paste_text(false) {
-        pause::end_paste();
-        return Err(err);
-    }
+    // Live typing: the words are already on screen — correct them to this
+    // exact payload instead of pasting it again.
+    let live_typed = match crate::always::live_type::finish(&written_clipboard) {
+        crate::always::live_type::Finish::Corrected => true,
+        crate::always::live_type::Finish::NotTyped => {
+            if let Err(err) = paste::paste_text(false) {
+                pause::end_paste();
+                return Err(err);
+            }
+            false
+        }
+        crate::always::live_type::Finish::FocusMoved => {
+            // Typed words stay where they were spoken; nothing is sent into
+            // the window the user moved to. Same recovery as a paused
+            // utterance whose focus changed (⌃⌥V).
+            let recoverable_id = crate::always::rejected::keep_withheld(
+                &final_text,
+                "focus moved during live typing",
+            );
+            tracing::info!(recoverable_id, "live_type_final_withheld_focus_moved");
+            pause::set_last_filtered(final_text.clone());
+            event::global_broadcaster()
+                .transcription_filtered("Window changed — press ⌃⌥V to paste the rest");
+            pause::dictation_buffer_clear();
+            pause::end_paste();
+            return Ok(());
+        }
+    };
     let pasted_at = Instant::now();
     // Remember exactly what was pasted, for voice editing.
     crate::always::voice_edit::note_paste(&written_clipboard);
@@ -1455,14 +1554,31 @@ fn deliver_paste(
         event::global_broadcaster()
             .transcription_failed(DICTATION_PART_LOST_KIND, DICTATION_PART_LOST_MESSAGE);
     }
-    if should_press_return(auto_enter_effective, &buffer_text, unrecovered_parts) {
+    // Spoken Return at the end of this dictation: Return now, whatever the
+    // auto-Enter setting — but never for an incomplete dictation.
+    let press_return = if send_after {
+        if unrecovered_parts > 0 {
+            tracing::info!(
+                unrecovered_parts,
+                "spoken_enter_suppressed_incomplete_dictation"
+            );
+        }
+        unrecovered_parts == 0
+    } else {
+        should_press_return(auto_enter_effective, &buffer_text, unrecovered_parts)
+    };
+    if press_return {
         // Hold the merged buffer so the NEXT utterance can
         // append again if it arrives before the countdown
         // fires. Set BEFORE schedule() so even a 0-delay
         // immediate-Return path sees the buffer for clearing.
         pause::dictation_buffer_set(buffer_text.clone());
-        let delay = per_app::effective_auto_enter_delay_ms(cfg.auto_enter_delay_ms);
-        auto_enter_countdown::schedule(rt, delay);
+        let delay = if send_after {
+            0
+        } else {
+            per_app::effective_auto_enter_delay_ms(cfg.auto_enter_delay_ms)
+        };
+        auto_enter_countdown::schedule(rt, delay, live_typed);
         if delay == 0 {
             // 0-delay presses Return synchronously inside schedule().
             return_committed = true;

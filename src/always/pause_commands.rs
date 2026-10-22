@@ -133,7 +133,7 @@ pub fn toggle_global() -> Outcome {
 fn toggle_global_with_resume(resume_fn: impl FnOnce() -> Outcome) -> Outcome {
     // A manual toggle is an explicit choice, even when a peer instance put
     // this daemon into passive standby.
-    if pause::is_user_resumable_pause() {
+    if pause::is_user_resumable_pause() || pause::is_startup_default_pause() {
         return resume_fn();
     }
     pause::set_paused_by_peer(false);
@@ -364,6 +364,24 @@ mod tests {
         let out = toggle_global();
         assert!(!out.effective, "toggle from an idle pause must resume");
         assert!(!out.master, "must not set master");
+    }
+
+    /// Linux / CLI: a fresh daemon is paused by default with no pause source
+    /// and no focused app. One press turns it on.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn first_toggle_after_start_resumes() {
+        let _g = pause::PAUSE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        pause::reset_pause_state_for_test();
+        assert!(pause::is_paused(), "starts paused by default");
+
+        let out = toggle_global();
+        assert!(!out.effective, "one press must turn Always on");
+        assert!(!out.master);
+        // The next press pauses as usual.
+        assert!(toggle_global().effective);
     }
 
     #[test]

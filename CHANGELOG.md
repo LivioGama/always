@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-22
+
+### Added
+- **live typing:** opt-in: words appear in the focused app while you speak, and the final transcript corrects them in place (macOS and Linux). Turn it on in Settings › Behavior ("Type words while you speak") or with `always config set live_typing true`. ([#146](https://github.com/LivioGama/always/pull/146))
+- **voice commands:** opt-in: say a phrase on its own ("press enter", or your own phrases) to press Return and send what you dictated, for chat apps and coding agents (macOS and Linux). Settings › Behavior › Auto-Enter. ([#147](https://github.com/LivioGama/always/pull/147))
+- **desktop app:** `always-tauri --hidden` starts the Linux/Windows app in the tray with no window, for launching at login. ([#149](https://github.com/LivioGama/always/pull/149))
+- **models:** Parakeet Ultra joins the local catalog: German and 24 more European languages as well as English, detected automatically, 637 MB, fully offline. ([#154](https://github.com/LivioGama/always/pull/154))
+- **models:** when Groq's free daily quota runs out, Always offers a one-click switch to an on-device engine: a downloaded model, Apple's recognizer on macOS 26+, or a download that switches once installed (macOS and Linux). Settings also warns that live transcript with Groq uses about 5× more of the quota. ([#158](https://github.com/LivioGama/always/pull/158))
+- **onboarding:** a new first step, "Choose Your Engine", sets up Groq (paste a key), downloads a first local model, or picks Apple on-device on macOS. The download keeps going while you grant permissions and Always switches to it once installed. The Linux onboarding now matches the macOS one. ([#158](https://github.com/LivioGama/always/pull/158))
+
+### Changed
+- **settings:** on macOS, Settings is now the same window as on Linux and Windows, opened from the menu bar, the Dock or `always://settings`; Snippets and Vocabulary live together under Library. ([#153](https://github.com/LivioGama/always/pull/153))
+- **live typing:** with a fast local engine, words appear sooner: previews run as often as the engine allows (down to every 150 ms) instead of every 350 ms. ([#155](https://github.com/LivioGama/always/pull/155))
+
+### Fixed
+- **linux:** dictation works on Linux again: v0.1.1 failed every utterance with "Audio capture not supported on this platform". Pasting works on Wayland (wtype, then ydotool), the CLI reaches the systemd-started daemon, and `always model list|download|use` fetches and picks a local model on installs without the Settings app. ([#145](https://github.com/LivioGama/always/pull/145))
+- **linux:** dictating into browser-based apps (Slack, Teams and Discord web apps, Electron apps) no longer sends the wrong keys, which made Slack leave the open conversation and typed nothing. ([#148](https://github.com/LivioGama/always/pull/148))
+- **onboarding:** the Tips page shows the shortcuts you actually configured, and on Wayland, where Always cannot listen for keys, the command to bind for each. ([#150](https://github.com/LivioGama/always/pull/150))
+- **desktop app:** Settings can be reopened from the tray after closing it, and the Linux tray is titled "Always". ([#151](https://github.com/LivioGama/always/pull/151))
+- **desktop app:** the Linux/Windows tray menu's Pause and Auto-Enter items work (they did nothing), the menu is flat, and Auto-Enter is a checkbox that is never greyed out. ([#152](https://github.com/LivioGama/always/pull/152))
+- **live typing:** a word is typed once it has held for 600 ms, and typed text is no longer deleted and retyped over punctuation or capitalisation, which made corrections constant. ([#156](https://github.com/LivioGama/always/pull/156))
+- **auto-enter:** with live typing on, Return now waits 200 ms after the last typed key instead of 50 ms, so Codex and Claude Code send the prompt instead of adding a new line. ([#158](https://github.com/LivioGama/always/pull/158))
+- **overlay:** with "Show live transcript" off, no live text appears any more; streaming local models and long sentences still showed it. ([#158](https://github.com/LivioGama/always/pull/158))
+- **models:** a model download picked during setup survives a daemon restart and resumes where it stopped, and requesting the same download twice no longer runs two downloads into the same file. ([#158](https://github.com/LivioGama/always/pull/158))
+
 ## [0.1.1] - 2026-10-20
 
 ### Added
