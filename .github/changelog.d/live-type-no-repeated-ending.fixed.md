@@ -1,0 +1,1 @@
+**live typing:** the end of a dictation no longer appears two or three times in a busy app (seen in Claude Code during long sessions): the last words are now typed in small, spaced steps instead of one burst.

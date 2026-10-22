@@ -434,24 +434,72 @@ fn inject(backspaces: usize, text: &str) -> Result<()> {
     if std::env::var("ALWAYS_NO_PASTE").as_deref() == Ok("1") {
         return Ok(());
     }
-    let mut strokes = Vec::with_capacity(2);
     if backspaces > 0 {
-        strokes.push(Stroke::Key {
-            code: keys::DELETE,
-            mods: Mods::NONE,
-            repeat: backspaces,
-        });
+        crate::always::voice_edit::mark_self_post();
+        ax_edit::post_strokes(
+            KeyTarget::Hid,
+            &[Stroke::Key {
+                code: keys::DELETE,
+                mods: Mods::NONE,
+                repeat: backspaces,
+            }],
+        )?;
     }
-    if !text.is_empty() {
-        strokes.push(Stroke::Text(text.to_string()));
+    for (i, part) in text_events(text).into_iter().enumerate() {
+        if i > 0 {
+            std::thread::sleep(TEXT_EVENT_GAP);
+        }
+        // Per event: a paced burst can outlast one self-post grace window.
+        crate::always::voice_edit::mark_self_post();
+        ax_edit::post_strokes(KeyTarget::Hid, &[Stroke::Text(part)])?;
     }
-    crate::always::voice_edit::mark_self_post();
-    ax_edit::post_strokes(KeyTarget::Hid, &strokes)
+    Ok(())
+}
+
+/// Pause between two text events. Sent back to back, a busy receiver
+/// (Claude Code in a long session, 2026-10-22) re-inserted the tail of the
+/// burst once per queued event: "…I don't understand.  having a computer?
+/// I don't understand. I don't understand." Spaced, each event lands alone.
+const TEXT_EVENT_GAP: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// The text events `text` is typed as: macOS posts at most 20 UTF-16 units
+/// per Unicode keyboard event, split here on char boundaries so the events
+/// can be paced. Linux types the whole text in one call.
+fn text_events(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    if !cfg!(target_os = "macos") {
+        return vec![text.to_string()];
+    }
+    let mut out = Vec::new();
+    let (mut cur, mut units) = (String::new(), 0);
+    for ch in text.chars() {
+        if units + ch.len_utf16() > 20 {
+            out.push(std::mem::take(&mut cur));
+            units = 0;
+        }
+        cur.push(ch);
+        units += ch.len_utf16();
+    }
+    out.push(cur);
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn text_events_split_at_20_utf16_units_on_char_boundaries() {
+        let text = "Why is retrieve gated by having a computer? 👍 I don't understand.";
+        let parts = text_events(text);
+        assert_eq!(parts.concat(), text);
+        assert!(parts.iter().all(|p| p.encode_utf16().count() <= 20));
+        assert_eq!(parts[0], "Why is retrieve gate");
+        assert!(text_events("").is_empty());
+    }
 
     #[test]
     fn formatting_differences_keep_what_is_typed() {
