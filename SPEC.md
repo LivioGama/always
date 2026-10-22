@@ -523,8 +523,10 @@ measured on Linux.
   every typed word, corrected to the Apple final.
 - **What is typed:** the committed text, then the words two consecutive
   previews agree on. The newest word of a preview is never typed early. Local
-  engines preview at least every 350 ms while live typing is on (cloud
-  cadences are unchanged).
+  engines preview at least every 350 ms while live typing is on, and sooner
+  when a preview pass is cheap: the next one starts twice the last pass's
+  duration later, never under 150 ms, so previews use at most half the time
+  (cloud cadences are unchanged).
 - **Corrections:** when the committed text, or an agreed word, differs from
   what was typed, the difference is corrected at once (Backspace, then type),
   so typing never stalls behind one changed word. The final payload — merge,

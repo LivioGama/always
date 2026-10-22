@@ -952,7 +952,24 @@ fn preview_cadence(
 /// local engines (≈10× real time on a laptop CPU) preview at least this
 /// often while it is on. Cloud cadences are left alone (API round trips).
 const LIVE_TYPING_INTERVAL_MS: u64 = 350;
-const LIVE_TYPING_MIN_NEW_SAMPLES: usize = 4_000;
+const LIVE_TYPING_MIN_NEW_SAMPLES: usize = 2_400;
+/// Fastest live-typing cadence. A word is typed once two previews agree,
+/// so the cadence is most of the delay between saying a word and seeing it.
+const LIVE_TYPING_MIN_INTERVAL_MS: u64 = 150;
+
+/// Live-typing preview interval for a local engine: twice the last pass's
+/// cost, so previews use at most half the time, between
+/// `LIVE_TYPING_MIN_INTERVAL_MS` and the cadence's own interval. A cheap
+/// engine (Parakeet: ~60-300 ms a pass) previews faster; a costly one keeps
+/// the fixed cadence. `last_cost_ms` 0 = no pass yet: the fixed cadence.
+fn live_typing_interval_ms(cadence_ms: u64, last_cost_ms: u64) -> u64 {
+    if last_cost_ms == 0 {
+        return cadence_ms;
+    }
+    last_cost_ms
+        .saturating_mul(2)
+        .clamp(LIVE_TYPING_MIN_INTERVAL_MS.min(cadence_ms), cadence_ms)
+}
 
 fn live_typing_cadence(
     mut c: PreviewCadence,
@@ -1311,6 +1328,9 @@ fn record_with_local_vad(
     // background transcribes (one round-trip at a time) and is cleared by
     // the thread on completion.
     let preview_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Wall time of the last completed preview pass, for the live-typing
+    // cadence (`live_typing_interval_ms`). 0 = none yet this session.
+    let preview_cost_ms = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let mut last_preview_at: Option<std::time::Instant> = None;
     // Total voiced-buffer size (committed + live) at the last preview
     // kickoff. Drives the slow cloud cadence's "enough NEW audio" check
@@ -2084,7 +2104,15 @@ fn record_with_local_vad(
                     && !(cadence.require_speculation_idle && speculation_pending)
                     && !preview_pending.load(std::sync::atomic::Ordering::Relaxed)
                     && last_preview_at.is_none_or(|t| {
-                        t.elapsed() >= std::time::Duration::from_millis(cadence.interval_ms)
+                        let interval = if live_typing && cfg.transcriber_backend.is_local() {
+                            live_typing_interval_ms(
+                                cadence.interval_ms,
+                                preview_cost_ms.load(std::sync::atomic::Ordering::Relaxed),
+                            )
+                        } else {
+                            cadence.interval_ms
+                        };
+                        t.elapsed() >= std::time::Duration::from_millis(interval)
                     })
                 {
                     last_preview_at = Some(std::time::Instant::now());
@@ -2115,6 +2143,7 @@ fn record_with_local_vad(
                     let transcriber_for_preview = Arc::clone(transcriber);
                     let rt_for_preview = rt.clone();
                     let flag = Arc::clone(&preview_pending);
+                    let cost = Arc::clone(&preview_cost_ms);
                     std::thread::spawn(move || {
                         let preview_started = std::time::Instant::now();
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
@@ -2145,9 +2174,11 @@ fn record_with_local_vad(
                         ));
                         match outcome {
                             Ok(Ok(result)) => {
+                                let preview_ms = preview_started.elapsed().as_millis() as u64;
+                                cost.store(preview_ms, std::sync::atomic::Ordering::Relaxed);
                                 tracing::info!(
                                     chars = result.text.len(),
-                                    preview_ms = preview_started.elapsed().as_millis() as u64,
+                                    preview_ms,
                                     "live_preview_sent"
                                 );
                                 if let Some((generation, chunks_present)) = live
@@ -3598,6 +3629,20 @@ fn final_silence_cut_frames(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn live_typing_interval_follows_preview_cost() {
+        // No pass yet: the fixed cadence.
+        assert_eq!(super::live_typing_interval_ms(350, 0), 350);
+        // Cheap passes: twice the cost, never under the floor.
+        assert_eq!(super::live_typing_interval_ms(350, 100), 200);
+        assert_eq!(super::live_typing_interval_ms(350, 40), 150);
+        // Costly passes: never slower than the cadence itself.
+        assert_eq!(super::live_typing_interval_ms(350, 400), 350);
+        // A cadence already under the floor is not slowed down.
+        assert_eq!(super::live_typing_interval_ms(100, 30), 100);
+    }
+
     use super::{
         CHUNKED_TAIL_MIN_VOICED_SAMPLES, SHORT_SPEECH_MS, chunk_target_secs,
         chunked_tail_has_voice, early_voice_frame_ok, extended_silence_frames, fast_energy_check,
