@@ -12,7 +12,6 @@ struct PermissionsPanel: View {
             VStack(alignment: .leading, spacing: 18) {
                 header
                 permissionRows
-                rebuildNote
             }
             .padding(20)
         }
@@ -68,20 +67,6 @@ struct PermissionsPanel: View {
                 action: handleAccessibilityAction
             )
         }
-    }
-
-    private var rebuildNote: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Development builds")
-                .font(.subheadline.bold())
-            Text("Debug rebuilds use a stable Apple Development signature when available so macOS keeps Always permissions across reinstalls.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(10)
-        .background(Color.secondary.opacity(0.08))
-        .cornerRadius(6)
     }
 
     private func permissionRow(
