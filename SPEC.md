@@ -920,7 +920,9 @@ offline; the cloud backend is faster to start and needs an API key.
   mid-download leaves the download running but does not switch). "Keep Groq"
   changes nothing; the switch takes effect like any model switch, and
   switching back is manual (Settings → Models). macOS returns focus to the
-  previously frontmost app after the prompt; Linux shows the Settings window
+  previously frontmost app after the prompt (the native app asks; the Tauri
+  Settings window, which also runs on macOS, stays out of it so the prompt
+  never appears twice); Linux shows the Settings window
   to present it, except during first-run setup (it then waits for Settings). Installs without the settings app (Linux tarball, headless)
   get no prompt. Live preview counts against the same quota (each preview is
   a Groq request).
