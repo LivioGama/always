@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { useDaemonState } from "./hooks/useDaemonState";
-import { cli, configShow, invoke, listen, udsStatus, windowLabel } from "./lib/tauri";
+import { cli, configShow, invoke, listen, platform, udsStatus, windowLabel } from "./lib/tauri";
 import { parseConfig } from "./lib/config";
 import { OnboardingView } from "./components/OnboardingView";
 import { SettingsWindow } from "./components/SettingsWindow";
 import { StatusOverlay } from "./components/StatusOverlay";
 import { CorrectionDialog } from "./components/CorrectionDialog";
+import { GroqQuotaDialog } from "./components/GroqQuotaDialog";
 
 type Route = "settings" | "onboarding" | "overlay" | "loading";
 
@@ -120,6 +121,22 @@ export default function App() {
     })();
   }, [onboardingDone]);
 
+  // On macOS the native app asks (GroqQuotaPrompt.swift); asking here too
+  // would show the prompt twice while Settings is running.
+  const [os, setOs] = useState("");
+  useEffect(() => {
+    platform().then(setOs).catch(() => {});
+  }, []);
+  const showQuota = daemon.state.groqQuotaExhausted && os !== "" && os !== "macos";
+
+  // Bring Settings forward for the quota dialog, but never over first-run
+  // setup; it is shown with Settings once setup is done.
+  useEffect(() => {
+    if (route === "settings" && onboardingDone && showQuota) {
+      invoke("show_settings_window").catch(() => {});
+    }
+  }, [route, onboardingDone, showQuota]);
+
   if (route === "loading") {
     return <div className="min-h-screen bg-surface-950" />;
   }
@@ -156,6 +173,7 @@ export default function App() {
   return (
     <>
       <SettingsWindow daemon={daemon} />
+      {showQuota && <GroqQuotaDialog daemon={daemon} />}
       {daemon.state.correctionPending && (
         <CorrectionDialog
           pending={daemon.state.correctionPending}

@@ -1476,13 +1476,14 @@ fn deliver_paste(
     // Return immediately, preserving the legacy behavior.
     // Live typing: the words are already on screen — correct them to this
     // exact payload instead of pasting it again.
-    match crate::always::live_type::finish(&written_clipboard) {
-        crate::always::live_type::Finish::Corrected => {}
+    let live_typed = match crate::always::live_type::finish(&written_clipboard) {
+        crate::always::live_type::Finish::Corrected => true,
         crate::always::live_type::Finish::NotTyped => {
             if let Err(err) = paste::paste_text(false) {
                 pause::end_paste();
                 return Err(err);
             }
+            false
         }
         crate::always::live_type::Finish::FocusMoved => {
             // Typed words stay where they were spoken; nothing is sent into
@@ -1500,7 +1501,7 @@ fn deliver_paste(
             pause::end_paste();
             return Ok(());
         }
-    }
+    };
     let pasted_at = Instant::now();
     // Remember exactly what was pasted, for voice editing.
     crate::always::voice_edit::note_paste(&written_clipboard);
@@ -1577,7 +1578,7 @@ fn deliver_paste(
         } else {
             per_app::effective_auto_enter_delay_ms(cfg.auto_enter_delay_ms)
         };
-        auto_enter_countdown::schedule(rt, delay);
+        auto_enter_countdown::schedule(rt, delay, live_typed);
         if delay == 0 {
             // 0-delay presses Return synchronously inside schedule().
             return_committed = true;

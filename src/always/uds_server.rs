@@ -57,6 +57,11 @@ static PAUSE_HANDOFF_LOCK: std::sync::LazyLock<parking_lot::Mutex<()>> =
 
 static CONNECTED_CLIENTS: AtomicUsize = AtomicUsize::new(0);
 
+/// True while at least one app (settings GUI, overlay) is connected.
+pub fn has_clients() -> bool {
+    CONNECTED_CLIENTS.load(Ordering::Relaxed) > 0
+}
+
 /// Rate limiter for UDS commands
 struct RateLimiter {
     last_reset: Instant,

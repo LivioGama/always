@@ -32,8 +32,10 @@ final class ModelManagerClient: ObservableObject {
     /// snapshot to confirm `is_downloaded = true`. Bridges the gap between
     /// extraction completing and the catalog refresh arriving.
     @Published var installing: Set<String> = []
-    /// Active backend in canonical wire form — `groq` or `local:<id>`.
-    @Published var activeBackend: String = "groq"
+    /// Active backend in canonical wire form — `groq`, `apple` or
+    /// `local:<id>`; empty until the daemon reports it, so nothing shows as
+    /// selected before then.
+    @Published var activeBackend: String = ""
     /// Backend the user asked to switch to but the daemon hasn't confirmed
     /// yet. Set optimistically on `setActive`; cleared when
     /// `ActiveTranscriberChanged` arrives. Drives the "Loading…" spinner
@@ -146,6 +148,13 @@ final class ModelManagerClient: ObservableObject {
         StateMonitor.shared.sendCommand("ListModels")
     }
 
+    /// Engine picked in onboarding that can't apply yet: a model still
+    /// downloading, or Groq waiting for the restart that loads its key.
+    /// Re-applied on every catalog snapshot (one arrives on each reconnect)
+    /// until the daemon confirms it, so neither leaving the step nor a
+    /// daemon restart (which kills an in-flight download) loses it.
+    var pendingBackend: String?
+
     func download(_ modelId: String) {
         errors.removeValue(forKey: modelId)
         downloadProgress[modelId] = 0
@@ -165,6 +174,8 @@ final class ModelManagerClient: ObservableObject {
     /// Sets `loadingBackend` optimistically so the UI can show a spinner
     /// immediately — cleared when `ActiveTranscriberChanged` confirms.
     func setActive(backend: String) {
+        // Any other explicit choice overrides a pending onboarding pick.
+        if pendingBackend != backend { pendingBackend = nil }
         loadingBackend = backend
         errors.removeValue(forKey: Self.errorKey(forBackend: backend))
         StateMonitor.shared.sendCommandWithData("SetActiveTranscriber", ["backend": backend])
@@ -184,6 +195,20 @@ final class ModelManagerClient: ObservableObject {
                 self.errors[Self.errorKey(forBackend: attempt)] =
                     "Didn't finish loading. Try again, or pick another model."
             }
+        }
+    }
+
+    /// Push `pendingBackend` to a (possibly just restarted) daemon.
+    private func applyPending(_ backend: String, _ list: [ModelInfo]) {
+        guard backend.hasPrefix("local:") else { return setActive(backend: backend) }
+        let id = Self.errorKey(forBackend: backend)
+        guard let m = list.first(where: { $0.id == id }) else { pendingBackend = nil; return }
+        if m.is_downloaded && !m.is_downloading {
+            setActive(backend: backend)
+        } else if !m.is_downloading {
+            // A restarted daemon dropped the download: resume it from the
+            // partial file. A duplicate request is a no-op in the daemon.
+            StateMonitor.shared.sendCommandWithData("DownloadModel", ["model_id": id])
         }
     }
 
@@ -216,6 +241,7 @@ final class ModelManagerClient: ObservableObject {
                     downloadProgress.removeValue(forKey: m.id)
                     downloadBytes.removeValue(forKey: m.id)
                 }
+                if let pending = pendingBackend { applyPending(pending, list.models) }
             }
         case .modelDownloadProgress:
             if let p = event.modelDownloadProgress {
@@ -246,6 +272,7 @@ final class ModelManagerClient: ObservableObject {
             }
         case .modelDownloadCancelled:
             if let id = event.modelId?.model_id {
+                if pendingBackend == "local:\(id)" { pendingBackend = nil }
                 downloadProgress.removeValue(forKey: id)
                 downloadBytes.removeValue(forKey: id)
                 installing.remove(id)
@@ -254,6 +281,7 @@ final class ModelManagerClient: ObservableObject {
             }
         case .modelDownloadFailed:
             if let err = event.modelError {
+                if pendingBackend == "local:\(err.model_id)" { pendingBackend = nil }
                 downloadProgress.removeValue(forKey: err.model_id)
                 downloadBytes.removeValue(forKey: err.model_id)
                 installing.remove(err.model_id)
@@ -297,12 +325,14 @@ final class ModelManagerClient: ObservableObject {
             if let backend = event.data?["backend"] {
                 let error = event.data?["error"] ?? "Model failed to load"
                 if loadingBackend == backend { loadingBackend = nil }
+                if pendingBackend == backend { pendingBackend = nil }
                 errors[Self.errorKey(forBackend: backend)] = error
                 logger.error("switch to \(backend, privacy: .public) failed: \(error, privacy: .public)")
             }
         case .activeTranscriberChanged:
             if let payload = event.activeTranscriber {
                 activeBackend = payload.backend
+                if pendingBackend == payload.backend { pendingBackend = nil }
                 // A slow load that succeeds after the timeout already put an
                 // error on this row; it is running now, so drop the stale one.
                 errors.removeValue(forKey: Self.errorKey(forBackend: payload.backend))

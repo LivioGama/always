@@ -4,6 +4,7 @@ struct BehaviorPanel: View {
     @ObservedObject var cliService: CLIService
     @ObservedObject var stateMonitor: StateMonitor
     @Binding var config: Config
+    @ObservedObject private var models: ModelManagerClient = .shared
 
     var body: some View {
         ScrollView {
@@ -83,6 +84,9 @@ struct BehaviorPanel: View {
                 "Periodically transcribes what you've said so far and shows the provisional text in the overlay while you're still talking. Uses a few extra transcription calls per utterance on the cloud backend."
             )
             .font(.caption)
+            if models.activeBackend == "groq" {
+                groqLivePreviewWarning
+            }
             Toggle(
                 "Type words while you speak",
                 isOn: Binding(
@@ -99,6 +103,23 @@ struct BehaviorPanel: View {
                 advancedThresholdsContent
             }
         }
+    }
+
+    // Numbers: SPEC §5 Groq live-preview cadence (≈1 request per 1.5 s of
+    // speech) against Groq's free tier of 2,000 requests per day.
+    private var groqLivePreviewWarning: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.caption2)
+                .foregroundColor(.orange)
+            Text(
+                "With Groq, live transcript re-sends your speech about every 1.5 s — roughly 5× more Groq requests. On Groq's free tier, that can use up the daily quota after about 45 minutes of speaking. Always tells you when today's quota runs out."
+            )
+            .font(.caption2)
+            .foregroundColor(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.leading, 4)
     }
 
     // MARK: - Custom preset hints

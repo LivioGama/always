@@ -1,0 +1,1 @@
+**models:** when Groq's free daily quota runs out, Always offers a one-click switch to an on-device engine: a downloaded model, Apple's recognizer on macOS 26+, or a download that switches once installed (macOS and Linux). Settings also warns that live transcript with Groq uses about 5× more of the quota.

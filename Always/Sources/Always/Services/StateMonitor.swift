@@ -876,6 +876,9 @@ class StateMonitor: ObservableObject {
             // the connection recovers.
             let model = event.data?["model"] ?? "local model"
             StatusOverlayController.shared.flash(state: .sttFallback(model: model), duration: 4.0)
+        case .groqQuotaExhausted:
+            // Async: the modal must not block this event handler.
+            Task { @MainActor in GroqQuotaPrompt.present() }
         case .lowMicrophoneVolume:
             // Microphone volume is too low - flash a warning overlay
             if let energy = event.data?["energy"] as? Double {

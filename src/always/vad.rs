@@ -2140,6 +2140,11 @@ fn record_with_local_vad(
                     // + open speech. While a chunk is in flight that is
                     // unknown (`settled_prefix` None), so nothing is typed.
                     let live = live_typing.then_some((live_generation, !chunker.is_empty()));
+                    // Streaming engines run this preview even with live
+                    // transcript off (live typing reuses it); the overlay
+                    // still gets no text then (SPEC §5).
+                    let show_live_text =
+                        cfg.stt_live_preview || crate::always::pause::is_consume_mode();
                     let transcriber_for_preview = Arc::clone(transcriber);
                     let rt_for_preview = rt.clone();
                     let flag = Arc::clone(&preview_pending);
@@ -2154,7 +2159,9 @@ fn record_with_local_vad(
                                 rt_for_preview.block_on(async {
                                     while let Some(item) = stream.next().await {
                                         let item = item.map_err(anyhow::Error::from)?;
-                                        if append_streaming_preview(&mut accumulated, &item.text) {
+                                        if append_streaming_preview(&mut accumulated, &item.text)
+                                            && show_live_text
+                                        {
                                             let display = match settled_prefix.as_deref() {
                                                 Some(prefix) if !prefix.is_empty() => {
                                                     format!("{prefix} {accumulated}")
@@ -2237,6 +2244,8 @@ fn record_with_local_vad(
                             .saturating_sub(crate::always::chunker::SEAM_CONTEXT_SAMPLES)..]
                             .to_vec(),
                     );
+                    chunker.show_live_text =
+                        cfg.stt_live_preview || crate::always::pause::is_consume_mode();
                     chunker.flush_with_context(context, head, transcriber, grammar, rt);
                     speculation_pending = false;
                     speculation_slot.invalidate();
@@ -2320,6 +2329,8 @@ fn record_with_local_vad(
                 } else {
                     None
                 };
+                chunker.show_live_text =
+                    cfg.stt_live_preview || crate::always::pause::is_consume_mode();
                 chunker.flush_with_context(
                     std::mem::take(&mut seam_context),
                     std::mem::take(&mut speech_samples),
@@ -2405,6 +2416,10 @@ fn record_with_local_vad(
                 // the JOIN of the committed chunks + this tail, so the
                 // warm must key on that join, not the tail alone.
                 let chunk_join = chunker.join_handle();
+                // Live preview off → no live text at all (consume-mode
+                // consumers still get it).
+                let show_spec_preview =
+                    cfg.stt_live_preview || crate::always::pause::is_consume_mode();
                 std::thread::spawn(move || {
                     // Wrap in catch_unwind: a panic in transcribe_from_bytes
                     // (network, deserialization, etc.) used to poison
@@ -2433,7 +2448,8 @@ fn record_with_local_vad(
                     // overlay can show a streaming preview while we wait for
                     // final silence. If the user keeps talking, the final
                     // transcription will supersede this.
-                    if let Ok(ref r) = outcome
+                    if show_spec_preview
+                        && let Ok(ref r) = outcome
                         && !r.text.is_empty()
                     {
                         event::global_broadcaster().transcript_chunk(r.text.clone());

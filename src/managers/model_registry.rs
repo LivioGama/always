@@ -192,6 +192,18 @@ impl Drop for DownloadCleanup<'_> {
     }
 }
 
+/// Releases a `downloads_in_flight` claim however `download` returns.
+struct InFlightClaim<'a> {
+    set: &'a Mutex<HashSet<String>>,
+    model_id: &'a str,
+}
+
+impl Drop for InFlightClaim<'_> {
+    fn drop(&mut self) {
+        self.set.lock().remove(self.model_id);
+    }
+}
+
 /// SHA256 verification verdict cache: `(path, file_len, mtime) -> matched`.
 /// Aliased to keep the `ModelRegistry` field readable and satisfy
 /// `clippy::type_complexity` (the CI gate runs `clippy -D warnings`).
@@ -215,6 +227,9 @@ pub struct ModelRegistry {
     available_models: Arc<Mutex<HashMap<String, ModelInfo>>>,
     cancel_flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     extracting_models: Arc<Mutex<HashSet<String>>>,
+    /// Model ids with a `download` running. Not `is_downloading`:
+    /// `refresh_disk_status` resets that flag mid-download.
+    downloads_in_flight: Arc<Mutex<HashSet<String>>>,
     events_tx: broadcast::Sender<ModelEvent>,
     /// Memoized SHA256 verdicts for single-file `.bin` models, keyed by
     /// `(path, file_len, mtime)`. Re-hashing a 1.6 GB checkpoint on every
@@ -259,6 +274,7 @@ impl ModelRegistry {
             available_models: Arc::new(Mutex::new(catalog)),
             cancel_flags: Arc::new(Mutex::new(HashMap::new())),
             extracting_models: Arc::new(Mutex::new(HashSet::new())),
+            downloads_in_flight: Arc::new(Mutex::new(HashSet::new())),
             events_tx,
             verify_cache: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -870,6 +886,16 @@ impl ModelRegistry {
     }
 
     pub async fn download(&self, model_id: &str) -> Result<()> {
+        // One download per model: a repeated DownloadModel (double click, or
+        // a GUI re-request after reconnect) would write the same .partial twice.
+        if !self.downloads_in_flight.lock().insert(model_id.to_string()) {
+            tracing::info!(model = %model_id, "model_download_already_running");
+            return Ok(());
+        }
+        let _claim = InFlightClaim {
+            set: &self.downloads_in_flight,
+            model_id,
+        };
         let model_info = self
             .get(model_id)
             .ok_or_else(|| anyhow::anyhow!("Model not found: {model_id}"))?;
@@ -2243,9 +2269,24 @@ mod tests {
             available_models: Arc::new(Mutex::new(HashMap::new())),
             cancel_flags: Arc::new(Mutex::new(HashMap::new())),
             extracting_models: Arc::new(Mutex::new(HashSet::new())),
+            downloads_in_flight: Arc::new(Mutex::new(HashSet::new())),
             events_tx,
             verify_cache: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    #[tokio::test]
+    async fn download_is_a_no_op_while_the_same_model_is_downloading() {
+        let dir = std::env::temp_dir().join(format!("always-dl-claim-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let reg = bare_registry(&dir);
+        // Unknown id errors, and the claim is released on that early return.
+        assert!(reg.download("nope").await.is_err());
+        assert!(reg.downloads_in_flight.lock().is_empty());
+        // A running download for the id makes a second request a no-op.
+        reg.downloads_in_flight.lock().insert("nope".into());
+        assert!(reg.download("nope").await.is_ok());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

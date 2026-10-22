@@ -249,7 +249,11 @@ VPIO's noise suppression was not measurable on a single-speaker machine.
    manual ⌘V instead of the whole utterance.
 9. **Paste** — text is typed into the focused application. If auto-Enter is on,
    Return follows after `auto_enter_delay_ms`. With a 0 ms delay, Return is
-   posted 50 ms after Cmd+V (the Cmd-flag guard in `auto_enter_countdown`);
+   posted 50 ms after Cmd+V (the Cmd-flag guard in `auto_enter_countdown`),
+   or 200 ms after live typing's last keystroke: terminal UIs treat a Return
+   right behind fast typing as part of a paste and insert a newline (Codex
+   does for 120 ms), so 50 ms there made auto-Enter add a line instead of
+   sending the prompt (user report 2026-10-22, Codex and Claude Code);
    the 100 ms post-paste settle that holds the paste-in-flight lock runs
    *after* Return, not before it (2026-10-13, user request: "make it insanely
    fast" — previously Return landed ~155 ms after the paste). The clipboard is
@@ -502,8 +506,21 @@ It never flips the overlay to "Transcribing" — the user is still talking, so
 the partial text renders under the listening state. The final transcription
 path (speculation → final cut → paste) is untouched by all three arms.
 
-With `stt_live_preview` off, Groq dictation shows no mid-speech previews;
-the free speculative preview at a pause (below) still renders once.
+With `stt_live_preview` off, the overlay shows no live transcript text at
+all: no mid-speech previews (a streaming engine's preview still runs, for
+live typing, but shows nothing), no per-chunk rolling text on long utterances,
+and the speculative transcription at a pause is not displayed either (it
+still runs, for the final). Consume mode is exempt —
+its consumers depend on the speculative chunk (product-owner request
+2026-10-22: "if they don't activate it, it should not be present in the
+overlay either").
+
+`stt_live_preview` stays ON by default. While Groq is the active backend,
+Settings → Behavior shows a warning under the toggle: live transcript
+re-sends speech about every 1.5 s (≈5× more Groq requests), which on Groq's
+free tier (2,000 requests/day) can use up the daily quota after about 45
+minutes of speaking. On macOS it adds that Always says when the day's quota
+runs out (§ Models, Groq daily quota) (product-owner request 2026-10-22).
 
 ### Live typing (opt-in: `live_typing`)
 
@@ -888,6 +905,27 @@ offline; the cloud backend is faster to start and needs an API key.
   engine with a real implementation, a correct download size, and a checksum.
 - A local model may be armed as fallback for the cloud backend; failures fall
   back silently but are logged.
+- **Groq daily quota used up (product-owner request 2026-10-22).** When Groq
+  answers 429 with `x-ratelimit-remaining-requests: 0` (Groq's request
+  headers always describe the per-day quota), the daemon sends
+  `GroqQuotaExhausted` — at most once per UTC day, and only while an app is
+  connected to receive it (otherwise the next such 429 tries again). A per-minute 429 (daily
+  requests left) sends nothing. If Groq is still the active backend, the
+  settings app asks whether to switch to an on-device engine: the best
+  downloaded local model (recommended first, then speed + accuracy — the
+  fallback pick). With none downloaded: macOS 26+ offers Apple's recognizer;
+  older macOS offers to download the best catalogue model by the same ranking
+  and switches when it is installed; Linux offers the same download, shows its
+  progress, and switches when it is installed (closing the dialog
+  mid-download leaves the download running but does not switch). "Keep Groq"
+  changes nothing; the switch takes effect like any model switch, and
+  switching back is manual (Settings → Models). macOS returns focus to the
+  previously frontmost app after the prompt (the native app asks; the Tauri
+  Settings window, which also runs on macOS, stays out of it so the prompt
+  never appears twice); Linux shows the Settings window
+  to present it, except during first-run setup (it then waits for Settings). Installs without the settings app (Linux tarball, headless)
+  get no prompt. Live preview counts against the same quota (each preview is
+  a Groq request).
 - Switching models takes effect on the next utterance.
 - Linux development and release builds include the local STT engines. Selecting a local
   model never invokes Groq or requires its API key; missing files or missing
@@ -1462,14 +1500,38 @@ method, ms, detail, text }` (strings only).
 
 Shown **once**, to someone who has never been through it, and never again.
 
-Two steps:
+Three steps:
 
-1. **Permissions.** Microphone and Accessibility are required and gate the
+1. **Engine (product-owner request 2026-10-22).** First, before Permissions,
+   so a model download runs while the user grants them. "Choose Your Engine":
+   option cards, in order —
+   - **Groq (cloud):** best accuracy and speed, needs a free API key (link to
+     console.groq.com/keys). "Save & Use" saves `groq_api_key` and switches to
+     Groq once the daemon, restarted to load the key, reconnects; on macOS
+     an invalid key is rejected inline first (Linux does not check it). Caption: free tier is about
+     2,000 requests a day and live transcript uses more of it.
+   - **Local model:** private and offline. Offers the best catalogue model
+     (recommended first, then speed + accuracy); "Download & Use" downloads it
+     with progress ("Keeps downloading while you continue") and switches when
+     installed, even if the user has moved on to later steps or closed setup.
+     A daemon restart mid-download (the Groq key save, or the mic supervisor's
+     exit before the mic is granted) is survived: the app re-requests the
+     download on reconnect and it resumes from the partial file. The daemon
+     ignores a second `DownloadModel` for a model already downloading.
+     Picking another engine cancels the pending switch. If one is already downloaded,
+     "Use <name>".
+   - **Apple on-device (macOS 26+ only):** no key, no download; the card says
+     it works but results are not as good as Groq or a local model.
+   The card for the active backend shows as selected. The step never blocks
+   Continue — "Set up later in Settings → Models" continues and keeps the
+   active backend (Apple on macOS 26+). Same step, same text on Linux, minus
+   Apple.
+2. **Permissions.** Microphone and Accessibility are required and gate the
    Continue button — without them nothing works at all. Input Monitoring is
    offered but never blocks: it enables the global shortcuts, not dictation.
    The window polls permission state, so granting in System Settings updates it
    without a restart.
-2. **My Voice.** The three enrollment recordings, inline. Always skippable —
+3. **My Voice.** The three enrollment recordings, inline. Always skippable —
    "Skip for now" and "Finish without it" both complete setup.
 
 **Last page: apps to turn voice typing on in.** The final "You're all set"
@@ -1510,8 +1572,14 @@ used the app before, and the flag is retro-marked. Upgrading must not greet a
 working setup with a welcome window.
 
 **The window is always dismissable.** No step may hold a first-run user hostage.
-The Groq API key was deliberately removed from this flow for that reason — it is
-not required (local models need none) and it now lives in Settings → Models.
+The Groq API key was once removed from this flow for that reason; it is back
+only as an optional choice in the Engine step, which never blocks (local models
+need no key, and Settings → Models still holds it).
+
+**Linux matches macOS.** The Linux onboarding uses the macOS layout, step order,
+titles, text and buttons. Agreed differences: no Apple engine, Linux's own
+permission rows, and no spoken narration (`say` is macOS-only)
+(product-owner request 2026-10-22).
 
 **Which onboarding there is depends on the platform.** On macOS onboarding is
 the Swift app's window (permissions, the three enrollment recordings, the
