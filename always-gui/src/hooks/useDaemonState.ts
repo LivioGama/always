@@ -73,6 +73,7 @@ export interface DaemonUiState {
   resumedApps: string[];
   pauseSource: string | null;
   correctionPending: { id: string; wrong: string; right: string } | null;
+  groqQuotaExhausted: boolean; // Groq daily quota used up; offer an on-device model (SPEC § Models)
   models: CatalogModel[];
   downloadProgress: Record<string, number>;
   downloadBytes: Record<string, { downloaded: number; total: number }>;
@@ -114,6 +115,7 @@ function initialState(): DaemonUiState {
     resumedApps: [],
     pauseSource: null,
     correctionPending: null,
+    groqQuotaExhausted: false,
     models: [],
     downloadProgress: {},
     downloadBytes: {},
@@ -238,6 +240,9 @@ export function useDaemonState() {
           next.enrollment.lastError = d.message ?? "Enrollment failed";
           break;
 
+        case "GroqQuotaExhausted":
+          if (prev.backend === "groq") next.groqQuotaExhausted = true;
+          break;
         case "CorrectionPending":
           next.correctionPending = { id: d.id, wrong: d.wrong, right: d.right };
           break;
@@ -481,7 +486,15 @@ export function useDaemonState() {
     setupMode: (enabled: boolean) => cmd({ type: "SetupMode", data: { enabled } }),
 
     listModels: () => cmd({ type: "ListModels" }),
-    downloadModel: (model_id: string) => cmd({ type: "DownloadModel", data: { model_id } }),
+    downloadModel: (model_id: string) => {
+      // Same as macOS: a retry starts clean, so a new failure reads as new.
+      setState((p) => {
+        const errors = { ...p.modelErrors };
+        delete errors[model_id];
+        return { ...p, modelErrors: errors };
+      });
+      cmd({ type: "DownloadModel", data: { model_id } });
+    },
     cancelModelDownload: (model_id: string) => cmd({ type: "CancelModelDownload", data: { model_id } }),
     deleteModel: (model_id: string) => cmd({ type: "DeleteModel", data: { model_id } }),
     setActiveTranscriber: (backend: string) => {
@@ -518,6 +531,7 @@ export function useDaemonState() {
       cmd({ type: "SetVoiceProfileEnabled", data: { enabled } });
     },
 
+    dismissGroqQuota: () => setState((p) => ({ ...p, groqQuotaExhausted: false })),
     approveCorrection: (id: string) => cmd({ type: "ApproveCorrection", data: { id } }),
     rejectCorrection: (id: string) => cmd({ type: "RejectCorrection", data: { id } }),
     logCorrection: (intended: string) => cmd({ type: "LogCorrection", data: { intended } }),

@@ -110,6 +110,9 @@ enum DaemonEventType: String, Codable {
     /// Groq circuit breaker opened — daemon switched to the named local
     /// model so dictation keeps working offline.
     case sttFallbackEngaged = "SttFallbackEngaged"
+    /// Groq's daily (free-tier) request quota is used up. At most once per
+    /// day; the GUI suggests switching to an on-device model.
+    case groqQuotaExhausted = "GroqQuotaExhausted"
     /// Ground truth from the daemon about its shortcut event tap: whether
     /// Input Monitoring is granted for the daemon process. Sent in every
     /// initial state burst and on change.

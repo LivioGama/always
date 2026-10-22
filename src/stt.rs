@@ -45,6 +45,8 @@ pub static GROQ_BASE_URL_ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
 static CONSECUTIVE_FAILURES: AtomicU32 = AtomicU32::new(0);
 /// Unix-millis until which the circuit remains open. `0` = closed.
 static CIRCUIT_OPEN_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+/// UTC day (days since the epoch) the daily-quota notice was last sent.
+static QUOTA_NOTICE_DAY: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Failure modes for [`transcribe_from_bytes`].
 ///
@@ -214,6 +216,20 @@ fn circuit_block_remaining_ms() -> Option<u64> {
     if until > now { Some(until - now) } else { None }
 }
 
+/// Groq's `*-requests` headers always describe the per-day quota (RPD), so
+/// none remaining on a 429 means the daily quota is used up, not a burst.
+fn daily_quota_exhausted(headers: &reqwest::header::HeaderMap) -> bool {
+    headers
+        .get("x-ratelimit-remaining-requests")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim() == "0")
+}
+
+/// True for the first caller on a given UTC day: the GUI asks once a day.
+fn first_quota_notice_on(day: u64) -> bool {
+    QUOTA_NOTICE_DAY.swap(day, Ordering::AcqRel) != day
+}
+
 fn record_success() {
     CONSECUTIVE_FAILURES.store(0, Ordering::Release);
     CIRCUIT_OPEN_UNTIL_MS.store(0, Ordering::Release);
@@ -375,6 +391,16 @@ pub fn transcribe_from_bytes_in(
                 }
 
                 last_status = Some(status);
+                if status == StatusCode::TOO_MANY_REQUESTS
+                    && daily_quota_exhausted(resp.headers())
+                    // Spend today's notice only when an app can show it;
+                    // otherwise the next exhausted 429 tries again.
+                    && crate::always::uds_server::has_clients()
+                    && first_quota_notice_on(now_ms() / 86_400_000)
+                {
+                    tracing::warn!("groq_daily_quota_exhausted");
+                    crate::always::event::global_broadcaster().groq_quota_exhausted();
+                }
                 if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
                     tracing::warn!(
                         status = status.as_u16(),
@@ -558,6 +584,24 @@ mod stt_unit_tests {
             GroqTranscriber::new("k").with_language("fr").language(),
             "fr"
         );
+    }
+
+    #[test]
+    fn daily_quota_notice_only_on_zero_remaining_once_a_day() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let h = |v: &'static str| {
+            let mut m = HeaderMap::new();
+            m.insert("x-ratelimit-remaining-requests", HeaderValue::from_static(v));
+            m
+        };
+        assert!(daily_quota_exhausted(&h("0")));
+        // Daily requests left: a per-minute burst, not the daily quota.
+        assert!(!daily_quota_exhausted(&h("1840")));
+        assert!(!daily_quota_exhausted(&HeaderMap::new()));
+        // Far-future days so no real request shares the gate.
+        assert!(first_quota_notice_on(1_000_000));
+        assert!(!first_quota_notice_on(1_000_000));
+        assert!(first_quota_notice_on(1_000_001));
     }
 
     /// The circuit-breaker counters are process-global atomics; the two

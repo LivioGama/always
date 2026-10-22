@@ -6,6 +6,7 @@ import { OnboardingView } from "./components/OnboardingView";
 import { SettingsWindow } from "./components/SettingsWindow";
 import { StatusOverlay } from "./components/StatusOverlay";
 import { CorrectionDialog } from "./components/CorrectionDialog";
+import { GroqQuotaDialog } from "./components/GroqQuotaDialog";
 
 type Route = "settings" | "onboarding" | "overlay" | "loading";
 
@@ -120,6 +121,14 @@ export default function App() {
     })();
   }, [onboardingDone]);
 
+  // Bring Settings forward for the quota dialog, but never over first-run
+  // setup; it is shown with Settings once setup is done.
+  useEffect(() => {
+    if (route === "settings" && onboardingDone && daemon.state.groqQuotaExhausted) {
+      invoke("show_settings_window").catch(() => {});
+    }
+  }, [route, onboardingDone, daemon.state.groqQuotaExhausted]);
+
   if (route === "loading") {
     return <div className="min-h-screen bg-surface-950" />;
   }
@@ -156,6 +165,7 @@ export default function App() {
   return (
     <>
       <SettingsWindow daemon={daemon} />
+      {daemon.state.groqQuotaExhausted && <GroqQuotaDialog daemon={daemon} />}
       {daemon.state.correctionPending && (
         <CorrectionDialog
           pending={daemon.state.correctionPending}

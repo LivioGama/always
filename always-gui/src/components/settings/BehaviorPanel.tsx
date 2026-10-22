@@ -138,6 +138,13 @@ export function BehaviorPanel({
           on={config.sttLivePreview}
           onChange={(v) => changeRuntimeSetting({ sttLivePreview: v })}
         />
+        {daemon.state.backend === "groq" && (
+          <Caption className="text-orange-400/90">
+            ⚠ With Groq, live transcript re-sends your speech about every 1.5 s — roughly 5× more Groq requests. On
+            Groq's free tier, that can use up the daily quota after about 45 minutes of speaking. Always tells you when
+            today's quota runs out.
+          </Caption>
+        )}
         <ToggleRow
           label="Type words while you speak"
           help="Types into the focused app as you talk instead of pasting when you stop, then corrects the words to the final transcript. Typing stops if you pause, switch window, or another app takes the microphone."

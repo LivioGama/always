@@ -435,6 +435,10 @@ pub enum DaemonEvent {
     SttFallbackEngaged {
         model: String,
     },
+    /// Groq answered 429 with no daily requests left: the account's daily
+    /// (free-tier) quota is used up. At most once per UTC day; the GUI
+    /// suggests switching to an on-device model.
+    GroqQuotaExhausted,
     /// "My Voice" enrollment accepted for `step`, but the daemon is still
     /// preparing (speaker model download/load). Recording has NOT begun;
     /// the GUI must not show "speak now" until `VoiceEnrollmentStarted`.
@@ -1205,6 +1209,11 @@ impl EventBroadcaster {
         self.send(DaemonEvent::SttFallbackEngaged {
             model: model.into(),
         });
+    }
+
+    /// See [`DaemonEvent::GroqQuotaExhausted`].
+    pub fn groq_quota_exhausted(&self) {
+        self.send(DaemonEvent::GroqQuotaExhausted);
     }
 
     /// Send the protocol-version handshake. Must be the first frame on
