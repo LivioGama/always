@@ -33,6 +33,8 @@ export function EngineStep({ daemon, onPick }: { daemon: DaemonApi; onPick: (bac
   const [key, setKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [keyError, setKeyError] = useState<string | null>(null);
+  // Saved: the key stays in the field, masked and read-only, until "Change".
+  const [keySaved, setKeySaved] = useState(false);
 
   useEffect(() => {
     daemon.listModels();
@@ -44,7 +46,7 @@ export function EngineStep({ daemon, onPick }: { daemon: DaemonApi; onPick: (bac
 
   const saveKey = async () => {
     const k = key.trim();
-    if (!k || saving) return;
+    if (!k || saving || keySaved) return;
     setSaving(true);
     setKeyError(null);
     try {
@@ -52,7 +54,7 @@ export function EngineStep({ daemon, onPick }: { daemon: DaemonApi; onPick: (bac
       // The daemon reads the key only at start.
       await restartDaemon();
       onPick("groq");
-      setKey("");
+      setKeySaved(true);
     } catch (e) {
       setKeyError(`Could not save the key: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -73,9 +75,14 @@ export function EngineStep({ daemon, onPick }: { daemon: DaemonApi; onPick: (bac
             placeholder="gsk_…"
             onChange={(e) => setKey(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && saveKey()}
-            className="flex-1 min-w-0 rounded-md bg-surface-800 border border-surface-700 px-2.5 py-1 text-xs text-white placeholder:text-surface-500 outline-none focus:border-primary-500"
+            disabled={keySaved || saving}
+            className="flex-1 min-w-0 rounded-md bg-surface-800 border border-surface-700 px-2.5 py-1 text-xs text-white placeholder:text-surface-500 outline-none focus:border-primary-500 disabled:opacity-60"
           />
-          <Btn prominent disabled={saving || !key.trim()} onClick={saveKey}>Save &amp; Use</Btn>
+          {keySaved ? (
+            <Btn onClick={() => { setKeySaved(false); setKey(""); }}>Change</Btn>
+          ) : (
+            <Btn prominent disabled={saving || !key.trim()} onClick={saveKey}>Save &amp; Use</Btn>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <button type="button" onClick={() => openUrl("https://console.groq.com/keys")} className="text-xs text-primary-400 hover:underline">

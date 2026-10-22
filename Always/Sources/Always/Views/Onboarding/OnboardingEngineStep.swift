@@ -10,6 +10,8 @@ struct OnboardingEngineStep: View {
     @State private var apiKey = ""
     @State private var isSavingKey = false
     @State private var keyError: String?
+    /// Key saved: it stays in the field, masked and read-only, until "Change".
+    @State private var keySaved = false
 
     private let cliService = CLIService()
 
@@ -60,10 +62,19 @@ struct OnboardingEngineStep: View {
                 SecureField("gsk_…", text: $apiKey)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit(saveKey)
-                Button("Save & Use", action: saveKey)
-                    .buttonStyle(.borderedProminent)
+                    .disabled(keySaved || isSavingKey)
+                if keySaved {
+                    Button("Change") {
+                        keySaved = false
+                        apiKey = ""
+                    }
                     .controlSize(.small)
-                    .disabled(isSavingKey || apiKey.trimmingCharacters(in: .whitespaces).isEmpty)
+                } else {
+                    Button("Save & Use", action: saveKey)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(isSavingKey || apiKey.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
             }
             HStack {
                 Link("Get a free key", destination: URL(string: "https://console.groq.com/keys")!)
@@ -183,7 +194,7 @@ struct OnboardingEngineStep: View {
 
     private func saveKey() {
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty, !isSavingKey else { return }
+        guard !key.isEmpty, !isSavingKey, !keySaved else { return }
         isSavingKey = true
         keyError = nil
         Task {
@@ -211,7 +222,7 @@ struct OnboardingEngineStep: View {
                 // reject Groq for lack of the key.
                 models.pendingBackend = "groq"
                 models.requestModelsList()
-                apiKey = ""
+                keySaved = true
             } catch {
                 keyError = "Could not save the key: \(error.localizedDescription)"
             }
