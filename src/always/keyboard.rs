@@ -1100,6 +1100,7 @@ fn dispatch_auto_enter() {
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn dispatch_force_paste() {
     if let Some(text) = pause::take_last_filtered() {
+        let text = crate::always::postprocess::local_cleanup(&text);
         let chars = text.len();
         tracing::info!(chars, "force_paste_filtered");
         if let Err(error) = paste::copy_to_clipboard(format!("{} ", text))

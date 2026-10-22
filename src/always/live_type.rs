@@ -107,9 +107,16 @@ pub fn preview(generation: u64, settled: Option<&str>, open: &str) {
     preview_while(
         crate::always::pause::is_paused() || crate::always::pause::is_consume_mode(),
         generation,
-        |stable| match &previous {
-            Some(prev) => crate::always::speech_action::merge_dictation_with(&loc, prev, stable).1,
-            None => stable.to_string(),
+        |stable| {
+            // The final gets this cleanup too: without it a stutter the engine
+            // turned into "the the the the" is typed while speaking.
+            let stable = crate::always::postprocess::local_cleanup(stable);
+            match &previous {
+                Some(prev) => {
+                    crate::always::speech_action::merge_dictation_with(&loc, prev, &stable).1
+                }
+                None => stable,
+            }
         },
         settled,
         open,
