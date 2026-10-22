@@ -5,8 +5,9 @@
 //! Source: the live preview — the same text the overlay shows: the preview
 //! loop in vad.rs, or with the Apple engine the instant-preview merger
 //! (live_preview.rs, verified previews only). A
-//! word is typed once two consecutive previews agree on it; the last,
-//! still-forming word is never typed early. When the utterance is final,
+//! word is typed once every preview of the last 600 ms agrees on it; the
+//! last, still-forming word is never typed early. Case or punctuation
+//! differences alone never rewrite typed text. When the utterance is final,
 //! `deliver_paste` hands over the exact payload it would have pasted, and the
 //! typed text is corrected to it (Backspace, then type) instead of pasting.
 //!
@@ -30,8 +31,11 @@ struct Session {
     generation: u64,
     /// Exactly what this session typed, in order.
     typed: String,
-    /// The previous preview, for agreement.
-    last_preview: String,
+    /// Recent previews (ms since the session began, open text), for
+    /// agreement over time: see `stable_prefix`.
+    recent: std::collections::VecDeque<(u64, String)>,
+    /// When the session began, for `recent`'s timestamps.
+    started: Option<std::time::Instant>,
     /// How a final payload is formatted (merge with in-flight dictation).
     loc: Option<Localization>,
     /// What had focus when typing began.
@@ -130,8 +134,12 @@ fn preview_while(
         s.stopped = true;
         return;
     }
-    let agreed = agreed_prefix(&s.last_preview, open);
-    s.last_preview = open.to_string();
+    let now_ms = s
+        .started
+        .get_or_insert_with(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64;
+    let agreed = stable_prefix(&mut s.recent, now_ms, open, stable_ms());
     let text = match (settled.filter(|t| !t.is_empty()), agreed.is_empty()) {
         (Some(settled), true) => settled.to_string(),
         (Some(settled), false) => format!("{settled} {agreed}"),
@@ -140,7 +148,7 @@ fn preview_while(
     if text.is_empty() {
         return;
     }
-    let target = formatted(&text);
+    let target = keep_typed_formatting(&s.typed, &formatted(&text));
     let (backspaces, rest) = plan(&s.typed, &target);
     if rest.is_empty() {
         // Nothing new, or the target is a shorter form of what is typed
@@ -180,7 +188,8 @@ pub fn finish(payload: &str) -> Finish {
         );
         return Finish::FocusMoved;
     }
-    let (backspaces, rest) = plan(&s.typed, payload);
+    let target = keep_typed_formatting(&s.typed, payload);
+    let (backspaces, rest) = plan(&s.typed, &target);
     if let Err(error) = inject(backspaces, &rest) {
         tracing::warn!(%error, "live_type_correction_failed");
     }
@@ -213,6 +222,94 @@ fn lock() -> std::sync::MutexGuard<'static, Option<Session>> {
 
 /// Words two consecutive previews agree on, from the start — never the
 /// last word of the newer one, which may still be forming.
+/// How long a word must have read the same before it is typed (or before an
+/// already-typed word is changed). Two previews agreeing is weak evidence
+/// when they are close together (a cheap engine previews every ~150 ms and
+/// both have heard nearly the same audio), so agreement is over time.
+const STABLE_MS: u64 = 600;
+
+fn stable_ms() -> u64 {
+    // Session tests drive previews back to back: the two-preview rule.
+    if cfg!(test) { 0 } else { STABLE_MS }
+}
+
+/// The words every preview of the last `stable_ms` agrees on (the current
+/// one included, its last word excluded). Needs a preview at least
+/// `stable_ms` old to compare against; until then nothing is agreed. At a
+/// fixed 350 ms cadence this is the old two-consecutive-previews rule.
+fn stable_prefix(
+    recent: &mut std::collections::VecDeque<(u64, String)>,
+    now_ms: u64,
+    current: &str,
+    stable_ms: u64,
+) -> String {
+    // Keep the newest preview at least `stable_ms` old as the anchor.
+    while recent.len() >= 2 && now_ms.saturating_sub(recent[1].0) >= stable_ms {
+        recent.pop_front();
+    }
+    let anchored = recent
+        .front()
+        .is_some_and(|(t, _)| now_ms.saturating_sub(*t) >= stable_ms);
+    let agreed = if anchored {
+        recent.iter().fold(current.to_string(), |acc, (_, p)| {
+            agreed_prefix_all(&acc, p)
+        })
+    } else {
+        String::new()
+    };
+    recent.push_back((now_ms, current.to_string()));
+    let c: Vec<&str> = current.split_whitespace().collect();
+    let n = agreed
+        .split_whitespace()
+        .count()
+        .min(c.len().saturating_sub(1));
+    c[..n].join(" ")
+}
+
+/// A word compared without its case and surrounding punctuation.
+fn bare(word: &str) -> String {
+    word.trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase()
+}
+
+/// `target`, but where its words only differ from what is already typed in
+/// case or punctuation, the typed form stays: those differences are not
+/// worth deleting and retyping text for (a comma for a full stop five words
+/// back rewrote everything after it). Real word changes are kept.
+fn keep_typed_formatting(typed: &str, target: &str) -> String {
+    let t: Vec<&str> = typed.split_whitespace().collect();
+    let g: Vec<&str> = target.split_whitespace().collect();
+    if t.is_empty() || g.len() < t.len() || t.iter().zip(&g).any(|(a, b)| bare(a) != bare(b)) {
+        return target.to_string();
+    }
+    let mut out = typed.trim_end().to_string();
+    for w in &g[t.len()..] {
+        out.push(' ');
+        out.push_str(w);
+    }
+    // Trailing space: the target's when it adds words, else whichever of the
+    // two has one (a finished sentence ends with a space).
+    let target_tail = &target[target.trim_end().len()..];
+    let typed_tail = &typed[typed.trim_end().len()..];
+    out.push_str(if g.len() > t.len() || typed_tail.is_empty() {
+        target_tail
+    } else {
+        typed_tail
+    });
+    out
+}
+
+/// Common leading words of two texts.
+fn agreed_prefix_all(a: &str, b: &str) -> String {
+    a.split_whitespace()
+        .zip(b.split_whitespace())
+        .take_while(|(x, y)| x == y)
+        .map(|(x, _)| x)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
 fn agreed_prefix(previous: &str, current: &str) -> String {
     let p: Vec<&str> = previous.split_whitespace().collect();
     let c: Vec<&str> = current.split_whitespace().collect();
@@ -355,6 +452,66 @@ fn inject(backspaces: usize, text: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formatting_differences_keep_what_is_typed() {
+        // A comma for a full stop: no rewrite, new words appended.
+        assert_eq!(
+            keep_typed_formatting(
+                "Thanks for the reply. That",
+                "Thanks for the reply, that sounds good"
+            ),
+            "Thanks for the reply. That sounds good"
+        );
+        // Same words, final punctuation: typed text stands, trailing space kept.
+        assert_eq!(
+            keep_typed_formatting("Ruf mich an", "Ruf mich an. "),
+            "Ruf mich an "
+        );
+        // A real word change is corrected.
+        assert_eq!(
+            keep_typed_formatting("Der serve ist", "Der Server ist heute"),
+            "Der Server ist heute"
+        );
+        assert_eq!(
+            keep_typed_formatting("würde auf", "wurde auf Donnerstag"),
+            "wurde auf Donnerstag"
+        );
+        // Nothing typed yet: the target as is.
+        assert_eq!(keep_typed_formatting("", "Hello. "), "Hello. ");
+    }
+
+    #[test]
+    fn stable_prefix_needs_agreement_over_time() {
+        let mut r = std::collections::VecDeque::new();
+        // First preview: nothing to compare against.
+        assert_eq!(stable_prefix(&mut r, 0, "I have a", 350), "");
+        // 150 ms later: agrees, but not yet for 350 ms.
+        assert_eq!(stable_prefix(&mut r, 150, "I have a dream", 350), "");
+        // 350 ms after the first: only what the first already had is agreed.
+        assert_eq!(
+            stable_prefix(&mut r, 350, "I have a dream today", 350),
+            "I have a"
+        );
+        // A flip inside the window holds the flipped word back.
+        assert_eq!(
+            stable_prefix(&mut r, 500, "I have the dream today now", 350),
+            "I have"
+        );
+        assert_eq!(
+            stable_prefix(&mut r, 700, "I have the dream today now", 350),
+            "I have"
+        );
+        // Stable again for 350 ms: the new variant is agreed.
+        assert_eq!(
+            stable_prefix(&mut r, 900, "I have the dream today now and", 350),
+            "I have the dream today now"
+        );
+        // Fixed 350 ms cadence: the old two-preview rule.
+        let mut r = std::collections::VecDeque::new();
+        assert_eq!(stable_prefix(&mut r, 0, "a b c", 350), "");
+        assert_eq!(stable_prefix(&mut r, 350, "a b c d", 350), "a b c");
+    }
 
     /// The session is process-global: tests that open one run one at a time.
     static SESSION_TESTS: Mutex<()> = Mutex::new(());
