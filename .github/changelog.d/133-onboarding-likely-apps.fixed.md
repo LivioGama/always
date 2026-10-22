@@ -1,1 +1,0 @@
-**onboarding:** the last setup page now offers the apps you are likely to dictate into (Slack, Messages, ChatGPT, Claude, Cursor, browsers, Mail, Notes…), running or installed, instead of the first eight running apps A→Z that left Slack off; password managers are never offered.

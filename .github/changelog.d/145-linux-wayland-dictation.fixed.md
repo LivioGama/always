@@ -1,0 +1,1 @@
+**linux:** dictation works on Linux again: v0.1.1 failed every utterance with "Audio capture not supported on this platform". Pasting works on Wayland (wtype, then ydotool), the CLI reaches the systemd-started daemon, and `always model list|download|use` fetches and picks a local model on installs without the Settings app.
