@@ -1,1 +1,0 @@
-**live typing:** opt-in: words appear in the focused app while you speak, and the final transcript corrects them in place (macOS and Linux). Turn it on in Settings › Behavior ("Type words while you speak") or with `always config set live_typing true`.

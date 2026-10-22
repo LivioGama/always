@@ -1,1 +1,0 @@
-**voice commands:** opt-in: say a phrase on its own ("press enter", or your own phrases) to press Return and send what you dictated, for chat apps and coding agents (macOS and Linux). Settings › Behavior › Auto-Enter.

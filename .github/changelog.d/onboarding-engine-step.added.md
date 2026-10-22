@@ -1,1 +1,0 @@
-**onboarding:** a new first step, "Choose Your Engine", sets up Groq (paste a key), downloads a first local model, or picks Apple on-device on macOS. The download keeps going while you grant permissions and Always switches to it once installed. The Linux onboarding now matches the macOS one.
