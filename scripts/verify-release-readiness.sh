@@ -38,6 +38,8 @@ local_gates() {
   RUSTDOCFLAGS="-D warnings" run cargo doc --locked --no-deps
   run cargo build --no-default-features --features linux --locked
   run cargo build --release --locked --target aarch64-apple-darwin
+  (cd always-gui && run bun install --frozen-lockfile && run bun run build)
+  run cargo build --release --locked --manifest-path crates/always_tauri/Cargo.toml --bin always-tauri
   ALWAYS_BUILD_PROFILE=release \
     ALWAYS_SWIFT_CONFIGURATION=release \
     ALWAYS_DAEMON_PATH="$ROOT/target/aarch64-apple-darwin/release/always" \

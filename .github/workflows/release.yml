@@ -460,6 +460,7 @@ jobs:
           fi
           codesign --verify --deep --strict "$ALWAYS_APP_DIR/Always.app"
           test -x "$ALWAYS_APP_DIR/Always.app/Contents/MacOS/always-daemon"
+          test -x "$ALWAYS_APP_DIR/Always.app/Contents/MacOS/always-tauri"
           "$ALWAYS_APP_DIR/Always.app/Contents/MacOS/always-daemon" --version
 
       - name: Windows

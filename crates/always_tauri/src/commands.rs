@@ -36,14 +36,21 @@ fn always_bin(resource_dir: Option<&std::path::Path>) -> Result<PathBuf, String>
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let name = if cfg!(windows) {
-                "always.exe"
+            // Always.app/Contents/MacOS ships the CLI as `always-daemon`: on
+            // case-insensitive APFS a sibling `always` is the Swift menu bar
+            // app `Always`, so it must be tried first.
+            let names: &[&str] = if cfg!(windows) {
+                &["always.exe"]
+            } else if cfg!(target_os = "macos") {
+                &["always-daemon", "always"]
             } else {
-                "always"
+                &["always"]
             };
-            let candidate = dir.join(name);
-            if candidate.exists() {
-                return Ok(candidate);
+            for name in names {
+                let candidate = dir.join(name);
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
             }
         }
     }

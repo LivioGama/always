@@ -107,6 +107,19 @@ swift build -c release --package-path "$APP_DIR/../preview-asr"
 cp "$APP_DIR/../preview-asr/.build/release/always-preview-asr" "$APP_BUNDLE/Contents/MacOS/always-preview-asr"
 echo "✓ Preview helper copied"
 
+# Settings window: the menu bar's "Settings…" spawns MacOS/always-tauri
+# (crates/always_tauri, embeds the always-gui frontend). Without it Settings
+# silently never opens, so a missing binary fails the build.
+TAURI_PATH="${ALWAYS_TAURI_PATH:-../crates/always_tauri/target/${ALWAYS_BUILD_PROFILE:-debug}/always-tauri}"
+if [ -f "$TAURI_PATH" ]; then
+    cp "$TAURI_PATH" "$APP_BUNDLE/Contents/MacOS/always-tauri"
+    echo "✓ Settings app copied ($TAURI_PATH → MacOS/always-tauri)"
+else
+    echo "✗ Settings app not found at $TAURI_PATH"
+    echo "  Build it first: (cd ../always-gui && bun install && bun run build) && cargo build --manifest-path ../crates/always_tauri/Cargo.toml --bin always-tauri (add --release for release)"
+    exit 1
+fi
+
 echo "Code signing app..."
 # Signing identity resolution — STABILITY over pedigree. macOS TCC keys
 # Accessibility/Input Monitoring grants to the signature: a real cert

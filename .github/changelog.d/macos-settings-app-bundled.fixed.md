@@ -1,0 +1,1 @@
+**macOS:** Settings opens again. The 0.1.2 app shipped without its Settings window (`always-tauri`), so the menu bar's Settings… did nothing; the build now bundles it and fails if it is missing. Settings also no longer opens the first-run Setup window instead, and its changes reach the daemon again.

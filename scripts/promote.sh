@@ -47,6 +47,13 @@ case "$PROFILE" in
 esac
 touch "$REPO_ROOT/.rust_build_timestamp"
 
+echo "▶ settings app (always-gui + always-tauri, $PROFILE)..."
+(cd always-gui && bun install --frozen-lockfile && bun run build)
+case "$PROFILE" in
+    debug)   cargo build --manifest-path crates/always_tauri/Cargo.toml --bin always-tauri ;;
+    release) cargo build --release --manifest-path crates/always_tauri/Cargo.toml --bin always-tauri ;;
+esac
+
 echo "▶ Swift bundle + deploy (production Always.app)..."
 (
     cd Always

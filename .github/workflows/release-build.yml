@@ -98,11 +98,26 @@ jobs:
       # No x86_64 macOS build: ort-sys ships no prebuilt ONNX Runtime for
       # x86_64-apple-darwin.
 
+      # The menu bar's Settings window is the Tauri app; build.sh bundles it
+      # as MacOS/always-tauri and fails without it.
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build settings frontend
+        working-directory: always-gui
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Build settings app (always-tauri)
+        run: cargo build --release --locked --manifest-path crates/always_tauri/Cargo.toml --bin always-tauri
+
       - name: Build Always.app (build.sh, release profile)
         env:
           ALWAYS_BUILD_PROFILE: release
           ALWAYS_SWIFT_CONFIGURATION: release
           ALWAYS_DAEMON_PATH: ${{ github.workspace }}/target/aarch64-apple-darwin/release/always
+          ALWAYS_TAURI_PATH: ${{ github.workspace }}/crates/always_tauri/target/release/always-tauri
           # Ad-hoc ("-"): no certificate, no notarization. build.sh signs the
           # bundle with `codesign --force --deep` (plus the entitlements and
           # bundle identifier), which is what we ship.
@@ -136,6 +151,7 @@ jobs:
           tar xzf "$ARCHIVE" -C "$d"
           codesign --verify --deep --strict "$d/$STAGING/Always.app"
           test -x "$d/$STAGING/Always.app/Contents/MacOS/always-daemon"
+          test -x "$d/$STAGING/Always.app/Contents/MacOS/always-tauri"
           rm -rf "$d"
           ls -l always-*
 
