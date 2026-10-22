@@ -1108,7 +1108,10 @@ Between transcription and the keyboard:
    paste time and around the LLM call: removes adjacent repeated words and
    conservative fillers ("um", "uh", "ah", "eh") without inventing content.
    It is the sole cleanup when the LLM pass is disabled, timed out, or
-   failed, and a post-pass on the LLM's own output.
+   failed, and a post-pass on the LLM's own output. It also runs on the live
+   typing preview before it is typed, and on a ⌃⌥V paste of a filtered
+   transcript: the engine can turn a spoken stutter ("the the") into ten
+   copies, and both paths typed them verbatim (owner report 2026-10-22).
 6. **Postprocess mode** — ONE setting (`postprocess_mode`, Settings → Models →
    Postprocessing), changed 2026-10-14 at the user's request ("it must be
    instant"; a "wait 250 ms then paste uncorrected" compromise was rejected).

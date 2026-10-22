@@ -1,0 +1,1 @@
+**live typing:** a stutter ("the the") no longer appears as a long run of repeated words while you speak, or when you paste a held transcript with ⌃⌥V: the same cleanup the final text gets now runs first.
