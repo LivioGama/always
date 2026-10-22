@@ -13,7 +13,6 @@
 #   scripts/dev-rebuild-macos.sh release        # release build (transcripts hidden)
 #   scripts/dev-rebuild-macos.sh --no-daemon    # skip daemon restart (for Swift-only changes)
 #   scripts/dev-rebuild-macos.sh --force-daemon # force daemon restart even if Rust unchanged
-#   scripts/dev-rebuild-macos.sh --no-tauri      # skip always-gui + always-tauri rebuild (daemon-only change)
 #   ALWAYS_REBUILD_SILENT=1 scripts/dev-rebuild-macos.sh   # mute sounds
 
 set -euo pipefail
@@ -21,7 +20,6 @@ set -euo pipefail
 # Parse arguments
 SKIP_DAEMON=false
 FORCE_DAEMON=false
-SKIP_TAURI=false
 PROFILE="debug"
 for arg in "$@"; do
     case "$arg" in
@@ -30,9 +28,6 @@ for arg in "$@"; do
             ;;
         --force-daemon)
             FORCE_DAEMON=true
-            ;;
-        --no-tauri)
-            SKIP_TAURI=true
             ;;
         release)
             PROFILE="release"
@@ -103,14 +98,6 @@ if true; then
     play "$SOUND_KILL"
     pkill -9 -f "Always Dev.app" 2>/dev/null || true
 
-    # A settings app launched from the crate's cargo target dir is the
-    # Swift menu bar's dev fallback (MenuBarView.tauriBinaryPath), so the
-    # menu action would happily focus it again — stale code. That launch
-    # path is not covered by the "Always Dev.app" pattern above. This
-    # pattern CANNOT match production: /Applications/Always.app/Contents/
-    # MacOS/always-tauri contains no "always_tauri/target" component.
-    pkill -9 -f "always_tauri/target/[^/]+/always-tauri" 2>/dev/null || true
-
     if [ "$SKIP_DAEMON" = false ]; then
         # Dev daemon via its own pid file (covers bundled daemon AND any
         # manual `ALWAYS_INSTANCE=dev always run` from target/).
@@ -149,115 +136,6 @@ else
 fi
 play "$SOUND_COMPILED"
 
-# ── Settings app (always-gui frontend + always-tauri binary) ────────────────
-# The menu bar's “Settings…” action spawns the bundled `always-tauri`
-# binary, which serves the React settings UI (Snippets, Vocabulary,
-# Update, …) and talks to the dev daemon over its socket. Built and
-# installed here so the dev bundle always carries the current settings
-# frontend. Skip with --no-tauri.
-GUI_DIR="$REPO_ROOT/always-gui"
-TAURI_CRATE_DIR="$REPO_ROOT/crates/always_tauri"
-TAURI_CONF="$TAURI_CRATE_DIR/tauri.conf.json"
-TAURI_BIN="$TAURI_CRATE_DIR/target/$PROFILE/always-tauri"
-BUNDLED_TAURI_BIN="$DEV_APP/Contents/MacOS/always-tauri"
-
-# tauri.conf.json sanity check for the macOS layout. The Tauri app must NOT
-# reuse the Swift app's bundle identifier: LaunchServices and TCC key mic /
-# accessibility grants to the identifier, so a collision would let the
-# settings app steal — or silently void — the GUI's permission grants. And
-# the settings window the menu action opens must exist and be centered.
-check_tauri_conf() {
-    if [ ! -f "$TAURI_CONF" ]; then
-        echo "✗ tauri.conf.json not found at $TAURI_CONF"
-        return 1
-    fi
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo "⚠️  python3 not found — skipping the tauri.conf.json check"
-        return 0
-    fi
-    python3 - "$TAURI_CONF" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1]) as fh:
-    conf = json.load(fh)
-
-problems = []
-identifier = conf.get("identifier", "")
-if identifier in ("com.always.v3", "com.always.v3.dev"):
-    problems.append(
-        "identifier %r collides with the Swift app's bundle id "
-        "(LaunchServices/TCC would merge the two apps)" % identifier
-    )
-
-windows = (conf.get("app") or {}).get("windows") or []
-settings = next((w for w in windows if w.get("label") == "settings"), None)
-if settings is None:
-    problems.append(
-        "no window labelled 'settings' — the menu bar action would open nothing"
-    )
-else:
-    if settings.get("center") is not True:
-        problems.append('settings window is not centered (set "center": true)')
-    if settings.get("visible") is not True:
-        print(
-            "  (settings window starts hidden — always-gui/App.tsx shows it after "
-            "the onboarding check; first-run instances show Setup instead)"
-        )
-
-for line in problems:
-    print("✗ " + line)
-sys.exit(1 if problems else 0)
-PY
-}
-
-if [ "$SKIP_TAURI" = true ]; then
-    echo "▶ skipping settings frontend + always-tauri (--no-tauri)"
-else
-    echo "▶ checking tauri.conf.json (macOS)…"
-    check_tauri_conf || {
-        echo "✗ tauri.conf.json failed the macOS sanity check — fix it before rebuilding."
-        exit 1
-    }
-
-    echo "▶ building settings frontend (always-gui)…"
-    (
-        cd "$GUI_DIR"
-        if command -v pnpm >/dev/null 2>&1; then
-            pnpm install --no-frozen-lockfile
-            pnpm run build
-        else
-            npm install
-            npm run build
-        fi
-    )
-    if [ ! -f "$GUI_DIR/dist/index.html" ]; then
-        echo "✗ always-gui build produced no dist/index.html"
-        exit 1
-    fi
-
-    # The frontend is EMBEDDED into the always-tauri binary by
-    # `tauri::generate_context!`, so a frontend-only change still requires
-    # recompiling the crate. Cargo usually notices via include_bytes!
-    # rerun-if-changed tracking, but a stale settings UI is exactly the class
-    # of silent failure this script exists to prevent — force it when dist
-    # is newer than the last binary.
-    if [ -x "$TAURI_BIN" ] && [ "$GUI_DIR/dist/index.html" -nt "$TAURI_BIN" ]; then
-        echo "  (frontend changed — forcing always-tauri recompile)"
-        touch "$TAURI_CRATE_DIR/src/main.rs"
-    fi
-
-    echo "▶ building settings app (always-tauri, $PROFILE)…"
-    case "$PROFILE" in
-        debug)   env -u CARGO_INCREMENTAL cargo build --manifest-path "$TAURI_CRATE_DIR/Cargo.toml" --bin always-tauri ;;
-        release) env -u CARGO_INCREMENTAL cargo build --release --manifest-path "$TAURI_CRATE_DIR/Cargo.toml" --bin always-tauri ;;
-    esac
-    if [ ! -x "$TAURI_BIN" ]; then
-        echo "✗ always-tauri binary not found at $TAURI_BIN"
-        exit 1
-    fi
-fi
-
 echo "▶ Swift bundle + deploy (Always Dev)..."
 (
     cd Always
@@ -274,57 +152,6 @@ echo "▶ Swift bundle + deploy (Always Dev)..."
 # resolve to it instead of /Applications.
 echo "▶ removing intermediate bundle..."
 rm -rf "$REPO_ROOT/Always/${DEV_APP_NAME}.app"
-
-# Install the settings app binary into the DEPLOYED dev bundle. build.sh
-# rsyncs in place (rsync --delete), so the copy happens AFTER the deploy,
-# which would otherwise strip a binary added to the project-dir bundle.
-# This is what the menu bar's “Settings…” action launches: MenuBarView
-# looks for Contents/MacOS/always-tauri inside its own bundle.
-# Scoped to "Always Dev.app" — production is never written to here.
-if [ "$SKIP_TAURI" = true ]; then
-    if [ ! -x "$BUNDLED_TAURI_BIN" ] && [ -x "$TAURI_BIN" ]; then
-        echo "  (--no-tauri: installing the previously built always-tauri)"
-        cp "$TAURI_BIN" "$BUNDLED_TAURI_BIN"
-    fi
-else
-    echo "▶ installing always-tauri into Always Dev.app..."
-    cp "$TAURI_BIN" "$BUNDLED_TAURI_BIN"
-fi
-if [ ! -x "$BUNDLED_TAURI_BIN" ]; then
-    echo "✗ always-tauri is missing from $BUNDLED_TAURI_BIN"
-    echo "  The menu bar's Settings action will log 'always-tauri binary not"
-    echo "  found' and open nothing. Rebuild without --no-tauri."
-    exit 1
-fi
-
-# build.sh already codesigned the bundle, so swapping in the new
-# always-tauri binary invalidated its seal. Re-sign in place — macOS 15+
-# refuses to launch an app whose seal no longer matches, and TCC keys mic
-# and accessibility grants to the signature, which must stay stable. This
-# mirrors build.sh's identity resolution: same cert survives grants across
-# rebuilds; ad-hoc is the accepted last resort.
-resign_identity="${ALWAYS_CODESIGN_IDENTITY:-}"
-if [ -z "$resign_identity" ]; then
-    resign_identity="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Always Local Signing\)".*/\1/p' | head -1)"
-fi
-if [ -z "$resign_identity" ]; then
-    resign_identity="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
-fi
-if [ -z "$resign_identity" ]; then
-    resign_identity="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)"
-fi
-[ -z "$resign_identity" ] && resign_identity="-"
-if codesign --force --sign "$resign_identity" \
-        --identifier "com.always.v3.dev" \
-        --entitlements "$REPO_ROOT/Always/Always.entitlements" \
-        "$DEV_APP" >/dev/null 2>&1; then
-    echo "  ✓ re-signed $DEV_APP (bundle seal restored after always-tauri swap)"
-else
-    echo "⚠️  could not re-sign $DEV_APP after adding always-tauri — the launch"
-    echo "    below may be rejected by Gatekeeper. Fix with:"
-    echo "    codesign --force --deep --sign '$resign_identity' '$DEV_APP'"
-fi
-
 
 # First-run seed: copy production state into the dev instance so the dev
 # app boots with the user's real prefs, Groq key, voiceprint, and
@@ -404,31 +231,6 @@ verify_running "dev GUI" "Always Dev.app/Contents/MacOS/Always$" \
 if [ "$SKIP_DAEMON" = false ]; then
     verify_running "dev daemon" "Always Dev.app/Contents/MacOS/always-daemon run" \
         "$DEV_APP/Contents/MacOS/always-daemon" || VERIFY_OK=false
-fi
-
-# The settings app is launched on demand by the menu bar, so this can only
-# verify the BINARY the menu action will find — not a running process.
-# Deployed and runnable are different claims, and a binary that is missing
-# or older than the one just built means the menu bar would launch a stale
-# settings UI. (Dev-only paths: the bundle path is "$DEV_APP".)
-if [ "$SKIP_TAURI" = false ] || [ -x "$BUNDLED_TAURI_BIN" ]; then
-    echo "  ▶ verifying the bundled always-tauri binary..."
-    bundled_mtime=$(stat -f %m "$BUNDLED_TAURI_BIN")
-    if [ -f "$TAURI_BIN" ] && [ "$bundled_mtime" -lt "$(stat -f %m "$TAURI_BIN")" ]; then
-        if [ "$SKIP_TAURI" = true ]; then
-            # Explicit opt-out: the cargo target is newer, but the user chose
-            # not to rebuild it this run. Say so — never silently ship stale.
-            echo "  ⚠️  bundled always-tauri is older than $TAURI_BIN (--no-tauri"
-            echo "     skipped the rebuild; run without the flag to refresh it)"
-        else
-            echo "✗ bundled always-tauri ($BUNDLED_TAURI_BIN) is older than the"
-            echo "  build at $TAURI_BIN — the menu bar Settings action would launch"
-            echo "  a stale settings app; the copy above did not take effect."
-            VERIFY_OK=false
-        fi
-    else
-        echo "  ✓ always-tauri installed in Always Dev.app (menu bar Settings will use it)"
-    fi
 fi
 
 if [ "$VERIFY_OK" != true ]; then

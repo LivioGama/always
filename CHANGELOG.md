@@ -18,7 +18,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **onboarding:** a new first step, "Choose Your Engine", sets up Groq (paste a key), downloads a first local model, or picks Apple on-device on macOS. The download keeps going while you grant permissions and Always switches to it once installed. The Linux onboarding now matches the macOS one. ([#158](https://github.com/LivioGama/always/pull/158))
 
 ### Changed
-- **settings:** on macOS, Settings is now the same window as on Linux and Windows, opened from the menu bar, the Dock or `always://settings`; Snippets and Vocabulary live together under Library. ([#153](https://github.com/LivioGama/always/pull/153))
 - **live typing:** with a fast local engine, words appear sooner: previews run as often as the engine allows (down to every 150 ms) instead of every 350 ms. ([#155](https://github.com/LivioGama/always/pull/155))
 
 ### Fixed
