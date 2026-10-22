@@ -30,7 +30,11 @@ pub fn schedule(rt: &Handle, delay_ms: u32, after_typing: bool) {
     if delay_ms == 0 {
         // Fast path: bypass the timer entirely, but wait for the text to land
         // in the target application before Return is pressed.
-        let guard = if after_typing { AFTER_TYPING_MS } else { AFTER_PASTE_MS };
+        let guard = if after_typing {
+            AFTER_TYPING_MS
+        } else {
+            AFTER_PASTE_MS
+        };
         std::thread::sleep(Duration::from_millis(guard));
         let _ = press_return_now();
         // Return committed — the dictation buffer (used to merge follow-up

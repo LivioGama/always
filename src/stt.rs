@@ -591,7 +591,10 @@ mod stt_unit_tests {
         use reqwest::header::{HeaderMap, HeaderValue};
         let h = |v: &'static str| {
             let mut m = HeaderMap::new();
-            m.insert("x-ratelimit-remaining-requests", HeaderValue::from_static(v));
+            m.insert(
+                "x-ratelimit-remaining-requests",
+                HeaderValue::from_static(v),
+            );
             m
         };
         assert!(daily_quota_exhausted(&h("0")));
