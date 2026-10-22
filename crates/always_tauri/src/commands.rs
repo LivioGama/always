@@ -423,6 +423,13 @@ pub fn show_settings_window(app: tauri::AppHandle) {
     WindowManager::new(app).show_settings();
 }
 
+/// `always-tauri --hidden`: start in the tray without opening a window — for
+/// launching at login. Settings stay one click away in the tray menu.
+#[tauri::command]
+pub fn launched_hidden() -> bool {
+    std::env::args().any(|arg| arg == "--hidden")
+}
+
 #[tauri::command]
 pub fn show_onboarding_window(app: tauri::AppHandle) {
     WindowManager::new(app).show_onboarding(ShowOnboardingReason::FirstLaunch);

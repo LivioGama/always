@@ -1,8 +1,8 @@
 //! System tray menu builder for the Always daemon GUI.
 //!
 //! The tray icon provides quick access to the two most-common controls:
-//! Pause / Resume and Auto-Enter.  It also exposes Settings, Onboarding
-//! and Quit.
+//! Pause / Resume and Auto-Enter (a check item).  It also exposes Settings,
+//! Onboarding and Quit.
 //!
 //! Menu items are updated reactively when the daemon state changes.
 //!
@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 #[cfg(not(target_os = "macos"))]
-use tauri::menu::{Menu, MenuBuilder, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::menu::{CheckMenuItem, Menu, MenuBuilder, MenuItem};
 #[cfg(not(target_os = "macos"))]
 use tauri::tray::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 #[cfg(not(target_os = "macos"))]
@@ -24,7 +24,7 @@ use tauri::{AppHandle, Wry};
 use tokio::sync::mpsc;
 
 #[cfg(not(target_os = "macos"))]
-use crate::uds_client::{ClientEvent, DaemonEvent, DaemonState, UdsClient};
+use crate::uds_client::{ClientEvent, DaemonCommand, DaemonEvent, DaemonState, UdsClient};
 #[cfg(not(target_os = "macos"))]
 use crate::window_manager::{ShowOnboardingReason, WindowManager};
 
@@ -43,21 +43,39 @@ pub fn build_tray(
 /// Build the system tray with the menu and connect event-driven updates.
 #[cfg(not(target_os = "macos"))]
 pub fn build_tray(app: &AppHandle, uds: Arc<UdsClient>) -> Result<TrayIcon<Wry>, tauri::Error> {
-    // Initial menu state — updated reactively once the first event arrives.
-    let initial_pause = MenuItem::new(app, "Pause", true, None::<&str>)?;
-    let initial_auto = MenuItem::new(app, "Auto-Enter", false, None::<&str>)?;
-
     let uds_for_click = Arc::clone(&uds);
+    let uds_for_menu = Arc::clone(&uds);
     let tray = TrayIconBuilder::new()
         .icon(app.default_window_icon().unwrap().clone())
         .tooltip("Always")
-        .menu(&build_menu(app, &initial_pause, &initial_auto)?)
-        .on_menu_event(|app, event| {
+        // Initial state; rebuilt from daemon events (update_menu_loop).
+        .menu(&build_menu(app, "Pause", false)?)
+        .on_menu_event(move |app, event| {
             let wm = WindowManager::new(app.clone());
-            match event.id().as_ref() {
-                "settings" => wm.show_settings(),
-                "onboarding" => wm.show_onboarding(ShowOnboardingReason::Reinvoked),
-                _ => {}
+            let command = match event.id().as_ref() {
+                "pause" => Some(DaemonCommand::TogglePause),
+                "auto_enter" => Some(DaemonCommand::ToggleAutoEnter),
+                "settings" => {
+                    wm.show_settings();
+                    None
+                }
+                "onboarding" => {
+                    wm.show_onboarding(ShowOnboardingReason::Reinvoked);
+                    None
+                }
+                "quit" => {
+                    app.exit(0);
+                    None
+                }
+                _ => None,
+            };
+            if let Some(cmd) = command {
+                let uds = Arc::clone(&uds_for_menu);
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = uds.send_command(cmd).await {
+                        tracing::warn!(error = %e, "tray_menu_command_failed");
+                    }
+                });
             }
         })
         .on_tray_icon_event(move |tray, event| {
@@ -87,27 +105,49 @@ pub fn build_tray(app: &AppHandle, uds: Arc<UdsClient>) -> Result<TrayIcon<Wry>,
 }
 
 /// Build the tray menu from the given pause / auto-enter items.
+/// The tray menu. Every item carries an id handled in `build_tray`'s
+/// `on_menu_event`; Auto-Enter is a check item showing the daemon's state.
+/// Flat: two entries do not warrant a Settings submenu. A custom Quit, since
+/// the predefined one is unsupported (shown disabled) in Linux tray menus.
 #[cfg(not(target_os = "macos"))]
 fn build_menu(
     app: &AppHandle,
-    pause_item: &MenuItem<Wry>,
-    auto_enter_item: &MenuItem<Wry>,
+    pause_label: &str,
+    auto_enter: bool,
 ) -> Result<Menu<Wry>, tauri::Error> {
     MenuBuilder::new(app)
-        .item(pause_item)
-        .item(auto_enter_item)
-        .separator()
-        .item(&Submenu::with_items(
+        .item(&MenuItem::with_id(
             app,
-            "Settings",
+            "pause",
+            pause_label,
             true,
-            &[
-                &MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?,
-                &MenuItem::with_id(app, "onboarding", "Onboarding", true, None::<&str>)?,
-            ],
+            None::<&str>,
+        )?)
+        .item(&CheckMenuItem::with_id(
+            app,
+            "auto_enter",
+            "Auto-Enter",
+            true,
+            auto_enter,
+            None::<&str>,
         )?)
         .separator()
-        .item(&PredefinedMenuItem::quit(app, None)?)
+        .item(&MenuItem::with_id(
+            app,
+            "settings",
+            "Settings…",
+            true,
+            None::<&str>,
+        )?)
+        .item(&MenuItem::with_id(
+            app,
+            "onboarding",
+            "Onboarding…",
+            true,
+            None::<&str>,
+        )?)
+        .separator()
+        .item(&MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?)
         .build()
 }
 
@@ -153,7 +193,6 @@ async fn update_menu_loop(tray: &TrayIcon<Wry>, uds: &Arc<UdsClient>) {
         let app = tray.app_handle();
         let state = uds.get_state().await;
         let auto_enter = uds.is_auto_enter_enabled().await;
-        let paused = uds.is_paused().await;
 
         let label = match state {
             DaemonState::Listening => "Pause",
@@ -162,22 +201,7 @@ async fn update_menu_loop(tray: &TrayIcon<Wry>, uds: &Arc<UdsClient>) {
             DaemonState::Unknown => "Pause",
         };
 
-        let pause_item = match MenuItem::new(app, label, true, None::<&str>) {
-            Ok(item) => item,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed_to_create_pause_menu_item");
-                continue;
-            }
-        };
-        let auto_item = match MenuItem::new(app, "Auto-Enter", auto_enter || paused, None::<&str>) {
-            Ok(item) => item,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed_to_create_auto_enter_menu_item");
-                continue;
-            }
-        };
-
-        if let Ok(menu) = build_menu(app, &pause_item, &auto_item) {
+        if let Ok(menu) = build_menu(app, label, auto_enter) {
             if let Err(e) = tray.set_menu(Some(menu)) {
                 tracing::warn!(error = %e, "tray_set_menu_failed");
             }
