@@ -553,7 +553,11 @@ Settable from Settings → Behavior, “Type words while you speak”.
   kept recoverable (⌃⌥V), as for a paused utterance whose focus changed.
   Linux compositors without a focus query: focus is assumed unchanged ❓.
 - **Typing:** voice editing's keystroke path (`ax_edit::post_strokes`):
-  macOS posts Unicode text and Backspace events; Linux uses `wtype` (virtual
+  macOS posts Unicode text and Backspace events, the text as events of at most
+  20 UTF-16 units spaced 25 ms apart: sent back to back, a busy receiver
+  (Claude Code in a long session) re-inserted the tail of the burst once per
+  queued event, so the end of a dictation appeared two or three times
+  (owner report 2026-10-22); Linux uses `wtype` (virtual
   keyboard: layout independent, works in terminals without a paste chord),
   else `ydotool`, else `xdotool`. The keystrokes are marked as Always's own,
   so they never count as user input (voice-edit gate, §9c).
