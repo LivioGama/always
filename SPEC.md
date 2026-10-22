@@ -1709,6 +1709,8 @@ daemon (I4/I5 hold *per instance*).
 | Focus-state file | `~/Library/Caches/Always/focus-state.json` | `focus-state-dev.json` |
 | Daemon build identity | `always.build-id` in the state dir | `always.build-id` in the dev state dir |
 | Daemon logs | `~/Library/Logs/Always` | `~/Library/Logs/Always-dev` |
+| Menu bar icon | monochrome (system template) | orange |
+| Settings sidebar | no banner | "Development build" banner above the daemon status |
 
 Shared deliberately: `~/Library/Application Support/always/models` and the
 `~/Library/Caches/always` model caches — immutable downloads, reused by both.
