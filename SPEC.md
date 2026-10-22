@@ -521,8 +521,12 @@ measured on Linux.
   the source is the instant-preview merger (Parakeet + Apple partials) — its
   verified previews only; Parakeet's words are typed provisionally and, like
   every typed word, corrected to the Apple final.
-- **What is typed:** the committed text, then the words two consecutive
-  previews agree on. The newest word of a preview is never typed early. Local
+- **What is typed:** the committed text, then the words every preview of the
+  last 600 ms agrees on (a word must read the same for 0.6 s before it is
+  typed, or before a typed word is changed). The newest word of a preview is
+  never typed early. Differences in case or punctuation alone never rewrite
+  typed text, while speaking or at the final: the typed form stays and only
+  new words are added. Local
   engines preview at least every 350 ms while live typing is on, and sooner
   when a preview pass is cheap: the next one starts twice the last pass's
   duration later, never under 150 ms, so previews use at most half the time
