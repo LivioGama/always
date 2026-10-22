@@ -224,3 +224,12 @@ libX11 = "*"
 libXtst = "*"
 libgcc = "*"
 "libstdc++" = "*"
+
+# Parakeet is a TDT model: each token comes with how many audio frames it
+# covers. transcribe-rs 0.3.12 ignores that and moves one frame at a time, so
+# on a stutter or a cut-off word Parakeet repeats it ("um um um um ...", up to
+# dozens of times). transcribe-rs PR #90 (Jon Gjengset) decodes the durations;
+# it is not released, so this pins it on top of 0.3.12. Drop this once a
+# transcribe-rs release includes it.
+[patch.crates-io]
+transcribe-rs = { git = "https://github.com/panbergco/transcribe-rs", rev = "cc4b541ed14e3acf31bd5904a894631c95331523" }
