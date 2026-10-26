@@ -85,7 +85,7 @@ kaldi-fbank-rust-kautism = "0.1.0"
 ndarray = "0.17"
 regex = "1"
 strsim = "0.11"
-parking_lot = "0.12"
+parking_lot = "0.13"
 thiserror = "1"
 rand = "0.8"
 uuid = { version = "1", features = ["v4", "serde"] }
