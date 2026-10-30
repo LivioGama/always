@@ -599,11 +599,11 @@ fn handle_vocab(action: VocabAction) -> Result<()> {
         VocabAction::Extract { path } => {
             let project_root = std::path::PathBuf::from(path.unwrap_or_else(|| ".".to_string()));
             let config = always::always::config::load_vocab_config();
-            // Read-only: prints `count<TAB>term`, most frequent first.
-            for (term, count) in
+            // Read-only: prints `count<TAB>term`, project-specific terms first.
+            for found in
                 always::always::vocab::project::extract_project_terms(&project_root, &config)?
             {
-                println!("{count}\t{term}");
+                println!("{}\t{}", found.count, found.term);
             }
         }
         VocabAction::Import => {
