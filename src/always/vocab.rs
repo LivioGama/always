@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 pub mod plugins;
+pub mod project;
 use plugins::{VocabPlugin, get_all_plugins};
 
 /// Provenance recorded on every glossary entry this module creates
