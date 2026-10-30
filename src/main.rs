@@ -176,7 +176,7 @@ enum CorrectionsAction {
 
 #[derive(Subcommand)]
 enum VocabAction {
-    /// Extract vocabulary from current project
+    /// Extract vocabulary from a project (read-only; prints count and term)
     Extract {
         /// Project root directory (default: current directory)
         #[arg(short, long)]
@@ -597,8 +597,14 @@ fn handle_config(action: ConfigAction) -> Result<()> {
 fn handle_vocab(action: VocabAction) -> Result<()> {
     match action {
         VocabAction::Extract { path } => {
-            let project_root = path.unwrap_or_else(|| ".".to_string());
-            println!("Vocabulary extraction not yet implemented for: {project_root}");
+            let project_root = std::path::PathBuf::from(path.unwrap_or_else(|| ".".to_string()));
+            let config = always::always::config::load_vocab_config();
+            // Read-only: prints `count<TAB>term`, most frequent first.
+            for (term, count) in
+                always::always::vocab::project::extract_project_terms(&project_root, &config)?
+            {
+                println!("{count}\t{term}");
+            }
         }
         VocabAction::Import => {
             println!("Scanning for installed speech-to-text software...");
