@@ -616,7 +616,7 @@ fn merge_into_glossary(path: &Path, terms: &[String]) -> Result<usize> {
 /// same directory (so the rename never crosses filesystems), fsynced, then
 /// renamed over `path`. A symlinked `path` (e.g. a dotfiles-managed
 /// `glossary.json`) is resolved first so the link itself is kept.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
 
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
