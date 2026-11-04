@@ -623,6 +623,11 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let permissions = match std::fs::metadata(&target) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).with_context(|| format!("stat {}", target.display())),
+    };
     let dir = target
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -643,6 +648,9 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
             .create_new(true)
             .open(&tmp)
             .with_context(|| format!("create {}", tmp.display()))?;
+        if let Some(permissions) = &permissions {
+            file.set_permissions(permissions.clone())?;
+        }
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
@@ -930,6 +938,36 @@ mod tests {
             "temp files left behind: {leftovers:?}"
         );
         assert_eq!(read_entries(&path).len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_preserves_existing_permissions_and_umask_for_new_files() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        for mode in [0o600, 0o640] {
+            let dir = scratch_dir("permissions");
+            let path = dir.join("glossary.json");
+            std::fs::write(&path, b"old").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+
+            write_atomic(&path, b"new").unwrap();
+
+            assert_eq!(std::fs::read(&path).unwrap(), b"new");
+            assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, mode);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        let dir = scratch_dir("new-permissions");
+        let path = dir.join("glossary.json");
+        let baseline = dir.join("baseline");
+        std::fs::write(&baseline, b"baseline").unwrap();
+        write_atomic(&path, b"new").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().mode() & 0o777,
+            std::fs::metadata(&baseline).unwrap().mode() & 0o777
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
