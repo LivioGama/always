@@ -891,6 +891,9 @@ offline; the cloud backend is faster to start and needs an API key.
   engine with a real implementation, a correct download size, and a checksum.
 - A local model may be armed as fallback for the cloud backend; failures fall
   back silently but are logged.
+- **Local Parakeet decoding honors token durations.** A token spanning
+  multiple audio frames is decoded once, so a stutter or cut-off word does not
+  create repeated copies solely because of that duration.
 - **Groq daily quota used up (product-owner request 2026-10-22).** When Groq
   answers 429 with `x-ratelimit-remaining-requests: 0` (Groq's request
   headers always describe the per-day quota), the daemon sends
@@ -1289,6 +1292,20 @@ their vocabulary correctly from day one.
 - **Manual re-run.** `always vocab import` runs the same code path on demand,
   ignores the marker, and works on every platform; use it after installing
   Wispr Flow or SuperWhisper later.
+
+### Project vocabulary extraction
+
+`always vocab extract` scans the current directory; `--path ROOT` selects a
+different project root. It is read-only: it prints one `count<TAB>term` row per
+candidate and never changes the glossary. Candidates follow the configured
+file patterns and length/common-word filters, and exclude language keywords,
+primitive types, and common standard-library, SQL, and English noise words.
+Project-specific evidence from
+documentation, file names, or string literals ranks first, then occurrence
+count descending and term alphabetically. Hidden files and directories,
+`target`, `node_modules`, `vendor`, `dist`, and `build` directories, symlinks,
+binary or non-UTF-8 files, unreadable files, and files larger than 1 MiB are
+skipped.
 
 ### Auto-learning toggle
 
