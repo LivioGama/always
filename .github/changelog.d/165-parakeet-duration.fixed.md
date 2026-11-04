@@ -1,1 +1,0 @@
-**parakeet:** Decode predicted token durations so stutters and cut-off words no longer turn into long runs of repeated text in Parakeet V2, V3, and Ultra dictation. ([#165](https://github.com/LivioGama/always/pull/165))
