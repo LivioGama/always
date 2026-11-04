@@ -800,7 +800,7 @@ mod transcript_stream_resolution_tests {
     }
 }
 
-fn load_vocab_config() -> VocabConfig {
+pub fn load_vocab_config() -> VocabConfig {
     VocabConfig {
         file_patterns: std::env::var("ALWAYS_FILE_PATTERNS")
             .ok()

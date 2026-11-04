@@ -553,7 +553,11 @@ Settable from Settings → Behavior, “Type words while you speak”.
   kept recoverable (⌃⌥V), as for a paused utterance whose focus changed.
   Linux compositors without a focus query: focus is assumed unchanged ❓.
 - **Typing:** voice editing's keystroke path (`ax_edit::post_strokes`):
-  macOS posts Unicode text and Backspace events; Linux uses `wtype` (virtual
+  macOS posts Unicode text and Backspace events, the text as events of at most
+  20 UTF-16 units spaced 25 ms apart: sent back to back, a busy receiver
+  (Claude Code in a long session) re-inserted the tail of the burst once per
+  queued event, so the end of a dictation appeared two or three times
+  (owner report 2026-10-22); Linux uses `wtype` (virtual
   keyboard: layout independent, works in terminals without a paste chord),
   else `ydotool`, else `xdotool`. The keystrokes are marked as Always's own,
   so they never count as user input (voice-edit gate, §9c).
@@ -887,6 +891,9 @@ offline; the cloud backend is faster to start and needs an API key.
   engine with a real implementation, a correct download size, and a checksum.
 - A local model may be armed as fallback for the cloud backend; failures fall
   back silently but are logged.
+- **Local Parakeet decoding honors token durations.** A token spanning
+  multiple audio frames is decoded once, so a stutter or cut-off word does not
+  create repeated copies solely because of that duration.
 - **Groq daily quota used up (product-owner request 2026-10-22).** When Groq
   answers 429 with `x-ratelimit-remaining-requests: 0` (Groq's request
   headers always describe the per-day quota), the daemon sends
@@ -1108,7 +1115,10 @@ Between transcription and the keyboard:
    paste time and around the LLM call: removes adjacent repeated words and
    conservative fillers ("um", "uh", "ah", "eh") without inventing content.
    It is the sole cleanup when the LLM pass is disabled, timed out, or
-   failed, and a post-pass on the LLM's own output.
+   failed, and a post-pass on the LLM's own output. It also runs on the live
+   typing preview before it is typed, and on a ⌃⌥V paste of a filtered
+   transcript: the engine can turn a spoken stutter ("the the") into ten
+   copies, and both paths typed them verbatim (owner report 2026-10-22).
 6. **Postprocess mode** — ONE setting (`postprocess_mode`, Settings → Models →
    Postprocessing), changed 2026-10-14 at the user's request ("it must be
    instant"; a "wait 250 ms then paste uncorrected" compromise was rejected).
@@ -1283,6 +1293,20 @@ their vocabulary correctly from day one.
   ignores the marker, and works on every platform; use it after installing
   Wispr Flow or SuperWhisper later.
 
+### Project vocabulary extraction
+
+`always vocab extract` scans the current directory; `--path ROOT` selects a
+different project root. It is read-only: it prints one `count<TAB>term` row per
+candidate and never changes the glossary. Candidates follow the configured
+file patterns and length/common-word filters, and exclude language keywords,
+primitive types, and common standard-library, SQL, and English noise words.
+Project-specific evidence from
+documentation, file names, or string literals ranks first, then occurrence
+count descending and term alphabetically. Hidden files and directories,
+`target`, `node_modules`, `vendor`, `dist`, and `build` directories, symlinks,
+binary or non-UTF-8 files, unreadable files, and files larger than 1 MiB are
+skipped.
+
 ### Auto-learning toggle
 
 The `auto_learn_corrections` preference (default `true`) controls whether
@@ -1300,6 +1324,11 @@ When a glossary substitution is successfully applied to a transcript, the
 term's `frequency` is bumped. Bumps are accumulated in memory and flushed to
 disk at most every 30 seconds to avoid write churn. Frequency influences
 ordering in the Whisper bias prompt.
+
+Failed flushes retain the pending counts, including counts recorded while a
+flush was running, for a later attempt. Automatic attempts remain spaced by
+at least 30 seconds even after a failure. Frequency saves replace the glossary
+atomically, preserving a symlinked glossary and unrelated entry fields.
 
 ### Ambiguous vs unambiguous classification
 
@@ -1702,6 +1731,8 @@ daemon (I4/I5 hold *per instance*).
 | Focus-state file | `~/Library/Caches/Always/focus-state.json` | `focus-state-dev.json` |
 | Daemon build identity | `always.build-id` in the state dir | `always.build-id` in the dev state dir |
 | Daemon logs | `~/Library/Logs/Always` | `~/Library/Logs/Always-dev` |
+| Menu bar icon | monochrome (system template) | orange |
+| Settings sidebar | no banner | "Development build" banner above the daemon status |
 
 Shared deliberately: `~/Library/Application Support/always/models` and the
 `~/Library/Caches/always` model caches — immutable downloads, reused by both.

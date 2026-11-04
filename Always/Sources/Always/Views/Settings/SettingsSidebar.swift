@@ -36,6 +36,9 @@ struct SettingsSidebar: View {
                 sidebarItem(for: panel)
             }
             Spacer()
+            if AppInstance.isDev {
+                devBanner
+            }
             Divider().padding(.horizontal, 12)
             statusFooter
         }
@@ -76,6 +79,24 @@ struct SettingsSidebar: View {
         .buttonStyle(.plain)
         .focusable(false)
         .padding(.horizontal, 8)
+    }
+
+    private var devBanner: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("Development build", systemImage: "hammer.fill")
+                .font(.caption.bold())
+                .foregroundColor(.orange)
+            Text("Always Dev runs beside Always with its own settings and data. Rebuilds keep a stable signature so macOS keeps its permissions.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.12))
+        .cornerRadius(6)
+        .padding(.horizontal, 8)
+        .padding(.bottom, 8)
     }
 
     private var statusFooter: some View {
