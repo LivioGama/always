@@ -1,0 +1,1 @@
+**dictation:** Share chunk audio with retry storage instead of copying it, reducing temporary allocations while preserving failed-audio recovery. Keep glossary usage counts queued when saving fails, retry without repeated disk churn, and save atomically so a failed write cannot truncate the glossary.

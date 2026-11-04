@@ -1308,6 +1308,11 @@ term's `frequency` is bumped. Bumps are accumulated in memory and flushed to
 disk at most every 30 seconds to avoid write churn. Frequency influences
 ordering in the Whisper bias prompt.
 
+Failed flushes retain the pending counts, including counts recorded while a
+flush was running, for a later attempt. Automatic attempts remain spaced by
+at least 30 seconds even after a failure. Frequency saves replace the glossary
+atomically, preserving a symlinked glossary and unrelated entry fields.
+
 ### Ambiguous vs unambiguous classification
 
 Mistranscriptions that are also common English words (e.g. "cloud" as a
