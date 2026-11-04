@@ -1,1 +1,0 @@
-**feature:** `always vocab extract [--path ROOT]` scans a project read-only and prints ranked candidate terms with occurrence counts, ready for vocabulary review. ([#174](https://github.com/LivioGama/always/pull/174))
