@@ -743,24 +743,36 @@ impl RecChild {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .with_context(|| format!("failed to run '{}'", path.display()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .context("capture helper stdout missing")?;
+        let Some(stdout) = child.stdout.take() else {
+            Self::kill_and_reap(&mut child, false);
+            anyhow::bail!("capture helper stdout missing");
+        };
         let cue_stdin = child.stdin.take();
         if let Some(stderr) = child.stderr.take() {
-            std::thread::spawn(move || {
-                use std::io::{BufRead, BufReader};
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        note_capture_helper_line(trimmed);
-                        tracing::info!(line = %trimmed, "capture_helper_stderr");
+            let spawned = std::thread::Builder::new()
+                .name("capture-helper-stderr".into())
+                .spawn(move || {
+                    use std::io::{BufRead, BufReader};
+                    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            note_capture_helper_line(trimmed);
+                            tracing::info!(line = %trimmed, "capture_helper_stderr");
+                        }
                     }
-                }
-            });
+                });
+            if let Err(error) = spawned {
+                Self::kill_and_reap(&mut child, false);
+                return Err(error).context("failed to start capture helper stderr thread");
+            }
         }
-        let readiness = wait_readable(stdout.as_raw_fd(), CAPTURE_HELPER_FIRST_BYTES_MS)?;
+        let readiness = match wait_readable(stdout.as_raw_fd(), CAPTURE_HELPER_FIRST_BYTES_MS) {
+            Ok(readiness) => readiness,
+            Err(error) => {
+                Self::kill_and_reap(&mut child, false);
+                return Err(error.into());
+            }
+        };
         // Readable could also be EOF (helper exited, e.g. VPIO unavailable).
         // The hang-up flag is authoritative: `try_wait` alone races, since
         // the pipe closes before the exit becomes waitable, which let a dead
@@ -778,7 +790,13 @@ impl RecChild {
             first_bytes_ms = started.elapsed().as_millis() as u64,
             "capture_helper_spawned"
         );
-        let ring = Self::start_reader(stdout, started, "capture-reader")?;
+        let ring = match Self::start_reader(stdout, started, "capture-reader") {
+            Ok(ring) => ring,
+            Err(error) => {
+                Self::kill_and_reap(&mut child, false);
+                return Err(error);
+            }
+        };
         // Only a voice-processing (`--vp`) helper renders cues — a plain
         // one runs input-only and ignores its stdin.
         *CAPTURE_CUE_SINK.lock() = if args.contains(&"--vp") {
@@ -870,40 +888,55 @@ impl RecChild {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .with_context(|| format!("Failed to run '{}'", rec_path.display()))?;
-        let stdout = child.stdout.take().context("sox stdout missing")?;
-        let ring = Self::start_reader(stdout, Instant::now(), "rec-reader")?;
+        let Some(stdout) = child.stdout.take() else {
+            Self::kill_and_reap(&mut child, true);
+            anyhow::bail!("sox stdout missing");
+        };
+        let ring = match Self::start_reader(stdout, Instant::now(), "rec-reader") {
+            Ok(ring) => ring,
+            Err(error) => {
+                Self::kill_and_reap(&mut child, true);
+                return Err(error);
+            }
+        };
         if let Some(stderr) = child.stderr.take() {
             let overruns = Arc::clone(&overruns);
             // Drain stderr on a background thread; log every non-empty
             // line as a daemon warning so SoX/CoreAudio errors surface
             // in the structured log instead of disappearing.
-            std::thread::spawn(move || {
-                use std::io::{BufRead, BufReader};
-                let reader = BufReader::new(stderr);
-                for line in reader.lines().map_while(Result::ok) {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    if trimmed.contains("buffer overrun") {
-                        // Overruns while capture is deliberately gated are
-                        // backpressure we created ourselves — nobody drains
-                        // the pipe during a gate, SoX blocks, CoreAudio
-                        // discards. Expected, not a device fault: don't
-                        // count them toward a respawn.
-                        if crate::always::pause::should_gate_capture() {
+            let spawned = std::thread::Builder::new()
+                .name("rec-stderr".into())
+                .spawn(move || {
+                    use std::io::{BufRead, BufReader};
+                    let reader = BufReader::new(stderr);
+                    for line in reader.lines().map_while(Result::ok) {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
                             continue;
                         }
-                        let count = overruns.record();
-                        // Avoid flooding the log — first + every 32nd.
-                        if count == 1 || count.is_multiple_of(32) {
-                            tracing::warn!(count, line = %trimmed, "rec_coreaudio_overrun");
+                        if trimmed.contains("buffer overrun") {
+                            // Overruns while capture is deliberately gated are
+                            // backpressure we created ourselves — nobody drains
+                            // the pipe during a gate, SoX blocks, CoreAudio
+                            // discards. Expected, not a device fault: don't
+                            // count them toward a respawn.
+                            if crate::always::pause::should_gate_capture() {
+                                continue;
+                            }
+                            let count = overruns.record();
+                            // Avoid flooding the log — first + every 32nd.
+                            if count == 1 || count.is_multiple_of(32) {
+                                tracing::warn!(count, line = %trimmed, "rec_coreaudio_overrun");
+                            }
+                            continue;
                         }
-                        continue;
+                        tracing::warn!(line = %trimmed, "rec_stderr");
                     }
-                    tracing::warn!(line = %trimmed, "rec_stderr");
-                }
-            });
+                });
+            if let Err(error) = spawned {
+                Self::kill_and_reap(&mut child, true);
+                return Err(error).context("failed to start rec stderr thread");
+            }
         }
         tracing::info!(
             pid = child.id(),
@@ -919,6 +952,19 @@ impl RecChild {
             overruns,
             own_group: true,
         })
+    }
+
+    fn kill_and_reap(child: &mut std::process::Child, own_group: bool) {
+        if own_group {
+            // SoX uses its PID as a private process-group ID; clean up helpers
+            // it forked as well as the direct child on startup failures.
+            if unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) } != 0 {
+                let _ = child.kill();
+            }
+        } else {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
     }
 
     /// Wall-clock age of this recorder process.
@@ -1795,6 +1841,52 @@ mod tests {
         assert!(
             started.elapsed().as_millis() < 2_000,
             "EOF must not wait out the timeout"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn kill_and_reap_stops_child() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+
+        super::RecChild::kill_and_reap(&mut child, false);
+
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_and_reap_stops_process_group_descendants() {
+        use std::io::BufRead as _;
+        use std::os::unix::process::CommandExt as _;
+
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30 & echo $!; wait"])
+            .process_group(0)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn shell with descendant");
+        let mut descendant = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut descendant)
+            .expect("read descendant pid");
+        let descendant: libc::pid_t = descendant.trim().parse().expect("parse descendant pid");
+
+        super::RecChild::kill_and_reap(&mut child, true);
+
+        assert!(child.try_wait().unwrap().is_some());
+        let status = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p"])
+            .arg(descendant.to_string())
+            .output()
+            .expect("inspect descendant process state");
+        let state = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            state.trim().is_empty() || state.trim().starts_with('Z'),
+            "group cleanup must stop the forked child, state: {state:?}"
         );
     }
 
