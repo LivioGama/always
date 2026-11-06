@@ -235,6 +235,11 @@ VPIO's noise suppression was not measurable on a single-speaker machine.
    itself under 400 ms in total gets the short 200 ms cut.
 7. **Transcribe** — the speculative result is used if still valid, otherwise a
    fresh transcription runs.
+   For Groq, speculative requests, pause-flushed chunks, and final or tail
+   recovery requests omit the contiguous trailing frames VAD has classified as
+   silence. This changes only the audio sent to transcription; captured sample
+   coordinates and the configured end-of-utterance window still include those
+   frames.
 8. **Post-process** — filters, glossary corrections, grammar cleanup (§9).
    A rule-filtered utterance (not a hallucination) is still copied to the
    clipboard — no paste, no auto-Enter — so a wrong filter verdict costs a

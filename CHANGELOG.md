@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-06
+
+### Fixed
+- **dictation:** Groq transcription omits trailing frames VAD classified as silence; pause and end-of-utterance timing is unchanged. ([#184](https://github.com/LivioGama/always/pull/184))
+
 ## [0.1.3] - 2026-11-04
 
 ### Added
