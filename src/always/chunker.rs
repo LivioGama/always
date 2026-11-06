@@ -69,7 +69,7 @@ struct ChunkSlot {
     overlaps_prev: bool,
     /// `None` while the background transcription is in flight.
     result: Mutex<Option<Result<ChunkText, String>>>,
-    audio: Mutex<Option<Vec<i16>>>,
+    audio: Mutex<Option<Arc<Vec<i16>>>>,
 }
 
 /// Raw Whisper text plus the grammar-corrected variant when the per-chunk
@@ -440,11 +440,12 @@ impl ChunkAccumulator {
             with_context.extend_from_slice(&audio_chunk);
             audio_chunk = with_context;
         }
+        let audio_chunk = Arc::new(audio_chunk);
         let slot = Arc::new(ChunkSlot {
             index,
             overlaps_prev,
             result: Mutex::new(None),
-            audio: Mutex::new(Some(audio_chunk.clone())),
+            audio: Mutex::new(Some(Arc::clone(&audio_chunk))),
         });
         self.slots.lock().push(Arc::clone(&slot));
         tracing::info!(chunk = index, secs, context_ms, "chunk_flush");
@@ -460,6 +461,7 @@ impl ChunkAccumulator {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                 || -> Result<TranscriptionResult> {
                     let wav = audio::create_wav_bytes_i16_mono_16k(&audio_chunk)?;
+                    drop(audio_chunk);
                     transcriber
                         .transcribe_from_bytes(wav)
                         .map_err(anyhow::Error::from)
@@ -662,8 +664,9 @@ impl ChunkAccumulator {
     }
 
     fn retry_sync(&self, slot: &ChunkSlot, transcriber: &Arc<dyn Transcriber>) -> Option<String> {
-        let audio_copy = slot.audio.lock().clone()?;
-        let wav = audio::create_wav_bytes_i16_mono_16k(&audio_copy).ok()?;
+        let audio = Arc::clone(slot.audio.lock().as_ref()?);
+        let wav = audio::create_wav_bytes_i16_mono_16k(&audio).ok()?;
+        drop(audio);
         match transcriber.transcribe_from_bytes(wav) {
             Ok(result) => {
                 *slot.audio.lock() = None;
@@ -681,7 +684,7 @@ impl ChunkAccumulator {
     /// Write a lost chunk's WAV to the failed-chunks dir so its speech
     /// stays recoverable. Nothing is added to the transcript.
     fn spill(&self, slot: &ChunkSlot) {
-        let Some(audio_samples) = slot.audio.lock().clone() else {
+        let Some(audio_samples) = slot.audio.lock().as_ref().cloned() else {
             // Transcription succeeded but the result was consumed by a
             // racing path — nothing to spill.
             return;
@@ -936,6 +939,7 @@ mod tests {
     /// fails for indices in `fail_calls`.
     struct MockTranscriber {
         calls: AtomicUsize,
+        audio: std::sync::Mutex<Vec<Vec<u8>>>,
         texts: Vec<&'static str>,
         fail_calls: Vec<usize>,
         /// Calls that hang for 3 s before answering (a stalled engine).
@@ -943,7 +947,8 @@ mod tests {
     }
 
     impl Transcriber for MockTranscriber {
-        fn transcribe_from_bytes(&self, _audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
+        fn transcribe_from_bytes(&self, audio: Vec<u8>) -> Result<TranscriptionResult, SttError> {
+            self.audio.lock().unwrap().push(audio);
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             if self.stall_calls.contains(&call) {
                 std::thread::sleep(Duration::from_secs(3));
@@ -981,6 +986,7 @@ mod tests {
     fn mock(texts: Vec<&'static str>, fail_calls: Vec<usize>) -> Arc<dyn Transcriber> {
         Arc::new(MockTranscriber {
             calls: AtomicUsize::new(0),
+            audio: std::sync::Mutex::new(Vec::new()),
             texts,
             fail_calls,
             stall_calls: vec![],
@@ -1038,12 +1044,23 @@ mod tests {
     fn failed_chunk_retries_synchronously() {
         let rt = rt();
         // Call 0 (background) fails; call 1 (sync retry) succeeds.
-        let t = mock(vec!["recovered text", "recovered text"], vec![0]);
+        let mock = Arc::new(MockTranscriber {
+            calls: AtomicUsize::new(0),
+            audio: std::sync::Mutex::new(Vec::new()),
+            texts: vec!["recovered text", "recovered text"],
+            fail_calls: vec![0],
+            stall_calls: vec![],
+        });
+        let t: Arc<dyn Transcriber> = mock.clone();
         let mut acc = ChunkAccumulator::new();
-        acc.flush(vec![0i16; 16_000], &t, None, rt.handle());
+        let samples: Vec<i16> = (0..16_000).map(|i| (i as i16).wrapping_mul(17)).collect();
+        acc.flush(samples, &t, None, rt.handle());
         let joined = acc.finalize(&t);
         assert_eq!(joined.text, "recovered text");
         assert_eq!(joined.failed_chunks, 0);
+        let audio = mock.audio.lock().unwrap();
+        assert_eq!(audio.len(), 2, "background attempt and retry both ran");
+        assert_eq!(audio[0], audio[1], "retry received the original chunk");
     }
 
     #[test]
@@ -1125,6 +1142,7 @@ mod tests {
         let rt = rt();
         let t: Arc<dyn Transcriber> = Arc::new(MockTranscriber {
             calls: AtomicUsize::new(0),
+            audio: std::sync::Mutex::new(Vec::new()),
             texts: vec!["unused", "stalled words recovered"],
             fail_calls: vec![],
             stall_calls: vec![0],

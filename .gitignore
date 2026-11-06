@@ -14,7 +14,6 @@ build/
 *.log
 *.jsonl
 glossary.json
-.gitnexus
 Always/.build/
 Always/.swiftpm/
 .filtering_evolution_history.md
