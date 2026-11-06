@@ -40,7 +40,7 @@ jobs:
           # CodeQL ships first-class Swift support; Rust uses the
           # community-maintained queries via `rust` build-mode.
           - language: swift
-            runner: macos-14
+            runner: macos-15
           - language: actions
             runner: ubuntu-latest
 

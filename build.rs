@@ -295,8 +295,8 @@ fn build_apple_stt_bridge() {
 
     let speech_framework = Path::new(&sdk_path).join("System/Library/Frameworks/Speech.framework");
 
-    // SpeechTranscriber, SpeechAnalyzer, etc. require macOS 15+.
-    // CI runners (macOS 14) have Speech.framework but not these types.
+    // SpeechTranscriber, SpeechAnalyzer, etc. require the macOS 26 SDK.
+    // Older SDKs have Speech.framework but not these types.
     let sdk_version_output = Command::new("xcrun")
         .args(["--show-sdk-version"])
         .output()
@@ -312,7 +312,7 @@ fn build_apple_stt_bridge() {
                 .next()
                 .and_then(|m| m.parse().ok())
                 .unwrap_or(0);
-            major >= 15
+            major >= 26
         })
         .unwrap_or(false);
 
@@ -323,7 +323,7 @@ fn build_apple_stt_bridge() {
     } else {
         if let Some(ref v) = sdk_version_output {
             println!(
-                "cargo:warning=SDK version {} detected; SpeechTranscriber requires macOS 15+.",
+                "cargo:warning=SDK version {} detected; SpeechTranscriber requires the macOS 26 SDK.",
                 v
             );
         }
