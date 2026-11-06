@@ -9,13 +9,16 @@ Branch model:
 
 - **`develop`** is where work lands. Pull requests target it.
 - **`main`** is protected and deploys. It receives changes only through a
-  `release-x.y.z` pull request cut from `develop`, merged as a **merge commit**
-  (never squash or rebase: develop/main ancestry must stay intact).
-- A release is the tag **`vX.Y.Z` on main's merge commit**. Pushing the tag runs
+  `release-x.y.z` pull request cut from `develop`, merged with an enabled GitHub
+  method. This repository currently disallows merge commits, so squash the PR;
+  never rebase it. The candidate checker verifies the landed tree exactly.
+- A release is the tag **`vX.Y.Z` on main's validated landing commit**. Pushing the tag runs
   `.github/workflows/release.yml`. Ordinary CI does not run on tags.
-- After the tag, **`main` is back-merged into `develop`** (fast-forward when
-  possible), so the tag is an ancestor of develop and the next
-  `prepare.sh` inventory is exact.
+- After the tag, **sync `main` back into `develop` before new work lands**. This
+  repository disallows merge commits, so create a sync branch from `develop`,
+  merge `main` into it, then squash that PR into `develop`. The release tree
+  will be recorded in develop's first-parent history; the candidate checker
+  uses that exact tree checkpoint when commit ancestry is unavailable.
 
 ## What the tag does
 
@@ -79,16 +82,18 @@ results; failure class; next action. On resume re-read live state (`gh pr view`,
 git fetch origin --tags
 git status --short                                   # clean
 LAST=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)
-git merge-base --is-ancestor "$LAST" origin/develop && echo "$LAST is on develop"
+LAST_TREE=$(git rev-parse "$LAST^{tree}")
+git log --first-parent --format=%T origin/develop | grep -Fx "$LAST_TREE" >/dev/null && echo "$LAST tree is in develop history"
 git log --oneline "$LAST"..origin/develop | head     # something to release
 gh run list --branch develop --workflow ci.yml --status completed -L 1    # success
 gh run list --branch main --workflow ci.yml --status completed -L 1       # success
-git merge-base --is-ancestor origin/main origin/develop && echo "main has nothing develop lacks"
+MAIN_TREE=$(git rev-parse 'origin/main^{tree}')
+git log --first-parent --format=%T origin/develop | grep -Fx "$MAIN_TREE" >/dev/null && echo "main tree is in develop history"
 ```
 
-If `main` has commits `develop` lacks (a hotfix), back-merge main into develop
-first; `check-candidate.py` refuses otherwise. A red `cargo deny check` is a
-`chore(deps)` PR into develop before the cut. Run the dry run early.
+If main's tree is absent from develop's first-parent history, sync main into
+develop first; `check-candidate.py` refuses otherwise. A red `cargo deny check`
+is a `chore(deps)` PR into develop before the cut. Run the dry run early.
 
 ## 2. Pick the version
 
@@ -157,7 +162,7 @@ Immediately before merging:
 ```bash
 git fetch origin
 python3 .agents/skills/release/check-candidate.py "$BASE" "$PREPARE_HEAD" --main "$MAIN_BASE" --tip origin/main
-gh pr merge <n> --merge                  # MERGE COMMIT. Not --squash, not --rebase.
+gh pr merge <n> --squash                 # this repository disallows merge commits
 ```
 
 If main moved or GitHub reports BEHIND, refresh coverage and validation; never
@@ -181,12 +186,18 @@ gh run watch <run-id> --exit-status                         # in the background
 
 Pass run ids literally (zsh does not word-split unquoted `$var`).
 
-## 5. Back-merge and verify
+## 5. Sync the release into develop and verify
 
 ```bash
 git fetch origin
-git switch develop && git merge --ff-only origin/main || git merge origin/main   # tag becomes an ancestor of develop
-git push origin develop
+git switch -c codex/sync-vX.Y.Z-to-develop origin/develop
+git merge --no-ff origin/main -m "chore(release): sync vX.Y.Z from main"
+git diff --stat origin/develop HEAD           # release metadata and any changes already on develop
+git push -u origin codex/sync-vX.Y.Z-to-develop
+gh pr create --base develop --head codex/sync-vX.Y.Z-to-develop --title "chore(release): sync vX.Y.Z into develop"
+gh pr merge <n> --squash
+git fetch origin
+git log --first-parent --format=%T origin/develop | grep -Fx "$(git rev-parse 'origin/main^{tree}')" >/dev/null
 ```
 
 Then verify from the published state, into a fresh directory:
