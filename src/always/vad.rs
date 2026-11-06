@@ -16,6 +16,26 @@ use crate::always::pause;
 use crate::always::vad_silero::SileroVad;
 use crate::stt::Transcriber;
 
+/// Remove only the contiguous suffix already classified as VAD silence.
+/// `speaker_trimmed_tail_samples` avoids removing samples that the speaker
+/// trim has already discarded from the same end of the buffer.
+fn trim_vad_silence<'a>(
+    samples: &'a [i16],
+    silence_frames: usize,
+    speaker_trimmed_tail_samples: usize,
+) -> &'a [i16] {
+    let vad_silence_samples = silence_frames.saturating_mul(FRAME_SAMPLES);
+    let remaining_silence = vad_silence_samples.saturating_sub(speaker_trimmed_tail_samples);
+    &samples[..samples.len().saturating_sub(remaining_silence)]
+}
+
+fn groq_uses_vad_tail_trim(cfg: &AlwaysConfig) -> bool {
+    matches!(
+        cfg.transcriber_backend,
+        crate::stt_dispatch::TranscriberBackendChoice::Groq
+    )
+}
+
 /// Speculative transcription slot with a generation counter so late
 /// writes from discarded speculation threads cannot poison the slot.
 struct SpeculationSlot {
@@ -2323,7 +2343,15 @@ fn record_with_local_vad(
                 && speech_samples.len() >= chunk_target_secs() as usize * 16_000
                 && speaker_gate_allows_stt(speaker_gate_requested, speaker_checked)
             {
-                committed_samples += speech_samples.len();
+                let captured_chunk_len = speech_samples.len();
+                let mut chunk_audio = std::mem::take(&mut speech_samples);
+                if groq_uses_vad_tail_trim(cfg) {
+                    let kept_samples = trim_vad_silence(&chunk_audio, consecutive_silence, 0).len();
+                    chunk_audio.truncate(kept_samples);
+                }
+                // Keep capture coordinates based on everything appended to
+                // the buffer, including silence removed only from ASR input.
+                committed_samples += captured_chunk_len;
                 let grammar = if cfg.postprocess_available() {
                     cfg.post_processor.clone()
                 } else {
@@ -2333,7 +2361,7 @@ fn record_with_local_vad(
                     cfg.stt_live_preview || crate::always::pause::is_consume_mode();
                 chunker.flush_with_context(
                     std::mem::take(&mut seam_context),
-                    std::mem::take(&mut speech_samples),
+                    chunk_audio,
                     transcriber,
                     grammar,
                     rt,
@@ -2400,7 +2428,14 @@ fn record_with_local_vad(
                 // Same edges the final paste will use (see
                 // `speaker_trim`): foreign lead-in/tail never transcribed.
                 spec_trim = speaker_timeline.plan(committed_samples, speech_samples.len());
-                let audio_snapshot = spec_trim.applied(&speech_samples);
+                let mut audio_snapshot = spec_trim.applied(&speech_samples);
+                if groq_uses_vad_tail_trim(cfg) {
+                    let speaker_tail =
+                        speech_samples.len() - spec_trim.keep(speech_samples.len()).end;
+                    let kept_samples =
+                        trim_vad_silence(&audio_snapshot, consecutive_silence, speaker_tail).len();
+                    audio_snapshot.truncate(kept_samples);
+                }
                 let transcriber_for_spec = Arc::clone(transcriber);
                 let slot = Arc::clone(&speculation_slot);
                 // For the speculative grammar warm below: the post-processor
@@ -2863,8 +2898,10 @@ fn record_with_local_vad(
     if speaker_gate_requested && !speaker_timeline.is_empty() {
         tracing::info!(windows = %speaker_timeline.summary(), "speaker_gate_timeline");
     }
+    let mut speaker_trimmed_tail_samples = 0;
     if !final_trim.is_empty() {
         let (lead, trail) = final_trim.apply(&mut speech_samples);
+        speaker_trimmed_tail_samples = trail;
         speaker_trimmed = true;
         tracing::info!(
             lead_secs = lead as f64 / 16_000.0,
@@ -2873,6 +2910,17 @@ fn record_with_local_vad(
             "speaker_gate_edges_trimmed"
         );
     }
+    // Retain `speech_samples` and all capture counters unchanged; only the
+    // audio handed to Groq omits the terminal frames classified as silence.
+    let stt_samples = if groq_uses_vad_tail_trim(cfg) {
+        trim_vad_silence(
+            &speech_samples,
+            consecutive_silence,
+            speaker_trimmed_tail_samples,
+        )
+    } else {
+        &speech_samples
+    };
     // The speculative pass transcribed the snapshot trimmed by the plan
     // known at kickoff; if a verdict landed since and moved an edge, its
     // text no longer matches the audio — transcribe afresh.
@@ -3017,8 +3065,8 @@ fn record_with_local_vad(
             Some(Ok(r)) => (r, true),
             _ => {
                 // No speculation, speculation errored, or timeout — do a fresh
-                // transcription with the full audio (including any trailing silence).
-                let wav_data = match audio::create_wav_bytes_i16_mono_16k(&speech_samples) {
+                // transcription with the remaining ASR input.
+                let wav_data = match audio::create_wav_bytes_i16_mono_16k(stt_samples) {
                     Ok(data) => data,
                     Err(err) => {
                         event::global_broadcaster().transcribing_stopped();
@@ -3062,7 +3110,7 @@ fn record_with_local_vad(
                 // Chunked tail: a Parakeet rescue starts only if this call
                 // runs abnormally long, so a recognizer timeout still has the
                 // tail's words ready without adding wait (see `TailRescue`).
-                let tail_rescue = has_chunks.then(|| TailRescue::arm(cfg, &speech_samples));
+                let tail_rescue = has_chunks.then(|| TailRescue::arm(cfg, stt_samples));
                 let transcribed = transcriber.transcribe_from_bytes(wav_data);
                 heartbeat_stop.store(true, Ordering::Relaxed);
                 let _ = heartbeat_handle.join();
@@ -3085,7 +3133,7 @@ fn record_with_local_vad(
                         // — the only recovery for a non-English Apple tail
                         // or the Parakeet V3 backend, where no rescue runs.
                         let text = recover_failed_chunked_tail(
-                            &speech_samples,
+                            stt_samples,
                             &anyhow::Error::from(err),
                             chunker.chunk_count(),
                             |span| {
@@ -3665,9 +3713,30 @@ mod tests {
         fast_normalized_energy, is_short_utterance_so_far, looks_mid_sentence,
         normal_silence_frames, normalized_energy, speaker_gate_allows_score,
         speaker_gate_allows_stt, speaker_gate_allows_transcription,
-        speaker_gate_dependencies_ready, voice_activity_energy_threshold,
+        speaker_gate_dependencies_ready, trim_vad_silence, voice_activity_energy_threshold,
     };
     use crate::always::AlwaysConfig;
+
+    #[test]
+    fn vad_tail_trim_removes_only_untrimmed_silent_frames() {
+        let active = vec![7; crate::always::audio::FRAME_SAMPLES * 2];
+        let samples = [active, vec![0; crate::always::audio::FRAME_SAMPLES * 3]].concat();
+
+        assert_eq!(
+            trim_vad_silence(&samples, 2, 0),
+            &samples[..crate::always::audio::FRAME_SAMPLES * 3]
+        );
+        assert_eq!(
+            trim_vad_silence(&samples, 2, 0).len(),
+            crate::always::audio::FRAME_SAMPLES * 3
+        );
+        assert_eq!(
+            trim_vad_silence(&samples, 3, crate::always::audio::FRAME_SAMPLES).len(),
+            crate::always::audio::FRAME_SAMPLES * 3
+        );
+        assert!(trim_vad_silence(&samples, usize::MAX, 0).is_empty());
+        assert_eq!(trim_vad_silence(&samples, 0, 0), samples);
+    }
 
     static CHUNK_TARGET_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
