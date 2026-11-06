@@ -403,11 +403,11 @@ fn sanitize_corrected_text(input: &str, output: &str) -> Option<String> {
         return None;
     }
 
-    // Correction models sometimes append conversational filler to an otherwise
-    // valid transcript. Treat that as a failed correction so the caller falls
-    // back to the words the user actually spoke. Do not strip it from the
-    // acoustic input: "thanks" can be intentional dictation.
-    if has_appended_gratitude(input, cleaned) {
+    // Correction models sometimes append canned closers to an otherwise valid
+    // transcript. Treat that as a failed correction so the caller falls back
+    // to the words the user actually spoke; these phrases remain valid when
+    // present in the acoustic input.
+    if has_appended_canned_phrase(input, cleaned) {
         return None;
     }
 
@@ -497,7 +497,7 @@ fn drops_spoken_content(input: &str, output: &str) -> bool {
     longest > MAX_DROPPED_RUN || dropped > MAX_DROPPED_RUN.max(n / 10)
 }
 
-fn has_appended_gratitude(input: &str, output: &str) -> bool {
+fn has_appended_canned_phrase(input: &str, output: &str) -> bool {
     let input_words = normalized_words(input);
     let output_words = normalized_words(output);
     [
@@ -505,6 +505,10 @@ fn has_appended_gratitude(input: &str, output: &str) -> bool {
         &["thanks"][..],
         &["thanks", "a", "lot"][..],
         &["thank", "you", "very", "much"][..],
+        &["i", "m", "going", "to", "go"][..],
+        &["i", "am", "going", "to", "go"][..],
+        &["i", "m", "gonna", "go"][..],
+        &["i", "gotta", "go"][..],
     ]
     .iter()
     .any(|suffix| ends_with_words(&output_words, suffix) && !ends_with_words(&input_words, suffix))
@@ -1162,11 +1166,28 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_corrected_text_rejects_model_appended_gratitude() {
+    fn sanitize_corrected_text_rejects_model_appended_canned_closers() {
         assert!(
             sanitize_corrected_text("Send the report.", "Send the report. Thank you.").is_none()
         );
         assert!(sanitize_corrected_text("Run the tests", "Run the tests. Thanks a lot.").is_none());
+        for ending in [
+            "I'm going to go.",
+            "I am going to go.",
+            "I'm gonna go.",
+            "I gotta go.",
+        ] {
+            let corrected = format!("Send the report. {ending}");
+            assert!(
+                sanitize_corrected_text("Send the report.", &corrected).is_none(),
+                "correction appended {ending:?}"
+            );
+        }
+        let spoken = "Send the report. I'm going to go.";
+        assert_eq!(
+            sanitize_corrected_text(spoken, spoken).as_deref(),
+            Some(spoken)
+        );
     }
 
     #[test]

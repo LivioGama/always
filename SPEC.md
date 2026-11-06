@@ -1098,13 +1098,15 @@ Between transcription and the keyboard:
    **Trailing canned closer** (2026-10-17, requested by Livio: "thank you"
    injected at the end of sentences). When a Groq result ends with a separate
    final sentence that normalizes to "thank you", "thanks", "thank you very
-   much", "(thank you|thanks) for watching", "bye" or "bye bye", preceded by at
-   least 4 words, that sentence is removed and the rest is pasted. Mid-sentence
-   uses are never touched. A final segment with its own metrics (avg_logprob
-   ≥ -0.15, no_speech_prob ≤ 0.05, differing from the previous segment) is
-   treated as genuine and kept. Known limit: Groq repeats one window's metrics
-   on every segment, so on Groq a genuine closing "Thank you." after ≥ 4 words
-   is also removed. ❓ Thresholds not tuned on real tail audio.
+   much", "(thank you|thanks) for watching", "bye", "bye bye", or one of
+   "I'm going to go" / "I am going to go" / "I'm gonna go" / "I gotta go",
+   preceded by at least 4 words, that sentence is removed and the rest is
+   pasted. Mid-sentence uses are never touched. A final segment with its own
+   metrics (avg_logprob ≥ -0.15, no_speech_prob ≤ 0.05, differing from the
+   previous segment) is treated as genuine and kept. Known limit: Groq repeats
+   one window's metrics on every segment, so on Groq a genuine closing "Thank
+   you." after ≥ 4 words is also removed. ❓ Thresholds not tuned on real tail
+   audio.
 2. **Vocabulary bias** — the user's glossary is sent to the model as a hint so
    domain terms transcribe correctly. **The hint must never reach the user's
    text**: these models echo their prompt back, especially on short or quiet
@@ -1144,6 +1146,11 @@ Between transcription and the keyboard:
      With today's latencies this almost never lands in time — it is kept
      as an option, not a dependency.
    - **Off** (`off`) — raw transcript + `local_cleanup` only.
+   - **Correction output guard** — if the Apple Intelligence or Groq grammar
+     correction adds a final canned departure ("I'm going to go", "I am going
+     to go", "I'm gonna go", or "I gotta go") that was absent from the
+     acoustic transcript, the correction is discarded and the dictated words
+     are kept. A phrase already spoken remains intact.
    - **Leading wake normalisation** (all modes, before the mode branch and
      the short-utterance/snippet paths, so the consume-mode handoff sees it
      too): a misheard assistant name as the FIRST token (or right after one
