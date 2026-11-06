@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-06
+
+### Fixed
+- **reliability:** recorder startup failures no longer leave orphaned processes, and macOS updates preserve the installed app if staging or signature validation fails. ([#188](https://github.com/LivioGama/always/pull/188))
+
+### Security
+- **privacy:** transcript history and the opt-in transcript stream are owner-only on Unix, including rotated files and data created by earlier versions. ([#188](https://github.com/LivioGama/always/pull/188))
+
 ## [0.1.4] - 2026-11-06
 
 ### Fixed
