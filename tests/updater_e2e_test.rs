@@ -11,6 +11,7 @@
 #![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -151,8 +152,23 @@ fn signed_release_is_downloaded_verified_and_installed_by_the_real_installer() {
     let old_bin = apps.join("Always.app/Contents/MacOS/always-daemon");
     fs::create_dir_all(old_bin.parent().unwrap()).unwrap();
     fs::write(&old_bin, "#!/bin/sh\necho 0.1.0\n").unwrap();
-    let plan = plan_install(Os::Mac, TARGET, &old_bin, Context::Cli, "prod", &HostProbe)
+    let mut plan = plan_install(Os::Mac, TARGET, &old_bin, Context::Cli, "prod", &HostProbe)
         .expect("a writable Always.app is updatable");
+    // This fixture's dummy app is not a signed Mach-O bundle; leave Minisign
+    // verification real and shim only the installer's code-signature check.
+    let test_tools = w.join("test-tools");
+    fs::create_dir_all(&test_tools).unwrap();
+    let codesign = test_tools.join("codesign");
+    fs::write(&codesign, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&codesign, fs::Permissions::from_mode(0o755)).unwrap();
+    plan.env.push((
+        "PATH",
+        format!(
+            "{}:{}",
+            test_tools.display(),
+            std::env::var("PATH").unwrap()
+        ),
+    ));
 
     let endpoints = Endpoints {
         api_latest: String::new(),

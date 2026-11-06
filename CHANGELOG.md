@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-06
+
+### Fixed
+- **dictation:** Groq transcription omits trailing frames VAD classified as silence; pause and end-of-utterance timing is unchanged. ([#184](https://github.com/LivioGama/always/pull/184))
+
+## [0.1.3] - 2026-11-04
+
+### Added
+- **feature:** `always vocab extract [--path ROOT]` scans a project read-only and prints ranked candidate terms with occurrence counts, ready for vocabulary review. ([#174](https://github.com/LivioGama/always/pull/174))
+
+### Changed
+- **dev build:** Always Dev shows an orange menu bar icon and a "Development build" banner in the Settings sidebar, so it is never mistaken for the installed app. ([#167](https://github.com/LivioGama/always/pull/167))
+
+### Fixed
+- **parakeet:** Decode predicted token durations so stutters and cut-off words no longer turn into long runs of repeated text in Parakeet V2, V3, and Ultra dictation. ([#165](https://github.com/LivioGama/always/pull/165))
+- **dictation:** Atomic glossary saves preserve the existing file permissions, keeping private vocabulary from becoming readable by other local users. ([#181](https://github.com/LivioGama/always/pull/181))
+- **live typing:** a stutter ("the the") no longer appears as a long run of repeated words while you speak, or when you paste a held transcript with ⌃⌥V: the same cleanup the final text gets now runs first. ([#166](https://github.com/LivioGama/always/pull/166))
+- **live typing:** the end of a dictation no longer appears two or three times in a busy app (seen in Claude Code during long sessions): the last words are now typed in small, spaced steps instead of one burst. ([#164](https://github.com/LivioGama/always/pull/164))
+- **dictation:** Share chunk audio with retry storage instead of copying it, reducing temporary allocations while preserving failed-audio recovery. Keep glossary usage counts queued when saving fails, retry without repeated disk churn, and save atomically so a failed write cannot truncate the glossary. ([#179](https://github.com/LivioGama/always/pull/179))
+
 ## [0.1.2] - 2026-10-22
 
 ### Added
