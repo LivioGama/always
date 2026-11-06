@@ -235,6 +235,11 @@ VPIO's noise suppression was not measurable on a single-speaker machine.
    itself under 400 ms in total gets the short 200 ms cut.
 7. **Transcribe** — the speculative result is used if still valid, otherwise a
    fresh transcription runs.
+   For Groq, speculative requests, pause-flushed chunks, and final or tail
+   recovery requests omit the contiguous trailing frames VAD has classified as
+   silence. This changes only the audio sent to transcription; captured sample
+   coordinates and the configured end-of-utterance window still include those
+   frames.
 8. **Post-process** — filters, glossary corrections, grammar cleanup (§9).
    A rule-filtered utterance (not a hallucination) is still copied to the
    clipboard — no paste, no auto-Enter — so a wrong filter verdict costs a
@@ -891,6 +896,9 @@ offline; the cloud backend is faster to start and needs an API key.
   engine with a real implementation, a correct download size, and a checksum.
 - A local model may be armed as fallback for the cloud backend; failures fall
   back silently but are logged.
+- **Local Parakeet decoding honors token durations.** A token spanning
+  multiple audio frames is decoded once, so a stutter or cut-off word does not
+  create repeated copies solely because of that duration.
 - **Groq daily quota used up (product-owner request 2026-10-22).** When Groq
   answers 429 with `x-ratelimit-remaining-requests: 0` (Groq's request
   headers always describe the per-day quota), the daemon sends
@@ -1290,6 +1298,20 @@ their vocabulary correctly from day one.
   ignores the marker, and works on every platform; use it after installing
   Wispr Flow or SuperWhisper later.
 
+### Project vocabulary extraction
+
+`always vocab extract` scans the current directory; `--path ROOT` selects a
+different project root. It is read-only: it prints one `count<TAB>term` row per
+candidate and never changes the glossary. Candidates follow the configured
+file patterns and length/common-word filters, and exclude language keywords,
+primitive types, and common standard-library, SQL, and English noise words.
+Project-specific evidence from
+documentation, file names, or string literals ranks first, then occurrence
+count descending and term alphabetically. Hidden files and directories,
+`target`, `node_modules`, `vendor`, `dist`, and `build` directories, symlinks,
+binary or non-UTF-8 files, unreadable files, and files larger than 1 MiB are
+skipped.
+
 ### Auto-learning toggle
 
 The `auto_learn_corrections` preference (default `true`) controls whether
@@ -1307,6 +1329,11 @@ When a glossary substitution is successfully applied to a transcript, the
 term's `frequency` is bumped. Bumps are accumulated in memory and flushed to
 disk at most every 30 seconds to avoid write churn. Frequency influences
 ordering in the Whisper bias prompt.
+
+Failed flushes retain the pending counts, including counts recorded while a
+flush was running, for a later attempt. Automatic attempts remain spaced by
+at least 30 seconds even after a failure. Frequency saves replace the glossary
+atomically, preserving a symlinked glossary and unrelated entry fields.
 
 ### Ambiguous vs unambiguous classification
 
@@ -1597,6 +1624,9 @@ including while loading or empty. With no entries, its message is centered in
 the space below the header; populated history uses that space for its list.
 The Linux and Windows Tauri History panel reads daemon history rows from
 `history.jsonl`, using the daemon's `ts` millisecond timestamp and `raw_text`.
+Transcript history stays local to the user's account. On Unix,
+`history.jsonl` and its rotated `history.jsonl.old` are mode 0600; reads and
+appends tighten files created by earlier versions too.
 
 **Settings controls.** Settings labels and explanatory text are not selectable
 as ordinary web text. Inputs, editable text, and transcript-history entries
@@ -1652,7 +1682,7 @@ the app has identified the platform, avoiding a Windows warning flash on Linux.
 | `idle_pause_secs` | 0 (off) | Idle auto-pause |
 | `postprocess_mode` | unset → migrated (§9 item 6) | `fast` · `apple` · `groq` · `off` |
 | `postprocess_enabled` | true | Legacy; only read to migrate `postprocess_mode` when unset |
-| `transcript_stream` | true | Append accepted utterances to `~/.always/transcripts.jsonl` |
+| `transcript_stream` | true | Append accepted utterances to `~/.always/transcripts.jsonl`; on Unix, the active and `.old` files are owner-only |
 | `capture_aec` | false (unset = off) | Echo-cancelled (VPIO) capture via `always-capture` (§3); false = plain helper (`--no-vp`) |
 | `audible_status_sound` | off | Sound cues (off/low/medium/high; see §10.1) |
 | `per_app_settings_json` | — | Per-application pause rules |

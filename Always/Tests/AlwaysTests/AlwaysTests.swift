@@ -517,16 +517,19 @@ final class AlwaysTests: XCTestCase {
 
     private func resetOverlayState(_ monitor: StateMonitor) {
         StatusOverlayController.shared.hide()
+        waitForStatusOverlayToHide()
+        // Drain UDSClient's queued initial connection state before injecting synthetic state.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
         monitor.currentModelSupportsStreaming = false
         monitor.isDaemonConnected = true
         monitor.isPaused = false
         monitor.isMasterPaused = false
+        monitor.daemonPaused = false
         monitor.isIdleAutoPaused = false
         monitor.isTranscribing = false
         monitor.isVoiceActivity = false
         monitor.partialTranscript = ""
         monitor.invalidateAppliedOverlay()
-        waitForStatusOverlayToHide()
     }
 
     /// The HUD must leave as soon as the text is final. It used to re-show
@@ -565,6 +568,7 @@ final class AlwaysTests: XCTestCase {
         StatusOverlayController.shared.flash(state: .autoEnterOn, duration: 0.3)
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.6))
 
+        XCTAssertTrue(monitor.isVoiceActivity, "voice activity should still be live")
         XCTAssertFalse(StatusOverlayController.shared.isFlashActive())
         XCTAssertTrue(isStatusOverlayVisible())
         let shown = NSApplication.shared.windows

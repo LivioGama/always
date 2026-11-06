@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime};
 
@@ -132,6 +132,7 @@ const FREQ_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 static PENDING_BUMPS: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
 /// Timestamp of the last disk flush.
 static LAST_FLUSH: OnceLock<Mutex<Instant>> = OnceLock::new();
+static FLUSH_LOCK: Mutex<()> = Mutex::new(());
 
 fn pending_bumps() -> &'static Mutex<HashMap<String, i64>> {
     PENDING_BUMPS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -139,6 +140,15 @@ fn pending_bumps() -> &'static Mutex<HashMap<String, i64>> {
 
 fn last_flush() -> &'static Mutex<Instant> {
     LAST_FLUSH.get_or_init(|| Mutex::new(Instant::now()))
+}
+
+fn should_flush_bumps(last: &mut Instant, now: Instant) -> bool {
+    if now.saturating_duration_since(*last) >= FREQ_FLUSH_INTERVAL {
+        *last = now;
+        true
+    } else {
+        false
+    }
 }
 
 /// Record that a glossary term was successfully applied to a transcript.
@@ -155,53 +165,83 @@ pub fn bump_frequency(term: &str) {
 /// Flush pending bumps if the flush interval has elapsed.
 fn maybe_flush_bumps() {
     let should_flush = {
-        let last = *last_flush().lock().unwrap();
-        last.elapsed() >= FREQ_FLUSH_INTERVAL
+        let mut last = last_flush().lock().unwrap();
+        should_flush_bumps(&mut last, Instant::now())
     };
-    if should_flush {
-        let _ = flush_bumps();
+    if should_flush && let Err(e) = flush_bumps() {
+        tracing::warn!(error = %e, "glossary_frequency_flush_failed");
     }
 }
 
 /// Write all pending frequency bumps to `glossary.json` and reset the
 /// accumulator. Returns the number of entries updated.
 pub fn flush_bumps() -> Result<usize> {
-    let bumps: HashMap<String, i64> = {
-        let mut bumps = pending_bumps().lock().unwrap();
-        if bumps.is_empty() {
+    let _flush = FLUSH_LOCK.lock().unwrap();
+    if pending_bumps().lock().unwrap().is_empty() {
+        return Ok(0);
+    }
+    let path = locate_glossary().context("locate glossary.json for frequency bump")?;
+    let result = flush_bumps_to(pending_bumps(), &path, crate::always::vocab::write_atomic);
+    *last_flush().lock().unwrap() = Instant::now();
+    result
+}
+
+fn flush_bumps_to(
+    pending: &Mutex<HashMap<String, i64>>,
+    path: &Path,
+    write: impl FnOnce(&Path, &[u8]) -> Result<()>,
+) -> Result<usize> {
+    let bumps = {
+        let mut pending = pending.lock().unwrap();
+        if pending.is_empty() {
             return Ok(0);
         }
-        std::mem::take(&mut *bumps)
+        std::mem::take(&mut *pending)
     };
 
-    let path = locate_glossary().context("locate glossary.json for frequency bump")?;
-    let raw = std::fs::read_to_string(&path).context("read glossary.json for bump")?;
-    let mut entries: Vec<serde_json::Value> =
-        serde_json::from_str(&raw).context("parse glossary.json for bump")?;
+    let result = (|| {
+        let raw = std::fs::read_to_string(path).context("read glossary.json for bump")?;
+        let mut entries: Vec<serde_json::Value> =
+            serde_json::from_str(&raw).context("parse glossary.json for bump")?;
 
-    let mut updated = 0;
-    for entry in entries.iter_mut() {
-        if let Some(term) = entry.get("term").and_then(|t| t.as_str())
-            && let Some(&delta) = bumps.get(&term.to_lowercase())
-        {
-            let freq = entry
-                .get("frequency")
-                .and_then(|f| f.as_i64())
-                .unwrap_or(100);
-            entry["frequency"] = serde_json::json!(freq + delta);
-            updated += 1;
+        let mut updated = 0;
+        for entry in entries.iter_mut() {
+            if let Some(term) = entry.get("term").and_then(|t| t.as_str())
+                && let Some(&delta) = bumps.get(&term.to_lowercase())
+            {
+                let freq = entry
+                    .get("frequency")
+                    .and_then(|f| f.as_i64())
+                    .unwrap_or(100);
+                entry["frequency"] = serde_json::json!(freq + delta);
+                updated += 1;
+            }
+        }
+
+        if updated > 0 {
+            let json = serde_json::to_string_pretty(&entries)?;
+            write(path, json.as_bytes()).context("write glossary.json after bump")?;
+        }
+
+        Ok(updated)
+    })();
+
+    match result {
+        Ok(updated) => {
+            if updated > 0 {
+                invalidate_cache();
+                tracing::debug!(updated, "glossary_frequency_bumped");
+            }
+            Ok(updated)
+        }
+        Err(error) => {
+            let mut pending = pending.lock().unwrap();
+            for (term, delta) in bumps {
+                *pending.entry(term).or_insert(0) += delta;
+            }
+            Err(error)
         }
     }
-
-    if updated > 0 {
-        let json = serde_json::to_string_pretty(&entries)?;
-        std::fs::write(&path, json).context("write glossary.json after bump")?;
-        invalidate_cache();
-        tracing::debug!(updated, "glossary_frequency_bumped");
-    }
-
-    *last_flush().lock().unwrap() = Instant::now();
-    Ok(updated)
 }
 
 fn entries() -> Vec<Entry> {
@@ -592,6 +632,74 @@ fn locate_glossary() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_flush_attempts_are_throttled_after_failure() {
+        let start = Instant::now();
+        let mut last = start;
+        assert!(!should_flush_bumps(
+            &mut last,
+            start + FREQ_FLUSH_INTERVAL - std::time::Duration::from_secs(1)
+        ));
+        assert!(should_flush_bumps(&mut last, start + FREQ_FLUSH_INTERVAL));
+        assert!(!should_flush_bumps(
+            &mut last,
+            start + FREQ_FLUSH_INTERVAL + std::time::Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn failed_glossary_read_or_parse_restores_pending_frequency_bumps() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let malformed = dir.path().join("malformed");
+        std::fs::write(&malformed, b"not json").unwrap();
+
+        for path in [&missing, &malformed] {
+            let pending = Mutex::new(HashMap::from([("acme".to_string(), 2)]));
+            assert!(flush_bumps_to(&pending, path, crate::always::vocab::write_atomic).is_err());
+            assert_eq!(
+                *pending.lock().unwrap(),
+                HashMap::from([("acme".to_string(), 2)])
+            );
+        }
+    }
+
+    #[test]
+    fn failed_write_keeps_and_merges_bumps_for_atomic_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("glossary.json");
+        std::fs::write(
+            &path,
+            r#"[{"term":"Acme","frequency":100,"custom":"preserve me"}]"#,
+        )
+        .unwrap();
+        let pending = Mutex::new(HashMap::from([("acme".to_string(), 2)]));
+
+        let failure = flush_bumps_to(&pending, &path, |_, _| {
+            *pending
+                .lock()
+                .unwrap()
+                .entry("acme".to_string())
+                .or_default() += 1;
+            anyhow::bail!("simulated disk failure")
+        });
+        assert!(failure.is_err());
+        assert_eq!(
+            *pending.lock().unwrap(),
+            HashMap::from([("acme".to_string(), 3)])
+        );
+
+        assert_eq!(
+            flush_bumps_to(&pending, &path, crate::always::vocab::write_atomic).unwrap(),
+            1
+        );
+        assert!(pending.lock().unwrap().is_empty());
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(entries[0]["frequency"], 103);
+        assert_eq!(entries[0]["custom"], "preserve me");
+    }
 
     fn entry(term: &str, miss: &[&str]) -> Entry {
         Entry {

@@ -48,7 +48,7 @@ never modifies existing entries, and reports `{"added": [...], "skipped_already_
    the user points at). Keep terms that dictation plausibly garbles or that are
    worth spelling exactly:
    - proper nouns: people, products, projects, repos, hosts (`genesis`, `exodus`)
-   - tool/CLI/library names (`qemu-img`, `tsgo`, `GitNexus`)
+   - tool/CLI/library names (`qemu-img`, `tsgo`)
    - paths and identifiers (`~/.agent-config`, `bun.lock`)
    - domain jargon, acronyms, non-English words the user uses repeatedly
    - terms the dictation visibly mangled during the chat
