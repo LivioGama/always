@@ -1624,6 +1624,9 @@ including while loading or empty. With no entries, its message is centered in
 the space below the header; populated history uses that space for its list.
 The Linux and Windows Tauri History panel reads daemon history rows from
 `history.jsonl`, using the daemon's `ts` millisecond timestamp and `raw_text`.
+Transcript history stays local to the user's account. On Unix,
+`history.jsonl` and its rotated `history.jsonl.old` are mode 0600; reads and
+appends tighten files created by earlier versions too.
 
 **Settings controls.** Settings labels and explanatory text are not selectable
 as ordinary web text. Inputs, editable text, and transcript-history entries
@@ -1679,7 +1682,7 @@ the app has identified the platform, avoiding a Windows warning flash on Linux.
 | `idle_pause_secs` | 0 (off) | Idle auto-pause |
 | `postprocess_mode` | unset → migrated (§9 item 6) | `fast` · `apple` · `groq` · `off` |
 | `postprocess_enabled` | true | Legacy; only read to migrate `postprocess_mode` when unset |
-| `transcript_stream` | true | Append accepted utterances to `~/.always/transcripts.jsonl` |
+| `transcript_stream` | true | Append accepted utterances to `~/.always/transcripts.jsonl`; on Unix, the active and `.old` files are owner-only |
 | `capture_aec` | false (unset = off) | Echo-cancelled (VPIO) capture via `always-capture` (§3); false = plain helper (`--no-vp`) |
 | `audible_status_sound` | off | Sound cues (off/low/medium/high; see §10.1) |
 | `per_app_settings_json` | — | Per-application pause rules |

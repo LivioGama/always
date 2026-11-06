@@ -352,14 +352,13 @@ impl Transcriber for LocalTranscriber {
 
                 let last_used = Arc::clone(&self.last_used);
                 let stream = futures::stream::unfold(
-                    (nemotron, last_used, chunks, 0usize),
-                    move |(mut nemotron, last_used, chunks, index)| async move {
+                    (nemotron, last_used, chunks.into_iter(), 0usize),
+                    move |(mut nemotron, last_used, mut chunks, index)| async move {
                         if index >= total {
                             return None;
                         }
                         let samples = chunks
-                            .get(index)
-                            .cloned()
+                            .next()
                             .unwrap_or_else(|| vec![0.0; NEMOTRON_CHUNK_SAMPLES]);
                         let result = nemotron
                             .transcribe_chunk(&samples)
