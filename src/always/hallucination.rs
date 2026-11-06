@@ -168,10 +168,6 @@ const TRAILING_CANNED_PHRASES: &[&str] = &[
     "thank you for watching",
     "bye",
     "bye bye",
-    "i'm going to go",
-    "i am going to go",
-    "i'm gonna go",
-    "i gotta go",
 ];
 
 /// Minimum words of real content that must precede a trailing canned
@@ -787,28 +783,6 @@ mod tests {
         );
         let r = make("Replace the database with pocket base. Bye.");
         assert!(strip_trailing_canned(&r.text, &r).is_some());
-    }
-
-    #[test]
-    fn strips_trailing_departure_sentence_variants() {
-        for ending in [
-            "I'm going to go.",
-            "I am going to go.",
-            "I'm gonna go.",
-            "I gotta go.",
-        ] {
-            let text = format!("Please send the invoice today. {ending}");
-            let r = make(&text);
-            assert_eq!(
-                strip_trailing_canned(&r.text, &r).as_deref(),
-                Some("Please send the invoice today."),
-                "should strip {ending:?}"
-            );
-        }
-
-        let spoken = "Please tell him I'm going to go.";
-        let r = make(spoken);
-        assert!(strip_trailing_canned(&r.text, &r).is_none());
     }
 
     #[test]
