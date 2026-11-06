@@ -86,7 +86,7 @@ jobs:
     name: Rust checks
     needs: changes
     if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.base_ref == 'main' || needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       # kaldi-fbank-rust-kautism bundles C++14 code; newer runners invoke
       # Clang with its legacy default and reject `>>`, `{}`, and make_unique.
@@ -224,7 +224,7 @@ jobs:
     name: Swift
     needs: changes
     if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.base_ref == 'main' || needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
