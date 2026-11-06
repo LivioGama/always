@@ -86,7 +86,7 @@ jobs:
     name: Rust checks
     needs: changes
     if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.base_ref == 'main' || needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
-    runs-on: macos-14
+    runs-on: macos-26
     env:
       # kaldi-fbank-rust-kautism bundles C++14 code; newer runners invoke
       # Clang with its legacy default and reject `>>`, `{}`, and make_unique.
@@ -99,10 +99,16 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Capture Xcode SDK for cache key
+        id: macos-sdk
+        run: echo "version=$(xcode-select -p | tr '/' '-')-sdk-$(xcrun --show-sdk-version)" >> "$GITHUB_OUTPUT"
+
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: |
-            rust-checks
+          # Xcode paths and the ORT download path appear in linker metadata.
+          shared-key: rust-checks-${{ steps.macos-sdk.outputs.version }}
+          cache-directories: |
+            ~/Library/Caches/ort.pyke.io/dfbin
           # Save from develop (the default branch): every PR and main can
           # restore default-branch caches, so one writer warms them all.
           save-if: ${{ github.ref == 'refs/heads/develop' }}
@@ -224,7 +230,7 @@ jobs:
     name: Swift
     needs: changes
     if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.base_ref == 'main' || needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
