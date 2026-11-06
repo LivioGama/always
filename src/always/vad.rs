@@ -19,11 +19,11 @@ use crate::stt::Transcriber;
 /// Remove only the contiguous suffix already classified as VAD silence.
 /// `speaker_trimmed_tail_samples` avoids removing samples that the speaker
 /// trim has already discarded from the same end of the buffer.
-fn trim_vad_silence<'a>(
-    samples: &'a [i16],
+fn trim_vad_silence(
+    samples: &[i16],
     silence_frames: usize,
     speaker_trimmed_tail_samples: usize,
-) -> &'a [i16] {
+) -> &[i16] {
     let vad_silence_samples = silence_frames.saturating_mul(FRAME_SAMPLES);
     let remaining_silence = vad_silence_samples.saturating_sub(speaker_trimmed_tail_samples);
     &samples[..samples.len().saturating_sub(remaining_silence)]
