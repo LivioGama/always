@@ -99,10 +99,16 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Capture Xcode SDK for cache key
+        id: macos-sdk
+        run: echo "version=$(xcode-select -p | tr '/' '-')-sdk-$(xcrun --show-sdk-version)" >> "$GITHUB_OUTPUT"
+
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: |
-            rust-checks
+          # Xcode paths and the ORT download path appear in linker metadata.
+          shared-key: rust-checks-${{ steps.macos-sdk.outputs.version }}
+          cache-directories: |
+            ~/Library/Caches/ort.pyke.io/dfbin
           # Save from develop (the default branch): every PR and main can
           # restore default-branch caches, so one writer warms them all.
           save-if: ${{ github.ref == 'refs/heads/develop' }}
