@@ -83,6 +83,33 @@ fn write_sha(archive: &Path, digest: &str) {
 /// Run the installer in self-update mode. `curl` is replaced by a shim that
 /// records any call and fails, to prove nothing is fetched.
 fn run(dir: &Path, archive: Option<&Path>, version: Option<&str>) -> (Output, PathBuf, PathBuf) {
+    run_with_failures(dir, archive, version, false, false)
+}
+
+fn run_with_ditto_failure(
+    dir: &Path,
+    archive: Option<&Path>,
+    version: Option<&str>,
+    fail_ditto: bool,
+) -> (Output, PathBuf, PathBuf) {
+    run_with_failures(dir, archive, version, fail_ditto, false)
+}
+
+fn run_with_codesign_failure(
+    dir: &Path,
+    archive: Option<&Path>,
+    version: Option<&str>,
+) -> (Output, PathBuf, PathBuf) {
+    run_with_failures(dir, archive, version, false, true)
+}
+
+fn run_with_failures(
+    dir: &Path,
+    archive: Option<&Path>,
+    version: Option<&str>,
+    fail_ditto: bool,
+    fail_codesign: bool,
+) -> (Output, PathBuf, PathBuf) {
     let shim_dir = dir.join("shim");
     fs::create_dir_all(&shim_dir).unwrap();
     let curl_marker = dir.join("curl-was-called");
@@ -96,6 +123,26 @@ fn run(dir: &Path, archive: Option<&Path>, version: Option<&str>) -> (Output, Pa
     )
     .unwrap();
     fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+    if fail_ditto {
+        let ditto = shim_dir.join("ditto");
+        fs::write(
+            &ditto,
+            "#!/bin/sh\nmkdir -p \"$2/Contents/MacOS\"\nprintf partial > \"$2/Contents/MacOS/Always\"\nexit 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(&ditto, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let codesign = shim_dir.join("codesign");
+    fs::write(
+        &codesign,
+        if fail_codesign {
+            "#!/bin/sh\nexit 1\n"
+        } else {
+            "#!/bin/sh\nexit 0\n"
+        },
+    )
+    .unwrap();
+    fs::set_permissions(&codesign, fs::Permissions::from_mode(0o755)).unwrap();
 
     let apps = dir.join("apps");
     let prefix = dir.join("prefix");
@@ -160,6 +207,63 @@ fn installs_the_given_archive_without_touching_the_network() {
         text(&out)
     );
     assert!(text(&out).contains("already-verified"), "{}", text(&out));
+}
+
+#[test]
+fn failed_macos_copy_keeps_the_previous_app() {
+    let Some(host) = host() else { return };
+    if !host.mac {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let old_app = dir.path().join("apps/Always.app");
+    let old_executable = old_app.join("Contents/MacOS/Always");
+    fs::create_dir_all(old_executable.parent().unwrap()).unwrap();
+    fs::write(&old_executable, b"old app").unwrap();
+    let archive = make_archive(dir.path(), &host);
+
+    let (out, _, _) = run_with_ditto_failure(dir.path(), Some(&archive), Some(TAG), true);
+
+    assert!(!out.status.success(), "{}", text(&out));
+    assert_eq!(fs::read(&old_executable).unwrap(), b"old app");
+    assert!(fs::read_dir(dir.path().join("apps")).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".always-update.")
+    }));
+}
+
+#[test]
+fn failed_macos_signature_keeps_the_previous_app() {
+    let Some(host) = host() else { return };
+    if !host.mac {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let old_app = dir.path().join("apps/Always.app");
+    let old_executable = old_app.join("Contents/MacOS/Always");
+    fs::create_dir_all(old_executable.parent().unwrap()).unwrap();
+    fs::write(&old_executable, b"old app").unwrap();
+    let archive = make_archive(dir.path(), &host);
+
+    let (out, _, _) = run_with_codesign_failure(dir.path(), Some(&archive), Some(TAG));
+
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("Code signature check failed"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(fs::read(&old_executable).unwrap(), b"old app");
+    assert!(fs::read_dir(dir.path().join("apps")).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".always-update.")
+    }));
 }
 
 #[test]

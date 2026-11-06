@@ -7,7 +7,8 @@
 //! - history helpers — `<config_dir>/always/history.jsonl`.
 //! - openers — URLs, files, "reveal in file manager".
 
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 use tauri::Manager;
@@ -228,13 +229,52 @@ pub fn history_file_path() -> String {
 /// `{text, timestamp_ms}`. Parses the JSONL the daemon appends per paste.
 #[tauri::command]
 pub fn read_history() -> Result<Vec<serde_json::Value>, String> {
-    let path = history_path();
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("read {}: {e}", path.display())),
+    read_history_at(&history_path())
+}
+
+fn read_history_at(path: &Path) -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(unix)]
+    {
+        let mut old = path.as_os_str().to_owned();
+        old.push(".old");
+        restrict_history_backup(&PathBuf::from(old))?;
+    }
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("read {}: {error}", path.display())),
     };
+    #[cfg(unix)]
+    if file
+        .metadata()
+        .map_err(|e| format!("read {}: {e}", path.display()))?
+        .is_file()
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("read {}: {e}", path.display()))?;
+    }
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
     Ok(parse_history_entries(&content))
+}
+
+#[cfg(unix)]
+fn restrict_history_backup(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => {
+            match std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(format!("read {}: {error}", path.display())),
+            }
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("read {}: {error}", path.display())),
+    }
 }
 
 fn parse_history_entries(content: &str) -> Vec<serde_json::Value> {
@@ -377,7 +417,7 @@ fn nul_terminated_wide(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{nul_terminated_wide, parse_history_entries};
+    use super::{nul_terminated_wide, parse_history_entries, read_history_at};
 
     #[test]
     fn history_reader_accepts_daemon_timestamp_field() {
@@ -388,6 +428,51 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["text"], "hello");
         assert_eq!(entries[0]["timestamp_ms"], 1720000000123i64);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn history_reader_restricts_existing_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "always-tauri-history-permissions-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"ts":1720000000123,"raw_text":"hello","processed_text":"Hello."}"#,
+        )
+        .unwrap();
+        let old = path.with_extension("jsonl.old");
+        std::fs::write(&old, "old history").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let entries = read_history_at(&path).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&old).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert!(read_history_at(&path).unwrap().is_empty());
+        assert_eq!(
+            std::fs::metadata(&old).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
