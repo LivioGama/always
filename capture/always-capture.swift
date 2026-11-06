@@ -325,7 +325,10 @@ let selfPid = getpid()
 var aecEngaged = true                 // VPIO starts un-bypassed
 var aecHoldUntil = DispatchTime.now() // cue hold
 var aecOffWork: DispatchWorkItem?
-var aecWatched = Set<AudioObjectID>()
+// CoreAudio retains each block and queue until the matching remove call.
+var aecWatched: [AudioObjectID: [(AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)]] = [:]
+// Keep failed removals so a later process-list update can retry them.
+var aecPendingRemoval: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
 /// Keep the canceller engaged this long after the last output stops: apps
 /// stop/start their output between tracks, and the room still rings briefly.
 let aecHangover = 2.0
@@ -462,8 +465,26 @@ func aecHoldFor(seconds: Double) {
 @available(macOS 14.2, *)
 func aecWatchProcesses() {
     let procs = audioProcesses()
-    aecWatched.formIntersection(procs)
-    for obj in procs where !aecWatched.contains(obj) {
+    let current = Set(procs)
+    let pending = aecPendingRemoval
+    aecPendingRemoval.removeAll()
+    for (obj, registeredAddress, listener) in pending {
+        var addr = registeredAddress
+        if AudioObjectRemovePropertyListenerBlock(obj, &addr, .main, listener) != noErr {
+            aecPendingRemoval.append((obj, registeredAddress, listener))
+        }
+    }
+    for obj in aecWatched.keys.filter({ !current.contains($0) }) {
+        for (registeredAddress, listener) in aecWatched.removeValue(forKey: obj) ?? [] {
+            var addr = registeredAddress
+            let status = AudioObjectRemovePropertyListenerBlock(obj, &addr, .main, listener)
+            if status != noErr {
+                log("aec listener removal failed for object \(obj): \(status)")
+                aecPendingRemoval.append((obj, registeredAddress, listener))
+            }
+        }
+    }
+    for obj in procs where aecWatched[obj] == nil {
         // IsRunningOutput is READ to decide, but its change is NOT
         // notified (measured 2026-10-14, macOS 27: an afplay object
         // registers with out=0, flips to out=1 ~0.6 s later, and a
@@ -471,16 +492,18 @@ func aecWatchProcesses() {
         // 'pdv#' (Devices) do). Engagement therefore waited for some
         // unrelated process-list change: a YouTube resume was engaged
         // 4.8 s late (11:25:10→14.9Z) and its narrator pasted as the user.
-        var ok = false
+        var listeners: [(AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
         for sel in [kAudioProcessPropertyIsRunningOutput, kAudioProcessPropertyIsRunning,
                     kAudioProcessPropertyDevices] {
             var addr = caAddr(sel)
-            if AudioObjectAddPropertyListenerBlock(obj, &addr, .main, { _, _ in aecReevaluate() }) == noErr {
-                ok = true
+            let listener: AudioObjectPropertyListenerBlock = { _, _ in aecReevaluate() }
+            if AudioObjectAddPropertyListenerBlock(obj, &addr, .main, listener) == noErr {
+                listeners.append((addr, listener))
             }
         }
-        if ok { aecWatched.insert(obj) }
+        if !listeners.isEmpty { aecWatched[obj] = listeners }
     }
+    assert(aecWatched.keys.allSatisfy(current.contains))
 }
 
 func startAecGate() {

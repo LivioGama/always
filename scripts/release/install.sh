@@ -50,7 +50,21 @@ warn() { printf 'WARN %s\n' "$*" >&2; }
 fail() { printf 'ERROR %s\n' "$*" >&2; exit 1; }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/always-install.XXXXXX")"
-cleanup() { rm -rf "$TMP"; }
+UPDATE_STAGE=""
+UPDATE_DEST=""
+UPDATE_BACKUP=""
+cleanup() {
+  rm -rf "$TMP"
+  if [[ -n "$UPDATE_STAGE" ]]; then
+    if [[ -n "$UPDATE_BACKUP" && ( -e "$UPDATE_BACKUP" || -L "$UPDATE_BACKUP" ) && ! -e "$UPDATE_DEST" && ! -L "$UPDATE_DEST" ]]; then
+      if ! mv "$UPDATE_BACKUP" "$UPDATE_DEST"; then
+        warn "Could not restore the previous app; it remains at ${UPDATE_BACKUP}"
+        return
+      fi
+    fi
+    rm -rf "$UPDATE_STAGE"
+  fi
+}
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 # Readable by apt's sandbox user (_apt) so `apt-get install ./file.deb` is quiet.
@@ -184,6 +198,21 @@ install_macos() {
   local src="$TMP/extract/${PREFIX_NAME}/Always.app"
   [[ -d "$src" ]] || fail "Archive does not contain ${PREFIX_NAME}/Always.app"
 
+  # Stage beside the destination so a copy failure leaves the installed app intact.
+  UPDATE_STAGE="$(mktemp -d "$app_dir/.always-update.XXXXXX")"
+  UPDATE_DEST="$dest"
+  UPDATE_BACKUP="$UPDATE_STAGE/Previous.app"
+  local staged="$UPDATE_STAGE/Always.app"
+  # ditto preserves the code signature, symlinks and resource forks.
+  if ! ditto "$src" "$staged"; then
+    fail "Could not stage Always at ${staged}; the installed app was left unchanged."
+  fi
+  [[ -d "$staged" ]] || fail "Staged app is missing at ${staged}; the installed app was left unchanged."
+  # curl does not quarantine, but a browser-downloaded archive would.
+  xattr -dr com.apple.quarantine "$staged" 2>/dev/null || true
+  codesign --verify --deep --strict "$staged" 2>/dev/null \
+    || fail "Code signature check failed for staged app; the installed app was left unchanged."
+
   # Quit a running copy that lives in the target location before replacing it.
   local was_running=0 pid
   if [[ -d "$dest" ]] && pgrep -f "${dest}/Contents/MacOS/Always" >/dev/null 2>&1; then
@@ -203,13 +232,15 @@ install_macos() {
     done
   fi
 
-  rm -rf "$dest"
-  # ditto preserves the code signature, symlinks and resource forks.
-  ditto "$src" "$dest"
-  # curl does not quarantine, but a browser-downloaded archive would.
-  xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
-  codesign --verify --deep --strict "$dest" 2>/dev/null \
-    || warn "Code signature check failed for ${dest}"
+  if [[ -e "$dest" || -L "$dest" ]]; then
+    mv "$dest" "$UPDATE_BACKUP" || fail "Could not preserve the existing app at ${dest}."
+  fi
+  if ! mv "$staged" "$dest"; then
+    if [[ -e "$UPDATE_BACKUP" || -L "$UPDATE_BACKUP" ]]; then
+      mv "$UPDATE_BACKUP" "$dest" || warn "Could not restore the previous app; it remains at ${UPDATE_BACKUP}"
+    fi
+    fail "Could not activate the staged app at ${dest}."
+  fi
   ok "Installed ${dest}"
 
   # A self-update relaunches only what it quit; a fresh install opens the app.

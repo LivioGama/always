@@ -17,6 +17,8 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// Rotate once the stream exceeds this size; the consumer tails live
@@ -58,23 +60,44 @@ fn append_at(path: &Path, text: &str, ts_ms: u64) -> anyhow::Result<()> {
     }
     rotate_if_needed(path)?;
     let line = serde_json::json!({"ts": ts_ms, "text": text, "source": "always"});
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     // serde_json escapes embedded newlines, so this is always one line.
     writeln!(file, "{line}")?;
     Ok(())
 }
 
 fn rotate_if_needed(path: &Path) -> anyhow::Result<()> {
+    let mut old = path.as_os_str().to_owned();
+    old.push(".old");
+    let old = PathBuf::from(old);
+    #[cfg(unix)]
+    {
+        set_owner_only_if_present(path)?;
+        set_owner_only_if_present(&old)?;
+    }
     let Ok(meta) = std::fs::metadata(path) else {
         return Ok(()); // no file yet
     };
     if meta.len() <= MAX_STREAM_BYTES {
         return Ok(());
     }
-    let mut old = path.as_os_str().to_owned();
-    old.push(".old");
-    std::fs::rename(path, PathBuf::from(old))?;
+    std::fs::rename(path, old)?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn set_owner_only_if_present(path: &Path) -> anyhow::Result<()> {
+    match std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(test)]
@@ -125,15 +148,22 @@ mod tests {
     fn oversized_stream_rotates_to_old() {
         let path = temp_stream_path("rotate");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        // Pre-fill beyond the rotation threshold.
-        let big = "x".repeat((MAX_STREAM_BYTES + 1) as usize);
-        std::fs::write(&path, &big).unwrap();
-
-        append_at(&path, "fresh after rotation", 2).unwrap();
-
         let mut old = path.as_os_str().to_owned();
         old.push(".old");
         let old = PathBuf::from(old);
+        // Pre-fill beyond the rotation threshold.
+        let big = "x".repeat((MAX_STREAM_BYTES + 1) as usize);
+        std::fs::write(&path, &big).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&old, "stale backup").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        append_at(&path, "fresh after rotation", 2).unwrap();
+
         assert!(old.exists(), "oversized file should rotate to .old");
         assert_eq!(std::fs::metadata(&old).unwrap().len(), big.len() as u64);
         let content = std::fs::read_to_string(&path).unwrap();
@@ -141,6 +171,18 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(content.lines().next().unwrap()).unwrap();
         assert_eq!(parsed["text"], "fresh after rotation");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(&old).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]
