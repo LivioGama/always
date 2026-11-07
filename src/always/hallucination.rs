@@ -191,10 +191,7 @@ const TRAILING_CANNED_PHRASES: &[&str] = &[
 fn is_repetition_loop(sentence: &str) -> bool {
     let words: Vec<&str> = sentence.split_whitespace().collect();
     let n = words.len();
-    (2..=n / 2).any(|p| {
-        n > p * 2
-            && (p..n).all(|i| words[i].eq_ignore_ascii_case(words[i - p]))
-    })
+    (2..=n / 2).any(|p| n > p * 2 && (p..n).all(|i| words[i].eq_ignore_ascii_case(words[i - p])))
 }
 
 /// Minimum words of real content that must precede a trailing canned
