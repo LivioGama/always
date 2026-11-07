@@ -235,11 +235,11 @@ VPIO's noise suppression was not measurable on a single-speaker machine.
    itself under 400 ms in total gets the short 200 ms cut.
 7. **Transcribe** — the speculative result is used if still valid, otherwise a
    fresh transcription runs.
-   For Groq, speculative requests, pause-flushed chunks, and final or tail
-   recovery requests omit the contiguous trailing frames VAD has classified as
-   silence. This changes only the audio sent to transcription; captured sample
-   coordinates and the configured end-of-utterance window still include those
-   frames.
+   Every request (speculative, chunk, final, tail recovery) sends the audio
+   with its trailing silence. Trimming that silence for Groq (#184, shipped in
+   0.1.5) was reverted 2026-11-07, requested by Livio: with audio ending on the
+   last sound, Whisper appended phantom closers ("I'm going to go.", "I'm
+   sorry.", "THE END OF THE…") to 16.6% of dictations vs 2.8% before.
 8. **Post-process** — filters, glossary corrections, grammar cleanup (§9).
    A rule-filtered utterance (not a hallucination) is still copied to the
    clipboard — no paste, no auto-Enter — so a wrong filter verdict costs a
@@ -1103,7 +1103,13 @@ Between transcription and the keyboard:
    **Trailing canned closer** (2026-10-17, requested by Livio: "thank you"
    injected at the end of sentences). When a Groq result ends with a separate
    final sentence that normalizes to "thank you", "thanks", "thank you very
-   much", "(thank you|thanks) for watching", "bye" or "bye bye", preceded by at
+   much", "(thank you|thanks) for watching", "bye", "bye bye", "i'm going to
+   go", "i'm gonna go", "i gotta go", "i have to go" or "you" (the "go" family
+   and "you" added 2026-11-07, requested by Livio: 13 of 275 utterances in two
+   days ended with "I'm going to go."; curly apostrophes match), "i'm sorry",
+   "oh", "mm-hmm", "i'm not", "i'm not sure" (added the same day — the user
+   confirmed never saying them there), or a Whisper repetition loop (a ≥ 2-word
+   run repeated, e.g. "THE END OF THE END OF THE"), preceded by at
    least 4 words, that sentence is removed and the rest is pasted. Mid-sentence
    uses are never touched. A final segment with its own metrics (avg_logprob
    ≥ -0.15, no_speech_prob ≤ 0.05, differing from the previous segment) is
