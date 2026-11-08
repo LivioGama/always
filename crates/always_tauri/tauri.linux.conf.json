@@ -16,7 +16,7 @@
           "pulseaudio-utils"
         ],
         "files": {
-          "/usr/lib/udev/rules.d/60-always-uinput.rules": "../../scripts/release/60-always-uinput.rules"
+          "/usr/lib/udev/rules.d/60-always-gui-uinput.rules": "../../scripts/release/60-always-uinput.rules"
         },
         "postInstallScript": "../../scripts/release/deb/postinst"
       }
