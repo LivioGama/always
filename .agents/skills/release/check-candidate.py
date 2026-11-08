@@ -4,9 +4,8 @@
 Usage: check-candidate.py BASE PREPARE_HEAD --main MAIN_BASE --tip FETCHED_MAIN [--merge MERGE]
 
 Branch model: work lives on `develop`; `release-x.y.z` is cut from develop and
-merged into the protected `main` with a MERGE COMMIT (never a squash, so
-develop/main ancestry stays intact). Pass the recorded SHAs, not moving
-branch names:
+merged into the protected `main` using an enabled merge method. Pass the
+recorded SHAs, not moving branch names:
 
   BASE          develop's SHA the release branch was cut from
   PREPARE_HEAD  the validated head of the release branch
@@ -14,13 +13,13 @@ branch names:
   FETCHED_MAIN  the freshly fetched origin/main
 
 Without --merge (before merging the PR): the diff BASE..PREPARE_HEAD must be
-release-prepare only, no changelog fragment may remain, MAIN_BASE must be an
-ancestor of PREPARE_HEAD (main holds nothing the candidate lacks), and
+release-prepare only, no changelog fragment may remain, and main's tree must
+be present either by ancestry in PREPARE_HEAD or in BASE's first-parent history.
 FETCHED_MAIN must still equal MAIN_BASE.
 
-With --merge (before tagging): MERGE must be on FETCHED_MAIN, its parents must
-be exactly MAIN_BASE and PREPARE_HEAD (a merge commit, not a squash), and its
-tree must equal PREPARE_HEAD's, so the tagged tree is the validated one.
+With --merge (before tagging): MERGE must be on FETCHED_MAIN and its tree must
+equal PREPARE_HEAD's. Its parents must be either MAIN_BASE and PREPARE_HEAD
+(merge commit) or MAIN_BASE alone (squash commit); rebases are refused.
 
 This does not attest CI, approvals or semantic changelog completeness.
 """
@@ -47,6 +46,12 @@ def is_ancestor(ancestor, descendant):
                           env=GIT_ENV).returncode == 0
 
 
+def tree_in_first_parent_history(tree_ref, descendant):
+    tree = git("rev-parse", f"{tree_ref}^{{tree}}")
+    history = git("log", "--first-parent", "--format=%T", descendant).splitlines()
+    return tree in history
+
+
 def rev(ref):
     return git("rev-parse", "--verify", f"{ref}^{{commit}}")
 
@@ -62,20 +67,20 @@ def check(base, head, main_base, tip, merge):
     fragments = git("ls-tree", "-r", "--name-only", head, ".github/changelog.d").splitlines()
     if any(path.endswith(".md") and not path.endswith("README.md") for path in fragments):
         raise ValueError("candidate still contains unreleased changelog fragments")
-    if not is_ancestor(main_base, head):
-        raise ValueError("main holds commits the candidate lacks; back-merge main into develop, "
-                         "then prepare again")
+    if not is_ancestor(main_base, head) and not tree_in_first_parent_history(main_base, base):
+        raise ValueError("main's tree is absent from develop's first-parent history; "
+                         "sync main into develop before preparing")
     if merge is None:
         if tip != main_base:
             raise ValueError("main moved: refresh candidate and changelog coverage, then revalidate")
         return
     merge = rev(merge)
     if not is_ancestor(merge, tip):
-        raise ValueError("merge commit is not on the fetched main")
+        raise ValueError("landing commit is not on the fetched main")
     parents = git("show", "-s", "--format=%P", merge).split()
-    if parents != [main_base, head]:
-        raise ValueError(f"merge parents {parents} are not [recorded main, validated prepare head]; "
-                         "was it squashed or rebased, or is the candidate stale?")
+    if parents not in ([main_base, head], [main_base]):
+        raise ValueError(f"merge parents {parents} are not [recorded main, validated prepare head] "
+                         "or [recorded main]; was it rebased, or is the candidate stale?")
     if git("rev-parse", f"{head}^{{tree}}") != git("rev-parse", f"{merge}^{{tree}}"):
         raise ValueError("merge tree differs from validated prepare head; do not tag")
 
@@ -94,7 +99,7 @@ def main():
     except (ValueError, subprocess.CalledProcessError) as error:
         print(f"release candidate refused: {error}", file=sys.stderr)
         return 1
-    print("release candidate: ancestry, scope and content verified")
+    print("release candidate: baseline, scope and content verified")
     return 0
 
 

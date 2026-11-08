@@ -6,12 +6,13 @@ Always loaded: the only sanctioned release path.
   It owns the whole flow: version pick, `prepare.sh` (changelog cut, one
   version across every manifest, lockfiles, `check-release.sh`) on a
   `release-x.y.z` branch cut from `develop`, a pull request into `main` merged
-  as a **merge commit**, then the `vX.Y.Z` tag on that merge commit, which
-  triggers `release.yml`.
+  with an enabled method (this repository currently uses squash), then the
+  `vX.Y.Z` tag on that exact validated tree, which triggers `release.yml`.
 - **Branches.** Work lands on `develop`. `main` is protected and deploys; it
-  receives changes only through develop -> main release PRs. Never squash or
-  rebase that PR (develop/main ancestry must stay intact), and back-merge main
-  into develop after the tag.
+  receives changes only through develop -> main release PRs. Use the repository's
+  allowed merge method, never bypass protection, and back-merge main into
+  develop immediately after the tag so the release tree is recorded in develop's
+  first-parent history.
 - **User-visible changes need a changelog fragment**:
   `.github/changelog.d/<slug>.<added|changed|deprecated|removed|fixed|security>.md`
   (see that directory's README). Never write bullets under `## [Unreleased]` in

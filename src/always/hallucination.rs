@@ -168,7 +168,31 @@ const TRAILING_CANNED_PHRASES: &[&str] = &[
     "thank you for watching",
     "bye",
     "bye bye",
+    // 2026-11-07: the most frequent closer in the user's history (13 of 275
+    // utterances in two days), Whisper's reading of breath/noise in a
+    // chunked tail.
+    "i'm going to go",
+    "i'm gonna go",
+    "i gotta go",
+    "i have to go",
+    "you",
+    // 2026-11-07, confirmed by the user as never spoken where they appeared.
+    "i'm sorry",
+    "oh",
+    "mm-hmm",
+    "mm hmm",
+    "i'm not",
+    "i'm not sure",
 ];
+
+/// Whisper's decode loop on a quiet tail: "THE END OF THE END OF THE" — a
+/// run of at least 2 words that repeats (the last copy may be cut short).
+/// Period ≥ 2 so a spoken "No, no, no." is never treated as a loop.
+fn is_repetition_loop(sentence: &str) -> bool {
+    let words: Vec<&str> = sentence.split_whitespace().collect();
+    let n = words.len();
+    (2..=n / 2).any(|p| n > p * 2 && (p..n).all(|i| words[i].eq_ignore_ascii_case(words[i - p])))
+}
 
 /// Minimum words of real content that must precede a trailing canned
 /// sentence before it is stripped. Shorter results are handled (or kept) by
@@ -210,7 +234,8 @@ pub fn strip_trailing_canned(text: &str, result: &TranscriptionResult) -> Option
     let core = body.trim_end_matches(['.', '!', '?', '\u{2026}', ' ']);
     let idx = core.rfind(['.', '!', '?'])?;
     let tail = &core[idx + 1..];
-    if !TRAILING_CANNED_PHRASES.contains(&normalize(tail).as_str()) {
+    let tail_norm = normalize(&tail.replace('\u{2019}', "'"));
+    if !TRAILING_CANNED_PHRASES.contains(&tail_norm.as_str()) && !is_repetition_loop(&tail_norm) {
         return None;
     }
     let head = core[..=idx].trim();
@@ -783,6 +808,36 @@ mod tests {
         );
         let r = make("Replace the database with pocket base. Bye.");
         assert!(strip_trailing_canned(&r.text, &r).is_some());
+        // Real transcripts, 2026-11-07.
+        let r = make("And there was also the TMUX operator and so on. I'm going to go.");
+        assert_eq!(
+            strip_trailing_canned(&r.text, &r).as_deref(),
+            Some("And there was also the TMUX operator and so on.")
+        );
+        let r = make("Which value of discount would you propose? I\u{2019}m going to go.");
+        assert!(strip_trailing_canned(&r.text, &r).is_some());
+        let r = make("Can you also sort every sheet by score? you");
+        assert_eq!(
+            strip_trailing_canned(&r.text, &r).as_deref(),
+            Some("Can you also sort every sheet by score?")
+        );
+        // Mid-sentence use is still kept.
+        let r = make("Tell me when it is done because I'm going to go.");
+        assert!(strip_trailing_canned(&r.text, &r).is_none());
+        let r = make("You can delete once you did the integration. THE END OF THE END OF THE");
+        assert_eq!(
+            strip_trailing_canned(&r.text, &r).as_deref(),
+            Some("You can delete once you did the integration.")
+        );
+        for tail in ["I'm sorry.", "Oh.", "Mm-hmm.", "I'm not.", "I'm not sure."] {
+            let r = make(&format!("Every second should make sense here. {tail}"));
+            assert!(strip_trailing_canned(&r.text, &r).is_some(), "{tail}");
+        }
+        // A spoken repetition or a normal last sentence is not a loop.
+        let r = make("I asked you to stop that now. No, no, no, no.");
+        assert!(strip_trailing_canned(&r.text, &r).is_none());
+        let r = make("Please open the pull request. I am done with the end of it.");
+        assert!(strip_trailing_canned(&r.text, &r).is_none());
     }
 
     #[test]
