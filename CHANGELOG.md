@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **shortcuts:** global shortcuts work on GNOME Wayland, registered with the desktop automatically. ([#197](https://github.com/LivioGama/always/pull/197))
 - **groq:** a key Groq rejects is no longer saved, on any platform. ([#197](https://github.com/LivioGama/always/pull/197))
 - **install:** on Linux, the install command now also installs the desktop app (tray and Settings) in a graphical session. `ALWAYS_GUI=0` skips it. ([#197](https://github.com/LivioGama/always/pull/197))
+- **update:** on macOS, Install update now quits Always, replaces it and reopens it, instead of hanging until you restarted the app yourself. ([#199](https://github.com/LivioGama/always/pull/199))
 - **logs:** a microphone that cannot be opened no longer fills the disk; it is retried every 5 seconds and reported as a microphone problem instead of a network error. ([#197](https://github.com/LivioGama/always/pull/197))
 - **microphone:** on Linux, Always now uses another working microphone when the system default cannot record. ([#197](https://github.com/LivioGama/always/pull/197))
 - **my voice:** Record now works on Linux and Windows; the daemon used to drop the request. ([#197](https://github.com/LivioGama/always/pull/197))
