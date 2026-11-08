@@ -200,6 +200,8 @@ maintainer = "Livio Gamassia <hello@omni3.ai>"
 section = "sound"
 priority = "optional"
 depends = "$auto, wl-clipboard, xclip, xdotool, pulseaudio-utils"
+# always-gui 0.1.7 shipped this package's udev rule; without this, updating the CLI beside it fails.
+replaces = "always-gui"
 maintainer-scripts = "scripts/release/deb"
 extended-description = "Always-on voice dictation daemon (CLI). Run `always run`, or enable the user service: systemctl --user enable --now always-daemon.service"
 assets = [

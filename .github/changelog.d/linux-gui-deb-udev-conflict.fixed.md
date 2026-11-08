@@ -1,0 +1,1 @@
+**linux:** the desktop app's `.deb` installs next to the `always` CLI package again; 0.1.7 refused it because both packages claimed the same udev rule file, so Debian and Ubuntu desktops ended up without the app.

@@ -115,7 +115,9 @@ combos as GNOME custom shortcuts running `always shortcut <action>`, re-syncs
 them when Settings changes one, keeps the user's own entries, and reports the
 listener as available. A non-production instance never registers them. Injection
 on Wayland tries `wtype`, then the daemon's own `/dev/uinput` keyboard (access
-from the `60-always-uinput` udev rule; packages and the tar install set it up),
+from the `60-always-uinput` udev rule, named `60-always-gui-uinput` in the GUI
+`.deb` so the CLI and GUI packages install side by side; packages and the tar
+install set it up),
 then `ydotool`, then `xdotool`. The GUI shows this instead of pretending the keys work: on
 Linux with the shortcut listener unavailable (`ShortcutListenerStatus` false =
 Wayland), onboarding's tips list only the bindable actions — pause everywhere
