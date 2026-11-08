@@ -41,7 +41,9 @@ export function ShortcutsPanel({
         <div className="rounded-md bg-primary-500/10 border border-primary-500/30 px-3 py-2 text-xs text-surface-200">
           On Wayland Always cannot listen for keys itself. Bind keys in your desktop's settings to{" "}
           <code>always toggle-pause</code> (pause everywhere) and <code>always toggle-auto-enter</code>. Keys
-          recorded here are what the setup tips show; they do not take effect by themselves.
+          recorded here are what the setup tips show; they do not take effect by themselves. If your
+          distribution still offers an X11 (Xorg) session, you can choose it at the login screen instead:
+          Always's own shortcuts work there.
         </div>
       )}
       <div>

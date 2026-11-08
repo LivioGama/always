@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **install:** on Linux, the install command now also installs the desktop app (tray and Settings) in a graphical session. `ALWAYS_GUI=0` skips it.
+- **shortcuts:** on Wayland, Settings and the setup tips now mention choosing an X11 session where one is available, since Always's own shortcuts work there.
+
 ## [0.1.6] - 2026-11-08
 
 ### Fixed
