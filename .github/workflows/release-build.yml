@@ -5,12 +5,13 @@ name: Release build
 # workflow so the build-provenance attestation's signer is this file, not the
 # caller: `gh attestation verify --signer-workflow
 # LivioGama/always/.github/workflows/release-build.yml` accepts only what this
-# file built. Its one secret is the minisign signing key, used by the `attest`
-# job alone (see "Sign the release assets").
+# file built. Its secrets are the minisign signing key, used by the `attest`
+# job alone (see "Sign the release assets"), and the macOS code-signing
+# certificate, used by `build-macos` alone (see "Import macOS signing certificate").
 #
 # Assets (stable contract, shared with scripts/release/install.sh / install.ps1
 # and the updater, SPEC section 12a):
-#   always-<tag>-aarch64-apple-darwin.tar.gz      Always.app (ad-hoc signed, not notarized)
+#   always-<tag>-aarch64-apple-darwin.tar.gz      Always.app (signed with the persistent release certificate, not notarized)
 #   always-<tag>-x86_64-unknown-linux-gnu.{tar.gz,deb,rpm}
 #   always-<tag>-aarch64-unknown-linux-gnu.{tar.gz,deb,rpm}
 #   always-<tag>-x86_64-pc-windows-msvc.zip
@@ -38,6 +39,12 @@ on:
         required: false
       # Only if the key is encrypted; leave unset for an unencrypted key.
       ALWAYS_MINISIGN_PASSWORD:
+        required: false
+      # Base64 of the .p12 holding the persistent macOS code-signing identity,
+      # and its password.
+      ALWAYS_MACOS_SIGNING_P12:
+        required: false
+      ALWAYS_MACOS_SIGNING_P12_PASSWORD:
         required: false
 
 permissions:
@@ -98,15 +105,51 @@ jobs:
       # No x86_64 macOS build: ort-sys ships no prebuilt ONNX Runtime for
       # x86_64-apple-darwin.
 
+      # macOS pins Microphone/Accessibility/Input Monitoring grants to the app's
+      # designated requirement. Ad-hoc makes that the per-build cdhash, so every
+      # update voids them; one persistent certificate keeps it constant. Replacing
+      # this certificate voids every user's grants once.
+      #
+      # No secret (a fork, or a branch dry run without it): a dry run falls back
+      # to ad-hoc with a notice; a tag run FAILS.
+      - name: Import macOS signing certificate
+        env:
+          P12_BASE64: ${{ secrets.ALWAYS_MACOS_SIGNING_P12 }}
+          P12_PASSWORD: ${{ secrets.ALWAYS_MACOS_SIGNING_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$P12_BASE64" ]; then
+            if [ "$GITHUB_REF_TYPE" = tag ]; then
+              echo "::error::ALWAYS_MACOS_SIGNING_P12 is not available; refusing to ship a build whose update voids users' macOS permissions"
+              exit 1
+            fi
+            echo "::notice::DRY RUN without ALWAYS_MACOS_SIGNING_P12: ad-hoc signing"
+            echo "ALWAYS_CODESIGN_IDENTITY=-" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          umask 077
+          p12="$RUNNER_TEMP/signing.p12"
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          pw="$(uuidgen)"
+          trap 'rm -f "$p12"' EXIT
+          printf '%s' "$P12_BASE64" | base64 --decode > "$p12"
+          security create-keychain -p "$pw" "$kc"
+          security set-keychain-settings "$kc"
+          security unlock-keychain -p "$pw" "$kc"
+          security import "$p12" -k "$kc" -P "$P12_PASSWORD" -T /usr/bin/codesign > /dev/null
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$pw" "$kc" > /dev/null
+          # build.sh runs codesign without --keychain: it must be on the search list.
+          security list-keychains -d user -s "$kc"
+          # Not -v: a self-signed certificate is untrusted here, and signing does not need trust.
+          identity="$(security find-identity -p codesigning "$kc" | awk '$1 == "1)" { print $2; exit }')"
+          test -n "$identity"
+          echo "ALWAYS_CODESIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
       - name: Build Always.app (build.sh, release profile)
         env:
           ALWAYS_BUILD_PROFILE: release
           ALWAYS_SWIFT_CONFIGURATION: release
           ALWAYS_DAEMON_PATH: ${{ github.workspace }}/target/aarch64-apple-darwin/release/always
-          # Ad-hoc ("-"): no certificate, no notarization. build.sh signs the
-          # bundle with `codesign --force --deep` (plus the entitlements and
-          # bundle identifier), which is what we ship.
-          ALWAYS_CODESIGN_IDENTITY: "-"
           # build.sh also "deploys"; keep that away from /Applications.
           ALWAYS_DEPLOY_PATH: ${{ runner.temp }}/deploy/Always.app
         run: |

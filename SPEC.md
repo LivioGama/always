@@ -1986,7 +1986,9 @@ Per OS:
   `Always.app` in place — the directory the running bundle lives in, normally
   `/Applications` — with `ditto`, and relaunches it if it was running. Needs
   the bundle named `Always.app` and its parent directory writable; otherwise
-  refused. Ad-hoc signed, not notarized (unchanged).
+  refused. Signed with the persistent release certificate, not notarized.
+  Microphone, Accessibility and Input Monitoring grants survive an update
+  because every release has the same designated requirement.
 - **Windows** — `always update` runs `install.ps1` as a child and waits.
   A running `.exe` cannot be overwritten but can be renamed: the installer
   stops the other Always processes in the install dir (never the updater's own
@@ -2048,6 +2050,16 @@ step sets the trusted comment to `timestamp:<unix>`, `file:<asset name>` and
 `tag:<release tag>`, tab-separated (what U1 checks). Losing the private key
 means installed apps can no longer verify future updates; those users would
 have to reinstall from the release page.
+
+**macOS code signing** (`.github/workflows/release-build.yml`): `Always.app` is
+signed with one persistent certificate from repository secrets
+`ALWAYS_MACOS_SIGNING_P12` (base64 `.p12`) and
+`ALWAYS_MACOS_SIGNING_P12_PASSWORD`. macOS ties permission grants to the
+designated requirement; an ad-hoc signature makes that a per-build hash, which
+voids every grant on each update. A tag run without the secret fails; a branch
+dry run falls back to ad-hoc with a notice. Replacing the certificate makes
+every user re-grant once. The first update from an ad-hoc release also needs
+that one re-grant.
 
 ---
 
