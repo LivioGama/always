@@ -39,3 +39,4 @@ scripts/launch-smoke/tts.aiff
 
 # Cargo build output in any (nested) crate, e.g. src-tauri/target, crates/*/target
 target/
+crates/always_tauri/bundle/

@@ -9,8 +9,16 @@
           "libgcc-s1",
           "libstdc++6",
           "libx11-6",
-          "libxtst6"
-        ]
+          "libxtst6",
+          "wl-clipboard",
+          "xclip",
+          "xdotool",
+          "pulseaudio-utils"
+        ],
+        "files": {
+          "/usr/lib/udev/rules.d/60-always-uinput.rules": "../../scripts/release/60-always-uinput.rules"
+        },
+        "postInstallScript": "../../scripts/release/deb/postinst"
       }
     },
     "resources": {

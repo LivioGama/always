@@ -73,6 +73,8 @@ export interface DaemonUiState {
   resumedApps: string[];
   pauseSource: string | null;
   correctionPending: { id: string; wrong: string; right: string } | null;
+  correctionRequest: string | null;
+  commandError: string | null;
   groqQuotaExhausted: boolean; // Groq daily quota used up; offer an on-device model (SPEC § Models)
   models: CatalogModel[];
   downloadProgress: Record<string, number>;
@@ -115,6 +117,8 @@ function initialState(): DaemonUiState {
     resumedApps: [],
     pauseSource: null,
     correctionPending: null,
+    correctionRequest: null,
+    commandError: null,
     groqQuotaExhausted: false,
     models: [],
     downloadProgress: {},
@@ -245,6 +249,9 @@ export function useDaemonState() {
           break;
         case "CorrectionPending":
           next.correctionPending = { id: d.id, wrong: d.wrong, right: d.right };
+          break;
+        case "CorrectionDialogRequested":
+          next.correctionRequest = d.last_transcript ?? "";
           break;
         case "FocusedAppChanged": next.focusedApp = d.bundle_id ?? null; break;
         case "ResumedAppsChanged": next.resumedApps = d.bundles ?? []; break;
@@ -450,7 +457,7 @@ export function useDaemonState() {
   // ── Command senders (raw JSON lines through the Tauri bridge) ────────────
 
   const cmd = useCallback((c: object) => {
-    sendDaemonCommand(c).catch(() => {});
+    sendDaemonCommand(c).catch((e) => setState((p) => ({ ...p, commandError: String(e) })));
   }, []);
 
   const api = {
@@ -531,6 +538,8 @@ export function useDaemonState() {
       cmd({ type: "SetVoiceProfileEnabled", data: { enabled } });
     },
 
+    dismissCommandError: () => setState((p) => ({ ...p, commandError: null })),
+    dismissCorrectionRequest: () => setState((p) => ({ ...p, correctionRequest: null })),
     dismissGroqQuota: () => setState((p) => ({ ...p, groqQuotaExhausted: false })),
     approveCorrection: (id: string) => cmd({ type: "ApproveCorrection", data: { id } }),
     rejectCorrection: (id: string) => cmd({ type: "RejectCorrection", data: { id } }),
@@ -586,7 +595,7 @@ export function useDaemonState() {
             update: {
               kind: "failed",
               stage: "install",
-              message: "The installer did not restart Always. See ~/Library/Logs/Always/update-install.log.",
+              message: "The installer did not restart Always. Run `always update` in a terminal to see why.",
             },
           };
         });

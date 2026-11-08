@@ -58,6 +58,7 @@ fn main() {
             commands::open_url,
             commands::open_path,
             commands::reveal_path,
+            commands::open_logs,
             commands::app_version,
             commands::window_label,
             commands::platform,

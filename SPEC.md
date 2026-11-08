@@ -92,7 +92,10 @@ Two processes, plus a recorder:
 On Linux and Windows, the daemon uses CPAL for microphone capture. It converts
 the selected device's supported sample rate and channel layout to the pipeline's
 16 kHz mono frames; Linux exposes the capture device through ALSA, including
-PipeWire/PulseAudio ALSA compatibility layers. Linux uses `wl-copy`/`wl-paste`
+PipeWire/PulseAudio ALSA compatibility layers. The system default device is
+used whenever it can capture. If it cannot, the first other device with a
+readable format is used instead, never ALSA's silent `null` device; a default
+that is only busy is waited for rather than replaced. Linux uses `wl-copy`/`wl-paste`
 for clipboard access on Wayland when installed, falling back to `xclip`, and
 uses `xclip` on X11. On Wayland it sends the paste chord with `wtype` (the
 virtual-keyboard protocol of wlroots compositors such as Hyprland and Sway; no
@@ -107,14 +110,32 @@ name); other Wayland compositors offer no portable query and receive Ctrl+V.
 X11 uses `xdotool`. Linux global
 shortcuts are available in X11 sessions; Wayland compositors do not let the
 daemon observe global key events, so users there control pause and auto-enter
-through the CLI. The GUI shows this instead of pretending the keys work: on
+through the CLI, except on GNOME: there the daemon registers the configured
+combos as GNOME custom shortcuts running `always shortcut <action>`, re-syncs
+them when Settings changes one, keeps the user's own entries, and reports the
+listener as available. A non-production instance never registers them. Injection
+on Wayland tries `wtype`, then the daemon's own `/dev/uinput` keyboard (access
+from the `60-always-uinput` udev rule; packages and the tar install set it up),
+then `ydotool`, then `xdotool`. The GUI shows this instead of pretending the keys work: on
 Linux with the shortcut listener unavailable (`ShortcutListenerStatus` false =
 Wayland), onboarding's tips list only the bindable actions — pause everywhere
 (`always toggle-pause`) and auto-enter (`always toggle-auto-enter`) — with the
 user's configured keys as suggestions for the desktop's own bindings, and
 Settings → Shortcuts says keys there are recorded, not active. Everywhere,
 both read the configured shortcuts (never a fixed list), and the per-app pause
-(focused-app monitor, macOS only) is not offered on Linux.
+(focused-app monitor, macOS only) is not offered on Linux. Those Wayland notices
+also suggest choosing an X11 (Xorg) session at the login screen where the
+distribution still offers one.
+
+On Linux and Windows nothing tracks the focused app, so the per-app allowlist,
+sound cues, status overlay and Apple Intelligence are not offered there.
+
+The Linux installer (`install.sh`) also installs the desktop app when a
+graphical session is detected (`DISPLAY` or `WAYLAND_DISPLAY`), or always with
+`ALWAYS_GUI=1`; `ALWAYS_GUI=0` skips it. A `.deb` install uses the `-gui.deb`
+package; `.rpm` and tar installs use the AppImage, in the install prefix's
+`bin/` with an `always-gui` launcher and a desktop entry. A failure only warns
+unless `ALWAYS_GUI=1`, and a self-update never installs the app.
 
 The GUI talks to the daemon over a Unix domain socket using newline-delimited
 JSON. On macOS it is `~/Library/Caches/Always/always{suffix}.sock`; on Linux it
@@ -895,7 +916,8 @@ offline; the cloud backend is faster to start and needs an API key.
 - **Never list a model that cannot run** (I8). Every catalogue entry must name an
   engine with a real implementation, a correct download size, and a checksum.
 - A local model may be armed as fallback for the cloud backend; failures fall
-  back silently but are logged.
+  back silently but are logged. Only a model that handles the dictation language
+  (`lang`, or the system locale for `auto`) is armed.
 - **Local Parakeet decoding honors token durations.** A token spanning
   multiple audio frames is decoded once, so a stutter or cut-off word does not
   create repeated copies solely because of that duration.
@@ -1530,7 +1552,9 @@ Three steps:
    - **Groq (cloud):** best accuracy and speed, needs a free API key (link to
      console.groq.com/keys). "Save & Use" saves `groq_api_key` and switches to
      Groq once the daemon, restarted to load the key, reconnects; on macOS
-     an invalid key is rejected inline first (Linux does not check it). Caption: free tier is about
+     an invalid key is rejected inline first, and `always config set groq_api_key`
+     refuses any key Groq does not accept, or cannot be asked about, on every platform. A saved
+     key stays shown masked, including when the step is revisited, until "Change". Caption: free tier is about
      2,000 requests a day and live transcript uses more of it.
    - **Local model:** private and offline. Offers the best catalogue model
      (recommended first, then speed + accuracy); "Download & Use" downloads it
@@ -1726,6 +1750,15 @@ auto-enter `ctrl+alt+a` · force paste `ctrl+alt+v` · log correction
   `speaker_gate_scored` (info) records each voice check's cost.
   `grammar_cache_hit` counts a paste that joined a warm call still in flight
   as a hit.
+- A microphone that cannot be opened is retried every 5 s, not every 100 ms,
+  and reported as a microphone problem, never a network one.
+- The Linux service logs at the daemon's default filter (`always=info,warn`),
+  so third-party INFO output does not reach the log.
+- `always test` runs one dictation in the terminal with logs shown: microphone
+  (input level), transcription (prints what it heard), then after a 5 s
+  countdown a paste into the focused app, without Enter. It bypasses text
+  cleanup and refuses to run while the daemon is running. A failed step exits
+  non-zero and names the step.
 
 ---
 

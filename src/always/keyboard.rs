@@ -137,7 +137,87 @@ pub fn reload_shortcuts() {
         correction_dialog,
         master_pause,
     };
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        set_input_monitoring_status(sync_desktop_shortcuts());
+    }
     tracing::info!("shortcuts_reloaded");
+}
+
+/// Register the configured combos with the desktop. False where Always cannot
+/// do that, or for a non-production instance, which must not take over the
+/// user's real shortcuts.
+#[cfg(target_os = "linux")]
+pub fn sync_desktop_shortcuts() -> bool {
+    use crate::always::gnome_shortcuts::{self, Binding};
+
+    if !gnome_shortcuts::is_gnome() || !crate::config::instance_suffix().is_empty() {
+        return false;
+    }
+    let bindings = {
+        let s = shared_shortcuts().read();
+        let accel = |c: &Combo| gnome_shortcuts::accelerator(c.ctrl, c.shift, c.alt, &c.key_char);
+        [
+            ("pause", "Always: pause or resume", accel(&s.pause)),
+            (
+                "master-pause",
+                "Always: pause everywhere",
+                accel(&s.master_pause),
+            ),
+            (
+                "auto-enter",
+                "Always: toggle auto-enter",
+                accel(&s.auto_enter),
+            ),
+            (
+                "force-paste",
+                "Always: paste filtered text",
+                accel(&s.force_paste),
+            ),
+            (
+                "log-correction",
+                "Always: log correction",
+                accel(&s.log_correction),
+            ),
+            (
+                "correction-dialog",
+                "Always: correct last transcript",
+                accel(&s.correction_dialog),
+            ),
+        ]
+        .map(|(action, label, accel)| Binding {
+            id: action,
+            label,
+            action,
+            accel,
+        })
+    };
+    match gnome_shortcuts::sync(&bindings) {
+        Ok(()) => {
+            tracing::info!("gnome_shortcuts_registered");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "gnome_shortcuts_failed");
+            false
+        }
+    }
+}
+
+/// Run a shortcut's action on behalf of a desktop-registered key. On its own
+/// thread: the actions paste and read the clipboard.
+#[cfg(target_os = "linux")]
+pub fn trigger_shortcut(name: &str) -> bool {
+    let action: fn() = match name {
+        "pause" => dispatch_pause_chord,
+        "master-pause" => handle_master_pause_hotkey,
+        "auto-enter" => dispatch_auto_enter,
+        "force-paste" => dispatch_force_paste,
+        "log-correction" => dispatch_log_correction,
+        "correction-dialog" => dispatch_correction_dialog,
+        _ => return false,
+    };
+    std::thread::spawn(action);
+    true
 }
 
 /// Event-based tracking of Command key state as a fallback when
@@ -1364,10 +1444,13 @@ pub fn start_keyboard_listener() -> Result<()> {
 #[cfg(target_os = "linux")]
 pub fn start_keyboard_listener() -> Result<()> {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        tracing::warn!(
-            "global_hotkeys_unavailable_wayland: use the CLI to toggle pause and auto-enter"
-        );
-        set_input_monitoring_status(false);
+        let registered = sync_desktop_shortcuts();
+        if !registered {
+            tracing::warn!(
+                "global_hotkeys_unavailable_wayland: use the CLI to toggle pause and auto-enter"
+            );
+        }
+        set_input_monitoring_status(registered);
         return Ok(());
     }
 

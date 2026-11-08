@@ -97,7 +97,7 @@ curl -fsSL https://raw.githubusercontent.com/LivioGama/always/main/scripts/insta
 irm https://raw.githubusercontent.com/LivioGama/always/main/scripts/install.ps1 | iex
 ```
 
-On macOS you get the full app, and its first launch walks you through everything. On Linux and Windows you get the `always` daemon and CLI: add a [free Groq key](https://console.groq.com/keys) and start it (details below).
+On macOS you get the full app, and its first launch walks you through everything. On Linux in a graphical session you also get the desktop app with its tray and Settings (start it with `always-tauri`, or `always-gui` if it was installed as an AppImage; `ALWAYS_GUI=0` skips it). On Linux and Windows you get the `always` daemon and CLI: add a [free Groq key](https://console.groq.com/keys) and start it (details below).
 
 ### 🤖 Let your agent install it
 

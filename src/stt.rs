@@ -113,6 +113,25 @@ fn transcriptions_url() -> String {
         .unwrap_or_else(|_| GROQ_TRANSCRIPTIONS_URL.to_string())
 }
 
+/// Ask Groq whether `api_key` works, as the macOS app does before saving one.
+/// Anything but HTTP 200 is a refusal: a key that was never checked must not
+/// be stored and fail later, at the first dictation.
+pub fn validate_groq_api_key(api_key: &str) -> anyhow::Result<()> {
+    let base = std::env::var("ALWAYS_GROQ_BASE_URL")
+        .unwrap_or_else(|_| "https://api.groq.com".to_string());
+    let response = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?
+        .get(format!("{}/openai/v1/models", base.trim_end_matches('/')))
+        .bearer_auth(api_key)
+        .send()
+        .map_err(|e| anyhow::anyhow!("Could not reach Groq: {e}"))?;
+    if response.status() != reqwest::StatusCode::OK {
+        anyhow::bail!("Invalid API key - Groq rejected the credentials");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TranscriptionSegment {
     #[serde(default)]

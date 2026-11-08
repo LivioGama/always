@@ -19,6 +19,7 @@ export function PermissionsPanel({ daemon }: { daemon: DaemonApi }) {
 
   const recheck = () => {
     setChecking(true);
+    daemon.getShortcutListenerStatus();
     setTimeout(() => setChecking(false), 800);
   };
 
@@ -47,10 +48,10 @@ export function PermissionsPanel({ daemon }: { daemon: DaemonApi }) {
       <PermissionRow
         icon="mic"
         ok={micOk}
-        title="Microphone"
-        okStatus="Granted"
+        title={os === "macos" ? "Microphone" : "Daemon"}
+        okStatus={os === "macos" ? "Granted" : "Connected"}
         badStatus="Unavailable"
-        okText="Granted — the daemon is hearing audio."
+        okText={os === "macos" ? "Granted — the daemon is hearing audio." : "Connected to the daemon."}
         badText="Can't reach the daemon, so the microphone state is unknown. Start the daemon, or check OS microphone privacy settings."
         actionTitle={os === "windows" ? "Open Microphone Settings" : os === "macos" ? "Open Settings" : undefined}
         onAction={() =>
