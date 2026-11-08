@@ -474,8 +474,12 @@ fn wrap_with_local_fallback(
 ) -> Arc<dyn Transcriber> {
     use crate::always::stt_local::LocalTranscriber;
 
-    let Some(info) = pick_fallback_model(registry) else {
-        tracing::info!("stt_fallback_unarmed: no verified local model downloaded");
+    let language = crate::stt::whisper_language(&cfg.lang);
+    let Some(info) = pick_fallback_model_for_language(registry, &language) else {
+        tracing::info!(
+            language,
+            "stt_fallback_unarmed: no verified local model for this language"
+        );
         return primary;
     };
     let Some(path) = registry.model_path(&info.id) else {
@@ -515,10 +519,38 @@ fn wrap_with_local_fallback(
 fn pick_fallback_model(
     registry: &ModelRegistry,
 ) -> Option<crate::managers::model_registry::ModelInfo> {
+    best_downloaded_model(registry, |_| true)
+}
+
+/// The fallback pick among models that can transcribe `language`: a Russian-only
+/// model must not turn a French speaker's dictation into Russian text.
+#[cfg(feature = "local-stt")]
+fn pick_fallback_model_for_language(
+    registry: &ModelRegistry,
+    language: &str,
+) -> Option<crate::managers::model_registry::ModelInfo> {
+    best_downloaded_model(registry, |m| {
+        model_handles_language(&m.supported_languages, language)
+    })
+}
+
+/// An empty list means the catalogue does not know (custom models).
+#[cfg(any(feature = "local-stt", test))]
+fn model_handles_language(supported: &[String], language: &str) -> bool {
+    supported.is_empty()
+        || supported
+            .iter()
+            .any(|l| l.split(['-', '_']).next() == Some(language))
+}
+
+fn best_downloaded_model(
+    registry: &ModelRegistry,
+    usable: impl Fn(&crate::managers::model_registry::ModelInfo) -> bool,
+) -> Option<crate::managers::model_registry::ModelInfo> {
     registry
         .list()
         .into_iter()
-        .filter(|m| m.is_downloaded && !m.is_downloading)
+        .filter(|m| m.is_downloaded && !m.is_downloading && usable(m))
         .max_by(|a, b| {
             (a.is_recommended, a.speed_score + a.accuracy_score)
                 .partial_cmp(&(b.is_recommended, b.speed_score + b.accuracy_score))
@@ -763,6 +795,15 @@ mod tests {
             };
             Box::pin(futures::stream::once(async move { result }))
         }
+    }
+
+    #[test]
+    fn fallback_model_must_handle_the_language() {
+        let langs = |l: &[&str]| l.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert!(!model_handles_language(&langs(&["ru"]), "fr"));
+        assert!(model_handles_language(&langs(&["ru"]), "ru"));
+        assert!(model_handles_language(&langs(&["zh-Hans", "en"]), "zh"));
+        assert!(model_handles_language(&[], "fr"));
     }
 
     fn breaker_open() -> SttError {

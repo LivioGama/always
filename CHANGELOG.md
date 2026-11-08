@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **dictation:** the offline fallback no longer uses a local model that cannot handle your language.
+- **cli:** `always toggle-pause`, `toggle-auto-enter` and `get-state` now reach a daemon started by the desktop app.
+- **onboarding:** a saved Groq key no longer looks gone when you return to the engine step.
+
 ## [0.1.6] - 2026-11-08
 
 ### Fixed

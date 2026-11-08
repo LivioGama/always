@@ -895,7 +895,8 @@ offline; the cloud backend is faster to start and needs an API key.
 - **Never list a model that cannot run** (I8). Every catalogue entry must name an
   engine with a real implementation, a correct download size, and a checksum.
 - A local model may be armed as fallback for the cloud backend; failures fall
-  back silently but are logged.
+  back silently but are logged. Only a model that handles the dictation language
+  (`lang`, or the system locale for `auto`) is armed.
 - **Local Parakeet decoding honors token durations.** A token spanning
   multiple audio frames is decoded once, so a stutter or cut-off word does not
   create repeated copies solely because of that duration.
@@ -1530,7 +1531,8 @@ Three steps:
    - **Groq (cloud):** best accuracy and speed, needs a free API key (link to
      console.groq.com/keys). "Save & Use" saves `groq_api_key` and switches to
      Groq once the daemon, restarted to load the key, reconnects; on macOS
-     an invalid key is rejected inline first (Linux does not check it). Caption: free tier is about
+     an invalid key is rejected inline first (Linux does not check it). A saved
+     key stays shown masked, including when the step is revisited, until "Change". Caption: free tier is about
      2,000 requests a day and live transcript uses more of it.
    - **Local model:** private and offline. Offers the best catalogue model
      (recommended first, then speed + accuracy); "Download & Use" downloads it

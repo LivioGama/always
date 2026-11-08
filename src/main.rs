@@ -776,7 +776,7 @@ fn handle_toggle_pause() -> Result<()> {
     // empty atomics, so flipping them locally was a no-op. Send the
     // toggle through the UDS socket so the actual daemon process
     // receives it.
-    if always::always::daemon::is_running() && always::always::daemon::socket_path().is_some() {
+    if always::always::daemon::accepts_commands() {
         send_uds_command(r#"{"type":"TogglePause"}"#)?;
         println!("Sent TogglePause to running daemon.");
         return Ok(());
@@ -803,7 +803,7 @@ fn handle_toggle_auto_enter() -> Result<()> {
     // Same rationale as `handle_toggle_pause`: dial the running daemon
     // when one exists so the toggle reaches the right process-local
     // atomic.
-    if always::always::daemon::is_running() && always::always::daemon::socket_path().is_some() {
+    if always::always::daemon::accepts_commands() {
         send_uds_command(r#"{"type":"ToggleAutoEnter"}"#)?;
         println!("Sent ToggleAutoEnter to running daemon.");
         return Ok(());
@@ -964,7 +964,7 @@ fn send_uds_command(json: &str) -> Result<()> {
 }
 
 fn handle_get_state() -> Result<()> {
-    if always::always::daemon::is_running() && always::always::daemon::socket_path().is_some() {
+    if always::always::daemon::accepts_commands() {
         let state = read_daemon_state()?;
         println!("{}", state);
         return Ok(());

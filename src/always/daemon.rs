@@ -181,6 +181,13 @@ pub fn is_running() -> bool {
     read_pid().is_some_and(|pid| process_is_running(pid) && pid_is_daemon(pid, &daemon_pids))
 }
 
+/// Whether a daemon answers on this instance's socket. Unlike [`is_running`]
+/// this also finds a daemon started from another install, such as the one the
+/// desktop app bundles.
+pub fn accepts_commands() -> bool {
+    socket_path().is_some_and(|sock| ipc_endpoint_live(&sock))
+}
+
 fn pid_is_daemon(pid: u32, daemon_pids: &[u32]) -> bool {
     daemon_pids.contains(&pid)
 }

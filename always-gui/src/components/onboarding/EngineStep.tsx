@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import type { CatalogModel, DaemonApi } from "../../hooks/useDaemonState";
-import { configSet, openUrl, restartDaemon } from "../../lib/tauri";
+import { configSet, openUrl, restartDaemon, configShow } from "../../lib/tauri";
+import { parseConfig } from "../../lib/config";
 import { Btn, Caption, Spinner } from "../controls";
 import { Icon } from "./icons";
 
@@ -38,6 +39,8 @@ export function EngineStep({ daemon, onPick }: { daemon: DaemonApi; onPick: (bac
 
   useEffect(() => {
     daemon.listModels();
+    // This step is remounted on every visit; a key saved earlier stays shown.
+    configShow().then((out) => { if (parseConfig(out).groqKeySaved) setKeySaved(true); }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -71,7 +74,7 @@ export function EngineStep({ daemon, onPick }: { daemon: DaemonApi; onPick: (bac
         <div className="flex items-center gap-2">
           <input
             type="password"
-            value={key}
+            value={keySaved && !key ? "••••••••••••••••" : key}
             placeholder="gsk_…"
             onChange={(e) => setKey(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && saveKey()}
