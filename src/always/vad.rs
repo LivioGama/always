@@ -660,6 +660,20 @@ pub fn poll_speech_energy(_cfg: &AlwaysConfig) -> Result<bool> {
 /// so subsequent `record_utterance` calls are not affected.
 #[cfg(feature = "cpal")]
 pub fn poll_speech_energy(cfg: &AlwaysConfig) -> Result<bool> {
+    let energy =
+        newest_frame_energy()?.ok_or_else(|| anyhow::anyhow!("No audio frame available"))?;
+    Ok(energy >= voice_activity_energy_threshold(cfg))
+}
+
+/// No-op stub: reading the input level requires the cpal audio path.
+#[cfg(not(feature = "cpal"))]
+pub fn newest_frame_energy() -> Result<Option<f64>> {
+    Ok(None)
+}
+
+/// Energy of the newest captured frame, or `None` before the first one.
+#[cfg(feature = "cpal")]
+pub fn newest_frame_energy() -> Result<Option<f64>> {
     let source_arc = audio::get_or_spawn()?;
     // Peeking at the newest frame: this probe runs while capture is gated
     // and nobody consumes the recorder's queue, so the oldest queued frame
@@ -668,16 +682,15 @@ pub fn poll_speech_energy(cfg: &AlwaysConfig) -> Result<bool> {
     let rec = guard
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Audio recorder not available"))?;
-    let frame_buf = rec
-        .peek_newest_frame()
-        .ok_or_else(|| anyhow::anyhow!("No audio frame available"))?;
+    let Some(frame_buf) = rec.peek_newest_frame() else {
+        return Ok(None);
+    };
     let mut sample_buf = [0i16; FRAME_SAMPLES];
     let chunks = frame_buf.as_chunks::<2>();
     for (i, chunk) in chunks.0.iter().enumerate() {
         sample_buf[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
     }
-    let energy = normalized_energy(&sample_buf[..]);
-    Ok(energy >= voice_activity_energy_threshold(cfg))
+    Ok(Some(normalized_energy(&sample_buf[..])))
 }
 
 /// Speech shorter than this is treated as a "short utterance" and gets
@@ -1185,6 +1198,9 @@ fn record_with_local_vad(
     // 50ms was too short — first syllable of "Run the program" was dropped. 200ms
     // gives enough headroom for VAD onset latency without bloating speech_samples.
     let pre_buffer_frames = (200 / FRAME_MS as usize).max(1);
+    // Use persistent recorder to avoid process spawning overhead. Before the
+    // model load below: a microphone that cannot open must not reload it per retry.
+    let recorder_arc = audio::get_or_spawn()?;
     // Silero VAD via vad-rs. Frame size is locked to FRAME_SAMPLES (480 = 30ms @ 16kHz);
     // the wrapper enforces this and converts i16 → f32 internally.
     let vad = SileroVad::new().context("failed to load Silero VAD")?;
@@ -1212,8 +1228,6 @@ fn record_with_local_vad(
     let smoothing_window: usize = 10;
     let mut prob_history: VecDeque<f32> = VecDeque::with_capacity(smoothing_window);
 
-    // Use persistent recorder to avoid process spawning overhead
-    let recorder_arc = audio::get_or_spawn()?;
     let mut frame_buf = [0u8; FRAME_BYTES];
     // Pre-allocate ~4 seconds of audio (16000 Hz * 4s = 64000 samples) to avoid Vec growth
     let mut speech_samples: Vec<i16> = Vec::with_capacity(64_000);
@@ -3483,7 +3497,7 @@ fn normalized_energy(samples: &[i16]) -> f64 {
     (sum_sq as f64 / samples.len() as f64).sqrt() / 32768.0
 }
 
-fn voice_activity_energy_threshold(cfg: &AlwaysConfig) -> f64 {
+pub(crate) fn voice_activity_energy_threshold(cfg: &AlwaysConfig) -> f64 {
     cfg.hear_energy_threshold.max(cfg.energy_threshold)
 }
 

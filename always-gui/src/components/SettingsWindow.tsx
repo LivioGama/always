@@ -45,6 +45,7 @@ export function SettingsWindow({ daemon }: { daemon: DaemonApi }) {
   const [panel, setPanel] = useState<SettingsPanelKey>("general");
   const [config, setConfig] = useState<Config>(DEFAULT_CONFIG);
   const [loaded, setLoaded] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   const load = useCallback(async () => {
@@ -65,14 +66,26 @@ export function SettingsWindow({ daemon }: { daemon: DaemonApi }) {
   // Persist a config patch: optimistic local state + `always config set` per
   // field (debounced for the slider-ish numeric rows), mirroring the Swift
   // app's CLIService.setConfig write-through.
-  const onConfigChange = useCallback((patch: Partial<Config>) => {
+  const onConfigChange = useCallback((patch: Partial<Config>, afterSave?: () => void) => {
     setConfig((prev) => ({ ...prev, ...patch }));
+    // A caller that acts on the saved value cannot wait out the debounce.
+    if (afterSave) {
+      Promise.all(
+        Object.entries(patch).flatMap(([field, value]) => {
+          const meta = FIELD_KEYS[field];
+          return meta ? [configSet(meta.key, meta.fmt(value))] : [];
+        }),
+      )
+        .then(afterSave)
+        .catch((e) => setSaveError(String(e)));
+      return;
+    }
     for (const [field, value] of Object.entries(patch)) {
       const meta = FIELD_KEYS[field];
       if (!meta) continue;
       clearTimeout(saveTimers.current[field]);
       saveTimers.current[field] = setTimeout(() => {
-        configSet(meta.key, meta.fmt(value)).catch(() => {});
+        configSet(meta.key, meta.fmt(value)).catch((e) => setSaveError(String(e)));
       }, 250);
     }
   }, []);
@@ -81,6 +94,18 @@ export function SettingsWindow({ daemon }: { daemon: DaemonApi }) {
     <div className="h-screen flex bg-surface-900 text-surface-100 overflow-hidden">
       <SettingsSidebar selected={panel} onSelect={setPanel} state={daemon.state} />
       <div className="flex-1 min-w-0 overflow-y-auto">
+        {(saveError ?? daemon.state.commandError) && (
+          <button
+            type="button"
+            className="w-full text-left bg-red-500/10 border-b border-red-500/30 px-5 py-2 text-xs text-red-400"
+            onClick={() => {
+              setSaveError(null);
+              daemon.dismissCommandError();
+            }}
+          >
+            {saveError ?? daemon.state.commandError} (click to dismiss)
+          </button>
+        )}
         {!loaded ? (
           <div className="p-5 text-xs text-surface-500">Loading settings…</div>
         ) : (

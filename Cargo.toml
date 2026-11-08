@@ -1,6 +1,6 @@
 [package]
 name = "always"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 description = "Always — the first speech-to-text software designed to be always on and free your hands from the affordance"
 license = "AGPL-3.0-only"
@@ -199,25 +199,33 @@ name = "always"
 maintainer = "Livio Gamassia <hello@omni3.ai>"
 section = "sound"
 priority = "optional"
-depends = "$auto"
+depends = "$auto, wl-clipboard, xclip, xdotool, pulseaudio-utils"
+maintainer-scripts = "scripts/release/deb"
 extended-description = "Always-on voice dictation daemon (CLI). Run `always run`, or enable the user service: systemctl --user enable --now always-daemon.service"
 assets = [
     ["target/release/always", "usr/bin/always", "755"],
     ["scripts/release/always-daemon.service", "usr/lib/systemd/user/always-daemon.service", "644"],
+    ["scripts/release/60-always-uinput.rules", "usr/lib/udev/rules.d/60-always-uinput.rules", "644"],
     ["LICENSE", "usr/share/doc/always/copyright", "644"],
 ]
 
 [package.metadata.generate-rpm]
 name = "always"
+post_install_script = "udevadm control --reload-rules; udevadm trigger --name-match=uinput; exit 0"
 summary = "Always-on voice dictation daemon"
 assets = [
     { source = "target/release/always", dest = "/usr/bin/always", mode = "755" },
     { source = "scripts/release/always-daemon.service", dest = "/usr/lib/systemd/user/always-daemon.service", mode = "644" },
+    { source = "scripts/release/60-always-uinput.rules", dest = "/usr/lib/udev/rules.d/60-always-uinput.rules", mode = "644" },
     { source = "LICENSE", dest = "/usr/share/licenses/always/LICENSE", mode = "644", doc = true },
 ]
 auto-req = "disabled"
 
 [package.metadata.generate-rpm.requires]
+wl-clipboard = "*"
+pulseaudio-utils = "*"
+xclip = "*"
+xdotool = "*"
 alsa-lib = "*"
 glibc = ">= 2.39"
 libX11 = "*"

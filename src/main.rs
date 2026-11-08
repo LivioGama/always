@@ -121,10 +121,19 @@ enum Commands {
         #[arg(long)]
         check: bool,
     },
+    /// Test the microphone, transcription and pasting, one step at a time
+    Test,
     /// Toggle pause/resume state
     TogglePause,
     /// Toggle auto-enter state
     ToggleAutoEnter,
+    /// Run a shortcut's action, or `sync` to register shortcuts with the desktop.
+    /// Called by desktop shortcuts on Wayland.
+    #[command(hide = true)]
+    Shortcut {
+        /// pause, master-pause, auto-enter, force-paste, log-correction, correction-dialog or sync
+        name: String,
+    },
     /// Reset macOS menu bar / Control Center cache for Always
     MenuBar {
         #[command(subcommand)]
@@ -237,8 +246,11 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize structured logging (writes to ~/Library/Logs/Always/ on macOS).
-    // Foreground only for `Run` (the explicit foreground/debug subcommand).
-    let foreground = matches!(cli.command, Some(Commands::RunForeground { .. }));
+    // Foreground only for `Run` (the explicit foreground/debug subcommand) and `Test`.
+    let foreground = matches!(
+        cli.command,
+        Some(Commands::RunForeground { .. } | Commands::Test)
+    );
     let _logging_guard = always::always::telemetry::init_logging(foreground)
         .map_err(|e| anyhow::anyhow!("Failed to initialize logging: {}", e))?;
 
@@ -258,12 +270,16 @@ fn main() -> Result<()> {
             silence,
             auto_enter,
         }) => always::always::run(&always_config(lang, timeout, silence, auto_enter)?),
+        Some(Commands::Test) => {
+            always::always::dictation_test::run(&always_config("auto".into(), 15, None, None)?)
+        }
         Some(Commands::Config { action }) => handle_config(action),
         Some(Commands::Vocab { action }) => handle_vocab(action),
         Some(Commands::Corrections { action }) => handle_corrections(action),
         Some(Commands::Voice { action }) => handle_voice(action),
         Some(Commands::TogglePause) => handle_toggle_pause(),
         Some(Commands::ToggleAutoEnter) => handle_toggle_auto_enter(),
+        Some(Commands::Shortcut { name }) => handle_shortcut(&name),
         Some(Commands::Model { action }) => cli::handle_model(action),
         Some(Commands::Logs { args }) => cli::handle_logs(args),
         Some(Commands::Update { check }) => {
@@ -552,7 +568,9 @@ fn handle_config(action: ConfigAction) -> Result<()> {
             // are unacceptable in local rebuilds because debug signing changes
             // the code requirement often enough for macOS to re-authorize.
             if key == "groq_api_key" {
-                db::set_preference(&conn, &key, &value)?;
+                let value = value.trim();
+                always::stt::validate_groq_api_key(value)?;
+                db::set_preference(&conn, &key, value)?;
                 println!("groq_api_key = *** (saved)");
             } else if key == "deepgram_api_key" {
                 db::set_preference(&conn, &key, &value)?;
@@ -776,7 +794,7 @@ fn handle_toggle_pause() -> Result<()> {
     // empty atomics, so flipping them locally was a no-op. Send the
     // toggle through the UDS socket so the actual daemon process
     // receives it.
-    if always::always::daemon::is_running() && always::always::daemon::socket_path().is_some() {
+    if always::always::daemon::accepts_commands() {
         send_uds_command(r#"{"type":"TogglePause"}"#)?;
         println!("Sent TogglePause to running daemon.");
         return Ok(());
@@ -799,11 +817,28 @@ fn handle_toggle_pause() -> Result<()> {
     Ok(())
 }
 
+fn handle_shortcut(name: &str) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if name == "sync" {
+        if !always::always::keyboard::sync_desktop_shortcuts() {
+            anyhow::bail!("this desktop's shortcuts cannot be registered automatically");
+        }
+        println!("Desktop shortcuts registered.");
+        return Ok(());
+    }
+    if !always::always::daemon::accepts_commands() {
+        anyhow::bail!("the Always daemon is not running");
+    }
+    send_uds_command(
+        &serde_json::json!({ "type": "TriggerShortcut", "data": { "name": name } }).to_string(),
+    )
+}
+
 fn handle_toggle_auto_enter() -> Result<()> {
     // Same rationale as `handle_toggle_pause`: dial the running daemon
     // when one exists so the toggle reaches the right process-local
     // atomic.
-    if always::always::daemon::is_running() && always::always::daemon::socket_path().is_some() {
+    if always::always::daemon::accepts_commands() {
         send_uds_command(r#"{"type":"ToggleAutoEnter"}"#)?;
         println!("Sent ToggleAutoEnter to running daemon.");
         return Ok(());
@@ -964,7 +999,7 @@ fn send_uds_command(json: &str) -> Result<()> {
 }
 
 fn handle_get_state() -> Result<()> {
-    if always::always::daemon::is_running() && always::always::daemon::socket_path().is_some() {
+    if always::always::daemon::accepts_commands() {
         let state = read_daemon_state()?;
         println!("{}", state);
         return Ok(());

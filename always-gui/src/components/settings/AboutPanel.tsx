@@ -192,7 +192,7 @@ function UpdateSection({ daemon }: { daemon: DaemonApi }) {
   const runCliInstall = async () => {
     const ok = window.confirm(
       "Install the Always update?\n\n" +
-        "Always will download and verify the update, then quit and relaunch. " +
+        "Always will download and verify the update, then restart. " +
         "Dictation pauses for a few seconds.",
     );
     if (!ok) return;
@@ -310,7 +310,7 @@ function UpdateSection({ daemon }: { daemon: DaemonApi }) {
             Run `always update`
           </Btn>
           {cliPhase === "installing" && (
-            <Caption>Downloading and verifying… Always relaunches when the installer finishes.</Caption>
+            <Caption>Downloading and verifying… Always restarts when the installer finishes.</Caption>
           )}
         </div>
       </div>

@@ -440,10 +440,11 @@ pub fn paste_text(auto_enter: bool) -> Result<()> {
 /// non-empty string (which the desktop environment sets for every
 /// Wayland compositor).
 pub fn is_wayland_session() -> bool {
-    std::env::var("WAYLAND_DISPLAY")
-        .ok()
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
+    is_wayland_display(std::env::var("WAYLAND_DISPLAY").ok().as_deref())
+}
+
+fn is_wayland_display(value: Option<&str>) -> bool {
+    value.is_some_and(|v| !v.is_empty())
 }
 
 /// Paste on a Wayland session (the transcript is already on the clipboard).
@@ -477,6 +478,9 @@ fn paste_wayland(auto_enter: bool) -> Result<()> {
         }
     }
     for (bin, paste_args, enter_args) in wayland_injectors(terminal) {
+        if bin == "ydotool" && paste_uinput(terminal, auto_enter) {
+            return Ok(());
+        }
         if !which_present(bin) {
             continue;
         }
@@ -492,6 +496,40 @@ fn paste_wayland(auto_enter: bool) -> Result<()> {
         }
     }
     paste_x11(auto_enter)
+}
+
+/// The built-in injector, tried after `wtype` (which GNOME and KDE refuse).
+#[cfg(target_os = "linux")]
+fn paste_uinput(terminal: bool, auto_enter: bool) -> bool {
+    use crate::always::linux_uinput::{KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V, chord};
+
+    let keys: &[u16] = if terminal {
+        &[KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V]
+    } else {
+        &[KEY_LEFTCTRL, KEY_V]
+    };
+    if let Err(e) = chord(keys) {
+        tracing::warn!(error = %e, "uinput_paste_failed");
+        return false;
+    }
+    if auto_enter {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        return press_return_uinput();
+    }
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn press_return_uinput() -> bool {
+    use crate::always::linux_uinput::{KEY_ENTER, chord};
+
+    match chord(&[KEY_ENTER]) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "uinput_return_failed");
+            false
+        }
+    }
 }
 
 /// `(binary, paste chord, Enter)` for each Wayland injector, in preference
@@ -746,6 +784,9 @@ pub fn press_return() -> Result<()> {
             }
         }
         for (bin, _, enter_args) in wayland_injectors(false) {
+            if bin == "ydotool" && press_return_uinput() {
+                return Ok(());
+            }
             if !which_present(bin) {
                 continue;
             }
@@ -1293,8 +1334,9 @@ mod tests {
 
     #[test]
     fn wayland_detection_with_unset_var() {
-        // Default (unset) — not wayland.
-        assert!(!is_wayland_session());
+        assert!(!is_wayland_display(None));
+        assert!(!is_wayland_display(Some("")));
+        assert!(is_wayland_display(Some("wayland-0")));
     }
 }
 

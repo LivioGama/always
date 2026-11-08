@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CatalogModel, DaemonApi } from "../../hooks/useDaemonState";
 import { resolvedPostprocessMode, type Config } from "../../lib/config";
-import { configDelete, configSet } from "../../lib/tauri";
+import { configDelete, configSet, platform, restartDaemon } from "../../lib/tauri";
 import { Btn, Caption, Divider, PanelTitle, Segmented, Spinner, Toggle } from "../controls";
 
 /// Settings → Models: post-processing mode + local model catalog.
@@ -13,6 +13,11 @@ export function ModelsPanel({ daemon, config, onConfigChange }: {
 }) {
   const s = daemon.state;
   const mode = resolvedPostprocessMode(config);
+  const [os, setOs] = useState<string | null>(null);
+
+  useEffect(() => {
+    platform().then(setOs).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (s.isDaemonConnected) daemon.listModels();
@@ -44,13 +49,13 @@ export function ModelsPanel({ daemon, config, onConfigChange }: {
             onChange={setMode}
             options={[
               { label: "Always Fast", value: "fast" },
-              { label: "Apple Intelligence", value: "apple" },
+              ...(os === "macos" ? [{ label: "Apple Intelligence", value: "apple" }] : []),
               { label: "Groq Cloud", value: "groq" },
               { label: "Off", value: "off" },
             ]}
           />
         </div>
-        {mode === "apple" && !config.appleIntelligenceAvailable && (
+        {os === "macos" && mode === "apple" && !config.appleIntelligenceAvailable && (
           <Caption className="mt-1.5 text-orange-400">
             ⚠ Apple Intelligence isn't available on this platform — transcripts will pass through unedited.
           </Caption>
@@ -78,15 +83,21 @@ function GroqKeyCard({ config, onConfigChange }: {
   const [draft, setDraft] = useState("");
   const [revealed, setRevealed] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const save = async () => {
     const key = draft.trim();
     if (!key) return;
     setSaving(true);
+    setError(null);
     try {
       await configSet("groq_api_key", key);
+      // The daemon reads the key only at start.
+      await restartDaemon();
       onConfigChange({ groqKeySaved: true, groqApiKey: key });
       setDraft("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
     }
@@ -94,10 +105,14 @@ function GroqKeyCard({ config, onConfigChange }: {
 
   const remove = async () => {
     setSaving(true);
+    setError(null);
     try {
       await configDelete("groq_api_key");
+      await restartDaemon();
       onConfigChange({ groqKeySaved: false, groqApiKey: null });
       setRevealed(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
     }
@@ -150,6 +165,7 @@ function GroqKeyCard({ config, onConfigChange }: {
           <Btn destructive onClick={remove} disabled={saving}>Delete</Btn>
         )}
       </div>
+      {error && <p className="text-xs text-red-400">{error}</p>}
     </div>
   );
 }

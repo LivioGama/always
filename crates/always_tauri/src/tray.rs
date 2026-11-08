@@ -17,7 +17,7 @@ use std::sync::Arc;
 #[cfg(not(target_os = "macos"))]
 use tauri::menu::{CheckMenuItem, Menu, MenuBuilder, MenuItem};
 #[cfg(not(target_os = "macos"))]
-use tauri::tray::{TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 #[cfg(not(target_os = "macos"))]
 use tauri::{AppHandle, Wry};
 #[cfg(not(target_os = "macos"))]
@@ -48,6 +48,7 @@ pub fn build_tray(app: &AppHandle, uds: Arc<UdsClient>) -> Result<TrayIcon<Wry>,
     let tray = TrayIconBuilder::new()
         .icon(app.default_window_icon().unwrap().clone())
         .tooltip("Always")
+        .show_menu_on_left_click(false)
         // Initial state; rebuilt from daemon events (update_menu_loop).
         .menu(&build_menu(app, "Pause", false)?)
         .on_menu_event(move |app, event| {
@@ -61,6 +62,16 @@ pub fn build_tray(app: &AppHandle, uds: Arc<UdsClient>) -> Result<TrayIcon<Wry>,
                 }
                 "onboarding" => {
                     wm.show_onboarding(ShowOnboardingReason::Reinvoked);
+                    None
+                }
+                "updates" => {
+                    wm.show_settings();
+                    None
+                }
+                "logs" => {
+                    if let Err(e) = crate::commands::open_logs(app.clone()) {
+                        tracing::warn!(error = %e, "tray_open_logs_failed");
+                    }
                     None
                 }
                 "quit" => {
@@ -79,7 +90,13 @@ pub fn build_tray(app: &AppHandle, uds: Arc<UdsClient>) -> Result<TrayIcon<Wry>,
             }
         })
         .on_tray_icon_event(move |tray, event| {
-            if let TrayIconEvent::Click { .. } = event {
+            // Windows reports both press and release; one click is one toggle.
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
                 // Left-click toggles pause/resume directly.
                 let uds = Arc::clone(&uds_for_click);
                 tauri::async_runtime::spawn(async move {
@@ -143,6 +160,20 @@ fn build_menu(
             app,
             "onboarding",
             "Onboarding…",
+            true,
+            None::<&str>,
+        )?)
+        .item(&MenuItem::with_id(
+            app,
+            "logs",
+            "Open Today's Log",
+            true,
+            None::<&str>,
+        )?)
+        .item(&MenuItem::with_id(
+            app,
+            "updates",
+            "Check for Updates…",
             true,
             None::<&str>,
         )?)

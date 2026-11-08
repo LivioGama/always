@@ -372,16 +372,9 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
         // recording a voiceprint from Settings must work even while
         // dictation is paused (that's exactly when users set it up).
         if let Some(step) = crate::always::enrollment::take_pending() {
-            #[cfg(target_os = "macos")]
-            {
-                let cfg_snapshot = active_cfg.read().clone();
-                if let Err(e) = crate::always::enrollment::run_enrollment(&cfg_snapshot, step) {
-                    tracing::warn!(error = %e, step = step.as_str(), "enrollment_run_failed");
-                }
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                tracing::debug!(step = step.as_str(), "enrollment_ignored_non_macos");
+            let cfg_snapshot = active_cfg.read().clone();
+            if let Err(e) = crate::always::enrollment::run_enrollment(&cfg_snapshot, step) {
+                tracing::warn!(error = %e, step = step.as_str(), "enrollment_run_failed");
             }
         }
 
@@ -518,9 +511,29 @@ pub fn run(cfg: &AlwaysConfig) -> Result<()> {
                 message: &format!("Voice processing error: {:#}", e),
             });
             // Don't exit - continue running
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(if is_mic_open_failure(&e) {
+                MIC_OPEN_RETRY
+            } else {
+                Duration::from_millis(100)
+            });
         }
     }
+}
+
+/// Wait before retrying a microphone that cannot be opened. At the normal
+/// 100 ms a broken device logged errors around the clock.
+const MIC_OPEN_RETRY: Duration = Duration::from_secs(5);
+
+/// Whether the error means the microphone could not be opened at all.
+fn is_mic_open_failure(err: &anyhow::Error) -> bool {
+    let s = format!("{err:#}").to_lowercase();
+    [
+        "failed to list configs",
+        "no input device",
+        "no input config",
+    ]
+    .iter()
+    .any(|marker| s.contains(marker))
 }
 
 /// Map a record/transcribe error to a (kind, message) pair for the
@@ -558,7 +571,13 @@ fn classify_transcription_error(err: &anyhow::Error) -> (&'static str, String) {
             "apple_timeout",
             "Speech engine timed out — its language model may still be downloading".to_string(),
         )
-    } else if s.contains("microphone capture") || s.contains("no input device") {
+    } else if is_mic_open_failure(err) {
+        // Before the network check: cpal's "disconnected" contains "connect".
+        (
+            "microphone",
+            "Can't open the microphone — run `always test` to see why".to_string(),
+        )
+    } else if s.contains("microphone capture") {
         (
             "microphone",
             "No audio from the microphone — check System Settings → Privacy & Security → Microphone".to_string(),
@@ -1967,6 +1986,14 @@ mod tests {
             ),
             (
                 "microphone capture failed: '/x/always-capture' produced no audio",
+                "microphone",
+            ),
+            (
+                "Failed to list configs: The requested audio device is not available. It may have been disconnected.",
+                "microphone",
+            ),
+            (
+                "No input device found: it may have been disconnected",
                 "microphone",
             ),
             ("Groq returned 401 Unauthorized", "auth"),

@@ -159,20 +159,35 @@ impl SharedAudioSource {
         })
     }
 
+    /// The default device, or the first other one that can capture when it
+    /// cannot. ALSA always reports a `default` device, so it has to be probed:
+    /// without a PipeWire/Pulse bridge it is card 0, which may have no mic.
     fn find_input_device() -> Result<cpal::Device> {
+        let can_capture = |d: &cpal::Device| -> Result<bool, cpal::Error> {
+            let configs: Vec<_> = d.supported_input_configs()?.collect();
+            Ok(pick_config(&configs).is_some())
+        };
         let host = cpal::default_host();
+        let mut default_failure = "there is no default device".to_string();
         if let Some(d) = host.default_input_device() {
-            return Ok(d);
+            match can_capture(&d) {
+                Ok(true) => return Ok(d),
+                // Busy means the mic exists and another app holds it: wait
+                // for it rather than silently switching microphones.
+                Err(e) if e.kind() == cpal::ErrorKind::DeviceBusy => return Ok(d),
+                Ok(false) => default_failure = "it has no readable format".to_string(),
+                Err(e) => default_failure = e.to_string(),
+            }
         }
         for d in host.devices().map_err(|e| anyhow::anyhow!("{}", e))? {
-            if d.supported_input_configs()
-                .map(|mut it| it.next().is_some())
-                .unwrap_or(false)
-            {
+            // ALSA's `null` device opens fine and records silence forever.
+            let is_null = d.id().is_ok_and(|id| id.id() == "null");
+            if !is_null && can_capture(&d).unwrap_or(false) {
+                tracing::warn!(device = %d, %default_failure, "default_input_device_unusable");
                 return Ok(d);
             }
         }
-        anyhow::bail!("No input device found")
+        anyhow::bail!("No input device found: {default_failure}")
     }
 
     fn find_config(device: &cpal::Device) -> Result<(cpal::StreamConfig, cpal::SampleFormat)> {
@@ -537,11 +552,32 @@ impl Drop for SharedAudioSource {
 static GLOBAL_SOURCE: std::sync::LazyLock<Arc<Mutex<Option<SharedAudioSource>>>> =
     std::sync::LazyLock::new(|| Arc::new(Mutex::new(None)));
 
+/// How long a failed microphone open is remembered. Probing every device is
+/// slow, and the idle-pause wake check would otherwise do it ten times a second.
+const OPEN_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+static LAST_OPEN_FAILURE: Mutex<Option<(std::time::Instant, String)>> = Mutex::new(None);
+
 /// Get or create the global shared audio source.
 pub fn get_or_spawn() -> Result<Arc<Mutex<Option<SharedAudioSource>>>> {
     let mut source = GLOBAL_SOURCE.lock();
     if source.is_none() {
-        *source = Some(SharedAudioSource::new()?);
+        let mut failure = LAST_OPEN_FAILURE.lock();
+        if let Some((at, message)) = failure.as_ref()
+            && at.elapsed() < OPEN_RETRY
+        {
+            anyhow::bail!("{message}");
+        }
+        match SharedAudioSource::new() {
+            Ok(opened) => {
+                *source = Some(opened);
+                *failure = None;
+            }
+            Err(e) => {
+                let message = format!("{e:#}");
+                *failure = Some((std::time::Instant::now(), message.clone()));
+                anyhow::bail!("{message}");
+            }
+        }
     }
     Ok(Arc::clone(&GLOBAL_SOURCE))
 }

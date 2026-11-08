@@ -1,0 +1,1 @@
+KERNEL=="uinput", TAG+="uaccess", OPTIONS+="static_node=uinput"

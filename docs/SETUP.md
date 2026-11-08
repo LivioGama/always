@@ -143,6 +143,8 @@ The daemon runs as the **current user** (via `--user` scope), so no root privile
 
 Always uses **ALSA** via the `cpal` crate for audio capture. On most modern Linux systems, PipeWire or PulseAudio provides an ALSA compatibility layer automatically.
 
+If dictation does nothing, stop the daemon and run `always test`: it checks the microphone, transcription and pasting one step at a time and prints what it heard.
+
 ```bash
 # Check available audio devices
 arecord -l

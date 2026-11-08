@@ -81,6 +81,9 @@ stop_recorded_dev_daemon
 echo "▶ building Linux daemon..."
 cargo build --locked --no-default-features --features linux,cpal,local-stt --bin always
 
+mkdir -p "$REPO_ROOT/crates/always_tauri/bundle/daemon"
+install -m 755 "$DAEMON_BIN" "$REPO_ROOT/crates/always_tauri/bundle/daemon/always"
+
 echo "▶ building settings frontend..."
 (
     cd "$GUI_DIR"
@@ -97,9 +100,9 @@ fi
 
 echo "▶ launching dev daemon..."
 if [[ -n "$DEV_GROQ_API_KEY" ]]; then
-    ALWAYS_INSTANCE=dev GROQ_API_KEY="$DEV_GROQ_API_KEY" "$DAEMON_BIN" run >"$DAEMON_LOG_FILE" 2>&1 &
+    NO_COLOR=1 ALWAYS_INSTANCE=dev GROQ_API_KEY="$DEV_GROQ_API_KEY" "$DAEMON_BIN" run >"$DAEMON_LOG_FILE" 2>&1 &
 else
-    ALWAYS_INSTANCE=dev "$DAEMON_BIN" run >"$DAEMON_LOG_FILE" 2>&1 &
+    NO_COLOR=1 ALWAYS_INSTANCE=dev "$DAEMON_BIN" run >"$DAEMON_LOG_FILE" 2>&1 &
 fi
 daemon_pid=$!
 unset DEV_GROQ_API_KEY
@@ -112,7 +115,7 @@ for _ in {1..150}; do
         cat "$DAEMON_LOG_FILE" >&2
         exit 1
     fi
-    if rg -q "uds_server_listening, socket_path: $SOCKET_FILE" "$DAEMON_LOG_FILE"; then
+    if grep -q "uds_server_listening, socket_path: $SOCKET_FILE" "$DAEMON_LOG_FILE"; then
         daemon_ready=true
         break
     fi
@@ -125,7 +128,7 @@ if [[ "$daemon_ready" != true ]]; then
 fi
 
 echo "▶ launching settings app..."
-ALWAYS_INSTANCE=dev ALWAYS_CLI="$DAEMON_BIN" "$GUI_BIN" >"$LOG_FILE" 2>&1 &
+NO_COLOR=1 ALWAYS_INSTANCE=dev ALWAYS_CLI="$DAEMON_BIN" "$GUI_BIN" >"$LOG_FILE" 2>&1 &
 gui_pid=$!
 printf '%s\n' "$gui_pid" > "$PID_FILE"
 
@@ -151,7 +154,7 @@ for _ in {1..150}; do
         cat "$LOG_FILE" >&2
         exit 1
     fi
-    if rg -q "uds_connected path=$SOCKET_FILE" "$LOG_FILE"; then
+    if grep -q "uds_connected path=$SOCKET_FILE" "$LOG_FILE"; then
         gui_connected=true
         break
     fi
@@ -163,7 +166,7 @@ if [[ "$gui_connected" != true ]]; then
     exit 1
 fi
 
-if ! tr '\0' '\n' <"/proc/$gui_pid/environ" | rg -qx 'ALWAYS_INSTANCE=dev'; then
+if ! tr '\0' '\n' <"/proc/$gui_pid/environ" | grep -qx 'ALWAYS_INSTANCE=dev'; then
     echo "✗ settings app is not isolated as the dev instance; log: $LOG_FILE" >&2
     exit 1
 fi

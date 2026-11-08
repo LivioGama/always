@@ -1370,6 +1370,14 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                 tracing::debug!("RespawnRecorder ignored — no recorder on this build");
             }
         }
+        DaemonCommand::TriggerShortcut { name } => {
+            #[cfg(target_os = "linux")]
+            if !crate::always::keyboard::trigger_shortcut(&name) {
+                tracing::warn!(name, "uds_unknown_shortcut");
+            }
+            #[cfg(not(target_os = "linux"))]
+            tracing::debug!(name, "uds_trigger_shortcut_ignored");
+        }
         DaemonCommand::ReloadShortcuts => {
             // Settings → Shortcuts saved a new combo. Re-read the prefs
             // DB and swap the live keyboard listener's shortcut set.
