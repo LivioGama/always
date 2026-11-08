@@ -23,7 +23,8 @@ name: Release
 # the `release-assets` workflow artifact. (Dispatching on a tag ref behaves
 # like a tag push.)
 #
-# No Apple Developer account: the macOS app is ad-hoc signed, NOT notarized.
+# No Apple Developer account: the macOS app is signed with a persistent
+# self-signed certificate (so permission grants survive updates), NOT notarized.
 # curl does not set com.apple.quarantine, so the installer-delivered app opens.
 # No Homebrew cask (decision: installer scripts and packages only).
 
@@ -151,10 +152,12 @@ jobs:
     with:
       tag: ${{ needs.verify.outputs.tag }}
     # Passed explicitly (not `secrets: inherit`): the called workflow gets the
-    # minisign signing key and nothing else.
+    # minisign and macOS code-signing keys and nothing else.
     secrets:
       ALWAYS_MINISIGN_SECRET_KEY: ${{ secrets.ALWAYS_MINISIGN_SECRET_KEY }}
       ALWAYS_MINISIGN_PASSWORD: ${{ secrets.ALWAYS_MINISIGN_PASSWORD }}
+      ALWAYS_MACOS_SIGNING_P12: ${{ secrets.ALWAYS_MACOS_SIGNING_P12 }}
+      ALWAYS_MACOS_SIGNING_P12_PASSWORD: ${{ secrets.ALWAYS_MACOS_SIGNING_P12_PASSWORD }}
 
   release:
     name: Publish release

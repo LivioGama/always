@@ -28,7 +28,7 @@ Branch model:
 | Job | Does | A failure means |
 | --- | --- | --- |
 | `verify` | tag is on main; `scripts/release/check-release.sh <tag>` (tag == every version file, CHANGELOG heading, empty Unreleased, fresh lockfiles); `cargo deny check`; locked tests | nothing built or published |
-| `assets` | builds macOS arm64 (`Always/build.sh` release, ad-hoc signed), Linux x86_64 and aarch64 (glibc: tar.gz, deb, rpm), Windows x86_64 (zip); `.sha256` per asset; `actions/attest` build provenance; stages `release-assets` | nothing published |
+| `assets` | builds macOS arm64 (`Always/build.sh` release, signed with the persistent certificate), Linux x86_64 and aarch64 (glibc: tar.gz, deb, rpm), Windows x86_64 (zip); `.sha256` per asset; `actions/attest` build provenance; stages `release-assets` | nothing published |
 | `release` | publishes a NON-draft release; body = the CHANGELOG section; uploads archives, packages, `.sha256`, `install.sh`, `install.ps1`, `always-<tag>.intoto.jsonl` | publication may already be immutable |
 | `smoke` (x7) | verifies provenance, then runs the installer from the published release on Ubuntu (deb, tar), Fedora (rpm), macOS arm64, Windows; each prints `always --version` | already published: distinguish code from infra |
 
@@ -39,9 +39,11 @@ Asset names (a public contract; the installers and website use them):
 
 Facts that shape everything:
 
-- **No notarization, no Homebrew.** The macOS app is ad-hoc signed; curl does
-  not quarantine, so the installer-delivered app opens. A browser-downloaded
-  archive needs `xattr -dr com.apple.quarantine`.
+- **No notarization, no Homebrew.** The macOS app is signed with one persistent
+  certificate (secret `ALWAYS_MACOS_SIGNING_P12`) so permission grants survive
+  updates; never ship ad-hoc or replace it casually. curl does not quarantine,
+  so the installer-delivered app opens. A browser-downloaded archive needs
+  `xattr -dr com.apple.quarantine`.
 - **`workflow_dispatch` on a branch is a dry run**: verify (version/changelog
   checks reported, not enforced), assets, then smoke against the built assets via
   `file://`. No release is created. Run it on the release branch before merging:

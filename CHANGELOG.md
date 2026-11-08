@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-11-08
+
+### Fixed
+- **updates:** macOS now keeps Microphone, Accessibility and Input Monitoring permissions across updates, because every release is signed with the same certificate. Updating from 0.1.8 or earlier needs one last re-grant: remove Always from those lists and add it back. ([#204](https://github.com/LivioGama/always/pull/204))
+
 ## [0.1.8] - 2026-11-08
 
 ### Fixed

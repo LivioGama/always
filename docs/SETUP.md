@@ -57,7 +57,7 @@ macOS may show: *"Always.app" needs to be opened to continue.*
 # Gatekeeper override — only if you downloaded from the web
 xattr -d com.apple.quarantine /Applications/Always.app
 
-# Signature check (the app is ad-hoc signed, not notarized)
+# Signature check (the app is signed with the project's own certificate, not notarized)
 codesign --verify --deep --strict /Applications/Always.app
 # Prints nothing on success; a failure names the broken file
 ```

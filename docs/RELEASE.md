@@ -8,8 +8,8 @@ from it.
 
 Users install with a one-line script, or download raw packages from the
 releases page. There are no disk images, no Homebrew cask, no Apple
-notarization and no MSI: the macOS app is ad-hoc signed, and Windows ships as
-a `.zip`.
+notarization and no MSI: the macOS app is signed with a persistent self-signed
+certificate, and Windows ships as a `.zip`.
 
 ## How users install
 
@@ -35,7 +35,7 @@ Names are a stable contract shared by the installers and the website:
 
 | Target | Assets |
 |--------|--------|
-| `aarch64-apple-darwin` | `.tar.gz` (contains `Always.app`, ad-hoc signed) |
+| `aarch64-apple-darwin` | `.tar.gz` (contains `Always.app`, signed with the persistent certificate) |
 | `x86_64-unknown-linux-gnu` | `.tar.gz`, `.deb`, `.rpm` |
 | `aarch64-unknown-linux-gnu` | `.tar.gz`, `.deb`, `.rpm` |
 | `x86_64-pc-windows-msvc` | `.zip` |
