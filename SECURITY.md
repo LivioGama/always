@@ -26,7 +26,7 @@ transit and tracked alongside the fix):
 
 If GitHub Security Advisories are unavailable to you, send email to:
 
-- **security@always.devliv.io**
+- **livio.gamassia@gmail.com**
 
 GPG fingerprint for encrypted reports: `<TBD — published in v1.0.0 release notes>`
 
