@@ -217,18 +217,22 @@ install_macos() {
 
   # Quit a running copy that lives in the target location before replacing it.
   local was_running=0 pid
-  if [[ -d "$dest" ]] && pgrep -f "${dest}/Contents/MacOS/Always" >/dev/null 2>&1; then
+  # -a: the app's Install button makes this script a descendant of the app
+  # and its daemon, and macOS pgrep hides ancestors by default. Anchored so a
+  # shell that merely mentions the path can never match.
+  local app_exe="^${dest}/Contents/MacOS/Always( |\$)" bundle_exe="^${dest}/Contents/MacOS/"
+  if [[ -d "$dest" ]] && pgrep -a -f "$app_exe" >/dev/null 2>&1; then
     was_running=1
     log "Quitting the running Always"
     osascript -e 'tell application "Always" to quit' >/dev/null 2>&1 || true
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-      pgrep -f "${dest}/Contents/MacOS/Always" >/dev/null 2>&1 || break
+      pgrep -a -f "$app_exe" >/dev/null 2>&1 || break
       sleep 0.5
     done
     # What is left of that bundle (the daemon, helpers). Never this script,
     # nor the `always update` process that started it: ending that one would
     # cut off the output the user is reading.
-    for pid in $(pgrep -f "${dest}/Contents/MacOS/" 2>/dev/null || true); do
+    for pid in $(pgrep -a -f "$bundle_exe" 2>/dev/null || true); do
       [[ "$pid" == "$$" || "$pid" == "${ALWAYS_UPDATER_PID:-}" ]] && continue
       kill "$pid" >/dev/null 2>&1 || true
     done
