@@ -1,0 +1,1 @@
+**updates:** macOS now keeps Microphone, Accessibility and Input Monitoring permissions across updates, because every release is signed with the same certificate. Updating from 0.1.8 or earlier needs one last re-grant: remove Always from those lists and add it back.
