@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-11-08
+
+### Fixed
+- **linux:** the desktop app's `.deb` installs next to the `always` CLI package again; 0.1.7 refused it because both packages claimed the same udev rule file, so Debian and Ubuntu desktops ended up without the app. ([#201](https://github.com/LivioGama/always/pull/201))
+
 ## [0.1.7] - 2026-11-08
 
 ### Added
