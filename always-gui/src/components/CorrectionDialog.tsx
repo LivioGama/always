@@ -14,7 +14,7 @@ export function CorrectionDialog({
   onReject,
 }: {
   pending: CorrectionPending;
-  onApprove: () => void;
+  onApprove: (intended: string) => void;
   onReject: () => void;
 }) {
   const [intended, setIntended] = useState(pending.right);
@@ -42,7 +42,7 @@ export function CorrectionDialog({
             className="w-full bg-surface-800 border border-surface-600 rounded-lg px-3 py-2 text-white text-sm placeholder-surface-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
             autoFocus
             onKeyDown={(e) => {
-              if (e.key === "Enter" && value) onApprove();
+              if (e.key === "Enter" && value) onApprove(value);
               if (e.key === "Escape") onReject();
             }}
           />
@@ -56,7 +56,7 @@ export function CorrectionDialog({
             Reject
           </button>
           <button
-            onClick={() => value && onApprove()}
+            onClick={() => value && onApprove(value)}
             disabled={!value}
             className="flex-1 px-3 py-2 text-sm font-semibold text-white bg-primary-600 hover:bg-primary-500 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >

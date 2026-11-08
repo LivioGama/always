@@ -16,31 +16,31 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "cpal"))]
 use anyhow::Context;
 use anyhow::Result;
 use parking_lot::Mutex;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "cpal"))]
 use crate::always::audio::{self, FRAME_BYTES, FRAME_MS, FRAME_SAMPLES};
 use crate::always::config::AlwaysConfig;
 use crate::always::event;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "cpal"))]
 use crate::always::speaker_embed;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "cpal"))]
 use crate::always::vad_silero::SileroVad;
 use crate::always::voiceprint::{self, EnrollStep};
 
 /// Voiced audio required per guided sample. 5s of actual voice gives
 /// the embedding a stable identity while keeping each step short.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "cpal"))]
 const TARGET_VOICED_MS: u32 = 5_000;
 /// Hard wall-clock cap per recording — covers "user clicked record and
 /// walked away" without wedging the event loop forever.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "cpal"))]
 const MAX_RECORDING_SECS: u64 = 45;
 /// Level-meter throttle (frames): 30ms frames × 3 ≈ 10 Hz.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "cpal"))]
 const LEVEL_EVERY_FRAMES: u32 = 3;
 
 static PENDING: Mutex<Option<EnrollStep>> = Mutex::new(None);
@@ -88,7 +88,6 @@ pub fn profile_status(cfg_enabled: bool) -> (bool, bool, Vec<String>) {
 /// Record one guided sample and fold it into the voiceprint. Runs on
 /// the event-loop thread. Broadcasts progress/terminal events itself;
 /// the returned Result is for the caller's log line only.
-#[cfg(target_os = "macos")]
 pub fn run_enrollment(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
     let broadcaster = event::global_broadcaster();
     let result = record_and_store(cfg, step);
@@ -107,12 +106,12 @@ pub fn run_enrollment(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
     result
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", feature = "cpal")))]
 fn record_and_store(_cfg: &AlwaysConfig, _step: EnrollStep) -> Result<()> {
-    anyhow::bail!("voice enrollment is only supported on macOS")
+    anyhow::bail!("voice enrollment needs audio capture, which this build does not include")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "cpal"))]
 fn record_and_store(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
     // The model is normally prefetched at daemon startup; if that hasn't
     // finished (or failed) the download happens here. Tell the UI we are
@@ -126,7 +125,7 @@ fn record_and_store(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
     let broadcaster = event::global_broadcaster();
     broadcaster.voice_enrollment_started(step.as_str());
 
-    let recorder_arc = audio::RecChild::get_or_spawn()?;
+    let recorder_arc = audio::get_or_spawn()?;
     // Start from the moment the user clicked record: the recorder keeps
     // queueing while dictation is paused (which is when people enroll),
     // and a voiceprint built from that backlog would include whatever the
@@ -216,7 +215,7 @@ fn record_and_store(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
 /// Same normalized RMS the daemon's energy gates use (see
 /// `vad::normalized_energy`), duplicated in miniature to avoid making
 /// that helper public just for a meter.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", feature = "cpal", test))]
 fn frame_energy(samples: &[i16]) -> f64 {
     if samples.is_empty() {
         return 0.0;

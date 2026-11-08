@@ -15,7 +15,7 @@ export function ShortcutsPanel({
 }: {
   daemon: DaemonApi;
   config: Config;
-  onConfigChange: (patch: Partial<Config>) => void;
+  onConfigChange: (patch: Partial<Config>, afterSave?: () => void) => void;
 }) {
   const [os, setOs] = useState("windows");
   useEffect(() => {
@@ -25,8 +25,7 @@ export function ShortcutsPanel({
   const needDesktop = shortcutsNeedDesktop(os, daemon.state.inputMonitoringGranted);
 
   const save = (key: keyof Config) => (value: string) => {
-    onConfigChange({ [key]: value } as Partial<Config>);
-    daemon.reloadShortcuts();
+    onConfigChange({ [key]: value } as Partial<Config>, daemon.reloadShortcuts);
   };
 
   return (
@@ -39,7 +38,7 @@ export function ShortcutsPanel({
       )}
       {needDesktop && (
         <div className="rounded-md bg-primary-500/10 border border-primary-500/30 px-3 py-2 text-xs text-surface-200">
-          On Wayland Always cannot listen for keys itself. Bind keys in your desktop's settings to{" "}
+          This Wayland desktop does not let Always register keys itself (GNOME does). Bind keys in your desktop's settings to{" "}
           <code>always toggle-pause</code> (pause everywhere) and <code>always toggle-auto-enter</code>. Keys
           recorded here are what the setup tips show; they do not take effect by themselves. If your
           distribution still offers an X11 (Xorg) session, you can choose it at the login screen instead:
@@ -55,12 +54,14 @@ export function ShortcutsPanel({
             shortcut={config.shortcutMasterPause}
             onSave={save("shortcutMasterPause")}
           />
+          {os !== "linux" && (
           <KeyCaptureButton
             label="Pause / Resume"
             description="Toggle pause for the currently focused app only."
             shortcut={config.shortcutPause}
             onSave={save("shortcutPause")}
           />
+          )}
           <KeyCaptureButton
             label="Toggle Auto-Enter"
             description="Enable or disable automatic Enter after pasting."

@@ -1857,7 +1857,7 @@ mod tests {
         assert!(child.try_wait().unwrap().is_some());
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn kill_and_reap_stops_process_group_descendants() {
         use std::io::BufRead as _;

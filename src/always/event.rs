@@ -900,6 +900,10 @@ pub enum DaemonCommand {
     /// no restart needed. Sent after each `always config set shortcut_*`
     /// call from the Swift app.
     ReloadShortcuts,
+    /// A shortcut the desktop owns was pressed (GNOME Wayland): run its action.
+    TriggerShortcut {
+        name: String,
+    },
     /// Iris → voice edit: run an edit command (same grammar as dictation,
     /// e.g. "scratch that", "change X to Y"). `force` = Iris was addressed
     /// explicitly, so the paste-window gate is skipped (secure fields and

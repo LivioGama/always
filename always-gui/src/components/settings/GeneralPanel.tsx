@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import type { DaemonApi } from "../../hooks/useDaemonState";
+import { platform } from "../../lib/tauri";
 import type { Config } from "../../lib/config";
 import { Caption, Card, Divider, PanelTitle, Segmented, Btn } from "../controls";
 import { PermissionsBanner } from "./PermissionsBanner";
@@ -15,11 +17,20 @@ export function GeneralPanel({
   onConfigChange: (patch: Partial<Config>) => void;
 }) {
   const s = daemon.state;
+  const [os, setOs] = useState<string | null>(null);
+  // Sound cues, the overlay and per-app focus tracking only exist on macOS.
+  const mac = os === "macos";
+
+  useEffect(() => {
+    platform().then(setOs).catch(() => {});
+  }, []);
 
   return (
     <div className="p-5 space-y-3.5">
       <PermissionsBanner daemon={daemon} />
 
+      {mac && (
+      <>
       {/* Sound cues */}
       <Card>
         <div className="flex items-center gap-2.5">
@@ -78,16 +89,20 @@ export function GeneralPanel({
       </div>
 
       <Divider />
+      </>
+      )}
 
       {/* Voice Typing Allowlist */}
       <div>
         <div className="flex items-baseline gap-2">
-          <PanelTitle>Voice Typing Allowlist</PanelTitle>
+          <PanelTitle>{mac ? "Voice Typing Allowlist" : "Voice Typing"}</PanelTitle>
           <div className="flex-1" />
-          <Caption>{s.resumedApps.length} app{s.resumedApps.length === 1 ? "" : "s"} resumed</Caption>
+          {mac && <Caption>{s.resumedApps.length} app{s.resumedApps.length === 1 ? "" : "s"} resumed</Caption>}
         </div>
         <Caption className="mt-1">
-          Always is paused by default. Add an app here to resume voice typing while you're in it.
+          {mac
+            ? "Always is paused by default. Add an app here to resume voice typing while you're in it."
+            : "Always types into whichever window has focus."}
         </Caption>
 
         {/* Master pause card */}
@@ -102,12 +117,14 @@ export function GeneralPanel({
             </svg>
             <div className="flex-1">
               <div className="text-[13px] font-semibold text-white">
-                {s.isMasterPaused ? "Paused everywhere" : "Allowlist active"}
+                {s.isMasterPaused ? "Paused everywhere" : mac ? "Allowlist active" : "Listening"}
               </div>
               <Caption>
                 {s.isMasterPaused
-                  ? "Master kill switch is on — every resumed app is force-paused."
-                  : "Resumed apps below are listening; everything else is paused."}
+                  ? "Master kill switch is on — dictation is off everywhere."
+                  : mac
+                    ? "Resumed apps below are listening; everything else is paused."
+                    : "Dictation is on in every app."}
               </Caption>
             </div>
             <Btn disabled={!s.isDaemonConnected} onClick={daemon.togglePause}>
@@ -117,10 +134,10 @@ export function GeneralPanel({
         </Card>
 
         {/* Focused app card */}
-        <FocusedAppCard daemon={daemon} />
+        {mac && <FocusedAppCard daemon={daemon} />}
 
         {/* Resumed apps */}
-        {s.resumedApps.length > 0 && (
+        {mac && s.resumedApps.length > 0 && (
           <>
             <Divider />
             <div className="text-xs font-semibold text-surface-400">Resumed apps</div>

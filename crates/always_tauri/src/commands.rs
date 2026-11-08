@@ -323,6 +323,46 @@ pub fn open_path(path: String) -> Result<(), String> {
     open_detached(&path)
 }
 
+/// Open today's log in a terminal, like the macOS menu bar's "Open Today's Log".
+#[tauri::command]
+pub fn open_logs(app: tauri::AppHandle) -> Result<(), String> {
+    let resource_dir = app.path().resource_dir().ok();
+    let bin = always_bin(resource_dir.as_deref())?;
+    #[cfg(windows)]
+    {
+        let command = format!("\"{}\" logs --pretty", bin.display());
+        Command::new("cmd")
+            .args(["/C", "start", "Always logs", "cmd", "/K", &command])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let bin = bin.display().to_string();
+        const TERMINALS: [(&str, &[&str]); 8] = [
+            ("x-terminal-emulator", &["-e"]),
+            ("ptyxis", &["--"]),
+            ("gnome-terminal", &["--"]),
+            ("konsole", &["-e"]),
+            ("kitty", &[]),
+            ("alacritty", &["-e"]),
+            ("foot", &[]),
+            ("xterm", &["-e"]),
+        ];
+        for (terminal, separator) in TERMINALS {
+            let spawned = Command::new(terminal)
+                .args(separator)
+                .args([&bin, "logs", "--pretty"])
+                .spawn();
+            if spawned.is_ok() {
+                return Ok(());
+            }
+        }
+        Err("no terminal emulator found".to_string())
+    }
+}
+
 /// Reveal `path` in the platform file manager (Explorer / Finder / xdg).
 #[tauri::command]
 pub fn reveal_path(path: String) -> Result<(), String> {

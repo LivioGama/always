@@ -284,6 +284,28 @@ install_rpm() {
   UNIT_KIND="system"
 }
 
+# A tarball declares no dependencies, so its install brings in what paste and
+# key injection use. Without root it prints what to run instead of failing:
+# the CLI itself still works.
+install_linux_runtime() {
+  local pkgs="wl-clipboard xclip xdotool pulseaudio-utils" rule='KERNEL=="uinput", TAG+="uaccess", OPTIONS+="static_node=uinput"'
+  local rule_path=/usr/lib/udev/rules.d/60-always-uinput.rules mgr=""
+  if command -v apt-get >/dev/null 2>&1; then mgr="apt-get"
+  elif command -v dnf >/dev/null 2>&1; then mgr="dnf"
+  elif command -v yum >/dev/null 2>&1; then mgr="yum"
+  fi
+  if [[ -n "$mgr" ]] && need_root \
+      && $SUDO "$mgr" install -y $pkgs \
+      && printf '%s\n' "$rule" | $SUDO tee "$rule_path" >/dev/null \
+      && $SUDO udevadm control --reload-rules \
+      && $SUDO udevadm trigger --name-match=uinput; then
+    ok "Installed the paste tools and keyboard access"
+    return 0
+  fi
+  warn "Pasting needs ${pkgs} and keyboard access. Install those packages as root, then run:"
+  warn "  echo '${rule}' | sudo tee ${rule_path} && sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=uinput"
+}
+
 install_tar() {
   fetch_verified "${PREFIX_NAME}.tar.gz"
   local archive="$VERIFIED" prefix bindir
@@ -425,7 +447,10 @@ install_linux() {
   case "$method" in
     deb) install_deb ;;
     rpm) install_rpm ;;
-    tar) install_tar ;;
+    tar)
+      install_tar
+      if [[ -z "$ARCHIVE_OVERRIDE" ]]; then install_linux_runtime; fi
+      ;;
     *)   fail "Unknown ALWAYS_METHOD: ${method} (use auto, deb, rpm or tar)" ;;
   esac
   if [[ -n "$ARCHIVE_OVERRIDE" ]]; then restart_service_if_active; else install_gui "$method"; offer_systemd; fi

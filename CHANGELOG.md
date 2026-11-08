@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dictation:** the offline fallback no longer uses a local model that cannot handle your language.
 - **cli:** `always toggle-pause`, `toggle-auto-enter` and `get-state` now reach a daemon started by the desktop app.
 - **onboarding:** a saved Groq key no longer looks gone when you return to the engine step.
+- **my voice:** Record now works on Linux and Windows; the daemon used to drop the request.
+- **shortcuts:** global shortcuts work on GNOME Wayland, registered with the desktop automatically.
+- **paste:** GNOME and KDE on Wayland paste through a built-in keyboard, without `ydotool`; packages install the clipboard tools and keyboard access.
+- **groq:** a key Groq rejects is no longer saved, on any platform.
+- **settings:** Apple Intelligence is only offered on macOS.
+- **tray:** added "Open Today's Log".
 - **install:** on Linux, the install command now also installs the desktop app (tray and Settings) in a graphical session. `ALWAYS_GUI=0` skips it.
 - **shortcuts:** on Wayland, Settings and the setup tips now mention choosing an X11 session where one is available, since Always's own shortcuts work there.
 

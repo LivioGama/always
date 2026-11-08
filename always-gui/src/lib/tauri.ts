@@ -33,7 +33,7 @@ export function cli(args: string[]): Promise<string> {
 
 export const configShow = () => cli(["config", "show"]);
 export const configSet = (key: string, value: string) => cli(["config", "set", key, value]);
-export const configDelete = (key: string) => cli(["config", "unset", key]).catch(() => cli(["config", "delete", key]));
+export const configDelete = (key: string) => cli(["config", "delete-key", key]);
 // The CLI has no `restart`. `stop` only sends SIGTERM and `start` treats a
 // daemon that is still exiting as running, so wait for it to go first.
 export const restartDaemon = async () => {

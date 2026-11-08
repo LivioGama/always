@@ -160,6 +160,10 @@ export function TipsStep({ daemon }: { daemon: DaemonApi }) {
 /// Final step: the apps voice typing is ON in (Linux analogue of OnboardingAppAllowlist).
 export function ReadyStep({ daemon }: { daemon: DaemonApi }) {
   const s = daemon.state;
+  const [os, setOs] = useState("");
+  useEffect(() => {
+    platform().then(setOs).catch(() => {});
+  }, []);
   const candidates = [...new Set([...(s.focusedApp ? [s.focusedApp] : []), ...s.resumedApps])];
   const toggle = (id: string) => daemon.setAppPaused(id, s.resumedApps.includes(id) ? null : false);
   const name = (id: string) => (id.split(/[\\/]/).pop() ?? id).replace(/\.exe$/i, "");
@@ -174,6 +178,10 @@ export function ReadyStep({ daemon }: { daemon: DaemonApi }) {
         </span>
       </div>
       <div className="w-full max-w-[440px] flex flex-col gap-2 min-h-0">
+        {os !== "macos" ? (
+          <Caption className="text-center">Always types into whichever window has focus. Pause it any time from the tray.</Caption>
+        ) : (
+        <>
         <h3 className="text-base font-semibold text-white">Turn voice typing on in:</h3>
         {candidates.length === 0 ? (
           <Caption>Focus the app you want to dictate into — it will show up here.</Caption>
@@ -194,6 +202,8 @@ export function ReadyStep({ daemon }: { daemon: DaemonApi }) {
           </div>
         )}
         <Caption>Every other app stays paused, so your words never land somewhere you didn't choose. Change this any time in Settings.</Caption>
+        </>
+        )}
       </div>
     </div>
   );

@@ -125,6 +125,13 @@ enum Commands {
     TogglePause,
     /// Toggle auto-enter state
     ToggleAutoEnter,
+    /// Run a shortcut's action, or `sync` to register shortcuts with the desktop.
+    /// Called by desktop shortcuts on Wayland.
+    #[command(hide = true)]
+    Shortcut {
+        /// pause, master-pause, auto-enter, force-paste, log-correction, correction-dialog or sync
+        name: String,
+    },
     /// Reset macOS menu bar / Control Center cache for Always
     MenuBar {
         #[command(subcommand)]
@@ -264,6 +271,7 @@ fn main() -> Result<()> {
         Some(Commands::Voice { action }) => handle_voice(action),
         Some(Commands::TogglePause) => handle_toggle_pause(),
         Some(Commands::ToggleAutoEnter) => handle_toggle_auto_enter(),
+        Some(Commands::Shortcut { name }) => handle_shortcut(&name),
         Some(Commands::Model { action }) => cli::handle_model(action),
         Some(Commands::Logs { args }) => cli::handle_logs(args),
         Some(Commands::Update { check }) => {
@@ -552,7 +560,9 @@ fn handle_config(action: ConfigAction) -> Result<()> {
             // are unacceptable in local rebuilds because debug signing changes
             // the code requirement often enough for macOS to re-authorize.
             if key == "groq_api_key" {
-                db::set_preference(&conn, &key, &value)?;
+                let value = value.trim();
+                always::stt::validate_groq_api_key(value)?;
+                db::set_preference(&conn, &key, value)?;
                 println!("groq_api_key = *** (saved)");
             } else if key == "deepgram_api_key" {
                 db::set_preference(&conn, &key, &value)?;
@@ -797,6 +807,23 @@ fn handle_toggle_pause() -> Result<()> {
         note,
     );
     Ok(())
+}
+
+fn handle_shortcut(name: &str) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if name == "sync" {
+        if !always::always::keyboard::sync_desktop_shortcuts() {
+            anyhow::bail!("this desktop's shortcuts cannot be registered automatically");
+        }
+        println!("Desktop shortcuts registered.");
+        return Ok(());
+    }
+    if !always::always::daemon::accepts_commands() {
+        anyhow::bail!("the Always daemon is not running");
+    }
+    send_uds_command(
+        &serde_json::json!({ "type": "TriggerShortcut", "data": { "name": name } }).to_string(),
+    )
 }
 
 fn handle_toggle_auto_enter() -> Result<()> {

@@ -107,7 +107,13 @@ name); other Wayland compositors offer no portable query and receive Ctrl+V.
 X11 uses `xdotool`. Linux global
 shortcuts are available in X11 sessions; Wayland compositors do not let the
 daemon observe global key events, so users there control pause and auto-enter
-through the CLI. The GUI shows this instead of pretending the keys work: on
+through the CLI, except on GNOME: there the daemon registers the configured
+combos as GNOME custom shortcuts running `always shortcut <action>`, re-syncs
+them when Settings changes one, keeps the user's own entries, and reports the
+listener as available. A non-production instance never registers them. Injection
+on Wayland tries `wtype`, then the daemon's own `/dev/uinput` keyboard (access
+from the `60-always-uinput` udev rule; packages and the tar install set it up),
+then `ydotool`, then `xdotool`. The GUI shows this instead of pretending the keys work: on
 Linux with the shortcut listener unavailable (`ShortcutListenerStatus` false =
 Wayland), onboarding's tips list only the bindable actions — pause everywhere
 (`always toggle-pause`) and auto-enter (`always toggle-auto-enter`) — with the
@@ -117,6 +123,9 @@ both read the configured shortcuts (never a fixed list), and the per-app pause
 (focused-app monitor, macOS only) is not offered on Linux. Those Wayland notices
 also suggest choosing an X11 (Xorg) session at the login screen where the
 distribution still offers one.
+
+On Linux and Windows nothing tracks the focused app, so the per-app allowlist,
+sound cues, status overlay and Apple Intelligence are not offered there.
 
 The Linux installer (`install.sh`) also installs the desktop app when a
 graphical session is detected (`DISPLAY` or `WAYLAND_DISPLAY`), or always with
@@ -1540,7 +1549,8 @@ Three steps:
    - **Groq (cloud):** best accuracy and speed, needs a free API key (link to
      console.groq.com/keys). "Save & Use" saves `groq_api_key` and switches to
      Groq once the daemon, restarted to load the key, reconnects; on macOS
-     an invalid key is rejected inline first (Linux does not check it). A saved
+     an invalid key is rejected inline first, and `always config set groq_api_key`
+     refuses any key Groq does not accept, or cannot be asked about, on every platform. A saved
      key stays shown masked, including when the step is revisited, until "Change". Caption: free tier is about
      2,000 requests a day and live transcript uses more of it.
    - **Local model:** private and offline. Offers the best catalogue model

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useDaemonState } from "./hooks/useDaemonState";
+import { useDaemonState, type DaemonApi } from "./hooks/useDaemonState";
 import { cli, configShow, invoke, listen, platform, udsStatus, windowLabel } from "./lib/tauri";
 import { parseConfig } from "./lib/config";
 import { OnboardingView } from "./components/OnboardingView";
@@ -159,13 +159,7 @@ export default function App() {
           onComplete={finishOnboarding}
           onOpenSettings={finishOnboarding}
         />
-        {daemon.state.correctionPending && (
-          <CorrectionDialog
-            pending={daemon.state.correctionPending}
-            onApprove={() => daemon.approveCorrection(daemon.state.correctionPending!.id)}
-            onReject={() => daemon.rejectCorrection(daemon.state.correctionPending!.id)}
-          />
-        )}
+        <Corrections daemon={daemon} />
       </>
     );
   }
@@ -174,13 +168,45 @@ export default function App() {
     <>
       <SettingsWindow daemon={daemon} />
       {showQuota && <GroqQuotaDialog daemon={daemon} />}
-      {daemon.state.correctionPending && (
-        <CorrectionDialog
-          pending={daemon.state.correctionPending}
-          onApprove={() => daemon.approveCorrection(daemon.state.correctionPending!.id)}
-          onReject={() => daemon.rejectCorrection(daemon.state.correctionPending!.id)}
-        />
-      )}
+      <Corrections daemon={daemon} />
     </>
+  );
+}
+
+/// The daemon's proposed correction, or the one the correction shortcut asked
+/// for. An edited proposal is logged as what the user meant.
+function Corrections({ daemon }: { daemon: DaemonApi }) {
+  const { correctionPending: pending, correctionRequest: request } = daemon.state;
+
+  useEffect(() => {
+    if (request !== null) invoke("show_settings_window").catch(() => {});
+  }, [request]);
+
+  if (pending) {
+    return (
+      <CorrectionDialog
+        pending={pending}
+        onApprove={(intended) => {
+          if (intended === pending.right) {
+            daemon.approveCorrection(pending.id);
+          } else {
+            daemon.rejectCorrection(pending.id);
+            daemon.logCorrection(intended);
+          }
+        }}
+        onReject={() => daemon.rejectCorrection(pending.id)}
+      />
+    );
+  }
+  if (request === null) return null;
+  return (
+    <CorrectionDialog
+      pending={{ id: "", wrong: request, right: request }}
+      onApprove={(intended) => {
+        daemon.logCorrection(intended);
+        daemon.dismissCorrectionRequest();
+      }}
+      onReject={daemon.dismissCorrectionRequest}
+    />
   );
 }

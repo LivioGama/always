@@ -23,6 +23,8 @@ pub mod event_loop;
 pub mod filter;
 pub mod filter_config;
 pub mod focus_state;
+#[cfg(target_os = "linux")]
+pub mod gnome_shortcuts;
 pub mod hallucination;
 pub mod held;
 pub mod history;
@@ -33,6 +35,8 @@ pub mod keyring;
 pub mod level_meter;
 #[cfg(target_os = "linux")]
 pub mod linux_keys;
+#[cfg(target_os = "linux")]
+pub mod linux_uinput;
 pub mod live_preview;
 pub mod live_type;
 pub mod localization;
