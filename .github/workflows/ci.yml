@@ -1,255 +1,35 @@
 name: CI
 
+# PR feedback must take under a minute (owner's decision, 2026-11-08), so this
+# only checks formatting, which needs no compilation. Tests, builds and
+# `cargo deny` run in release.yml, which gates every publish.
+#
+# `CI` is the required status check on `main`, matched by job name. Add no
+# `paths:` filter: a skipped workflow leaves the check pending and blocks merging.
+
 on:
   push:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
-  # Used by pr-gate to run the real CI on a merge-preview branch
-  # (pr-gate/precheck/<id>) before it opens the PR. No inputs: the ref the run
-  # is dispatched on is the code under test. No workflow-level `paths:` here
-  # either (see the note below).
+  # Used by pr-gate on its merge-preview branch.
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-
-# ─── PR checks ────────────────────────────────────────────────────────────────
-#
-# The four jobs below (Rust checks, Swift, Tauri GUI (check), Docker (Linux
-# build + test)) are REQUIRED status checks on `main` by name. Rules that keep
-# them safe, do not break them:
-#   * never add `paths:` / `paths-ignore:` to the workflow triggers — a whole
-#     workflow skipped by a filter leaves required checks "Pending" and blocks
-#     merging. Filtering is done per job (via `changes`) instead; a job skipped
-#     by `if:` reports "Success".
-#   * keep each job's `name:` exactly as is — the ruleset matches on it.
-#   * pushes to `main` and PRs into `main` ALWAYS run every job. Docs-only
-#     skipping applies to `develop` only, and fails open: if `changes` fails,
-#     every job runs.
-#   * the `!cancelled()` in each `if:` is deliberate — without a status-check
-#     function a job whose `needs` failed is skipped, which would report
-#     "Success" without running the check.
+permissions:
+  contents: read
 
 jobs:
-  # ─── Change detection ─────────────────────────────────────────────────────
-  # `code` is 'true' when ANY changed file is not docs-only. Docs-only means
-  # Markdown anywhere, docs/**, LICENSE and changelog fragments. Nothing under
-  # src/, tests/, benches/, build.rs, crates/ or the Swift/GUI trees reads those
-  # files (no include_str!/include_bytes!/fs read of any .md or docs/ file), and
-  # the Docker build context already excludes *.md and docs/. (LICENSE is
-  # packaged by cargo-deb/generate-rpm, but only in release-build.yml.)
-  #
-  # `predicate-quantifier: every` makes the negated patterns act as exclusions:
-  # a file counts only if it matches '**' AND every '!' pattern.
-  #
-  # Skipped for main-bound runs (they run everything regardless), so the
-  # release path never depends on this job.
-  changes:
-    name: Detect changes
-    if: ${{ github.ref != 'refs/heads/main' && github.base_ref != 'main' }}
+  ci:
+    name: CI
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      code: ${{ steps.filter.outputs.code }}
-    steps:
-      # Needed for `push` events, where the filter diffs `before..HEAD` with git.
-      # (Pull requests use the REST API and need `pull-requests: read`.)
-      - uses: actions/checkout@v4
-
-      - name: Filter changed files
-        id: filter
-        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
-        with:
-          # workflow_dispatch has no PR/`before` payload: diff the dispatched
-          # branch against develop explicitly (the action would default to the
-          # repo default branch, which is develop). Left empty for PRs, where
-          # the action ignores `base` and warns if it is set.
-          base: ${{ github.event_name == 'workflow_dispatch' && 'develop' || '' }}
-          predicate-quantifier: every
-          filters: |
-            code:
-              - '**'
-              - '!**/*.md'
-              - '!docs/**'
-              - '!LICENSE'
-              - '!.github/changelog.d/**'
-
-  rust-checks:
-    name: Rust checks
-    needs: changes
-    if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.base_ref == 'main' || needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
-    runs-on: macos-26
-    env:
-      # kaldi-fbank-rust-kautism bundles C++14 code; newer runners invoke
-      # Clang with its legacy default and reject `>>`, `{}`, and make_unique.
-      CXXFLAGS: -std=c++14
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          persist-credentials: false
 
-      - name: Capture Xcode SDK for cache key
-        id: macos-sdk
-        run: echo "version=$(xcode-select -p | tr '/' '-')-sdk-$(xcrun --show-sdk-version)" >> "$GITHUB_OUTPUT"
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # Xcode paths and the ORT download path appear in linker metadata.
-          shared-key: rust-checks-${{ steps.macos-sdk.outputs.version }}
-          cache-directories: |
-            ~/Library/Caches/ort.pyke.io/dfbin
-          # Save from develop (the default branch): every PR and main can
-          # restore default-branch caches, so one writer warms them all.
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
-
-      # ── Formatting ──────────────────────────────────────────────────────────
       - name: Check formatting
         run: cargo fmt --all -- --check
-
-      # ── Clippy ──────────────────────────────────────────────────────────────
-      - name: Clippy (default features)
-        run: cargo clippy --all-targets --locked -- -D warnings
-
-      - name: Clippy (no-default-features + linux + cpal)
-        run: cargo clippy --no-default-features --features linux,cpal --all-targets --locked -- -D warnings
-
-      - name: Clippy (overlay feature)
-        run: cargo clippy --all-targets --features overlay --locked -- -D warnings
-
-      # ── Tests ───────────────────────────────────────────────────────────────
-      - name: Tests (default features)
-        run: cargo test --locked --bins --lib --tests -- --skip macos_overlay
-
-      - name: Tests (no-default-features + linux + cpal)
-        run: cargo test --no-default-features --features linux,cpal --locked --lib --bins -- --skip macos
-
-      - name: Tests (overlay feature)
-        run: cargo test --locked --features overlay --lib --bins -- --skip macos
-
-      # `local-stt` isn't in default features; compiling the engine code (no
-      # model weights download) catches broken plumbing / pure-logic tests.
-      - name: Tests (local-stt)
-        run: cargo test --locked --features local-stt --lib --bins -- --skip macos
-
-      # ── Coverage ────────────────────────────────────────────────────────────
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov
-
-      - name: Generate coverage (lcov)
-        run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
-
-      # Coverage is informational: a Codecov network outage (e.g. the
-      # uploader download timing out) must not fail a required check, nor
-      # skip the cargo deny gate below.
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        continue-on-error: true
-        timeout-minutes: 3
-        with:
-          files: lcov.info
-          fail_ci_if_error: false
-          flags: rust
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
-      # ── Security ────────────────────────────────────────────────────────────
-      - name: Install cargo-audit, cargo-deny, cargo-machete
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-audit,cargo-deny,cargo-machete
-
-      - name: cargo audit
-        # Default behaviour: denies high/critical vulnerabilities and yanked
-        # crates. Advisory-level warnings are suppressed via .cargo/audit.toml.
-        run: cargo audit
-
-      - name: cargo deny (supply-chain gate)
-        run: cargo deny check
-
-      - name: cargo machete (unused deps)
-        run: cargo machete
-
-  # ─── Tauri / GUI check ────────────────────────────────────────────────────
-
-  tauri-check:
-    name: Tauri GUI (check)
-    needs: changes
-    if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.base_ref == 'main' || needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
-    # Builds the production frontend with Bun and TypeScript 7's native
-    # compiler; no Rust or macOS is needed, so use the cheaper Linux runner.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Install frontend deps
-        working-directory: always-gui
-        run: bun install --frozen-lockfile
-
-      # Tauri v2 frontend build: typecheck and compile the actual webview assets.
-      - name: Build frontend (always-gui)
-        working-directory: always-gui
-        run: bun run build
-
-  # ─── Docker (Linux CLI build + test) ─────────────────────────────────────
-
-  docker-linux:
-    name: Docker (Linux build + test)
-    needs: changes
-    if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.base_ref == 'main' || needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # Build the Dockerfile that lives in the repo root.
-      - name: Build Docker image
-        run: docker build -f Dockerfile -t always-ci .
-
-      # Smoke-test: run the compiled binary.
-      - name: Run binary smoke test
-        run: docker run --rm always-ci always --help
-
-  # ─── Swift (existing) ────────────────────────────────────────────────────
-
-  swift:
-    name: Swift
-    needs: changes
-    if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.base_ref == 'main' || needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache Swift build
-        uses: actions/cache@v4
-        with:
-          path: |
-            Always/.build
-            ~/Library/Caches/org.swift.swiftpm
-          key: ${{ runner.os }}-swiftpm-${{ hashFiles('Always/Package.swift') }}
-          restore-keys: |
-            ${{ runner.os }}-swiftpm-
-
-      - name: Build Swift app
-        run: |
-          cd Always
-          swift build
-
-      - name: Swift tests
-        run: |
-          cd Always
-          swift test

@@ -7,7 +7,7 @@ name: Release
 #
 #   verify   tag == Cargo version (lockstep with every other version file),
 #            tag is on main, CHANGELOG section exists, cargo deny
-#   test     the ci.yml test suite on macOS
+#   test     the test suite on macOS
 #   assets   release-build.yml: macOS arm64 / Linux x86_64+aarch64 / Windows
 #            builds, checksums, build-provenance attestation, minisign
 #            signatures (*.minisig) for every archive/package/GUI installer
@@ -107,13 +107,12 @@ jobs:
         with:
           tool: cargo-deny
 
-      # CI runs cargo-deny only on dependency changes, while RustSec keeps
-      # publishing advisories: an advisory published since then stops the
-      # release here, before anything is built.
+      # The only cargo-deny gate: an advisory stops the release here, before
+      # anything is built.
       - name: Dependency policy (cargo deny check)
         run: cargo deny check
 
-  # The same tests ci.yml runs, on the platform that ships the app. (The Linux
+  # The only automated test run, on the platform that ships the app. (The Linux
   # lib tests do not compile on a real Linux host: src/always/replay_tests.rs
   # uses the macOS-only apple_stt / stt_apple modules ungated.)
   test:
