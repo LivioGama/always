@@ -17,6 +17,7 @@ pub mod correction_request;
 pub mod daemon;
 pub mod det_correct;
 pub mod dictation;
+pub mod dictation_test;
 pub mod enrollment;
 pub mod event;
 pub mod event_loop;

@@ -515,7 +515,7 @@ fn wrap_with_local_fallback(
 /// first, then the highest combined speed+accuracy score. `is_downloaded`
 /// already encodes integrity (SHA256 / `.verified` marker), so partial
 /// or unverified downloads never qualify.
-#[cfg(feature = "local-stt")]
+#[cfg(all(feature = "local-stt", target_os = "linux"))]
 fn pick_fallback_model(
     registry: &ModelRegistry,
 ) -> Option<crate::managers::model_registry::ModelInfo> {
@@ -543,6 +543,7 @@ fn model_handles_language(supported: &[String], language: &str) -> bool {
             .any(|l| l.split(['-', '_']).next() == Some(language))
 }
 
+#[cfg(feature = "local-stt")]
 fn best_downloaded_model(
     registry: &ModelRegistry,
     usable: impl Fn(&crate::managers::model_registry::ModelInfo) -> bool,

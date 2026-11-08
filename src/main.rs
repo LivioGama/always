@@ -121,6 +121,8 @@ enum Commands {
         #[arg(long)]
         check: bool,
     },
+    /// Test the microphone, transcription and pasting, one step at a time
+    Test,
     /// Toggle pause/resume state
     TogglePause,
     /// Toggle auto-enter state
@@ -244,8 +246,11 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize structured logging (writes to ~/Library/Logs/Always/ on macOS).
-    // Foreground only for `Run` (the explicit foreground/debug subcommand).
-    let foreground = matches!(cli.command, Some(Commands::RunForeground { .. }));
+    // Foreground only for `Run` (the explicit foreground/debug subcommand) and `Test`.
+    let foreground = matches!(
+        cli.command,
+        Some(Commands::RunForeground { .. } | Commands::Test)
+    );
     let _logging_guard = always::always::telemetry::init_logging(foreground)
         .map_err(|e| anyhow::anyhow!("Failed to initialize logging: {}", e))?;
 
@@ -265,6 +270,9 @@ fn main() -> Result<()> {
             silence,
             auto_enter,
         }) => always::always::run(&always_config(lang, timeout, silence, auto_enter)?),
+        Some(Commands::Test) => {
+            always::always::dictation_test::run(&always_config("auto".into(), 15, None, None)?)
+        }
         Some(Commands::Config { action }) => handle_config(action),
         Some(Commands::Vocab { action }) => handle_vocab(action),
         Some(Commands::Corrections { action }) => handle_corrections(action),

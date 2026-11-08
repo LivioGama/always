@@ -92,7 +92,10 @@ Two processes, plus a recorder:
 On Linux and Windows, the daemon uses CPAL for microphone capture. It converts
 the selected device's supported sample rate and channel layout to the pipeline's
 16 kHz mono frames; Linux exposes the capture device through ALSA, including
-PipeWire/PulseAudio ALSA compatibility layers. Linux uses `wl-copy`/`wl-paste`
+PipeWire/PulseAudio ALSA compatibility layers. The system default device is
+used whenever it can capture. If it cannot, the first other device with a
+readable format is used instead, never ALSA's silent `null` device; a default
+that is only busy is waited for rather than replaced. Linux uses `wl-copy`/`wl-paste`
 for clipboard access on Wayland when installed, falling back to `xclip`, and
 uses `xclip` on X11. On Wayland it sends the paste chord with `wtype` (the
 virtual-keyboard protocol of wlroots compositors such as Hyprland and Sway; no
@@ -1747,6 +1750,15 @@ auto-enter `ctrl+alt+a` · force paste `ctrl+alt+v` · log correction
   `speaker_gate_scored` (info) records each voice check's cost.
   `grammar_cache_hit` counts a paste that joined a warm call still in flight
   as a hit.
+- A microphone that cannot be opened is retried every 5 s, not every 100 ms,
+  and reported as a microphone problem, never a network one.
+- The Linux service logs at the daemon's default filter (`always=info,warn`),
+  so third-party INFO output does not reach the log.
+- `always test` runs one dictation in the terminal with logs shown: microphone
+  (input level), transcription (prints what it heard), then after a 5 s
+  countdown a paste into the focused app, without Enter. It bypasses text
+  cleanup and refuses to run while the daemon is running. A failed step exits
+  non-zero and names the step.
 
 ---
 

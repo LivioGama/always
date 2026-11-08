@@ -443,7 +443,6 @@ pub fn is_wayland_session() -> bool {
     is_wayland_display(std::env::var("WAYLAND_DISPLAY").ok().as_deref())
 }
 
-#[cfg(target_os = "linux")]
 fn is_wayland_display(value: Option<&str>) -> bool {
     value.is_some_and(|v| !v.is_empty())
 }

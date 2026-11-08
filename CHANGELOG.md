@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **cli:** `always test` checks the microphone, transcription and pasting one step at a time, and prints what it heard.
+
 ### Fixed
+- **microphone:** on Linux, Always now uses another working microphone when the system default cannot record.
+- **logs:** a microphone that cannot be opened no longer fills the disk; it is retried every 5 seconds and reported as a microphone problem instead of a network error.
 - **dictation:** the offline fallback no longer uses a local model that cannot handle your language.
 - **cli:** `always toggle-pause`, `toggle-auto-enter` and `get-state` now reach a daemon started by the desktop app.
 - **onboarding:** a saved Groq key no longer looks gone when you return to the engine step.
