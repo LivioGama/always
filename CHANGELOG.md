@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-08
+
+### Fixed
+- **dictation:** Groq dictations no longer end with words you never said ("I'm going to go.", "I'm sorry.", "Oh.", "THE END OF THE END OF THE"). 0.1.4 stopped sending trailing silence to Whisper, which made it invent a closing phrase on about 1 in 6 dictations; the silence is sent again, and a separate final sentence that is one of these known phantoms is removed. ([#194](https://github.com/LivioGama/always/pull/194))
+
 ## [0.1.5] - 2026-11-06
 
 ### Fixed
