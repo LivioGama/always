@@ -141,7 +141,7 @@ Then, before committing:
 - **SPEC.md.** The repo's SPEC.md is normative; a behaviour change in the
   release must already be in it (it should have landed with the change).
 - **Gates.** `cargo fmt --all -- --check`, `cargo clippy --all-targets --locked -- -D warnings`,
-  `cargo test --locked --bins --lib --tests -- --skip macos_overlay` (what ci.yml runs).
+  `cargo test --locked --bins --lib --tests -- --skip macos_overlay` (ci.yml only checks formatting).
 - **Local app check.** Per CLAUDE.md, a change is not done until the new build is
   running: `scripts/dev-rebuild.sh` before declaring a release candidate good.
 
