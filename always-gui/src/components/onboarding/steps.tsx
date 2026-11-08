@@ -126,7 +126,7 @@ export function TipsStep({ daemon }: { daemon: DaemonApi }) {
     return (
       <div className="flex flex-col gap-3 px-5">
         <Caption className="text-center">
-          On Wayland Always cannot listen for keys itself. Add these to your desktop's keyboard shortcuts (on Hyprland: a bind per line in your config) — the keys are suggestions, choose your own.
+          On Wayland Always cannot listen for keys itself. Add these to your desktop's keyboard shortcuts (on Hyprland: a bind per line in your config) — the keys are suggestions, choose your own. If your distribution still offers an X11 (Xorg) session, you can choose it at the login screen instead: Always's own shortcuts work there.
         </Caption>
         {visibleShortcuts(config, os, true).map((a) => (
           <RowCard key={a.key} className="py-3.5 border-white/[0.12]">

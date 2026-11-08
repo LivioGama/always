@@ -24,6 +24,8 @@
 #   ALWAYS_PREFIX      Linux tar install prefix (default: ~/.local)
 #   ALWAYS_NO_LAUNCH   macOS: set to 1 to skip opening the app
 #   ALWAYS_SYSTEMD     Linux: 1 = enable the user service, 0 = skip; default: ask
+#   ALWAYS_GUI         Linux desktop app (tray and Settings): auto (default,
+#                      only in a graphical session) | 1 = required | 0 = skip
 #
 # Self-update mode (`always update`, or the app's "Install update"). The
 # updater has ALREADY downloaded the release files and verified their minisign
@@ -345,6 +347,51 @@ offer_systemd() {
   esac
 }
 
+install_gui_deb() {
+  fetch_verified "${PREFIX_NAME}-gui.deb"
+  log "Installing the desktop app with apt (needs root)"
+  $SUDO apt-get install -y "$VERIFIED" || fail "apt-get could not install ${PREFIX_NAME}-gui.deb"
+  ok "Installed the desktop app. Start it with: always-tauri"
+}
+
+# rpm and tar installs have no GUI package. The wrapper sets
+# APPIMAGE_EXTRACT_AND_RUN so the app also starts without libfuse2.
+install_gui_appimage() {
+  fetch_verified "${PREFIX_NAME}-gui.AppImage"
+  local bindir="${ALWAYS_PREFIX:-$HOME/.local}/bin"
+  local apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  mkdir -p "$bindir" "$apps" || fail "Could not create ${bindir} or ${apps}"
+  install -m 755 "$VERIFIED" "$bindir/always-gui.AppImage" || fail "Could not install into ${bindir}"
+  printf '#!/bin/sh\nAPPIMAGE_EXTRACT_AND_RUN=1 exec "%s" "$@"\n' "$bindir/always-gui.AppImage" > "$bindir/always-gui" \
+    || fail "Could not write ${bindir}/always-gui"
+  chmod 755 "$bindir/always-gui" || fail "Could not make ${bindir}/always-gui executable"
+  printf '[Desktop Entry]\nType=Application\nName=Always\nExec="%s"\nTerminal=false\nCategories=Utility;\n' \
+    "$bindir/always-gui" > "$apps/always-gui.desktop" || fail "Could not write ${apps}/always-gui.desktop"
+  ok "Installed the desktop app. Start it with: always-gui"
+}
+
+# Runs after the CLI is in place. Without ALWAYS_GUI=1 a failure only warns:
+# the CLI works by itself, and older releases have no GUI assets to fetch.
+install_gui() {
+  local method="$1" mode="${ALWAYS_GUI:-auto}"
+  case "$mode" in
+    0) return 0 ;;
+    1) ;;
+    auto)
+      if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+        log "No graphical session; skipping the desktop app (ALWAYS_GUI=1 installs it anyway)"
+        return 0
+      fi
+      ;;
+    *) fail "Unknown ALWAYS_GUI: ${mode} (use auto, 1 or 0)" ;;
+  esac
+  if ( if [[ "$method" == "deb" ]]; then install_gui_deb; else install_gui_appimage; fi ); then
+    return 0
+  fi
+  [[ "$mode" != "1" ]] || fail "Could not install the desktop app."
+  warn "Could not install the desktop app; the always CLI is installed and works without it."
+}
+
 # Self-update on Linux: the new binary only runs after a restart, so restart
 # the user service when (and only when) it is already active.
 restart_service_if_active() {
@@ -381,7 +428,7 @@ install_linux() {
     tar) install_tar ;;
     *)   fail "Unknown ALWAYS_METHOD: ${method} (use auto, deb, rpm or tar)" ;;
   esac
-  if [[ -n "$ARCHIVE_OVERRIDE" ]]; then restart_service_if_active; else offer_systemd; fi
+  if [[ -n "$ARCHIVE_OVERRIDE" ]]; then restart_service_if_active; else install_gui "$method"; offer_systemd; fi
   log "Run 'always --help' to get started. Docs: https://liviogama.github.io/always/"
 }
 

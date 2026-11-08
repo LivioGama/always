@@ -114,7 +114,16 @@ Wayland), onboarding's tips list only the bindable actions — pause everywhere
 user's configured keys as suggestions for the desktop's own bindings, and
 Settings → Shortcuts says keys there are recorded, not active. Everywhere,
 both read the configured shortcuts (never a fixed list), and the per-app pause
-(focused-app monitor, macOS only) is not offered on Linux.
+(focused-app monitor, macOS only) is not offered on Linux. Those Wayland notices
+also suggest choosing an X11 (Xorg) session at the login screen where the
+distribution still offers one.
+
+The Linux installer (`install.sh`) also installs the desktop app when a
+graphical session is detected (`DISPLAY` or `WAYLAND_DISPLAY`), or always with
+`ALWAYS_GUI=1`; `ALWAYS_GUI=0` skips it. A `.deb` install uses the `-gui.deb`
+package; `.rpm` and tar installs use the AppImage, in the install prefix's
+`bin/` with an `always-gui` launcher and a desktop entry. A failure only warns
+unless `ALWAYS_GUI=1`, and a self-update never installs the app.
 
 The GUI talks to the daemon over a Unix domain socket using newline-delimited
 JSON. On macOS it is `~/Library/Caches/Always/always{suffix}.sock`; on Linux it

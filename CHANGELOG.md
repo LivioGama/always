@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dictation:** the offline fallback no longer uses a local model that cannot handle your language.
 - **cli:** `always toggle-pause`, `toggle-auto-enter` and `get-state` now reach a daemon started by the desktop app.
 - **onboarding:** a saved Groq key no longer looks gone when you return to the engine step.
+- **install:** on Linux, the install command now also installs the desktop app (tray and Settings) in a graphical session. `ALWAYS_GUI=0` skips it.
+- **shortcuts:** on Wayland, Settings and the setup tips now mention choosing an X11 session where one is available, since Always's own shortcuts work there.
 
 ## [0.1.6] - 2026-11-08
 
