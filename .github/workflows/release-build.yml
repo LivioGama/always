@@ -74,7 +74,7 @@ jobs:
           targets: aarch64-apple-darwin
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: release-aarch64-apple-darwin
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref_type == 'tag' }}
@@ -216,7 +216,7 @@ jobs:
           toolchain: stable
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: release-${{ matrix.target }}
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref_type == 'tag' }}
@@ -230,7 +230,7 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev xdotool
 
       - name: Install cargo-deb and cargo-generate-rpm
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2
         with:
           tool: cargo-deb,cargo-generate-rpm
 
@@ -354,7 +354,7 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: release-x86_64-pc-windows-msvc
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref_type == 'tag' }}
