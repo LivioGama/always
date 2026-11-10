@@ -1544,6 +1544,9 @@ func overlayTimingLog(_ stage: String) {
         .appendingPathComponent("Library/Logs/Always", isDirectory: true)
     let url = dir.appendingPathComponent("overlay-timing.log")
     guard let data = line.data(using: .utf8) else { return }
+    // The directory only exists once a production daemon has logged there;
+    // on a dev-only machine every write used to fail silently.
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     if let handle = try? FileHandle(forWritingTo: url) {
         defer { try? handle.close() }
         _ = try? handle.seekToEnd()

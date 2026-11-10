@@ -1739,7 +1739,15 @@ auto-enter `ctrl+alt+a` · force paste `ctrl+alt+v` · log correction
 - Overlay timing instrument: `ALWAYS_OVERLAY_TIMING=1` writes each hop —
   event received, reached the main thread, ordered on screen, with window level
   and screen geometry — to `~/Library/Logs/Always/overlay-timing.log`. Off by
-  default.
+  default. `recv` is stamped for every event that shows, relabels or hides
+  the HUD (`VoiceActivityDetected` as bare `recv`, the others with their
+  name), so the hide path can be timed as well as the show path.
+- `speech_quiet_edge.since_last_voiced_ms` is the speech-time gap between the
+  last frame that was voiced on its own evidence and the first frame counted
+  as silent — the smoothing hold before the silence window starts.
+  `capture_helper_stderr` carries one `tap_cadence` line per helper start:
+  the audio-delivery period actually obtained, which bounds how closely
+  anything downstream can follow the voice.
 - Any user-visible latency claim must be measured from **first speech**, not
   from an internal marker that fires later.
 - Audio frames carry their estimated capture time (§4). Measured from it:

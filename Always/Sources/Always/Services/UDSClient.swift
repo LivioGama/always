@@ -1003,8 +1003,16 @@ class UDSClient: ObservableObject {
     private func handleEvent(_ event: DaemonEvent) {
         // Any event (incl. Heartbeat) proves the daemon is alive.
         lastEventTime = Date()
-        if event.type == .voiceActivityDetected {
+        // Stamp every event that shows, relabels or hides the HUD, so the
+        // hide path ("final text → overlay gone") can be measured across
+        // processes the same way the show path already was.
+        switch event.type {
+        case .voiceActivityDetected:
             overlayTimingLog("recv")
+        case .voiceActivityEnded, .transcribingStarted, .transcribingStopped, .transcriptFinal:
+            overlayTimingLog("recv \(event.type.rawValue)")
+        default:
+            break
         }
         logger.debug("handleEvent - type: \(event.type.rawValue, privacy: .public)")
 

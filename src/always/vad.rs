@@ -1246,6 +1246,10 @@ fn record_with_local_vad(
     // `announce_voice_activity!` because macro_rules hygiene binds the
     // locals a macro reads at its DEFINITION site.
     let mut first_voice_at: Option<std::time::Instant> = None;
+    // Capture time of the last frame that was voiced on its own evidence
+    // (see where it is set). Measures how long after the voice really
+    // stopped the loop first counts a silent frame.
+    let mut last_loud_at: Option<std::time::Instant> = None;
     // Capture time of the frame being processed; its value when the loop
     // exits is the moment the final-silence cut was reached in speech time.
     let mut frame_captured_at = std::time::Instant::now();
@@ -1811,6 +1815,12 @@ fn record_with_local_vad(
         if is_speech && first_voice_at.is_none() {
             first_voice_at = Some(frame_captured_at);
         }
+        // Last frame that was voiced on its OWN evidence (raw Silero or
+        // energy), not merely kept "in speech" by the smoothing window.
+        // Reference point for `speech_quiet_edge` below.
+        if is_speech && (last_prob >= silence_threshold || energy_above_threshold) {
+            last_loud_at = Some(frame_captured_at);
+        }
         if !in_speech && !voice_activity_announced && !speaker_gate_requested {
             if early_voice_frame_ok(
                 frame_energy,
@@ -2298,6 +2308,17 @@ fn record_with_local_vad(
                 continue;
             }
             consecutive_silence += 1;
+            if consecutive_silence == 1 {
+                // First counted silent frame of this pause. Speech time, not
+                // processing time (both stamps are capture times), plus how
+                // far behind the live audio this frame was handled.
+                tracing::info!(
+                    since_last_voiced_ms = last_loud_at
+                        .map(|t| frame_captured_at.saturating_duration_since(t).as_millis() as u64),
+                    processing_lag_ms = frame_captured_at.elapsed().as_millis() as u64,
+                    "speech_quiet_edge"
+                );
+            }
             consecutive_speech = 0;
             speech_samples.extend_from_slice(samples);
 
