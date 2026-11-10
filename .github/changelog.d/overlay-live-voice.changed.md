@@ -1,0 +1,1 @@
+**overlay:** the dots now move with your speaking level while the indicator says "Listening" and lie flat within about a tenth of a second of you going quiet, instead of looping on a fixed rhythm. The indicator itself appears, changes label and leaves exactly as before, and when the text is pasted does not move.

@@ -388,6 +388,16 @@ Idle-paused · Low mic volume · correction confirmations.
   end, grammar follows — and it returns to "Listening" only if the user
   resumes speaking. The final text is not re-shown in the HUD on any model:
   it is already in the focused application.
+- **The dots follow the live voice while "Listening".** Their travel is the
+  user's speaking level (§10.2): they move while the user talks and lie
+  flat within about 0.1 s of the user going quiet. The HUD itself does not
+  leave or change label at that moment — when the indicator leaves is
+  governed by the two rules above, and when the utterance ends by §4; a
+  pause only brings the dots to rest. From the speculative kickoff on
+  ("Transcribing") the dots run their steady wave, which means "working".
+  A level never shows, hides or relabels the HUD, and nothing moves for a
+  speaker who is not verified (§6). Requested by Livio, 2026-11-10: the
+  indicator should match the live voice, above all when it stops.
 - Follows the active screen and the cursor; must be fully on a screen the user
   is looking at.
 - Fixed width, growing height: transcript text wraps within the fixed content
@@ -2099,7 +2109,13 @@ caller, play start 11–21 ms. Every cue logs `status_sound_played {cue, level, 
 `VoiceLevel { energy, energy_db, voiced, bands[5] }` at ~20 Hz, only for
 voiced frames of a verified speaker (or with My Voice off) — never for
 room noise, pauses, or media the gate has not accepted — plus one
-`voiced: false` frame (energy 0) when the utterance ends. `energy` is the
+`voiced: false` frame (energy 0) at each pause inside the utterance (the
+first frame the end-of-speech logic counts as silent) and one when the
+utterance ends. The cadence is in capture time, not processing time: audio
+arrives in bursts, and a burst yields evenly spaced ticks ending on its
+newest audio rather than one tick carrying its oldest. The macOS HUD's
+dots are driven by this stream (§5); it is delivered to the overlay
+directly, latest value wins. `energy` is the
 RMS of the captured (echo-cancelled, when §3 applies) mic since the last
 tick as a fraction of full scale; `energy_db` the same in dBFS;
 `bands` the RMS share of ≈80-250/250-500/500-1k/1k-2k/2k-4k Hz.

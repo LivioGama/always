@@ -599,6 +599,13 @@ class StateMonitor: ObservableObject {
     /// check — `OverlayState` already conforms — and removes the entire
     /// class of problem at its source.
     private func updateOverlay() {
+        // The dots follow the live voice only in the "Listening" phase —
+        // the user is speaking and nothing is being transcribed yet. From
+        // the speculative kickoff on they return to the steady wave, which
+        // means "working". Idempotent, so it sits ahead of the dedupe guard:
+        // the phase can change without the rendered state changing (live
+        // preview text is the same state in both phases).
+        StatusOverlayController.shared.setVoiceDriven(isVoiceActivity && !isTranscribing)
         let desired = desiredOverlayState()
         guard appliedOverlay != .some(desired) else { return }
         appliedOverlay = .some(desired)
