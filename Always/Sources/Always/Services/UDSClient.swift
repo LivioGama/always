@@ -249,6 +249,14 @@ struct VoiceEnrollmentLevelData: Codable {
     let target_ms: UInt32
 }
 
+// Speaking-level tick: ~20 Hz while the (verified) user is voiced, plus one
+// zero, unvoiced tick at each pause and at the end of the utterance. The
+// HUD's dots follow it.
+struct VoiceLevelData: Codable {
+    let energy_db: Double
+    let voiced: Bool
+}
+
 // Snapshot of the enrolled voice profile. Sent in the initial state
 // burst and after every mutation (sample captured, delete, toggle).
 struct VoiceProfileStatusData: Codable {
@@ -338,6 +346,8 @@ struct DaemonEvent: Codable {
     let voiceEnrollmentLevel: VoiceEnrollmentLevelData?
     /// Populated for `VoiceProfileStatus`.
     let voiceProfileStatus: VoiceProfileStatusData?
+    /// Populated for `VoiceLevel`.
+    let voiceLevel: VoiceLevelData?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -374,6 +384,7 @@ struct DaemonEvent: Codable {
         var micUnavailable: MicUnavailableData? = nil
         var voiceEnrollmentLevel: VoiceEnrollmentLevelData? = nil
         var voiceProfileStatus: VoiceProfileStatusData? = nil
+        var voiceLevel: VoiceLevelData? = nil
 
         switch type {
         case .hello:
@@ -431,8 +442,7 @@ struct DaemonEvent: Codable {
             voiceProfileStatus = try container.decodeIfPresent(
                 VoiceProfileStatusData.self, forKey: .data)
         case .voiceLevel:
-            // Numeric payload; nothing in the GUI reads it.
-            break
+            voiceLevel = try container.decodeIfPresent(VoiceLevelData.self, forKey: .data)
         default:
             // Fall-through path: text-bearing or empty events. Keep using
             // the loose dict so existing call sites (e.g. transcript chunk
@@ -465,6 +475,7 @@ struct DaemonEvent: Codable {
         self.micUnavailable = micUnavailable
         self.voiceEnrollmentLevel = voiceEnrollmentLevel
         self.voiceProfileStatus = voiceProfileStatus
+        self.voiceLevel = voiceLevel
     }
 
     func encode(to encoder: Encoder) throws {
@@ -523,6 +534,8 @@ struct DaemonEvent: Codable {
             try container.encodeIfPresent(voiceEnrollmentLevel, forKey: .data)
         case .voiceProfileStatus:
             try container.encodeIfPresent(voiceProfileStatus, forKey: .data)
+        case .voiceLevel:
+            try container.encodeIfPresent(voiceLevel, forKey: .data)
         default:
             try container.encodeIfPresent(data, forKey: .data)
         }
@@ -554,7 +567,8 @@ struct DaemonEvent: Codable {
         shortcutListenerStatus: ShortcutListenerStatusData? = nil,
         micUnavailable: MicUnavailableData? = nil,
         voiceEnrollmentLevel: VoiceEnrollmentLevelData? = nil,
-        voiceProfileStatus: VoiceProfileStatusData? = nil
+        voiceProfileStatus: VoiceProfileStatusData? = nil,
+        voiceLevel: VoiceLevelData? = nil
     ) {
         self.type = type
         self.data = data
@@ -582,6 +596,7 @@ struct DaemonEvent: Codable {
         self.micUnavailable = micUnavailable
         self.voiceEnrollmentLevel = voiceEnrollmentLevel
         self.voiceProfileStatus = voiceProfileStatus
+        self.voiceLevel = voiceLevel
     }
 }
 
@@ -594,6 +609,10 @@ class UDSClient: ObservableObject {
     @Published var isDegraded: Bool = false
 
     private let socketPath: String
+    /// Newest speaking level not yet delivered to the overlay, and its lock
+    /// (written on the socket queue, drained on main). See `forwardVoiceLevel`.
+    private var pendingVoiceLevel: VoiceLevelData?
+    private let voiceLevelLock = NSLock()
     private var socketFD: Int32 = -1
     private var queue: DispatchQueue
     private var reconnectScheduled = false
@@ -1003,8 +1022,16 @@ class UDSClient: ObservableObject {
     private func handleEvent(_ event: DaemonEvent) {
         // Any event (incl. Heartbeat) proves the daemon is alive.
         lastEventTime = Date()
-        if event.type == .voiceActivityDetected {
+        // Stamp every event that shows, relabels or hides the HUD, so the
+        // hide path ("final text → overlay gone") can be measured across
+        // processes the same way the show path already was.
+        switch event.type {
+        case .voiceActivityDetected:
             overlayTimingLog("recv")
+        case .voiceActivityEnded, .transcribingStarted, .transcribingStopped, .transcriptFinal:
+            overlayTimingLog("recv \(event.type.rawValue)")
+        default:
+            break
         }
         logger.debug("handleEvent - type: \(event.type.rawValue, privacy: .public)")
 
@@ -1031,8 +1058,39 @@ class UDSClient: ObservableObject {
         // Heartbeat is purely a liveness signal — don't spam NotificationCenter.
         if event.type == .heartbeat { return }
 
+        // The speaking level moves the HUD's dots and nothing else. It goes
+        // straight to the overlay rather than through NotificationCenter,
+        // where ~20 ticks a second were fanned out to four observers that
+        // all ignore them.
+        if event.type == .voiceLevel {
+            if let level = event.voiceLevel { forwardVoiceLevel(level) }
+            return
+        }
+
         DispatchQueue.main.async {
             NotificationCenter.default.post(name: .daemonEvent, object: event)
+        }
+    }
+
+    /// Hand the newest speaking level to the overlay with at most ONE
+    /// main-queue hop in flight: if main is busy, ticks that pile up are
+    /// collapsed to the latest instead of being replayed late, because an
+    /// old level is worth nothing to an indicator that follows the voice.
+    private func forwardVoiceLevel(_ level: VoiceLevelData) {
+        voiceLevelLock.lock()
+        let hopInFlight = pendingVoiceLevel != nil
+        pendingVoiceLevel = level
+        voiceLevelLock.unlock()
+        guard !hopInFlight else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.voiceLevelLock.lock()
+            let latest = self.pendingVoiceLevel
+            self.pendingVoiceLevel = nil
+            self.voiceLevelLock.unlock()
+            guard let latest else { return }
+            StatusOverlayController.shared.setVoiceLevel(
+                energyDb: latest.energy_db, voiced: latest.voiced)
         }
     }
 

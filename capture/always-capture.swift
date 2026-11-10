@@ -171,9 +171,30 @@ func stopRawMeter() {
 // touches them.
 var monoBuf: AVAudioPCMBuffer?
 var outBuf: AVAudioPCMBuffer?
+// One-shot probe of the real tap cadence. `bufferSize` is only a request and
+// AVAudioEngine may deliver larger buffers; the delivery period is the floor
+// on how closely anything downstream can follow the live voice, so it is
+// logged once per helper start (as `capture_helper_stderr` in the daemon log)
+// instead of being assumed. Tap thread only.
+var cadenceStart: CFAbsoluteTime = 0
+var cadenceCallbacks = 0
+var cadenceFrames = 0
+var cadenceLogged = false
 input.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { buffer, _ in
     let frames = Int(buffer.frameLength)
     guard frames > 0, let src = buffer.floatChannelData?[0] else { return }
+    if !cadenceLogged {
+        let now = CFAbsoluteTimeGetCurrent()
+        if cadenceCallbacks == 0 { cadenceStart = now }
+        cadenceCallbacks += 1
+        cadenceFrames += frames
+        if now - cadenceStart >= 1.0 {
+            cadenceLogged = true
+            let per = cadenceFrames / cadenceCallbacks
+            let ms = Int(Double(per) / inFormat.sampleRate * 1000)
+            log("tap_cadence callbacks=\(cadenceCallbacks) frames_per_callback=\(per) ms_per_callback=\(ms) requested_frames=1024")
+        }
+    }
     if rawLevelsEnabled { procMeter.add(src, frames, rate: inFormat.sampleRate) }
     if monoBuf == nil || Int(monoBuf!.frameCapacity) < frames {
         monoBuf = AVAudioPCMBuffer(pcmFormat: monoIn, frameCapacity: AVAudioFrameCount(max(frames, 4096)))

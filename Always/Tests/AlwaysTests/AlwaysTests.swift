@@ -555,6 +555,139 @@ final class AlwaysTests: XCTestCase {
                           "HUD must be gone within the short fade after the final text")
     }
 
+    /// SPEC §5: the HUD leaves as soon as the text is final — on every
+    /// model. Streaming models used to get the final text re-shown for
+    /// 1.5 s after the paste.
+    func testTranscriptFinalOnStreamingModelDoesNotReshow() throws {
+        try ensureAppKit()
+        let monitor = StateMonitor.shared
+        resetOverlayState(monitor)
+        monitor.currentModelSupportsStreaming = true
+        defer { monitor.currentModelSupportsStreaming = false }
+
+        try post(#"{"type":"VoiceActivityDetected","data":null}"#)
+        try post(#"{"type":"TranscribingStarted","data":null}"#)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.7))
+        XCTAssertTrue(isStatusOverlayVisible())
+
+        let finalAt = Date()
+        try post(#"{"type":"TranscriptFinal","data":{"text":"done"}}"#)
+        waitForStatusOverlayToHide(timeout: 2.0)
+        XCTAssertLessThan(Date().timeIntervalSince(finalAt), 0.45,
+                          "HUD must be gone within the short fade after the final text")
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
+        XCTAssertFalse(isStatusOverlayVisible(), "the final text must not be re-shown")
+    }
+
+    /// Speaking again right after a dictation must keep its badge. The old
+    /// 1.5 s final-text timer fired a blind hide that took the NEXT
+    /// utterance's badge down with it.
+    func testVoiceRightAfterFinalOnStreamingModelStaysVisible() throws {
+        try ensureAppKit()
+        let monitor = StateMonitor.shared
+        resetOverlayState(monitor)
+        monitor.currentModelSupportsStreaming = true
+        defer { monitor.currentModelSupportsStreaming = false }
+
+        try post(#"{"type":"VoiceActivityDetected","data":null}"#)
+        try post(#"{"type":"TranscribingStarted","data":null}"#)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.7))
+        try post(#"{"type":"TranscriptFinal","data":{"text":"done"}}"#)
+        waitForStatusOverlayToHide(timeout: 2.0)
+
+        try post(#"{"type":"VoiceActivityDetected","data":null}"#)
+        // Past where the old 1.5 s timer would have fired.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 1.8))
+        XCTAssertTrue(monitor.isVoiceActivity)
+        XCTAssertTrue(isStatusOverlayVisible(), "the new utterance's badge must survive")
+
+        try post(#"{"type":"VoiceActivityEnded","data":null}"#)
+        waitForStatusOverlayToHide()
+    }
+
+    // MARK: - Live voice motion
+
+    func testVoiceLevelPayloadDecodes() throws {
+        let tick = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: #"{"type":"VoiceLevel","data":{"energy":0.05,"energy_db":-26.0,"voiced":true,"bands":[0.1,0.2,0.3,0.2,0.2]}}"#
+                .data(using: .utf8)!)
+        XCTAssertEqual(tick.voiceLevel?.energy_db, -26.0)
+        XCTAssertEqual(tick.voiceLevel?.voiced, true)
+
+        // The pause tick the daemon sends when the voice stops.
+        let rest = try JSONDecoder().decode(
+            DaemonEvent.self,
+            from: #"{"type":"VoiceLevel","data":{"energy":0.0,"energy_db":-100.0,"voiced":false,"bands":[0.0,0.0,0.0,0.0,0.0]}}"#
+                .data(using: .utf8)!)
+        XCTAssertEqual(rest.voiceLevel?.voiced, false)
+    }
+
+    func testVoiceLevelScale() {
+        // Room tone and the held-open tail of a word: dots at rest.
+        XCTAssertEqual(VoiceLevelScale.normalized(energyDb: -100, voiced: true), 0)
+        XCTAssertEqual(VoiceLevelScale.normalized(energyDb: -40, voiced: true), 0)
+        // Normal speech moves them clearly; loud speech reaches full travel.
+        XCTAssertGreaterThan(VoiceLevelScale.normalized(energyDb: -26, voiced: true), 0.5)
+        XCTAssertEqual(VoiceLevelScale.normalized(energyDb: -10, voiced: true), 1)
+        // An unvoiced tick rests the dots whatever energy it carries.
+        XCTAssertEqual(VoiceLevelScale.normalized(energyDb: -20, voiced: false), 0)
+    }
+
+    /// The dots follow the voice while "Listening", rest on the daemon's
+    /// pause tick WITHOUT the HUD leaving, and go back to the steady
+    /// "working" wave once transcription starts.
+    func testDotsFollowVoiceWhileListeningOnly() throws {
+        try ensureAppKit()
+        let monitor = StateMonitor.shared
+        resetOverlayState(monitor)
+        let controller = StatusOverlayController.shared
+        func motion() -> (driven: Bool, level: CGFloat)? {
+            NSApplication.shared.windows
+                .compactMap { $0 as? StatusOverlayWindow }
+                .compactMap { $0.currentVoiceMotion }
+                .first
+        }
+
+        try post(#"{"type":"VoiceActivityDetected","data":null}"#)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        XCTAssertTrue(isStatusOverlayVisible())
+        XCTAssertEqual(motion()?.driven, true, "Listening: dots follow the voice")
+
+        controller.setVoiceLevel(energyDb: -22, voiced: true)
+        XCTAssertGreaterThan(motion()?.level ?? 0, 0.5)
+
+        // The voice pauses: dots rest, HUD stays.
+        controller.setVoiceLevel(energyDb: -100, voiced: false)
+        XCTAssertEqual(motion()?.level, 0)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
+        XCTAssertTrue(isStatusOverlayVisible(), "a pause tick must not hide the HUD")
+        XCTAssertTrue(monitor.isVoiceActivity)
+
+        try post(#"{"type":"TranscribingStarted","data":null}"#)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        XCTAssertEqual(motion()?.driven, false, "Transcribing: steady wave")
+
+        // The user resumes before the cut: back to following the voice.
+        try post(#"{"type":"TranscribingStopped","data":null}"#)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        XCTAssertEqual(motion()?.driven, true)
+
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.5))
+        try post(#"{"type":"VoiceActivityEnded","data":null}"#)
+        waitForStatusOverlayToHide()
+    }
+
+    /// A level tick is not a reason to show the HUD.
+    func testVoiceLevelNeverShowsTheOverlay() throws {
+        try ensureAppKit()
+        resetOverlayState(StateMonitor.shared)
+        XCTAssertFalse(isStatusOverlayVisible())
+        StatusOverlayController.shared.setVoiceLevel(energyDb: -15, voiced: true)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.2))
+        XCTAssertFalse(isStatusOverlayVisible())
+    }
+
     /// A confirmation flash that ends while the user is still speaking must
     /// hand the window back to the live badge, not blank it until the next
     /// daemon heartbeat.

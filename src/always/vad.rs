@@ -1023,7 +1023,7 @@ struct UtterancePreview {
     preview: Option<Arc<crate::always::live_preview::LivePreview>>,
     parakeet: Option<crate::always::preview_asr::PreviewUtterance>,
     prebuffer_fed: bool,
-    level: Option<crate::always::level_meter::LevelMeter>,
+    level: crate::always::level_meter::LiveLevel,
     /// Pre-onset audio for Parakeet only (longer than the 200 ms STT
     /// pre-buffer): see [`PREVIEW_PREROLL_FRAMES`].
     preroll: VecDeque<Vec<i16>>,
@@ -1105,21 +1105,32 @@ impl UtterancePreview {
     /// The loudness meter only counts VOICED frames of a VERIFIED speaker
     /// (or My Voice off): it is the user's speaking-level meter, so room
     /// noise, pauses and not-yet-accepted media never move it.
-    fn frame(&mut self, samples: &[i16], voiced: bool, verified: bool) {
+    ///
+    /// The overlay's dots are driven by this stream, so it is timed in
+    /// capture time (`captured_at`) and a pause is announced once with a
+    /// zero, unvoiced tick — see `level_meter::LiveLevel`.
+    fn frame(
+        &mut self,
+        samples: &[i16],
+        voiced: bool,
+        verified: bool,
+        captured_at: std::time::Instant,
+    ) {
+        use crate::always::level_meter::LevelEvent;
         if let Some(p) = self.parakeet.as_mut() {
             p.feed(samples);
         }
         if verified && let Some(preview) = &self.preview {
             preview.set_verified();
         }
-        if !(voiced && verified) {
-            return;
-        }
-        let meter = self
-            .level
-            .get_or_insert_with(crate::always::level_meter::LevelMeter::new);
-        if let Some((energy, bands)) = meter.push(samples, std::time::Instant::now()) {
-            event::global_broadcaster().voice_level(energy, true, bands);
+        match self.level.frame(samples, voiced && verified, captured_at) {
+            Some(LevelEvent::Level(energy, bands)) => {
+                event::global_broadcaster().voice_level(energy, true, bands);
+            }
+            Some(LevelEvent::Rest) => {
+                event::global_broadcaster().voice_level(0.0, false, [0.0; 5]);
+            }
+            None => {}
         }
     }
 }
@@ -1148,7 +1159,7 @@ impl Drop for UtterancePreview {
             p.close();
         }
         self.parakeet = None;
-        if self.level.is_some() {
+        if self.level.started() {
             event::global_broadcaster().voice_level(0.0, false, [0.0; 5]);
         }
     }
@@ -1246,6 +1257,10 @@ fn record_with_local_vad(
     // `announce_voice_activity!` because macro_rules hygiene binds the
     // locals a macro reads at its DEFINITION site.
     let mut first_voice_at: Option<std::time::Instant> = None;
+    // Capture time of the last frame that was voiced on its own evidence
+    // (see where it is set). Measures how long after the voice really
+    // stopped the loop first counts a silent frame.
+    let mut last_loud_at: Option<std::time::Instant> = None;
     // Capture time of the frame being processed; its value when the loop
     // exits is the moment the final-silence cut was reached in speech time.
     let mut frame_captured_at = std::time::Instant::now();
@@ -1811,6 +1826,12 @@ fn record_with_local_vad(
         if is_speech && first_voice_at.is_none() {
             first_voice_at = Some(frame_captured_at);
         }
+        // Last frame that was voiced on its OWN evidence (raw Silero or
+        // energy), not merely kept "in speech" by the smoothing window.
+        // Reference point for `speech_quiet_edge` below.
+        if is_speech && (last_prob >= silence_threshold || energy_above_threshold) {
+            last_loud_at = Some(frame_captured_at);
+        }
         if !in_speech && !voice_activity_announced && !speaker_gate_requested {
             if early_voice_frame_ok(
                 frame_energy,
@@ -2016,7 +2037,12 @@ fn record_with_local_vad(
                 if let Some(session) = stream_session.as_mut() {
                     session.feed(samples);
                 }
-                utt_preview.frame(samples, true, !speaker_gate_requested || speaker_checked);
+                utt_preview.frame(
+                    samples,
+                    true,
+                    !speaker_gate_requested || speaker_checked,
+                    frame_captured_at,
+                );
                 // Same anchor refresh for the case where we were already in
                 // speech (consecutive_speech overflows min_speech_frames
                 // immediately) — keep the watchdog clock pinned to "right
@@ -2289,7 +2315,12 @@ fn record_with_local_vad(
                 }
             }
         } else if in_speech {
-            utt_preview.frame(samples, false, !speaker_gate_requested || speaker_checked);
+            utt_preview.frame(
+                samples,
+                false,
+                !speaker_gate_requested || speaker_checked,
+                frame_captured_at,
+            );
             if keyboard::is_option_held() {
                 consecutive_silence = 0;
                 consecutive_speech = 0;
@@ -2298,6 +2329,17 @@ fn record_with_local_vad(
                 continue;
             }
             consecutive_silence += 1;
+            if consecutive_silence == 1 {
+                // First counted silent frame of this pause. Speech time, not
+                // processing time (both stamps are capture times), plus how
+                // far behind the live audio this frame was handled.
+                tracing::info!(
+                    since_last_voiced_ms = last_loud_at
+                        .map(|t| frame_captured_at.saturating_duration_since(t).as_millis() as u64),
+                    processing_lag_ms = frame_captured_at.elapsed().as_millis() as u64,
+                    "speech_quiet_edge"
+                );
+            }
             consecutive_speech = 0;
             speech_samples.extend_from_slice(samples);
 

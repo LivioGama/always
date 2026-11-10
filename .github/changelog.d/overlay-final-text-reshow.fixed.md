@@ -1,0 +1,1 @@
+**overlay:** with a streaming model, speaking again within 1.5 s of a dictation no longer makes the indicator vanish while you talk. A leftover timer that re-showed the final text hid whatever was on screen when it ran out; the final text is no longer re-shown, on any model.

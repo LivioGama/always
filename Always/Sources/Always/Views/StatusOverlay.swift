@@ -311,10 +311,29 @@ enum OverlayState: Equatable, Hashable {
     }
 }
 
+/// Maps the daemon's speaking level (dBFS RMS) to how far the HUD's dots
+/// travel, 0…1. Below `floorDb` is room tone and the tail of a word the
+/// daemon is still holding open: the dots rest. `fullDb` is loud speech.
+enum VoiceLevelScale {
+    static let floorDb: Double = -40   // ≈ 0.010 RMS
+    static let fullDb: Double = -18    // ≈ 0.126 RMS
+
+    static func normalized(energyDb: Double, voiced: Bool) -> CGFloat {
+        guard voiced, energyDb.isFinite else { return 0 }
+        return CGFloat(min(max((energyDb - floorDb) / (fullDb - floorDb), 0), 1))
+    }
+}
+
 /// Three-dot wave animation used for ongoing states (listening / processing /
 /// transcribing). Three white circles bounce vertically in a sine-wave loop
 /// with a 1/3-period phase offset between neighbors so the wave appears to
 /// ripple across.
+///
+/// Two drivers, same wave:
+/// - **steady** — fixed amplitude. Means "working" (transcribing).
+/// - **voice-driven** — the amplitude is the user's speaking level, so the
+///   dots move while they talk and lie flat within ~0.1 s of them going
+///   quiet. Used while the HUD says "Listening" (SPEC §5).
 fileprivate class DotWaveView: NSView {
     private let dotCount = 3
     private let dotDiameter: CGFloat
@@ -324,6 +343,26 @@ fileprivate class DotWaveView: NSView {
 
     private var dotLayers: [CAShapeLayer] = []
     private var isAnimating = false
+
+    /// Which driver runs while animating.
+    private(set) var voiceDriven = false
+    /// Level last reported by the daemon, 0…1.
+    private(set) var targetLevel: CGFloat = 0
+    /// Level currently drawn; chases `targetLevel`.
+    private var shownLevel: CGFloat = 0
+    private var levelTimer: Timer?
+    private var lastLevelAt: CFTimeInterval = 0
+    private var lastTickAt: CFTimeInterval = 0
+    private var wavePhase: Double = 0
+
+    /// Rise fast, fall fast: the dots are at 90 % of a new level in ~35 ms
+    /// going up and ~90 ms coming down.
+    private static let attackTau: CFTimeInterval = 0.015
+    private static let releaseTau: CFTimeInterval = 0.040
+    /// No level for this long means the stream stopped without saying so
+    /// (lost event, reconnect): rest rather than hold a stale amplitude.
+    /// Longer than the worst audio-delivery gap between two ticks.
+    private static let levelStaleAfter: CFTimeInterval = 0.25
 
     init(frame frameRect: NSRect, compact: Bool = false) {
         self.dotDiameter = compact ? 5 : 9
@@ -386,7 +425,73 @@ fileprivate class DotWaveView: NSView {
         if isAnimating { return }
         isAnimating = true
         layoutDots()
+        installDriver()
+    }
 
+    /// Switch between the steady wave and the voice-driven one. Safe to call
+    /// at any time; takes effect at once if the wave is running.
+    func setVoiceDriven(_ on: Bool) {
+        guard on != voiceDriven else { return }
+        voiceDriven = on
+        guard isAnimating else { return }
+        removeDriver()
+        layoutDots()
+        installDriver()
+    }
+
+    /// Newest speaking level, 0…1 (0 = the voice paused).
+    func setLevel(_ level: CGFloat) {
+        targetLevel = min(max(level, 0), 1)
+        lastLevelAt = CACurrentMediaTime()
+    }
+
+    private func installDriver() {
+        if voiceDriven {
+            installLevelDriver()
+        } else {
+            installSteadyWave()
+        }
+    }
+
+    private func removeDriver() {
+        levelTimer?.invalidate()
+        levelTimer = nil
+        for dot in dotLayers {
+            dot.removeAllAnimations()
+        }
+    }
+
+    private func installLevelDriver() {
+        lastTickAt = CACurrentMediaTime()
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.levelTick()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        levelTimer = timer
+        levelTick()
+    }
+
+    private func levelTick() {
+        let now = CACurrentMediaTime()
+        let dt = min(max(now - lastTickAt, 0), 0.1)
+        lastTickAt = now
+        if now - lastLevelAt > Self.levelStaleAfter { targetLevel = 0 }
+        let tau = targetLevel > shownLevel ? Self.attackTau : Self.releaseTau
+        shownLevel += (targetLevel - shownLevel) * CGFloat(1 - exp(-dt / tau))
+        if targetLevel == 0 && shownLevel < 0.01 { shownLevel = 0 }
+        wavePhase = (wavePhase + dt / period).truncatingRemainder(dividingBy: 1)
+
+        let centerY = bounds.height / 2
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (i, dot) in dotLayers.enumerated() {
+            let theta = 2.0 * .pi * (wavePhase + Double(i) / Double(dotCount))
+            dot.position.y = centerY + amplitude * shownLevel * CGFloat(sin(theta))
+        }
+        CATransaction.commit()
+    }
+
+    private func installSteadyWave() {
         let centerY = bounds.height / 2
         let key = "dotWave"
 
@@ -419,9 +524,10 @@ fileprivate class DotWaveView: NSView {
     func stop() {
         if !isAnimating { return }
         isAnimating = false
-        for dot in dotLayers {
-            dot.removeAllAnimations()
-        }
+        removeDriver()
+        // A level from before the HUD left must not move the next one.
+        targetLevel = 0
+        shownLevel = 0
         layoutDots()
     }
 }
@@ -683,6 +789,20 @@ class StatusOverlayView: NSView {
     fileprivate func stopAnimations() {
         dotWaveView.stop()
     }
+
+    fileprivate func setVoiceDriven(_ on: Bool) {
+        dotWaveView.setVoiceDriven(on)
+    }
+
+    fileprivate func setVoiceLevel(_ level: CGFloat) {
+        dotWaveView.setLevel(level)
+    }
+
+    /// Whether the dots are following the voice, and the level they were
+    /// last given (0…1).
+    fileprivate var voiceMotion: (driven: Bool, level: CGFloat) {
+        (dotWaveView.voiceDriven, dotWaveView.targetLevel)
+    }
 }
 
 class StatusOverlayWindow: NSPanel {
@@ -693,6 +813,24 @@ class StatusOverlayWindow: NSPanel {
     /// (e.g. live partial text vs the bare listening badge), not just
     /// that a window is visible.
     var currentOverlayState: OverlayState? { overlayView?.state }
+
+    /// Whether the dots follow the live voice. Kept here, not only in the
+    /// view, because the content view is rebuilt when the display mode
+    /// changes and must come back in the same mode.
+    private var voiceDriven = false
+
+    func setVoiceDriven(_ on: Bool) {
+        voiceDriven = on
+        overlayView?.setVoiceDriven(on)
+    }
+
+    func setVoiceLevel(_ level: CGFloat) {
+        overlayView?.setVoiceLevel(level)
+    }
+
+    /// Read-only: whether the dots are following the voice and the level
+    /// they were last given. For tests, like `currentOverlayState`.
+    var currentVoiceMotion: (driven: Bool, level: CGFloat)? { overlayView?.voiceMotion }
 
     /// Repeating poll that lets the HUD follow the cursor across displays.
     /// nil whenever the HUD is hidden.
@@ -731,6 +869,7 @@ class StatusOverlayWindow: NSPanel {
             builtCompact = wantCompact
             let frame = NSRect(origin: .zero, size: hudSize)
             let view = StatusOverlayView(frame: frame, compact: wantCompact)
+            view.setVoiceDriven(voiceDriven)
             overlayView = view
             contentView = view
         }
@@ -1359,6 +1498,20 @@ class StatusOverlayController {
         window?.show(state: state, instant: state.isInstantShow)
     }
 
+    /// Make the dots follow the live voice (`true`, the "Listening" phase)
+    /// or run the steady "working" wave (`false`). Never shows or hides
+    /// anything, and never creates the window.
+    func setVoiceDriven(_ on: Bool) {
+        window?.setVoiceDriven(on)
+    }
+
+    /// Newest speaking level from the daemon. Only moves dots that are
+    /// already on screen in the voice-driven mode: it cannot show, hide or
+    /// relabel the HUD, so a level tick can never keep it up or take it down.
+    func setVoiceLevel(energyDb: Double, voiced: Bool) {
+        window?.setVoiceLevel(VoiceLevelScale.normalized(energyDb: energyDb, voiced: voiced))
+    }
+
     /// Show the overlay briefly then auto-hide. Used for transient
     /// notifications like Pause/Resume or Auto-Enter on/off toggles.
     /// Always lasts the full `duration` regardless of voice activity.
@@ -1544,6 +1697,9 @@ func overlayTimingLog(_ stage: String) {
         .appendingPathComponent("Library/Logs/Always", isDirectory: true)
     let url = dir.appendingPathComponent("overlay-timing.log")
     guard let data = line.data(using: .utf8) else { return }
+    // The directory only exists once a production daemon has logged there;
+    // on a dev-only machine every write used to fail silently.
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     if let handle = try? FileHandle(forWritingTo: url) {
         defer { try? handle.close() }
         _ = try? handle.seekToEnd()
