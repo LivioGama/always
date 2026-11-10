@@ -386,7 +386,8 @@ Idle-paused · Low mic volume · correction confirmations.
   stays up from the speculative kickoff until the final text is ready to
   paste or the utterance is dropped — speech-to-text finishing is not the
   end, grammar follows — and it returns to "Listening" only if the user
-  resumes speaking.
+  resumes speaking. The final text is not re-shown in the HUD on any model:
+  it is already in the focused application.
 - Follows the active screen and the cursor; must be fully on a screen the user
   is looking at.
 - Fixed width, growing height: transcript text wraps within the fixed content

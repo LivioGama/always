@@ -555,6 +555,56 @@ final class AlwaysTests: XCTestCase {
                           "HUD must be gone within the short fade after the final text")
     }
 
+    /// SPEC §5: the HUD leaves as soon as the text is final — on every
+    /// model. Streaming models used to get the final text re-shown for
+    /// 1.5 s after the paste.
+    func testTranscriptFinalOnStreamingModelDoesNotReshow() throws {
+        try ensureAppKit()
+        let monitor = StateMonitor.shared
+        resetOverlayState(monitor)
+        monitor.currentModelSupportsStreaming = true
+        defer { monitor.currentModelSupportsStreaming = false }
+
+        try post(#"{"type":"VoiceActivityDetected","data":null}"#)
+        try post(#"{"type":"TranscribingStarted","data":null}"#)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.7))
+        XCTAssertTrue(isStatusOverlayVisible())
+
+        let finalAt = Date()
+        try post(#"{"type":"TranscriptFinal","data":{"text":"done"}}"#)
+        waitForStatusOverlayToHide(timeout: 2.0)
+        XCTAssertLessThan(Date().timeIntervalSince(finalAt), 0.45,
+                          "HUD must be gone within the short fade after the final text")
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
+        XCTAssertFalse(isStatusOverlayVisible(), "the final text must not be re-shown")
+    }
+
+    /// Speaking again right after a dictation must keep its badge. The old
+    /// 1.5 s final-text timer fired a blind hide that took the NEXT
+    /// utterance's badge down with it.
+    func testVoiceRightAfterFinalOnStreamingModelStaysVisible() throws {
+        try ensureAppKit()
+        let monitor = StateMonitor.shared
+        resetOverlayState(monitor)
+        monitor.currentModelSupportsStreaming = true
+        defer { monitor.currentModelSupportsStreaming = false }
+
+        try post(#"{"type":"VoiceActivityDetected","data":null}"#)
+        try post(#"{"type":"TranscribingStarted","data":null}"#)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.7))
+        try post(#"{"type":"TranscriptFinal","data":{"text":"done"}}"#)
+        waitForStatusOverlayToHide(timeout: 2.0)
+
+        try post(#"{"type":"VoiceActivityDetected","data":null}"#)
+        // Past where the old 1.5 s timer would have fired.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 1.8))
+        XCTAssertTrue(monitor.isVoiceActivity)
+        XCTAssertTrue(isStatusOverlayVisible(), "the new utterance's badge must survive")
+
+        try post(#"{"type":"VoiceActivityEnded","data":null}"#)
+        waitForStatusOverlayToHide()
+    }
+
     /// A confirmation flash that ends while the user is still speaking must
     /// hand the window back to the live badge, not blank it until the next
     /// daemon heartbeat.

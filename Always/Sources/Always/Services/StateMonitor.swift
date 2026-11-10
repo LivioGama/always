@@ -756,6 +756,7 @@ class StateMonitor: ObservableObject {
         case .listeningStopped:
             isListeningActive = false
             isVoiceActivity = false
+            updateOverlay()
         case .transcribingStarted:
             // Re-emitted every ~2s as a keep-alive during long waits, so
             // only treat the first as the start of a new transcription.
@@ -770,6 +771,7 @@ class StateMonitor: ObservableObject {
             if isTranscribing { isTranscribing = false }
             cancelTranscribingLease()
             stopTranscribingTicker()
+            updateOverlay()
         case .transcriptChunk, .transcriptionInterim:
             // Streaming and speculative previews share the same UTF-8 text
             // contract.  A valid preview proves the transcription is still
@@ -806,19 +808,13 @@ class StateMonitor: ObservableObject {
             // step (transcribing cleared, voice not yet), which restarted
             // the minimum-visible clock and kept the HUD up ~1 s after the
             // paste.
+            // The HUD leaves here and is not brought back: SPEC §5 "Leaves
+            // as soon as the text is final". A 1.5 s re-show of the final
+            // text used to follow on streaming models, on a timer that
+            // could not be cancelled and bypassed `appliedOverlay` — it
+            // kept the HUD up after the paste and could hide the badge of
+            // the NEXT utterance if the user spoke again within it.
             updateOverlay()
-
-            // Optionally show the final reshaped text in the overlay briefly
-            if let text = event.data?["text"], !text.isEmpty,
-               currentModelSupportsStreaming {
-                let reshaped = TextReshaper.reshape(text)
-                // Show the final text briefly before hiding
-                StatusOverlayController.shared.show(state: .transcribingWithText(text: reshaped, isInterim: false))
-                // Auto-hide after a short delay
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    StatusOverlayController.shared.hide()
-                }
-            }
         case .voiceActivityDetected:
             // Fresh utterance start (not a mid-utterance heartbeat):
             // drop any stale partial from the previous one so the badge
@@ -832,7 +828,7 @@ class StateMonitor: ObservableObject {
             isVoiceActivity = true
             armVoiceLease()
             showOngoingOverlayIfNeeded()
-            NSLog("Always: VoiceActivityDetected -> overlay")
+            logger.debug("VoiceActivityDetected -> overlay")
         case .voiceActivityEnded:
             if isVoiceActivity { isVoiceActivity = false }
             if partialUnverified {
@@ -842,7 +838,11 @@ class StateMonitor: ObservableObject {
                 unverifiedLeaseWork?.cancel()
             }
             cancelVoiceLease()
-            NSLog("Always: VoiceActivityEnded -> hide overlay")
+            // Render now, after the writes, like the show path does —
+            // otherwise the hide waits one more main-queue turn for the
+            // publisher sink.
+            updateOverlay()
+            logger.debug("VoiceActivityEnded -> hide overlay")
         case .transcriptionFiltered:
             // Transcription was rejected — clear ongoing state and flash
             // a brief "Filtered" overlay so the user knows the daemon
