@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-11-25
+
+### Security
+- **deps:** the `url` crate is updated to 2.5.9, fixing a stack overflow on nested `blob:` URLs (RUSTSEC-2026-0592). ([#226](https://github.com/LivioGama/always/pull/226))
+
 ## [0.1.10] - 2026-11-25
 
 ### Added
