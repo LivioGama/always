@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-11-25
+
+### Fixed
+- **settings:** a small Groq spend shows with more decimals (≈ $0.0048) instead of rounding to $0.00. ([#232](https://github.com/LivioGama/always/pull/232))
+- **update:** on macOS, Install update reopens Always even when macOS refuses the first relaunch (LaunchServices error -600); before, Always could stay closed after updating. ([#232](https://github.com/LivioGama/always/pull/232))
+
 ## [0.1.12] - 2026-11-25
 
 ### Fixed
