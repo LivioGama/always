@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-11-25
+
+### Fixed
+- **release:** the Windows build is pinned to Rust 1.99.1 because Rust 1.100 broke the ONNX Runtime DLL copy; 0.1.10 and 0.1.11 were tagged but never published for that reason, so this release carries their changes. ([#229](https://github.com/LivioGama/always/pull/229))
+
 ## [0.1.11] - 2026-11-25
 
 ### Security
