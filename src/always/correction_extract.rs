@@ -105,7 +105,9 @@ async fn call_llm(prompt: &str, api_key: &str, model: &str) -> Result<String> {
         .await
         .context("Failed to call Groq API for correction extraction")?;
 
+    let headers = response.headers().clone();
     if !response.status().is_success() {
+        crate::always::groq_usage::record_completion(&headers, model, None);
         let error = response.text().await.unwrap_or_default();
         anyhow::bail!("Groq API error (extraction): {}", error);
     }
@@ -114,6 +116,7 @@ async fn call_llm(prompt: &str, api_key: &str, model: &str) -> Result<String> {
         .json()
         .await
         .context("Failed to parse Groq extraction response")?;
+    crate::always::groq_usage::record_completion(&headers, model, json.get("usage"));
 
     let content = json["choices"][0]["message"]["content"]
         .as_str()

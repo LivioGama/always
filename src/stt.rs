@@ -364,6 +364,10 @@ pub fn transcribe_from_bytes_in(
     let mut last_network_err: Option<reqwest::Error> = None;
     let mut last_parse_err: Option<reqwest::Error> = None;
 
+    let audio_seconds = crate::always::groq_usage::wav_seconds(&audio_data);
+    // Only real Groq traffic counts toward today's usage (tests point
+    // `ALWAYS_GROQ_BASE_URL` at a mock server).
+    let count_usage = std::env::var_os("ALWAYS_GROQ_BASE_URL").is_none();
     for attempt in 0..MAX_ATTEMPTS {
         // Multipart bodies cannot be cheaply replayed, so rebuild per attempt.
         let form = match build_form(audio_data.clone(), language) {
@@ -383,6 +387,14 @@ pub fn transcribe_from_bytes_in(
         match response {
             Ok(resp) => {
                 let status = resp.status();
+                if count_usage {
+                    crate::always::groq_usage::record_transcription(
+                        resp.headers(),
+                        WHISPER_MODEL,
+                        audio_seconds,
+                        status.is_success(),
+                    );
+                }
                 if status.is_success() {
                     match resp.json::<TranscriptionResult>() {
                         Ok(mut result) => {
