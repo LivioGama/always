@@ -1,6 +1,6 @@
 {
   "productName": "Always",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "identifier": "com.always.stt",
   "build": {
     "frontendDist": "../../always-gui/dist",
