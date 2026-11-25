@@ -47,12 +47,18 @@ struct GroqUsageBar: View {
         HStack {
             Text("Paid usage today").font(.caption)
             Spacer()
-            Text(String(format: "≈ $%.2f", usage.cost_usd))
+            Text("≈ " + Self.dollars(usage.cost_usd))
                 .font(.caption)
                 .fontWeight(.semibold)
                 .monospacedDigit()
         }
         .help("Estimated from Groq's published prices and what Always sent today (UTC). Groq's console has the exact bill.")
+    }
+
+    /// Small daily spends stay visible: $0.0048, not $0.00.
+    static func dollars(_ value: Double) -> String {
+        let format = value < 0.01 ? "$%.4f" : value < 1 ? "$%.3f" : "$%.2f"
+        return String(format: format, value)
     }
 
     private func freeDetail(_ usage: GroqUsageData) -> String {
