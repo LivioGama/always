@@ -1102,6 +1102,27 @@ recognition. Requires no API key and never uploads audio on macOS 26+.
   Selecting it sends `SetActiveTranscriber { "backend": "apple" }`, the active
   row is badged, and the same loading spinner is shown until the daemon
   answers (success, failure or no-op; 120 s give-up, see above).
+  Remote Groq Whisper sits right under it as the same kind of card. Every
+  choice on the Models tab — Apple, Groq, each Postprocess mode — is the same
+  card: title, one-line description, an "Active" badge on the selected one, a
+  "Use" button on the others (owner request 2026-11-25: the transcription list
+  and the Postprocess segmented control looked and behaved differently).
+- The Groq API key field (and today's Groq usage under it) shows only while
+  Groq is the transcription engine or the Postprocess mode (owner request
+  2026-11-25). A card that needs the missing key says so.
+- **Groq usage today** (owner request 2026-11-25). Groq has no usage or spend
+  API, so the daemon tallies each UTC day in `config_dir()/groq_usage.json`
+  (survives daemon restarts): billed Whisper audio seconds (each request ≥ 10 s,
+  Groq's minimum), chat-completion tokens from the response `usage`, and the
+  `x-ratelimit-{limit,remaining}-requests` (requests per day) headers. A
+  requests-per-day limit above 50,000 means the paid Developer plan, otherwise
+  the free plan. It sends `GroqUsage` after every Groq request and in the
+  initial burst. Free plan: a bar of the free daily allowance used — the
+  tightest of 8 h of audio, 200K cleanup tokens, and requests per day; Groq
+  answers 429 past it and never bills the free plan. Paid plan: the estimated
+  spend today, from Groq's prices (Whisper turbo $0.04/h, v3 $0.111/h;
+  gpt-oss-20b $0.075/$0.30 and gpt-oss-120b $0.15/$0.60 per 1M input/output
+  tokens; other models priced as 120b). An estimate, not Groq's bill.
 - `Always.app/Contents/Info.plist` declares `NSSpeechRecognitionUsageDescription`
   so the bundled `always-daemon` can request macOS speech-recognition permission.
   The first transcription attempt triggers a TCC prompt; without this key the
@@ -1157,6 +1178,9 @@ Between transcription and the keyboard:
 6. **Postprocess mode** — ONE setting (`postprocess_mode`, Settings → Models →
    Postprocessing), changed 2026-10-14 at the user's request ("it must be
    instant"; a "wait 250 ms then paste uncorrected" compromise was rejected).
+   All four modes are always offered, Groq included whatever the current
+   mode (owner report 2026-11-25: Groq was shown only while already
+   selected, so it could not be chosen again).
    **The paste never waits on a language model.** Before, the blocking LLM
    pass (8 s timeout) was the 3–10 s insert delay: prod 2026-10-13, n=86,
    `latency_breakdown` total p50 266 ms / p95 9228 ms, grammar p95 8026 ms,

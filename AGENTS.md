@@ -1,19 +1,5 @@
 # Always Project Rules
 
-## Opening pull requests
-
-PR-Gate is optional. Use it when you explicitly want its review-and-fix flow,
-real CI on a merge-preview branch, and signed PR submission. The
-`.github/workflows/pr-gate-guard.yml` only checks PRs whose body contains a
-`pr-gate:v1` marker; ordinary PRs without that marker are left alone.
-
-- To opt in, run `pr-gate submit` or `PR_GATE_OPT_IN=1 gh pr create ...`.
-  Plain `gh pr create` submits directly to GitHub.
-- Release PRs (`release-x.y.z` -> `main`) are exempt; the `release` skill opens
-  them directly.
-- Maintainers can bypass signature checks with the `pr-gate-bypass` label (then
-  reopen).
-
 ## 🚨 `SPEC.md` is normative — keep it in sync with the code
 
 `SPEC.md` describes the behaviour this product is supposed to have. It is the

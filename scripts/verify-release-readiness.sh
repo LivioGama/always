@@ -26,8 +26,7 @@ local_gates() {
     .github/workflows/ci.yml \
     .github/workflows/release.yml \
     .github/workflows/release-build.yml \
-    .github/workflows/codeql.yml \
-    .github/workflows/dependency-review.yml
+    .github/workflows/codeql.yml
   run cargo fmt --check
   run cargo clippy --all-targets --all-features --locked -- -D warnings
   run cargo test --locked --all-targets

@@ -684,6 +684,11 @@ where
     if let Some(update) = crate::always::updater::initial_burst_event() {
         initial_events.push(update);
     }
+    // Today's Groq usage, so Settings shows the bar without waiting for
+    // the next Groq request.
+    if let Some(usage) = crate::always::groq_usage::initial_burst_event() {
+        initial_events.push(usage);
+    }
 
     let mut initial_payload = String::new();
     for event in initial_events {

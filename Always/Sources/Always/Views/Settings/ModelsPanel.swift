@@ -10,12 +10,22 @@ struct ModelsPanel: View {
     var saveApiKey: () -> Void
     var deleteApiKey: () -> Void
     var savePostprocessProvider: () -> Void
+    @ObservedObject private var models: ModelManagerClient = .shared
+
+    /// The key (and today's Groq usage) only matter when Groq does some of
+    /// the work: as the transcription engine or as the Postprocess mode
+    /// (owner request 2026-11-25).
+    private var usesGroq: Bool {
+        models.activeBackend == "groq" || config.resolvedPostprocessMode == "groq"
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                groqKeySection
-                Divider()
+                if usesGroq {
+                    groqKeySection
+                    Divider()
+                }
                 postprocessSection
                 Divider()
                 ModelsSection(config: $config)
@@ -40,6 +50,10 @@ struct ModelsPanel: View {
             Text("Required for the remote Groq backend and for smart postprocessing.")
                 .font(.caption2)
                 .foregroundColor(.secondary)
+            if hasGroqKey {
+                GroqUsageBar()
+                    .padding(.top, 4)
+            }
         }
     }
 
@@ -116,49 +130,49 @@ struct ModelsPanel: View {
         config.groqKeySaved
     }
 
-    /// Apple Intelligence works on-device with no API key; the Groq
-    /// backend needs a key. Matches the daemon's `can_correct()` gate.
-    private var usesApple: Bool {
-        config.postprocessProvider == "apple"
-    }
-
-    /// One explicit Postprocess mode (SPEC §9/§10). Changing it restarts
-    /// the daemon, like the provider switch it replaces.
+    /// One explicit Postprocess mode (SPEC §9/§10), offered as the same
+    /// cards as the transcription engines. Changing it restarts the daemon,
+    /// like the provider switch it replaces.
     private var postprocessSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Postprocessing").font(.headline)
-
-            Picker("Postprocess mode", selection: postprocessModeBinding) {
-                Text("Always Fast").tag("fast")
-                Text("Apple Intelligence").tag("apple")
-                if config.resolvedPostprocessMode == "groq" {
-                    Text("Groq (cloud)").tag("groq")
-                }
-                Text("Off").tag("off")
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Postprocessing").font(.headline)
+                Text("How a transcript is cleaned up before it is pasted.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            .pickerStyle(.segmented)
-            .help("How a transcript is cleaned up before it is pasted.")
-
-            Text(postprocessModeDescription)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(postprocessModeLatency)
-                .font(.caption2)
-                .foregroundColor(.secondary.opacity(0.8))
-
-            if config.resolvedPostprocessMode == "apple" && !config.appleIntelligenceAvailable {
-                Text("Apple Intelligence isn't ready on this Mac yet. Enable it and download the language model in System Settings → Apple Intelligence & Siri. Until then Always Fast corrections are used.")
-                    .font(.caption)
-                    .foregroundColor(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if config.resolvedPostprocessMode == "groq" && !hasGroqKey {
-                Text("Enter and save a Groq API key above. Until then Always Fast corrections are used.")
-                    .font(.caption)
-                    .foregroundColor(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
+            ForEach(Self.postprocessModes, id: \.self) { mode in
+                ChoiceCard(
+                    title: Self.postprocessTitle(mode),
+                    detail: "\(Self.postprocessDescription(mode)) \(Self.postprocessLatency(mode))",
+                    isActive: config.resolvedPostprocessMode == mode,
+                    warning: postprocessWarning(mode),
+                    onUse: { postprocessModeBinding.wrappedValue = mode }
+                )
             }
         }
+    }
+
+    private static let postprocessModes = ["fast", "apple", "groq", "off"]
+
+    private static func postprocessTitle(_ mode: String) -> String {
+        switch mode {
+        case "fast": return "Always Fast"
+        case "apple": return "Apple Intelligence"
+        case "groq": return "Groq (Cloud)"
+        default: return "Off"
+        }
+    }
+
+    private func postprocessWarning(_ mode: String) -> String? {
+        guard config.resolvedPostprocessMode == mode else { return nil }
+        if mode == "apple" && !config.appleIntelligenceAvailable {
+            return "Apple Intelligence isn't ready on this Mac yet. Enable it and download the language model in System Settings → Apple Intelligence & Siri. Until then Always Fast corrections are used."
+        }
+        if mode == "groq" && !hasGroqKey {
+            return "Enter and save a Groq API key above. Until then Always Fast corrections are used."
+        }
+        return nil
     }
 
     private var postprocessModeBinding: Binding<String> {
@@ -172,8 +186,8 @@ struct ModelsPanel: View {
         )
     }
 
-    private var postprocessModeDescription: String {
-        switch config.resolvedPostprocessMode {
+    private static func postprocessDescription(_ mode: String) -> String {
+        switch mode {
         case "fast":
             return "Built-in corrector: your glossary and learned corrections, casing, stray punctuation and recognizer artifacts. No model, nothing leaves the Mac."
         case "apple":
@@ -185,17 +199,11 @@ struct ModelsPanel: View {
         }
     }
 
-    private var postprocessModeLatency: String {
-        switch config.resolvedPostprocessMode {
+    private static func postprocessLatency(_ mode: String) -> String {
+        switch mode {
         case "fast": return "Adds about 1 ms before paste."
         case "apple", "groq": return "Adds about 1 ms before paste; the model runs in the background."
         default: return "Adds under 1 ms before paste."
         }
-    }
-
-    /// True when the Groq backend is selected but no key is present —
-    /// the only state in which the toggle is disabled.
-    private var usesGroqWithoutKey: Bool {
-        !usesApple && !hasGroqKey
     }
 }

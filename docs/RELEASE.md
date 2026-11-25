@@ -64,7 +64,7 @@ The `.deb` and `.rpm` install the systemd **user** unit
 | Job | What it does |
 |-----|--------------|
 | `verify` | Tag is on `main`; `check-release.sh` (tag equals every version file, CHANGELOG heading present, lockfiles fresh); `cargo deny check` |
-| `test` | The `ci.yml` test suite on macOS |
+| `test` | The test suite on macOS |
 | `assets` | Calls `release-build.yml`: builds macOS arm64, Linux x86_64 and aarch64, Windows x86_64; writes a `.sha256` per asset; attests build provenance; stages the `release-assets` artifact |
 | `release` | Publishes a non-draft GitHub Release; body is the CHANGELOG section |
 | `smoke` | Installs the published release with the real installers on Ubuntu (deb, tar.gz), Fedora (rpm), macOS arm64 and Windows, and runs `always --version` |

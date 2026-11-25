@@ -439,6 +439,22 @@ pub enum DaemonEvent {
     /// (free-tier) quota is used up. At most once per UTC day; the GUI
     /// suggests switching to an on-device model.
     GroqQuotaExhausted,
+    /// Today's (UTC) Groq usage, after every Groq request and in the
+    /// initial burst. `plan` is `free` | `paid` | `unknown` (from Groq's
+    /// requests-per-day limit). `cost_usd` is the local estimate of what a
+    /// paid plan is billed today; the free plan is never billed.
+    GroqUsage {
+        plan: String,
+        audio_seconds: f64,
+        audio_seconds_free: f64,
+        llm_tokens: u64,
+        llm_tokens_free: u64,
+        stt_requests_limit: Option<u64>,
+        stt_requests_remaining: Option<u64>,
+        llm_requests_limit: Option<u64>,
+        llm_requests_remaining: Option<u64>,
+        cost_usd: f64,
+    },
     /// "My Voice" enrollment accepted for `step`, but the daemon is still
     /// preparing (speaker model download/load). Recording has NOT begun;
     /// the GUI must not show "speak now" until `VoiceEnrollmentStarted`.

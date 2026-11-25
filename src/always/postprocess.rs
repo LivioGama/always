@@ -313,7 +313,9 @@ impl PostProcessor {
             .await
             .context("Failed to call Groq API")?;
 
+        let headers = response.headers().clone();
         if !response.status().is_success() {
+            crate::always::groq_usage::record_completion(&headers, &self.config.groq_model, None);
             let error = response.text().await.unwrap_or_default();
             anyhow::bail!("Groq API error: {}", error);
         }
@@ -322,6 +324,11 @@ impl PostProcessor {
             .json()
             .await
             .context("Failed to parse Groq response")?;
+        crate::always::groq_usage::record_completion(
+            &headers,
+            &self.config.groq_model,
+            json.get("usage"),
+        );
         let raw_corrected = json["choices"][0]["message"]["content"]
             .as_str()
             .context("Invalid Groq response format")?

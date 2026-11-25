@@ -20,8 +20,9 @@ private enum SortOrder: String, CaseIterable {
 ///
 /// * Downloaded models on top, with the active one badged.
 /// * Available models below, each with size + download button.
-/// * Backend toggle at the very top so users can flip to the remote
-///   Groq API without scrolling past the catalog.
+/// * Apple on-device and remote Groq as cards at the very top (the same
+///   `ChoiceCard` the Postprocessing modes use), so neither needs a scroll
+///   past the catalog.
 struct ModelsSection: View {
     @ObservedObject private var models: ModelManagerClient = .shared
     @Binding var config: Config
@@ -112,9 +113,9 @@ struct ModelsSection: View {
         VStack(alignment: .leading, spacing: 12) {
             sectionHeader
 
-            appleBackendSection
-
             backendBar
+
+            builtInBackendCards
 
             languagePickerSection
 
@@ -176,9 +177,7 @@ struct ModelsSection: View {
         }
     }
 
-    /// Toggle between remote Groq and the currently-selected local
-    /// model. Falls back to "no local model yet" when nothing is
-    /// downloaded.
+    /// The engine transcribing right now, by name.
     private var backendBar: some View {
         HStack(spacing: 10) {
             Text("Active:")
@@ -188,13 +187,6 @@ struct ModelsSection: View {
                 .font(.subheadline)
                 .fontWeight(.semibold)
             Spacer()
-            if models.activeBackend != "groq" {
-                Button("Use Groq (Remote)") {
-                    models.setActive(backend: "groq")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 10)
@@ -218,69 +210,31 @@ struct ModelsSection: View {
         return models.activeBackend
     }
 
-    /// On-device Apple STT card — shown at the top of the model list.
-    /// Selecting it sends `SetActiveTranscriber { "backend": "apple" }`.
-    private var appleBackendSection: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text("Apple (On-Device)")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                    if models.activeBackend == "apple" {
-                        Text("Active")
-                            .font(.caption2)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(Color.accentColor.opacity(0.25))
-                            )
-                    }
-                }
-                Text("Siri on-device dictation for the current language. No download, no API key.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let error = models.errors["apple"] {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            Spacer()
-            if models.activeBackend == "apple" {
-                Text("Active")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            } else {
-                let loading = models.loadingBackend == "apple"
-                Button {
-                    models.setActive(backend: "apple")
-                } label: {
-                    HStack(spacing: 4) {
-                        if loading {
-                            ProgressView()
-                                .controlSize(.small)
-                        }
-                        Text(loading ? "Loading…" : "Use")
-                            .font(.caption)
-                    }
-                }
-                .controlSize(.small)
-                .disabled(models.loadingBackend != nil)
-            }
+    /// The two engines that need no download — Apple on-device and remote
+    /// Groq — as the same cards the Postprocessing choices use.
+    private var builtInBackendCards: some View {
+        VStack(spacing: 8) {
+            ChoiceCard(
+                title: "Apple (On-Device)",
+                detail: "Siri on-device dictation for the current language. No download, no API key.",
+                isActive: models.activeBackend == "apple",
+                isLoading: models.loadingBackend == "apple",
+                isDisabled: models.loadingBackend != nil,
+                warning: models.errors["apple"],
+                onUse: { models.setActive(backend: "apple") }
+            )
+            ChoiceCard(
+                title: "Groq Whisper (Cloud)",
+                detail: "Groq's hosted Whisper. Needs a Groq API key; audio is sent to Groq.",
+                isActive: models.activeBackend == "groq",
+                isLoading: models.loadingBackend == "groq",
+                isDisabled: models.loadingBackend != nil,
+                warning: models.activeBackend == "groq" && !config.groqKeySaved
+                    ? "Enter and save a Groq API key above."
+                    : models.errors["groq"],
+                onUse: { models.setActive(backend: "groq") }
+            )
         }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(
-                    models.activeBackend == "apple"
-                        ? Color.accentColor.opacity(0.6)
-                        : Color.secondary.opacity(0.2)
-                )
-        )
     }
 
     /// The catalog entry for the currently active local model, or `nil`

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-11-25
+
+### Added
+- **settings:** on macOS, under the Groq API key, a bar shows how much of Groq's free daily allowance you have used today, or on a paid Groq plan the estimated spend so far today. ([#223](https://github.com/LivioGama/always/pull/223))
+
+### Changed
+- **settings:** on macOS the Models tab shows transcription engines and Postprocess modes as the same cards with a Use button, and the Groq API key only appears when Groq transcribes or cleans up. ([#223](https://github.com/LivioGama/always/pull/223))
+
+### Fixed
+- **settings:** Groq can be picked again as the Postprocess mode on macOS; it was hidden unless it was already selected. ([#223](https://github.com/LivioGama/always/pull/223))
+
 ## [0.1.9] - 2026-11-08
 
 ### Fixed

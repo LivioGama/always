@@ -413,6 +413,7 @@ impl OverlayStateReducer {
             | DaemonEvent::ActiveTranscriberFailed { .. }
             | DaemonEvent::SttFallbackEngaged { model: _ }
             | DaemonEvent::GroqQuotaExhausted
+            | DaemonEvent::GroqUsage { .. }
             | DaemonEvent::VoiceEnrollmentPreparing { .. }
             | DaemonEvent::VoiceEnrollmentStarted { .. }
             | DaemonEvent::VoiceEnrollmentLevel { .. }
