@@ -1122,7 +1122,8 @@ recognition. Requires no API key and never uploads audio on macOS 26+.
   answers 429 past it and never bills the free plan. Paid plan: the estimated
   spend today, from Groq's prices (Whisper turbo $0.04/h, v3 $0.111/h;
   gpt-oss-20b $0.075/$0.30 and gpt-oss-120b $0.15/$0.60 per 1M input/output
-  tokens; other models priced as 120b). An estimate, not Groq's bill.
+  tokens; other models priced as 120b), shown to 4 decimals under $0.01 and
+  3 under $1 so a small spend never reads $0.00. An estimate, not Groq's bill.
 - `Always.app/Contents/Info.plist` declares `NSSpeechRecognitionUsageDescription`
   so the bundled `always-daemon` can request macOS speech-recognition permission.
   The first transcription attempt triggers a TCC prompt; without this key the
@@ -2008,7 +2009,11 @@ Per OS:
   left of that bundle; from `always update` it spares that process, so the
   user keeps the output), swaps
   `Always.app` in place — the directory the running bundle lives in, normally
-  `/Applications` — with `ditto`, and relaunches it if it was running. Needs
+  `/Applications` — with `ditto`, and relaunches it if it was running: `open`
+  (3 tries), then `launchctl asuser <uid> open`, then the bundle's `Always`
+  executable started directly, and it checks the app is up (owner report
+  2026-11-25: updating 0.1.9 → 0.1.12, `open` failed with LaunchServices
+  -600 and Always stayed closed). Needs
   the bundle named `Always.app` and its parent directory writable; otherwise
   refused. Signed with the persistent release certificate, not notarized.
   Microphone, Accessibility and Input Monitoring grants survive an update

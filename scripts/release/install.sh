@@ -252,9 +252,34 @@ install_macos() {
   # A self-update relaunches only what it quit; a fresh install opens the app.
   if [[ "${ALWAYS_NO_LAUNCH:-0}" != "1" ]] && { [[ -z "$ARCHIVE_OVERRIDE" ]] || [[ "$was_running" == 1 ]]; }; then
     log "Opening Always"
-    open "$dest"
+    relaunch_macos "$dest" "$app_exe"
   fi
   log "macOS will ask for Microphone and Accessibility access on first use."
+}
+
+# Reopen the app after a self-update. The Install button runs this script
+# from the daemon of the app it just quit; LaunchServices can then refuse a
+# plain `open` (error -600, seen updating 0.1.9 -> 0.1.12), leaving Always
+# closed. Try `open` again, then through the user's launchd session, then
+# start the bundle's executable directly, and check the app really runs.
+relaunch_macos() {
+  local app="$1" app_exe="$2"
+  for _ in 1 2 3; do
+    open "$app" 2>/dev/null && return 0
+    sleep 1
+  done
+  warn "open failed; retrying through launchd"
+  if launchctl asuser "$(id -u)" /usr/bin/open "$app" 2>/dev/null; then
+    return 0
+  fi
+  warn "launchd open failed; starting ${app}/Contents/MacOS/Always directly"
+  nohup "${app}/Contents/MacOS/Always" >/dev/null 2>&1 </dev/null &
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    pgrep -a -f "$app_exe" >/dev/null 2>&1 && return 0
+    sleep 0.5
+  done
+  warn "Could not reopen Always; open it from /Applications."
+  return 0
 }
 
 # ── Linux ────────────────────────────────────────────────────────────────────
