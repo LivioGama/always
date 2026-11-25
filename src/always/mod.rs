@@ -26,6 +26,7 @@ pub mod filter_config;
 pub mod focus_state;
 #[cfg(target_os = "linux")]
 pub mod gnome_shortcuts;
+pub mod groq_usage;
 pub mod hallucination;
 pub mod held;
 pub mod history;

@@ -876,6 +876,8 @@ class StateMonitor: ObservableObject {
             // the connection recovers.
             let model = event.data?["model"] ?? "local model"
             StatusOverlayController.shared.flash(state: .sttFallback(model: model), duration: 4.0)
+        case .groqUsage:
+            GroqUsageStore.shared.apply(event.groqUsage)
         case .groqQuotaExhausted:
             // Async: the modal must not block this event handler.
             Task { @MainActor in GroqQuotaPrompt.present() }

@@ -113,6 +113,9 @@ enum DaemonEventType: String, Codable {
     /// Groq's daily (free-tier) request quota is used up. At most once per
     /// day; the GUI suggests switching to an on-device model.
     case groqQuotaExhausted = "GroqQuotaExhausted"
+    /// Today's Groq usage (free allowance used, estimated paid spend).
+    /// After every Groq request and in the initial burst.
+    case groqUsage = "GroqUsage"
     /// Ground truth from the daemon about its shortcut event tap: whether
     /// Input Monitoring is granted for the daemon process. Sent in every
     /// initial state burst and on change.
@@ -242,6 +245,21 @@ struct MicUnavailableData: Codable {
     let unavailable: Bool
 }
 
+/// Payload of `GroqUsage`: today's (UTC) Groq usage. See
+/// `groq_usage.rs` in the daemon.
+struct GroqUsageData: Codable, Equatable {
+    let plan: String
+    let audio_seconds: Double
+    let audio_seconds_free: Double
+    let llm_tokens: Double
+    let llm_tokens_free: Double
+    let stt_requests_limit: Double?
+    let stt_requests_remaining: Double?
+    let llm_requests_limit: Double?
+    let llm_requests_remaining: Double?
+    let cost_usd: Double
+}
+
 // "My Voice" enrollment live meter — ~10 Hz while recording a sample.
 struct VoiceEnrollmentLevelData: Codable {
     let energy: Double
@@ -334,6 +352,8 @@ struct DaemonEvent: Codable {
     let shortcutListenerStatus: ShortcutListenerStatusData?
     /// Populated for `MicUnavailable`.
     let micUnavailable: MicUnavailableData?
+    /// Populated for `GroqUsage`.
+    let groqUsage: GroqUsageData?
     /// Populated for `VoiceEnrollmentLevel`.
     let voiceEnrollmentLevel: VoiceEnrollmentLevelData?
     /// Populated for `VoiceProfileStatus`.
@@ -372,6 +392,7 @@ struct DaemonEvent: Codable {
         var grammarCorrected: GrammarCorrectedData? = nil
         var shortcutListenerStatus: ShortcutListenerStatusData? = nil
         var micUnavailable: MicUnavailableData? = nil
+        var groqUsage: GroqUsageData? = nil
         var voiceEnrollmentLevel: VoiceEnrollmentLevelData? = nil
         var voiceProfileStatus: VoiceProfileStatusData? = nil
 
@@ -424,6 +445,9 @@ struct DaemonEvent: Codable {
         case .micUnavailable:
             micUnavailable = try container.decodeIfPresent(
                 MicUnavailableData.self, forKey: .data)
+        case .groqUsage:
+            groqUsage = try container.decodeIfPresent(
+                GroqUsageData.self, forKey: .data)
         case .voiceEnrollmentLevel:
             voiceEnrollmentLevel = try container.decodeIfPresent(
                 VoiceEnrollmentLevelData.self, forKey: .data)
@@ -463,6 +487,7 @@ struct DaemonEvent: Codable {
         self.grammarCorrected = grammarCorrected
         self.shortcutListenerStatus = shortcutListenerStatus
         self.micUnavailable = micUnavailable
+        self.groqUsage = groqUsage
         self.voiceEnrollmentLevel = voiceEnrollmentLevel
         self.voiceProfileStatus = voiceProfileStatus
     }
@@ -519,6 +544,8 @@ struct DaemonEvent: Codable {
             try container.encodeIfPresent(shortcutListenerStatus, forKey: .data)
         case .micUnavailable:
             try container.encodeIfPresent(micUnavailable, forKey: .data)
+        case .groqUsage:
+            try container.encodeIfPresent(groqUsage, forKey: .data)
         case .voiceEnrollmentLevel:
             try container.encodeIfPresent(voiceEnrollmentLevel, forKey: .data)
         case .voiceProfileStatus:
@@ -553,6 +580,7 @@ struct DaemonEvent: Codable {
         grammarCorrected: GrammarCorrectedData? = nil,
         shortcutListenerStatus: ShortcutListenerStatusData? = nil,
         micUnavailable: MicUnavailableData? = nil,
+        groqUsage: GroqUsageData? = nil,
         voiceEnrollmentLevel: VoiceEnrollmentLevelData? = nil,
         voiceProfileStatus: VoiceProfileStatusData? = nil
     ) {
@@ -580,6 +608,7 @@ struct DaemonEvent: Codable {
         self.grammarCorrected = grammarCorrected
         self.shortcutListenerStatus = shortcutListenerStatus
         self.micUnavailable = micUnavailable
+        self.groqUsage = groqUsage
         self.voiceEnrollmentLevel = voiceEnrollmentLevel
         self.voiceProfileStatus = voiceProfileStatus
     }
