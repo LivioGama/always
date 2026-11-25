@@ -1,0 +1,1 @@
+**release:** the Windows build is pinned to Rust 1.99.1 because Rust 1.100 broke the ONNX Runtime DLL copy; 0.1.10 and 0.1.11 were tagged but never published for that reason, so this release carries their changes.
