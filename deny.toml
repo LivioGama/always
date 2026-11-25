@@ -15,6 +15,10 @@ ignore = [
     # Low-risk advisory vulnerabilities in widely-used infra crates.
     # These are advisory-level issues with minimal attack surface for our usage.
     "RUSTSEC-2024-0436", # paste unmaintained
+    # Unmaintained notices with no successor yet and no known vulnerability
+    # (2026-11-25); revisit when a maintained fork is published.
+    "RUSTSEC-2026-0543", # chrono unmaintained
+    "RUSTSEC-2026-0542", # humantime unmaintained
     "RUSTSEC-2024-0366", # der yanked (derivative re-export)
     # Advisory/vulnerability advisories that are low-risk for our usage.
     "RUSTSEC-2026-0258", # h2 — unbounded empty DATA frames
