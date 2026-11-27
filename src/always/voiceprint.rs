@@ -140,7 +140,19 @@ struct Store {
     foreign_unassigned: Option<VoiceProfile>,
     /// The file could not be read or parsed. Nothing may be written over it
     /// (that would destroy every saved voiceprint); mutations are refused.
+    /// Retried after [`LOAD_RETRY`], so a fixed file is picked up without a
+    /// restart.
     load_failed: bool,
+    failed_at: Option<std::time::Instant>,
+}
+
+/// How long a failed load is cached before the file is read again.
+const LOAD_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
+impl Store {
+    fn needs_reload(&self) -> bool {
+        self.load_failed && self.failed_at.is_none_or(|t| t.elapsed() >= LOAD_RETRY)
+    }
 }
 
 impl Store {
@@ -261,22 +273,28 @@ static CACHE: RwLock<Option<Arc<Store>>> = RwLock::new(None);
 static WRITER: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 fn store() -> Arc<Store> {
-    if let Some(s) = CACHE.read().as_ref() {
+    if let Some(s) = CACHE.read().as_ref()
+        && !s.needs_reload()
+    {
         return s.clone();
     }
     let _w = WRITER.lock();
     load_locked()
 }
 
-/// The cached store, loading it if needed. Caller holds [`WRITER`].
+/// The cached store, loading it if needed (or retrying a failed load).
+/// Caller holds [`WRITER`].
 fn load_locked() -> Arc<Store> {
-    if let Some(s) = CACHE.read().as_ref() {
+    if let Some(s) = CACHE.read().as_ref()
+        && !s.needs_reload()
+    {
         return s.clone();
     }
     let loaded = Arc::new(load_from_disk().unwrap_or_else(|e| {
         tracing::error!(error = %e, "voiceprint_load_failed_store_read_only");
         Store {
             load_failed: true,
+            failed_at: Some(std::time::Instant::now()),
             legacy_imported: true,
             ..Store::default()
         }
@@ -287,6 +305,13 @@ fn load_locked() -> Arc<Store> {
 
 /// Run one read-modify-write under [`WRITER`]. Refused after a failed load.
 fn mutate<R>(f: impl FnOnce(&mut Store) -> Result<R>) -> Result<R> {
+    mutate_if(|store| f(store).map(|r| (r, true)))
+}
+
+/// Like [`mutate`], but the closure says whether it changed the store; an
+/// unchanged store is not written (no disk write, no clobbering of a change
+/// another process made).
+fn mutate_if<R>(f: impl FnOnce(&mut Store) -> Result<(R, bool)>) -> Result<R> {
     let _w = WRITER.lock();
     let current = load_locked();
     if current.load_failed {
@@ -296,9 +321,11 @@ fn mutate<R>(f: impl FnOnce(&mut Store) -> Result<R>) -> Result<R> {
         );
     }
     let mut next = (*current).clone();
-    let r = f(&mut next)?;
-    persist(&next)?;
-    *CACHE.write() = Some(Arc::new(next));
+    let (r, changed) = f(&mut next)?;
+    if changed {
+        persist(&next)?;
+        *CACHE.write() = Some(Arc::new(next));
+    }
     Ok(r)
 }
 
@@ -456,9 +483,15 @@ fn load_from_disk() -> Result<Store> {
             .or_insert_with(|| (mic_name(None), p));
         migrated = true;
     }
-    if migrated && let Err(e) = persist(&store) {
-        // The profiles were read fine: keep using them, retry next start.
-        tracing::warn!(error = %e, "voiceprint_migration_persist_failed");
+    if migrated {
+        match persist(&store) {
+            // Adopted by the "default" mic at once: the embeddings now live in
+            // the store, so the old file must not linger.
+            Ok(()) if store.unassigned.is_none() && store.legacy_imported => remove_legacy_file(),
+            Ok(()) => {}
+            // The profiles were read fine: keep using them, retry next start.
+            Err(e) => tracing::warn!(error = %e, "voiceprint_migration_persist_failed"),
+        }
     }
     Ok(store)
 }
@@ -540,28 +573,36 @@ pub fn note_verified(device: Option<&InputDevice>, verified: &Arc<VoiceProfile>)
     let Some(dev) = device else {
         return false;
     };
-    let result = mutate(|store| {
-        let is_unassigned = store
+    // Cheap pre-check on the cached snapshot: almost every accepted
+    // utterance is verified against a mic's own voiceprint, and must not
+    // take the writer lock or touch the disk.
+    let is_unassigned = |store: &Store| {
+        store
             .unassigned
             .as_ref()
-            .is_some_and(|u| Arc::ptr_eq(u, verified));
+            .is_some_and(|u| Arc::ptr_eq(u, verified))
+    };
+    if !is_unassigned(&store()) {
+        return false;
+    }
+    let result = mutate_if(|store| {
         let has_own = store
             .mics
             .get(&dev.uid)
             .is_some_and(|(_, p)| p.is_complete());
-        if !is_unassigned || has_own {
-            return Ok(None);
+        if !is_unassigned(store) || has_own {
+            return Ok((None, false));
         }
         let hits = store.unassigned_hits.entry(dev.uid.clone()).or_insert(0);
         *hits += 1;
         if *hits < ADOPT_AFTER_VERIFIED {
-            return Ok(Some(false));
+            return Ok((Some(false), true));
         }
         if let Some(p) = store.unassigned.take() {
             store.mics.insert(dev.uid.clone(), (dev.name.clone(), p));
         }
         store.unassigned_hits.clear();
-        Ok(Some(true))
+        Ok((Some(true), true))
     });
     match result {
         Ok(Some(true)) => {
@@ -594,8 +635,11 @@ pub fn clear_mic(uid: &str) -> Result<()> {
         Ok(())
     })?;
     // The legacy file holds the same embeddings as the unassigned or adopted
-    // profile; once no unassigned profile remains it has no other purpose.
-    if store().unassigned.is_none() {
+    // profile; once it was imported and no unassigned profile (of any model)
+    // remains, it has no other purpose. A skipped (unreadable) import is left
+    // for the next start's retry.
+    let after = store();
+    if after.legacy_imported && after.unassigned.is_none() && after.foreign_unassigned.is_none() {
         remove_legacy_file();
     }
     clear_recent_accepted();
@@ -844,6 +888,54 @@ mod tests {
             write_legacy(1.0);
             assert_eq!(selection().unwrap().source, Source::ThisMic);
             assert!(mic_status().mic_enrolled);
+        });
+    }
+
+    #[test]
+    fn fixed_store_is_reread_without_restart() {
+        with_temp_config(|| {
+            enroll_all(1.0);
+            let good = std::fs::read_to_string(store_path()).unwrap();
+            std::fs::write(store_path(), "{ not json").unwrap();
+            *CACHE.write() = None;
+            assert!(!is_enrolled());
+            std::fs::write(store_path(), good).unwrap();
+            // Force the retry window to have elapsed.
+            if let Some(s) = CACHE.write().as_mut() {
+                let mut st = (**s).clone();
+                st.failed_at = None;
+                *s = Arc::new(st);
+            }
+            assert!(is_enrolled(), "fixed file picked up");
+        });
+    }
+
+    #[test]
+    fn verifying_against_an_own_voiceprint_writes_nothing() {
+        with_temp_config(|| {
+            enroll_all(1.0);
+            let before = std::fs::metadata(store_path()).unwrap().modified().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let sel = selection().unwrap();
+            assert!(!note_verified(sel.device.as_ref(), &sel.profile));
+            let after = std::fs::metadata(store_path()).unwrap().modified().unwrap();
+            assert_eq!(before, after);
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn deleting_another_mic_keeps_an_unimported_legacy_file() {
+        with_temp_config(|| {
+            enroll_all(1.0);
+            let mut disk: DiskStore =
+                serde_json::from_str(&std::fs::read_to_string(store_path()).unwrap()).unwrap();
+            disk.legacy_imported = false;
+            std::fs::write(store_path(), serde_json::to_string(&disk).unwrap()).unwrap();
+            std::fs::write(profile_path(), "unreadable for now").unwrap();
+            *CACHE.write() = None;
+            clear_mic("elgato").unwrap();
+            assert!(profile_path().exists(), "kept for the next start's retry");
         });
     }
 

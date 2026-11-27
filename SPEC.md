@@ -651,7 +651,10 @@ So:
   abandoned partial recording there. An unreadable legacy file is skipped
   (retried next start) and never hides the per-mic voiceprints.
 - An unreadable `voiceprints.json` is never overwritten: the gate sees no
-  voiceprint and every recording/delete is refused until the file is fixed.
+  voiceprint and every recording and per-mic delete is refused. The file is
+  re-read every 5 s, so fixing it takes effect without a restart. "Delete all
+  voiceprints" (`DeleteVoiceProfile`, `always voice clear`) still deletes it —
+  that is an explicit request to remove it.
   Voiceprints from another embedding model are kept on disk, unused, until
   that mic is re-recorded. Builds that cannot identify the
   device (Linux) treat every capture as one "default" mic, which adopts it at
