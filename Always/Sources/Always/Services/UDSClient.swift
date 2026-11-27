@@ -270,9 +270,28 @@ struct VoiceEnrollmentLevelData: Codable {
 // Snapshot of the enrolled voice profile. Sent in the initial state
 // burst and after every mutation (sample captured, delete, toggle).
 struct VoiceProfileStatusData: Codable {
+    /// Some microphone has a complete voiceprint (the gate can run).
     let enrolled: Bool
     let enabled: Bool
+    /// Steps recorded on the LIVE microphone.
     let steps: [String]
+    // Per-microphone voiceprints (2026-11-27, additive). Optional so an
+    // older daemon's snapshot still decodes.
+    /// Display name of the live microphone.
+    let mic: String?
+    /// The live microphone has its own complete voiceprint.
+    let mic_enrolled: Bool?
+    /// Every saved voiceprint.
+    let mics: [VoiceMicData]?
+}
+
+/// One microphone with a saved "My Voice" voiceprint.
+struct VoiceMicData: Codable, Hashable, Identifiable {
+    /// CoreAudio device UID, or "unassigned" for the pre-per-mic recording.
+    let uid: String
+    let name: String
+    let complete: Bool
+    var id: String { uid }
 }
 
 // Models-tab payloads. Defined in `Models/ModelInfo.swift`:

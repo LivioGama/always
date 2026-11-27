@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-11-27
+
+### Fixed
+- **voice:** each microphone now keeps its own voiceprint, and Always switches to the right one when you change mic. Before, a voiceprint recorded on one mic rejected you on another (a studio mic vs the MacBook's built-in mic), so everything you said was silently dropped. When the live mic has no voiceprint yet, the menu bar says "My Voice not set up for <mic> — Record" instead of staying silent. An existing voiceprint is kept and claimed by the mic it keeps recognising you on. ([#235](https://github.com/LivioGama/always/pull/235))
+- **voice:** the "Quieter voice" sample of My Voice can now be recorded on a laptop's built-in mic. Soft speech there was rarely recognised as speech, so the sample ran out its 45 seconds and failed with "not enough speech captured". ([#235](https://github.com/LivioGama/always/pull/235))
+
 ## [0.1.13] - 2026-11-25
 
 ### Fixed

@@ -32,6 +32,7 @@ pub mod held;
 pub mod history;
 pub mod hud;
 pub mod idle_watcher;
+pub mod input_device;
 pub mod keyboard;
 pub mod keyring;
 pub mod level_meter;

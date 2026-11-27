@@ -77,12 +77,16 @@ pub fn take_pending() -> Option<EnrollStep> {
 }
 
 /// Current profile snapshot for `VoiceProfileStatus` broadcasts.
-pub fn profile_status(cfg_enabled: bool) -> (bool, bool, Vec<String>) {
-    let (enrolled, steps) = match voiceprint::current() {
-        Some(p) => (p.is_complete(), p.recorded_steps()),
-        None => (false, Vec::new()),
-    };
-    (enrolled, cfg_enabled, steps)
+pub fn profile_status_event(cfg_enabled: bool) -> event::DaemonEvent {
+    let st = voiceprint::mic_status();
+    event::DaemonEvent::VoiceProfileStatus {
+        enrolled: st.any_enrolled,
+        enabled: cfg_enabled,
+        steps: st.steps,
+        mic: st.mic,
+        mic_enrolled: st.mic_enrolled,
+        mics: st.mics,
+    }
 }
 
 /// Record one guided sample and fold it into the voiceprint. Runs on
@@ -94,8 +98,7 @@ pub fn run_enrollment(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
     match &result {
         Ok(()) => {
             broadcaster.voice_enrollment_sample_captured(step.as_str());
-            let (enrolled, enabled, steps) = profile_status(cfg.speaker_gate_enabled);
-            broadcaster.voice_profile_status(enrolled, enabled, steps);
+            broadcaster.voice_profile_status(cfg.speaker_gate_enabled);
             tracing::info!(step = step.as_str(), "voice_enrollment_captured");
         }
         Err(e) => {
@@ -143,12 +146,23 @@ fn record_and_store(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
     let mut started = false;
     let mut frames_since_level: u32 = 0;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(MAX_RECORDING_SECS);
+    let vad_bar = enrollment_vad_threshold(step, cfg.silero_threshold);
+    // Speech-probability histogram (tenths), logged with the outcome so a
+    // failing pass shows how close the user's voice came to `vad_bar`.
+    let mut prob_hist = [0u32; 10];
 
     loop {
         if CANCEL.load(Ordering::SeqCst) {
             anyhow::bail!("cancelled");
         }
         if std::time::Instant::now() >= deadline {
+            tracing::warn!(
+                step = step.as_str(),
+                vad_bar,
+                voiced_ms,
+                prob_tenths = ?prob_hist,
+                "voice_enrollment_too_little_voice"
+            );
             anyhow::bail!(
                 "not enough speech captured ({}s of voice needed)",
                 TARGET_VOICED_MS / 1000
@@ -181,10 +195,9 @@ fn record_and_store(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
             sample_buf[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
         }
 
-        let voiced = vad
-            .predict(&sample_buf)
-            .map(|p| p >= cfg.silero_threshold)
-            .unwrap_or(false);
+        let prob = vad.predict(&sample_buf).unwrap_or(0.0);
+        prob_hist[((prob * 10.0) as usize).min(9)] += 1;
+        let voiced = prob >= vad_bar;
         if voiced {
             started = true;
             voiced_ms += FRAME_MS;
@@ -205,12 +218,37 @@ fn record_and_store(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
         }
     }
 
+    tracing::info!(
+        step = step.as_str(),
+        vad_bar,
+        prob_tenths = ?prob_hist,
+        "voice_enrollment_voice_collected"
+    );
     let embedding = embedder
         .embed(&samples)
         .context("failed to compute voice embedding")?;
     voiceprint::set_step(step, embedding).context("failed to persist voiceprint")?;
     Ok(())
 }
+
+/// Speech-probability bar a frame must clear to count toward an enrollment
+/// pass. The quieter pass asks the user to speak softly, and soft speech on a
+/// laptop's built-in mic rarely reaches the dictation bar (2026-11-27: the
+/// normal and louder passes finished in 7–8 s on the MacBook Pro Microphone,
+/// the quieter one ran out its 45 s window). Counting it at a lower bar is
+/// what lets that pass be recorded at all; the frames still feed the same
+/// embedding as before.
+#[cfg(any(target_os = "macos", feature = "cpal", test))]
+fn enrollment_vad_threshold(step: EnrollStep, dictation_threshold: f32) -> f32 {
+    match step {
+        EnrollStep::Lower => dictation_threshold.min(QUIET_PASS_VAD_THRESHOLD),
+        _ => dictation_threshold,
+    }
+}
+
+/// See [`enrollment_vad_threshold`].
+#[cfg(any(target_os = "macos", feature = "cpal", test))]
+const QUIET_PASS_VAD_THRESHOLD: f32 = 0.2;
 
 /// Same normalized RMS the daemon's energy gates use (see
 /// `vad::normalized_energy`), duplicated in miniature to avoid making
@@ -227,6 +265,15 @@ fn frame_energy(samples: &[i16]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quieter_pass_counts_softer_speech_than_dictation() {
+        assert_eq!(enrollment_vad_threshold(EnrollStep::Normal, 0.5), 0.5);
+        assert_eq!(enrollment_vad_threshold(EnrollStep::Louder, 0.5), 0.5);
+        assert_eq!(enrollment_vad_threshold(EnrollStep::Lower, 0.5), 0.2);
+        // A user who already lowered the dictation bar keeps theirs.
+        assert_eq!(enrollment_vad_threshold(EnrollStep::Lower, 0.1), 0.1);
+    }
 
     #[test]
     fn request_queue_single_slot() {

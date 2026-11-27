@@ -34,6 +34,7 @@ struct SettingsWindow: View {
     @State private var isDeletingApiKey = false
     @FocusState private var focusedField: Field?
     @State private var selectedPanel: SettingsPanel = .general
+    @ObservedObject private var navigator: SettingsNavigator = .shared
 
     enum Field {
         case apiKey
@@ -96,6 +97,12 @@ struct SettingsWindow: View {
             panelContent
         }
         .background(SettingsWindowFrameFix())
+        .onReceive(navigator.$requested.compactMap { $0 }) { panel in
+            selectedPanel = panel
+            // @Published emits in willSet: clearing synchronously would be
+            // overwritten by the pending assignment, so clear on the next tick.
+            DispatchQueue.main.async { navigator.requested = nil }
+        }
         .onAppear {
             focusedField = nil
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
