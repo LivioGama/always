@@ -599,7 +599,12 @@ Optional. When on, only the enrolled user's voice is transcribed — other peopl
 television, meeting audio and music are ignored.
 
 **Enrollment** records three passes (normal, lower, louder), each needing 5 s of
-voice. Each pass is stored as its own embedding, plus their combined average.
+voice within 45 s. A frame counts as voice when the speech detector's
+probability clears the dictation bar (`silero_threshold`, default 0.5) — except
+in the **lower** pass, which counts it from 0.2 (or the dictation bar, if
+lower): soft speech on a laptop's built-in mic rarely reaches 0.5, so that pass
+could never finish (2026-11-27, reported by Livio: "the quiet voice is not
+working"). Each pass logs its speech-probability histogram. Each pass is stored as its own embedding, plus their combined average.
 In Settings, the My Voice switch cannot be turned on until all three samples
 are recorded, but it remains possible to turn it off if the saved setting is
 on. When off without a complete profile, the UI explains that enrollment is

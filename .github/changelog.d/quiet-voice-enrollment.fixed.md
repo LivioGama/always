@@ -1,0 +1,1 @@
+**voice:** the "Quieter voice" sample of My Voice can now be recorded on a laptop's built-in mic. Soft speech there was rarely recognised as speech, so the sample ran out its 45 seconds and failed with "not enough speech captured".
