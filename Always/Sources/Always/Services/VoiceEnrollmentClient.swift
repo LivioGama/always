@@ -80,6 +80,20 @@ final class VoiceEnrollmentClient: ObservableObject {
     /// True once any status snapshot has arrived (drives the panel's
     /// waiting state).
     @Published var statusReceived: Bool = false
+    /// Name of the microphone dictation is captured from right now.
+    @Published var currentMic: String? = nil
+    /// The live microphone has its own complete voiceprint. Starts true so
+    /// no alert flashes before the first snapshot.
+    @Published var micEnrolled: Bool = true
+    /// Every saved voiceprint, one per microphone.
+    @Published var mics: [VoiceMicData] = []
+
+    /// My Voice is on, but the live mic has no voiceprint of its own — the
+    /// user's words are likely being dropped (SPEC §6). Drives the menu-bar
+    /// "not set up for this mic" alert and the panel banner.
+    var needsVoiceprintForCurrentMic: Bool {
+        statusReceived && isEnabled && isEnrolled && !micEnrolled
+    }
 
     private var observer: NSObjectProtocol?
     private var cancellables = Set<AnyCancellable>()
@@ -185,6 +199,14 @@ final class VoiceEnrollmentClient: ObservableObject {
         StateMonitor.shared.sendCommand("DeleteVoiceProfile")
     }
 
+    /// Delete one microphone's voiceprint; the others stay.
+    func deleteProfile(forMic uid: String) {
+        mics.removeAll { $0.uid == uid }
+        StateMonitor.shared.sendCommandWithData(
+            "DeleteVoiceProfileForMic", ["uid": uid]
+        )
+    }
+
     // MARK: Event handler (daemon → UI)
 
     private func handle(_ event: DaemonEvent) {
@@ -195,6 +217,10 @@ final class VoiceEnrollmentClient: ObservableObject {
                 recordedSteps = Set(status.steps)
                 isEnrolled = status.enrolled
                 isEnabled = status.enabled
+                currentMic = status.mic
+                // A v12 daemon has one global voiceprint: treat it as this mic's.
+                micEnrolled = status.mic_enrolled ?? status.enrolled
+                mics = status.mics ?? []
 
                 // Save to cache for instant display on next launch
                 saveCachedStatus()

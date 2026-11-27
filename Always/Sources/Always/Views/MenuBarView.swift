@@ -8,6 +8,7 @@ struct MenuBarView: View {
     @ObservedObject private var stateMonitor = StateMonitor.shared
     @ObservedObject private var updateService = UpdateService.shared
     @ObservedObject private var focusedApp = FocusedAppMonitor.shared
+    @ObservedObject private var voice = VoiceEnrollmentClient.shared
     @Environment(\.openWindow) private var openWindow
 
 
@@ -96,6 +97,22 @@ struct MenuBarView: View {
                 systemImage: statusIcon,
                 iconColor: statusColor
             )
+
+            if voice.needsVoiceprintForCurrentMic {
+                Divider()
+
+                // My Voice is on but this mic has no voiceprint of its own:
+                // without this row the user's words vanish silently (SPEC §6).
+                MenuRow(
+                    label: "My Voice not set up for \(voice.currentMic ?? "this mic") — Record",
+                    systemImage: "person.wave.2",
+                    isDisabled: false,
+                    action: {
+                        SettingsNavigator.shared.requested = .myVoice
+                        openSettings()
+                    }
+                )
+            }
 
             if stateMonitor.isMicUnavailable {
                 Divider()

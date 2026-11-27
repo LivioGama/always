@@ -670,13 +670,9 @@ where
     // "My Voice" profile snapshot so the Settings tab renders correct
     // state on open without a request round-trip.
     {
-        let (enrolled, enabled, steps) =
-            crate::always::enrollment::profile_status(ctx.cfg.read().speaker_gate_enabled);
-        initial_events.push(DaemonEvent::VoiceProfileStatus {
-            enrolled,
-            enabled,
-            steps,
-        });
+        initial_events.push(crate::always::enrollment::profile_status_event(
+            ctx.cfg.read().speaker_gate_enabled,
+        ));
     }
 
     // A known newer release (SPEC §12a): the client may connect long after
@@ -1306,13 +1302,20 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
         }
         DaemonCommand::DeleteVoiceProfile => match crate::always::voiceprint::clear() {
             Ok(()) => {
-                let (enrolled, enabled, steps) =
-                    crate::always::enrollment::profile_status(ctx.cfg.read().speaker_gate_enabled);
-                global_broadcaster().voice_profile_status(enrolled, enabled, steps);
+                global_broadcaster().voice_profile_status(ctx.cfg.read().speaker_gate_enabled);
                 tracing::info!("uds_voice_profile_deleted");
             }
             Err(e) => tracing::error!(error = %e, "uds_voice_profile_delete_failed"),
         },
+        DaemonCommand::DeleteVoiceProfileForMic { uid } => {
+            match crate::always::voiceprint::clear_mic(&uid) {
+                Ok(()) => {
+                    global_broadcaster().voice_profile_status(ctx.cfg.read().speaker_gate_enabled);
+                    tracing::info!(uid = %uid, "uds_voice_profile_mic_deleted");
+                }
+                Err(e) => tracing::error!(error = %e, "uds_voice_profile_mic_delete_failed"),
+            }
+        }
         DaemonCommand::SetVoiceProfileEnabled { enabled } => {
             ctx.cfg.write().speaker_gate_enabled = enabled;
             // Persist for the next daemon start.
@@ -1341,14 +1344,11 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                     }
                 }
             }
-            let (enrolled, _, steps) = crate::always::enrollment::profile_status(enabled);
-            global_broadcaster().voice_profile_status(enrolled, enabled, steps);
+            global_broadcaster().voice_profile_status(enabled);
             tracing::info!(enabled, "uds_set_voice_profile_enabled");
         }
         DaemonCommand::GetVoiceProfileStatus => {
-            let (enrolled, enabled, steps) =
-                crate::always::enrollment::profile_status(ctx.cfg.read().speaker_gate_enabled);
-            global_broadcaster().voice_profile_status(enrolled, enabled, steps);
+            global_broadcaster().voice_profile_status(ctx.cfg.read().speaker_gate_enabled);
         }
         DaemonCommand::GetShortcutListenerStatus => {
             // Re-send only a known status; "unknown" (listener not started
@@ -1369,6 +1369,11 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                 if let Err(e) = crate::always::audio::RecChild::force_respawn() {
                     tracing::error!(error = %e, "uds_respawn_recorder_failed");
                 }
+                // My Voice follows the mic: re-read it now so the next
+                // utterance is scored against this mic's voiceprint, and
+                // tell the GUI whether this mic has one (§6).
+                crate::always::input_device::refresh();
+                global_broadcaster().voice_profile_status(ctx.cfg.read().speaker_gate_enabled);
             }
             #[cfg(not(target_os = "macos"))]
             {

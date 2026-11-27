@@ -8,13 +8,16 @@ struct MyVoicePanel: View {
     @ObservedObject var stateMonitor: StateMonitor
     @ObservedObject private var client: VoiceEnrollmentClient = .shared
     @State private var confirmingDelete = false
+    /// Mic whose voiceprint the user asked to delete (confirmation pending).
+    @State private var micPendingDelete: VoiceMicData? = nil
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 header
                 gateToggleCard
-                Text("Record the three short samples below — about 5 seconds of speech each — so Always learns what YOUR voice sounds like across the ways you actually talk.")
+                micCard
+                Text("Record the three short samples below — about 5 seconds of speech each — so Always learns what YOUR voice sounds like across the ways you actually talk. Each microphone keeps its own voiceprint: Always switches to the right one when you change mic.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -29,7 +32,9 @@ struct MyVoicePanel: View {
                         .foregroundColor(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if !client.recordedSteps.isEmpty {
+                if !client.mics.isEmpty {
+                    savedMicsList
+                } else if !client.recordedSteps.isEmpty {
                     deleteRow
                 }
                 if !stateMonitor.isDaemonConnected {
@@ -153,19 +158,92 @@ struct MyVoicePanel: View {
         .cornerRadius(6)
     }
 
+    /// Which mic the samples below are for, and whether it has a voiceprint.
+    @ViewBuilder
+    private var micCard: some View {
+        let missing = client.isEnrolled && !client.micEnrolled
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: missing ? "exclamationmark.triangle.fill" : "mic.fill")
+                .font(.title3)
+                .foregroundColor(missing ? .orange : .secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Microphone: \(client.currentMic ?? "unknown")")
+                    .font(.subheadline.bold())
+                Text(missing
+                    ? "No voiceprint for this mic yet. Your voice sounds different through it, so Always may ignore what you say. Record the three samples below while using this mic."
+                    : client.micEnrolled && client.isEnrolled
+                    ? "This mic has its own voiceprint."
+                    : "Samples you record now are saved for this mic.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .padding(10)
+        .background((missing ? Color.orange : Color.secondary).opacity(0.08))
+        .cornerRadius(6)
+    }
+
+    /// Every saved voiceprint, each deletable on its own.
+    private var savedMicsList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Saved voiceprints").font(.subheadline.bold())
+            ForEach(client.mics) { mic in
+                HStack(spacing: 8) {
+                    Image(systemName: mic.complete ? "checkmark.circle.fill" : "circle.dashed")
+                        .foregroundColor(mic.complete ? .green : .secondary)
+                    Text(mic.name).font(.caption)
+                    if !mic.complete {
+                        Text("incomplete").font(.caption2).foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button(role: .destructive) {
+                        micPendingDelete = mic
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .disabled(!stateMonitor.isDaemonConnected)
+                    .help("Delete the voiceprint for \(mic.name)")
+                }
+            }
+            deleteRow
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.08))
+        .cornerRadius(6)
+        .confirmationDialog(
+            "Delete the voiceprint for \(micPendingDelete?.name ?? "this mic")?",
+            isPresented: Binding(
+                get: { micPendingDelete != nil },
+                set: { if !$0 { micPendingDelete = nil } }
+            ),
+            presenting: micPendingDelete
+        ) { mic in
+            Button("Delete", role: .destructive) { client.deleteProfile(forMic: mic.uid) }
+            Button("Cancel", role: .cancel) {}
+        } message: { mic in
+            Text("Always forgets how your voice sounds through \(mic.name). Your other microphones keep theirs.")
+        }
+    }
+
     private var deleteRow: some View {
         HStack {
             Spacer()
             Button(role: .destructive) {
                 confirmingDelete = true
             } label: {
-                Label("Delete voiceprint", systemImage: "trash")
+                Label(client.mics.count > 1 ? "Delete all voiceprints" : "Delete voiceprint", systemImage: "trash")
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
             .disabled(!stateMonitor.isDaemonConnected)
             .confirmationDialog(
-                "Delete your enrolled voiceprint?",
+                client.mics.count > 1
+                    ? "Delete the voiceprints of all \(client.mics.count) microphones?"
+                    : "Delete your enrolled voiceprint?",
                 isPresented: $confirmingDelete
             ) {
                 Button("Delete", role: .destructive) { client.deleteProfile() }

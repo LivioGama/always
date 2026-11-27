@@ -1,5 +1,12 @@
 import SwiftUI
 
+/// Lets other windows (the menu bar) open Settings on a given panel.
+@MainActor
+final class SettingsNavigator: ObservableObject {
+    static let shared = SettingsNavigator()
+    @Published var requested: SettingsPanel? = nil
+}
+
 enum SettingsPanel: String, CaseIterable {
     case general = "General"
     case models = "Models"

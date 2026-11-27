@@ -121,6 +121,8 @@ struct SpeakerGate {
     embedder: std::sync::Arc<crate::always::speaker_embed::SpeakerEmbedder>,
     voiceprint: std::sync::Arc<crate::always::voiceprint::VoiceProfile>,
     threshold: f32,
+    /// Mic the utterance is captured from (credited on adoption).
+    device: Option<crate::always::input_device::InputDevice>,
 }
 
 struct SpeakerGateContext {
@@ -168,7 +170,9 @@ fn speaker_gate_ctx(cfg: &AlwaysConfig) -> SpeakerGateContext {
             gate: None,
         };
     }
-    let profile = crate::always::voiceprint::current();
+    let selection = crate::always::voiceprint::selection();
+    let device = selection.as_ref().and_then(|s| s.device.clone());
+    let profile = selection.map(|s| s.profile);
     let profile_complete = profile
         .as_ref()
         .is_some_and(|profile| profile.is_complete());
@@ -187,6 +191,7 @@ fn speaker_gate_ctx(cfg: &AlwaysConfig) -> SpeakerGateContext {
         embedder: embedder.expect("ready speaker gate must have an embedder"),
         voiceprint: profile.expect("ready speaker gate must have a voiceprint"),
         threshold: cfg.speaker_gate_threshold as f32,
+        device,
     });
     SpeakerGateContext { requested, gate }
 }
@@ -250,6 +255,7 @@ fn speaker_gate_admit_accepted(gate: &SpeakerGate, samples: &[i16], voiced_sampl
     let embedder = Arc::clone(&gate.embedder);
     let voiceprint = Arc::clone(&gate.voiceprint);
     let threshold = gate.threshold;
+    let device = gate.device.clone();
     std::thread::spawn(move || {
         let Ok(e) = embedder.embed(&samples) else {
             return;
@@ -258,6 +264,13 @@ fn speaker_gate_admit_accepted(gate: &SpeakerGate, samples: &[i16], voiced_sampl
         if enrolled >= threshold {
             crate::always::voiceprint::remember_accepted(e);
             tracing::debug!(enrolled, "speaker_gate_pool_admitted");
+            // An unassigned (pre-per-mic) voiceprint is claimed by the mic it
+            // keeps verifying the user on.
+            // Credit the mic the utterance was captured on, not whichever is
+            // live by the time this embedding finished.
+            if crate::always::voiceprint::note_verified(device.as_ref(), &voiceprint) {
+                crate::always::event::global_broadcaster().voice_profile_status(true);
+            }
         }
     });
 }
@@ -392,6 +405,7 @@ impl GateJob {
         let embedder = Arc::clone(&gate.embedder);
         let voiceprint = Arc::clone(&gate.voiceprint);
         let threshold = gate.threshold;
+        let device = gate.device.clone();
         let audio_started_at = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs_f64(
                 samples.len() as f64 / 16_000.0,
@@ -405,6 +419,7 @@ impl GateJob {
                 embedder,
                 voiceprint,
                 threshold,
+                device,
             };
             let scored = speaker_gate_embed_score(&local, &samples);
             let score = scored.map(|(score, e)| {

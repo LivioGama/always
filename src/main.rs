@@ -211,8 +211,12 @@ enum VoiceAction {
     Enable,
     /// Disable the gate (voiceprint is kept)
     Disable,
-    /// Delete the enrolled voiceprint
-    Clear,
+    /// Delete voiceprints: all of them, or one mic's with --mic <uid>
+    /// (uids are listed by `always voice status`)
+    Clear {
+        #[arg(long)]
+        mic: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -895,17 +899,29 @@ fn handle_voice(action: VoiceAction) -> Result<()> {
             let threshold = prefs
                 .speaker_gate_threshold
                 .unwrap_or(always::always::config::DEFAULT_SPEAKER_GATE_THRESHOLD);
-            match voiceprint::current() {
-                Some(p) => {
-                    println!("enrolled: {}", p.is_complete());
-                    println!("steps_recorded: {}", p.recorded_steps().join(", "));
-                    println!("model: {}", p.model);
-                    println!("updated_at: {}", p.updated_at);
+            let st = voiceprint::mic_status();
+            println!("enrolled: {}", st.any_enrolled);
+            println!("current_mic: {}", st.mic.as_deref().unwrap_or("(unknown)"));
+            println!("current_mic_enrolled: {}", st.mic_enrolled);
+            println!(
+                "steps_recorded: {}",
+                if st.steps.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    st.steps.join(", ")
                 }
-                None => {
-                    println!("enrolled: false");
-                    println!("steps_recorded: (none)");
-                }
+            );
+            if let Some(sel) = voiceprint::selection() {
+                println!("gate_uses: {:?}", sel.source);
+                println!("model: {}", sel.profile.model);
+            }
+            for m in &st.mics {
+                println!(
+                    "mic: {} [{}] {}",
+                    m.name,
+                    m.uid,
+                    if m.complete { "complete" } else { "partial" }
+                );
             }
             println!("gate_enabled: {enabled}");
             println!("gate_threshold: {threshold}");
@@ -934,10 +950,23 @@ fn handle_voice(action: VoiceAction) -> Result<()> {
             println!("My Voice gate disabled — Always listens to any voice again.");
             Ok(())
         }
-        VoiceAction::Clear => {
-            voiceprint::clear()?;
-            let _ = send_uds_command(r#"{"type":"DeleteVoiceProfile"}"#);
-            println!("Voiceprint deleted.");
+        VoiceAction::Clear { mic } => {
+            match mic {
+                Some(uid) => {
+                    voiceprint::clear_mic(&uid)?;
+                    let cmd = serde_json::json!({
+                        "type": "DeleteVoiceProfileForMic",
+                        "data": { "uid": uid },
+                    });
+                    let _ = send_uds_command(&cmd.to_string());
+                    println!("Voiceprint for mic {uid} deleted.");
+                }
+                None => {
+                    voiceprint::clear()?;
+                    let _ = send_uds_command(r#"{"type":"DeleteVoiceProfile"}"#);
+                    println!("All voiceprints deleted.");
+                }
+            }
             Ok(())
         }
     }
