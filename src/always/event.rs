@@ -50,6 +50,13 @@ static LAST_LOW_MIC_OVERLAY: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(||
 /// for streaming transcribers that emit progressive interim results
 /// followed by final committed text. The existing `TranscriptChunk` /
 /// `TranscriptFinal` remain for non-streaming chunk-based transcription.
+///
+/// **2026-11-27, additive (version unchanged):** one "My Voice" voiceprint
+/// per microphone. [`DaemonEvent::VoiceProfileStatus`] gains `mic` /
+/// `mic_enrolled` / `mics` (`serde(default)`, so this build still decodes an
+/// older snapshot; older clients ignore the unknown keys) and
+/// [`DaemonCommand::DeleteVoiceProfileForMic`] deletes one mic's voiceprint.
+/// Clients require an exact version match, so additive changes never bump it.
 pub const PROTOCOL_VERSION: u32 = 12;
 pub const PEER_PAUSE_LEASE_CAPABILITY: &str = "peer-pause-lease-v1";
 
@@ -486,14 +493,24 @@ pub enum DaemonEvent {
         step: String,
         message: String,
     },
-    /// Snapshot of the "My Voice" profile: which steps are recorded,
-    /// whether the profile is complete (`enrolled`), and whether the
-    /// runtime gate pref is on. Included in the initial state burst and
-    /// re-emitted on every mutation.
+    /// Snapshot of the "My Voice" profile: `enrolled` = some microphone has
+    /// a complete voiceprint (the gate can run), `steps` = steps recorded on
+    /// the LIVE mic, `enabled` = the runtime gate pref. `mic` names the live
+    /// mic, `mic_enrolled` says whether it has its own complete voiceprint
+    /// (false while `enrolled && enabled` = "My Voice isn't set up for this
+    /// mic" alert), `mics` lists every saved voiceprint. Included in the
+    /// initial state burst and re-emitted on every mutation and on every
+    /// default-input change.
     VoiceProfileStatus {
         enrolled: bool,
         enabled: bool,
         steps: Vec<String>,
+        #[serde(default)]
+        mic: Option<String>,
+        #[serde(default)]
+        mic_enrolled: bool,
+        #[serde(default)]
+        mics: Vec<crate::always::voiceprint::MicSummary>,
     },
     /// A newer release than the running build is published on GitHub
     /// (SPEC §12a Updates). Notify-only: nothing installs until the client
@@ -894,6 +911,11 @@ pub enum DaemonCommand {
     /// Delete the enrolled voiceprint entirely. The runtime gate
     /// degrades to ungated behavior until re-enrollment.
     DeleteVoiceProfile,
+    /// Delete ONE microphone's voiceprint (`uid` from
+    /// `VoiceProfileStatus.mics`; `"unassigned"` = the pre-per-mic one).
+    DeleteVoiceProfileForMic {
+        uid: String,
+    },
     /// Flip the "only listen to my voice" gate pref. Persisted to the
     /// DB and hot-applied to the running config.
     SetVoiceProfileEnabled {
@@ -1379,12 +1401,10 @@ impl EventBroadcaster {
         });
     }
 
-    pub fn voice_profile_status(&self, enrolled: bool, enabled: bool, steps: Vec<String>) {
-        self.send(DaemonEvent::VoiceProfileStatus {
-            enrolled,
-            enabled,
-            steps,
-        });
+    /// Broadcast the current My Voice snapshot (see
+    /// [`crate::always::enrollment::profile_status_event`]).
+    pub fn voice_profile_status(&self, enabled: bool) {
+        self.send(crate::always::enrollment::profile_status_event(enabled));
     }
 
     /// A watchdog pause source flipped (mic conflict / audio output).
@@ -1634,5 +1654,40 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(matches!(events[0], DaemonEvent::TranscriptChunk { .. }));
         assert!(matches!(events[1], DaemonEvent::TranscriptChunk { .. }));
+    }
+}
+
+#[cfg(test)]
+mod protocol_version_sync_tests {
+    use super::PROTOCOL_VERSION;
+
+    /// Every client disconnects on an inexact version match, so a daemon-only
+    /// bump silently cuts the GUI off (2026-11-27: the macOS app lost its
+    /// daemon and greyed out Settings → My Voice). Keep all copies equal.
+    #[test]
+    fn clients_expect_the_daemon_protocol_version() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        for (file, needle) in [
+            (
+                "Always/Sources/Always/Services/UDSClient.swift",
+                "let UDS_PROTOCOL_VERSION: UInt32 = ",
+            ),
+            (
+                "crates/always_tauri/src/uds_client.rs",
+                "pub const PROTOCOL_VERSION: u32 = ",
+            ),
+        ] {
+            let text = std::fs::read_to_string(format!("{root}/{file}")).unwrap();
+            let line = text
+                .lines()
+                .find(|l| l.trim_start().starts_with(needle))
+                .unwrap_or_else(|| panic!("{file}: no `{needle}`"));
+            let value: u32 = line.trim_start()[needle.len()..]
+                .trim_end_matches(';')
+                .trim()
+                .parse()
+                .unwrap();
+            assert_eq!(value, PROTOCOL_VERSION, "{file} disagrees with the daemon");
+        }
     }
 }

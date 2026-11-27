@@ -77,12 +77,16 @@ pub fn take_pending() -> Option<EnrollStep> {
 }
 
 /// Current profile snapshot for `VoiceProfileStatus` broadcasts.
-pub fn profile_status(cfg_enabled: bool) -> (bool, bool, Vec<String>) {
-    let (enrolled, steps) = match voiceprint::current() {
-        Some(p) => (p.is_complete(), p.recorded_steps()),
-        None => (false, Vec::new()),
-    };
-    (enrolled, cfg_enabled, steps)
+pub fn profile_status_event(cfg_enabled: bool) -> event::DaemonEvent {
+    let st = voiceprint::mic_status();
+    event::DaemonEvent::VoiceProfileStatus {
+        enrolled: st.any_enrolled,
+        enabled: cfg_enabled,
+        steps: st.steps,
+        mic: st.mic,
+        mic_enrolled: st.mic_enrolled,
+        mics: st.mics,
+    }
 }
 
 /// Record one guided sample and fold it into the voiceprint. Runs on
@@ -94,8 +98,7 @@ pub fn run_enrollment(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
     match &result {
         Ok(()) => {
             broadcaster.voice_enrollment_sample_captured(step.as_str());
-            let (enrolled, enabled, steps) = profile_status(cfg.speaker_gate_enabled);
-            broadcaster.voice_profile_status(enrolled, enabled, steps);
+            broadcaster.voice_profile_status(cfg.speaker_gate_enabled);
             tracing::info!(step = step.as_str(), "voice_enrollment_captured");
         }
         Err(e) => {

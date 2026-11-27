@@ -615,6 +615,47 @@ recording window starts then, not at the click. The onboarding Record button is
 disabled while the daemon is disconnected, as in Settings. Unknown events are
 ignored by both ends, so an older GUI or daemon simply skips `VoiceEnrollmentPreparing`.
 
+**One voiceprint per microphone (2026-11-27, requested by Livio after
+dictation went silent on the built-in mic).** The same voice through two
+microphones embeds too differently for one voiceprint to verify both: a
+profile recorded on the Elgato scored the owner at median 0.45 there and 0.16
+on the MacBook Pro Microphone, where 0 of 75 utterances were typed — silently.
+So:
+
+- Voiceprints are stored per input device, keyed by its CoreAudio device UID
+  (`voiceprints.json`), with the device name for display. Recording a sample
+  always writes to the **live** mic's voiceprint; other mics' are untouched.
+- The gate scores against the live mic's own complete voiceprint. The live mic
+  is the system default input, re-read at most every 2 s and at once on every
+  default-input change (`RespawnRecorder`). Switching mic switches voiceprint
+  on the next utterance, with no restart.
+- A mic with no voiceprint of its own is still gated — against the pre-per-mic
+  voiceprint if one exists, else the most recently updated other mic's — so a
+  stranger is never typed (I3). Meanwhile `VoiceProfileStatus` reports
+  `mic_enrolled: false` and, while My Voice is on, the menu bar shows
+  **"My Voice not set up for <mic> — Record"**, opening Settings → My Voice.
+  Dropped words stay recoverable as before.
+- The adaptive own-voice pool (below) is cleared whenever the live mic
+  changes: its embeddings are mic-specific.
+- Migration: the pre-per-mic `voiceprint.json` (mic unknown) is imported as an
+  **unassigned** voiceprint and left on disk for downgrades until a mic adopts
+  it or it is deleted; then the file is removed, so no stray copy of the
+  voiceprint remains. The first mic on which it verifies the user 3 times
+  (`ADOPT_AFTER_VERIFIED`, each an accepted utterance of ≥ 1.5 s, credited to
+  the mic that utterance was captured on) adopts it as its own, replacing an
+  abandoned partial recording there. An unreadable legacy file is skipped
+  (retried next start) and never hides the per-mic voiceprints.
+- An unreadable `voiceprints.json` is never overwritten: the gate sees no
+  voiceprint and every recording/delete is refused until the file is fixed.
+  Voiceprints from another embedding model are kept on disk, unused, until
+  that mic is re-recorded. Builds that cannot identify the
+  device (Linux) treat every capture as one "default" mic, which adopts it at
+  once — their behaviour is unchanged.
+- `enrolled` (gate can run, onboarding done) means *some* mic has a complete
+  voiceprint. Settings lists every saved voiceprint, each deletable alone
+  (`DeleteVoiceProfileForMic`); `DeleteVoiceProfile` and `always voice clear`
+  still delete all of them (`--mic <uid>` deletes one).
+
 **Scoring:** an utterance's embedding is compared against the enrolled profile;
 above the threshold, it is the user.
 
