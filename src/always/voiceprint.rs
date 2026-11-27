@@ -487,7 +487,15 @@ fn load_from_disk() -> Result<Store> {
         match persist(&store) {
             // Adopted by the "default" mic at once: the embeddings now live in
             // the store, so the old file must not linger.
-            Ok(()) if store.unassigned.is_none() && store.legacy_imported => remove_legacy_file(),
+            // A legacy profile from another embedding model is kept, unused,
+            // for a downgrade (same rule as `clear_mic`).
+            Ok(())
+                if store.unassigned.is_none()
+                    && store.foreign_unassigned.is_none()
+                    && store.legacy_imported =>
+            {
+                remove_legacy_file()
+            }
             Ok(()) => {}
             // The profiles were read fine: keep using them, retry next start.
             Err(e) => tracing::warn!(error = %e, "voiceprint_migration_persist_failed"),
@@ -757,6 +765,10 @@ mod tests {
     }
 
     fn write_legacy(seed: f32) {
+        write_legacy_model(seed, speaker_embed::MODEL_FILE);
+    }
+
+    fn write_legacy_model(seed: f32, model: &str) {
         let steps: BTreeMap<String, Vec<f32>> = EnrollStep::ALL
             .iter()
             .enumerate()
@@ -765,7 +777,7 @@ mod tests {
         let all: Vec<Vec<f32>> = steps.values().cloned().collect();
         let legacy = VoiceProfile {
             version: 1,
-            model: speaker_embed::MODEL_FILE.to_string(),
+            model: model.to_string(),
             voiceprint: speaker_embed::combine_embeddings(&all).unwrap(),
             steps,
             created_at: now_iso(),
@@ -888,6 +900,16 @@ mod tests {
             write_legacy(1.0);
             assert_eq!(selection().unwrap().source, Source::ThisMic);
             assert!(mic_status().mic_enrolled);
+        });
+    }
+
+    #[test]
+    fn legacy_profile_from_another_model_is_kept_on_disk() {
+        with_temp_config(|| {
+            write_legacy_model(1.0, "old-model.onnx");
+            assert!(current().is_none(), "another model's profile is unused");
+            assert!(store_path().exists(), "import persisted");
+            assert!(profile_path().exists(), "kept for a downgrade");
         });
     }
 
