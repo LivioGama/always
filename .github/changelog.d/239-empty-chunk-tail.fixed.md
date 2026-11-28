@@ -1,1 +1,0 @@
-**dictation:** a long dictation whose last part held no audio is no longer flagged as missing a part. Always used to send that empty tail to Groq, which refused it, so the dictation showed a "part lost" warning and auto-Enter was skipped although nothing was lost.
