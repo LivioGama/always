@@ -669,8 +669,9 @@ So:
   device (Linux) treat every capture as one "default" mic, which adopts it at
   once — their behaviour is unchanged.
 - `enrolled` (gate can run, onboarding done) means *some* mic has a complete
-  voiceprint. Settings lists every saved voiceprint, each deletable alone
-  (`DeleteVoiceProfileForMic`); `DeleteVoiceProfile` and `always voice clear`
+  voiceprint. The macOS Settings window (SwiftUI) lists every saved
+  voiceprint, each deletable alone (`DeleteVoiceProfileForMic`); the Tauri
+  window (Linux) has no per-mic list yet. `DeleteVoiceProfile` and `always voice clear`
   still delete all of them (`--mic <uid>` deletes one).
 
 **Scoring:** an utterance's embedding is compared against the enrolled profile;
@@ -717,7 +718,9 @@ measured stranger ceiling): an utterance accepted over a video is a
 mixture, so its pool entry also carries the video's voice, and on
 2026-11-28 that voice alone verified against it at 0.52–0.56 and was
 pasted three times (reported by the owner: "it detects even the voice
-from the video"). Offline replay (25 own clips, 16
+from the video"). Offline replay, measured 2026-10-14 BEFORE that floor
+existed (the floor can only lower these pass rates; not re-measured)
+(25 own clips, 16
 strangers incl. 6 TTS voices, 12 music-only): own voice over music at 5 dB
 0.80 → 0.88 pass, over speech at 5 dB 0.36 → 0.76, verify p95 4891 → 4021
 ms overall; false accepts stayed 0.
