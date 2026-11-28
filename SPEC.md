@@ -703,7 +703,13 @@ voice instead of 2 s; the threshold itself never moves. Scores are also
 taken against an in-memory pool of the last 8 accepted own-voice
 embeddings (never persisted; an embedding is only admitted if it passed
 against the enrolled profile alone, so the pool cannot drift toward a
-stranger; cleared on re-enrollment). Offline replay (25 own clips, 16
+stranger; cleared on re-enrollment). The pool only counts for a window
+whose score against the enrolled profile alone is at least 0.30 (the
+measured stranger ceiling): an utterance accepted over a video is a
+mixture, so its pool entry also carries the video's voice, and on
+2026-11-28 that voice alone verified against it at 0.52–0.56 and was
+pasted three times (reported by the owner: "it detects even the voice
+from the video"). Offline replay (25 own clips, 16
 strangers incl. 6 TTS voices, 12 music-only): own voice over music at 5 dB
 0.80 → 0.88 pass, over speech at 5 dB 0.36 → 0.76, verify p95 4891 → 4021
 ms overall; false accepts stayed 0.

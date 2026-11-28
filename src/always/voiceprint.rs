@@ -693,6 +693,28 @@ pub fn clear() -> Result<()> {
 /// pool can never chain away from the enrolled voice.
 const RECENT_ACCEPTED_MAX: usize = 8;
 
+/// The pool may only lift a window that already sounds like the user
+/// against the ENROLLED profile. An accepted utterance spoken over a
+/// video is a mixture, so its pool embedding carries the video's voice
+/// too, and that voice alone then matched it: 2026-11-28 prod, video
+/// speech verified at 0.52-0.56 via "recent" (3 pastes) while the same
+/// video scored 0.05-0.20 everywhere else. 0.30 is the measured stranger
+/// ceiling against the enrolled profile (see above and
+/// `speaker_trim::FOREIGN_MAX_SCORE`).
+pub const RECENT_POOL_ENROLLED_FLOOR: f32 = 0.30;
+
+/// Combine the enrolled score with the best pool score. Returns the
+/// score to judge and whether the pool supplied it. Never below
+/// `enrolled`; the pool is ignored when `enrolled` is under
+/// [`RECENT_POOL_ENROLLED_FLOOR`].
+pub fn lift_with_recent(enrolled: f32, recent: f32) -> (f32, bool) {
+    if enrolled >= RECENT_POOL_ENROLLED_FLOOR && recent > enrolled {
+        (recent, true)
+    } else {
+        (enrolled, false)
+    }
+}
+
 static RECENT_ACCEPTED: parking_lot::Mutex<std::collections::VecDeque<Vec<f32>>> =
     parking_lot::Mutex::new(std::collections::VecDeque::new());
 
@@ -1053,6 +1075,19 @@ mod tests {
             clear().unwrap();
             assert!(recent_accepted().is_empty());
         });
+    }
+
+    #[test]
+    fn recent_pool_never_lifts_a_window_far_from_the_enrolled_voice() {
+        // Video voice matching a mixture in the pool (2026-11-28 prod).
+        assert_eq!(lift_with_recent(0.12, 0.54), (0.12, false));
+        assert_eq!(lift_with_recent(0.29, 0.90), (0.29, false));
+        // Own voice over media: near the enrolled voice, the pool lifts it.
+        assert_eq!(lift_with_recent(0.35, 0.56), (0.56, true));
+        assert_eq!(lift_with_recent(RECENT_POOL_ENROLLED_FLOOR, 0.6), (0.6, true));
+        // Never below the enrolled-only score.
+        assert_eq!(lift_with_recent(0.55, 0.40), (0.55, false));
+        assert_eq!(lift_with_recent(0.55, f32::MIN), (0.55, false));
     }
 
     #[test]
