@@ -5,7 +5,7 @@
 //! [`crate::stt::Transcriber`], so the daemon can swap remote Groq for
 //! a local model without touching call sites. The engine dispatch
 //! (Whisper / Parakeet / Moonshine / MoonshineStreaming / SenseVoice /
-//! GigaAM / Canary / Cohere / Nemotron) is decided at load time from the catalog
+//! GigaAM / Canary / Cohere / Nemotron / Whistle) is decided at load time from the catalog
 //! entry — see [`crate::managers::model_registry::EngineType`].
 //!
 //! Audio path: callers hand us WAV bytes (16 kHz mono i16, produced by
@@ -89,6 +89,8 @@ enum LoadedEngine {
     /// every time — so there's no shared mutable state left to corrupt.
     #[cfg(feature = "local-stt")]
     Nemotron(NemotronHandle),
+    #[cfg(cactus)]
+    Whistle(crate::always::cactus::Whistle),
 }
 
 /// Local-model [`Transcriber`] implementation.
@@ -235,6 +237,17 @@ fn build_engine(engine_type: EngineType, path: &Path) -> Result<LoadedEngine> {
         #[cfg(not(feature = "local-stt"))]
         EngineType::Nemotron => {
             return Err(anyhow::anyhow!("Nemotron requires the local-stt feature"));
+        }
+        #[cfg(cactus)]
+        EngineType::Whistle => LoadedEngine::Whistle(
+            crate::always::cactus::Whistle::load(path)
+                .map_err(|e| anyhow::anyhow!("whistle load failed: {e}"))?,
+        ),
+        #[cfg(not(cactus))]
+        EngineType::Whistle => {
+            return Err(anyhow::anyhow!(
+                "Whistle needs the Cactus runtime (macOS Apple Silicon, local-stt)"
+            ));
         }
     })
 }
@@ -482,6 +495,11 @@ fn run_engine(
         LoadedEngine::Nemotron(_) => {
             anyhow::bail!("Nemotron requires the local-stt feature")
         }
+        #[cfg(cactus)]
+        LoadedEngine::Whistle(w) => transcribe_rs::TranscriptionResult {
+            text: w.transcribe(samples, language.as_deref())?,
+            segments: None,
+        },
     };
     Ok(result.text)
 }
@@ -621,6 +639,35 @@ mod tests {
     fn rejects_non_wav() {
         let bogus = vec![0u8; 64];
         assert!(decode_wav_to_f32(&bogus).is_err());
+    }
+
+    /// End-to-end Whistle through the daemon's Transcriber path. Runs only
+    /// with real files: `WHISTLE_CACT` (weights) and `WHISTLE_WAV`, a 16 kHz
+    /// mono i16 WAV whose speech contains "kitchen lights", made with:
+    /// `say -o f.wav --file-format=WAVE --data-format=LEI16@16000 "turn off the kitchen lights"`
+    #[cfg(cactus)]
+    #[test]
+    fn whistle_transcribes_speech_wav() {
+        let (Some(model), Some(wav)) = (
+            std::env::var_os("WHISTLE_CACT"),
+            std::env::var_os("WHISTLE_WAV"),
+        ) else {
+            return;
+        };
+        let t = LocalTranscriber::load(
+            EngineType::Whistle,
+            Path::new(&model),
+            Some("en".into()),
+            false,
+        )
+        .expect("load whistle");
+        let bytes = std::fs::read(wav).expect("read wav");
+        let r = t.transcribe_from_bytes(bytes).expect("transcribe");
+        assert!(
+            r.text.to_lowercase().contains("kitchen lights"),
+            "got {:?}",
+            r.text
+        );
     }
 }
 

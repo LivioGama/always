@@ -249,6 +249,29 @@ enum ConfigAction {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Short CLI commands: die quietly on a closed pipe (`status | grep -q`)
+    // instead of panicking (panic = "abort" → SIGABRT crash report). Rust
+    // ignores SIGPIPE by default; long-running processes keep that.
+    #[cfg(unix)]
+    let long_running = matches!(
+        cli.command,
+        None | Some(
+            Commands::Start { .. }
+                | Commands::RunForeground { .. }
+                | Commands::Test
+                | Commands::Update { .. }
+                | Commands::MenuBar { .. }
+        )
+    );
+    #[cfg(all(unix, feature = "overlay"))]
+    let long_running = long_running || matches!(cli.command, Some(Commands::Overlay { .. }));
+    #[cfg(unix)]
+    if !long_running {
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
+
     // Initialize structured logging (writes to ~/Library/Logs/Always/ on macOS).
     // Foreground only for `Run` (the explicit foreground/debug subcommand) and `Test`.
     let foreground = matches!(

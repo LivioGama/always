@@ -212,23 +212,22 @@ fn speaker_gate_embed_score(gate: &SpeakerGate, samples: &[i16]) -> Option<(f32,
         Ok(e) => {
             let (enrolled, matched) = best_voiceprint_match(&e, &gate.voiceprint);
             // Adaptive extension: the user's own recently accepted
-            // utterances (see voiceprint::remember_accepted). Max over
-            // targets never scores below the enrolled-only behaviour.
+            // utterances (see voiceprint::remember_accepted). Never scores
+            // below the enrolled-only behaviour, and only lifts a window
+            // that is already near the enrolled voice (video leak fix).
             let recent = crate::always::voiceprint::recent_accepted()
                 .iter()
                 .filter(|r| r.len() == e.len())
                 .map(|r| crate::always::speaker_embed::cosine(&e, r))
                 .fold(f32::MIN, f32::max);
-            let (score, matched) = if recent > enrolled {
-                (recent, "recent")
-            } else {
-                (enrolled, matched)
-            };
+            let (score, lifted) = crate::always::voiceprint::lift_with_recent(enrolled, recent);
+            let matched = if lifted { "recent" } else { matched };
             // Info, not debug: the embedding sits on the badge's critical
             // path under "My Voice", so its cost must be visible in
             // production logs.
             tracing::info!(
                 score,
+                enrolled,
                 matched,
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 audio_secs = samples.len() as f64 / 16_000.0,
@@ -3044,6 +3043,14 @@ fn record_with_local_vad(
     } else {
         match speculation {
             Some(Ok(r)) => (r, true),
+            // A chunked utterance whose tail holds no audio (the last cut
+            // landed on its end): nothing is left to transcribe. Sending it
+            // got HTTP 400 "audio_too_short" from Groq and flagged the
+            // dictation as missing a part (2026-11-26 prod: 13 times).
+            _ if has_chunks && speech_samples.len() < MIN_TAIL_SAMPLES => {
+                tracing::info!(samples = speech_samples.len(), "chunked_tail_empty_skipped");
+                (crate::stt::TranscriptionResult::default(), false)
+            }
             _ => {
                 // No speculation, speculation errored, or timeout — do a fresh
                 // transcription with the full audio (including any trailing silence).
@@ -3272,6 +3279,11 @@ fn recover_failed_chunked_tail(
     );
     recovered
 }
+
+/// Shortest chunked tail worth transcribing: 0.01 s at 16 kHz, Groq's
+/// minimum audio length (shorter gets HTTP 400 `audio_too_short`).
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
+const MIN_TAIL_SAMPLES: usize = 160;
 
 /// One fresh transcription of a failed chunked tail by the pasting engine.
 #[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]

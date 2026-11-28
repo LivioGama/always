@@ -309,6 +309,14 @@ so the paste landed when the timeout fired — no added wait. The log line
 `chunked_tail_stt_failed` marks the recovery (`recovered_by`, saved path;
 no transcript text).
 
+**An empty tail is not a lost tail (fixed 2026-11-27).** When the last chunk
+cut lands on the end of the utterance, the tail holds under 0.01 s of audio
+(`MIN_TAIL_SAMPLES`, Groq's minimum). It is not sent to the recognizer: the
+committed chunks are pasted as the whole dictation, with no "part lost"
+warning and auto-Enter as usual (`chunked_tail_empty_skipped`). Before, Groq
+answered HTTP 400 `audio_too_short` and the dictation was flagged incomplete
+(prod 2026-11-26: 13 times).
+
 **Chunked dictation keeps its pauses (fixed 2026-10-14).** The 200 ms
 short-utterance cut applies only while the *whole* utterance (committed
 chunks + live buffer) is under `SHORT_SPEECH_MS`. It used to judge the live
@@ -605,6 +613,9 @@ in the **lower** pass, which counts it from 0.2 (or the dictation bar, if
 lower): soft speech on a laptop's built-in mic rarely reaches 0.5, so that pass
 could never finish (2026-11-27, reported by Livio: "the quiet voice is not
 working"). Each pass logs its speech-probability histogram. Each pass is stored as its own embedding, plus their combined average.
+A pass is saved under the mic it was recorded on, captured when recording
+starts; if the input mic changes before the pass is saved, the pass is
+refused ("record this sample again") rather than stored under the wrong mic.
 In Settings, the My Voice switch cannot be turned on until all three samples
 are recorded, but it remains possible to turn it off if the saved setting is
 on. When off without a complete profile, the UI explains that enrollment is
@@ -661,8 +672,9 @@ So:
   device (Linux) treat every capture as one "default" mic, which adopts it at
   once — their behaviour is unchanged.
 - `enrolled` (gate can run, onboarding done) means *some* mic has a complete
-  voiceprint. Settings lists every saved voiceprint, each deletable alone
-  (`DeleteVoiceProfileForMic`); `DeleteVoiceProfile` and `always voice clear`
+  voiceprint. The macOS Settings window (SwiftUI) lists every saved
+  voiceprint, each deletable alone (`DeleteVoiceProfileForMic`); the Tauri
+  window (Linux) has no per-mic list yet. `DeleteVoiceProfile` and `always voice clear`
   still delete all of them (`--mic <uid>` deletes one).
 
 **Scoring:** an utterance's embedding is compared against the enrolled profile;
@@ -703,7 +715,15 @@ voice instead of 2 s; the threshold itself never moves. Scores are also
 taken against an in-memory pool of the last 8 accepted own-voice
 embeddings (never persisted; an embedding is only admitted if it passed
 against the enrolled profile alone, so the pool cannot drift toward a
-stranger; cleared on re-enrollment). Offline replay (25 own clips, 16
+stranger; cleared on re-enrollment). The pool only counts for a window
+whose score against the enrolled profile alone is at least 0.30 (the
+measured stranger ceiling): an utterance accepted over a video is a
+mixture, so its pool entry also carries the video's voice, and on
+2026-11-28 that voice alone verified against it at 0.52–0.56 and was
+pasted three times (reported by the owner: "it detects even the voice
+from the video"). Offline replay, measured 2026-10-14 BEFORE that floor
+existed (the floor can only lower these pass rates; not re-measured)
+(25 own clips, 16
 strangers incl. 6 TTS voices, 12 music-only): own voice over music at 5 dB
 0.80 → 0.88 pass, over speech at 5 dB 0.36 → 0.76, verify p95 4891 → 4021
 ms overall; false accepts stayed 0.
@@ -996,7 +1016,8 @@ offline; the cloud backend is faster to start and needs an API key.
   a Groq request).
 - Switching models takes effect on the next utterance.
 - Linux development and release builds include the local STT engines. Selecting a local
-  model never invokes Groq or requires its API key; missing files or missing
+  model never invokes Groq **speech-to-text** or requires its API key (the
+  post-processing pass may still call Groq on the text, see §9); missing files or missing
   local-engine support produce a local-model error and keep the previous
   backend selected.
 - On Linux startup, Groq is eligible only when a non-empty key is configured.
@@ -1027,6 +1048,22 @@ offline; the cloud backend is faster to start and needs an API key.
 `moonshine-small-streaming-en`, `moonshine-medium-streaming-en`, `nemotron-3.5-asr-streaming-0.6b`.
 These engines expose partial text events (§5). Moonshine models are English only;
 Nemotron 3.5 supports 40 language-locales with auto language detection.
+
+**Whistle (`whistle`, product-owner request 2026-11-26).** Cactus Compute's
+17 MB non-streaming model (`whistle.cact`, Hugging Face
+`Cactus-Compute/whistle`, pinned revision, SHA-256 checked). Languages: en, de,
+fr, es, it, nl, pl; a `lang` outside that list (or `auto`) lets the model detect
+the language. Output is cased and punctuated; silence returns empty text. It
+runs on the Cactus C engine (`libcactus.a` 4.1.4), which `build.rs` downloads,
+checksums and links statically. It is offered only in macOS Apple Silicon builds
+with `local-stt`; if the engine cannot be fetched at build time the build still
+succeeds and Whistle is simply absent from the catalog (`ALWAYS_CACTUS_LIB_DIR`
+points the build at a local copy). The engine holds one model in process-global
+state, so Whistle calls are serialized. Release builds: macOS arm64 and Linux
+are built with `local-stt` (local models run; Whistle on macOS only), Windows
+is not. The macOS release sets `ALWAYS_REQUIRE_CACTUS=1`, so a release whose
+Cactus download fails stops instead of publishing without Whistle (owner
+request 2026-11-28: "I want to include Whistle").
 
 ### 8.1 NVIDIA Nemotron 3.5 ASR — implementation notes
 
@@ -1269,6 +1306,18 @@ Between transcription and the keyboard:
      → `fast` (the corrector supersedes the old bare local cleanup). The
      stored legacy prefs are not rewritten. A mode change restarts the
      daemon, like the provider switch it replaces.
+   The cleanup runs after local speech models too, not only after Groq or
+   Apple speech-to-text (product-owner request 2026-11-26: Whistle dictations
+   never reached it); only an unconfigured backend skips it. Its instructions
+   ask it to fix misheard words so each sentence reads the way the speaker
+   meant it in context (`And you check the logs?` → `Can you check the
+   logs?`, `So I can we can start` → `So we can start`), never adding ideas;
+   product and tool names still come only from the glossary.
+   Its vocabulary rules name the misheard form first (``replace `physical`
+   with `infisical` ``) and state they only go one way: never replace a
+   correct term with a misheard form. (The earlier `` `term` ← wrong ``
+   layout was read backwards by gpt-oss and turned a correctly heard
+   "infisical" into "physical" — Groq replay 2026-11-26, owner-approved fix.)
    Its prompt enforces token preservation (never expand one word into a
    phrase or contract a phrase into one word) and a certainty bar for
    glossary substitutions. A bounded domain-vocabulary section lists the
@@ -1340,6 +1389,14 @@ The glossary is loaded with modification-time-gated reloads. Writing to
 `glossary.json` (via `apply_pairs_to_glossary`, `bump_frequency`, or external
 edit) invalidates the in-memory cache, and the next access reloads from disk.
 No daemon restart is needed for new corrections to take effect.
+
+All Always glossary writers (daemon and CLI) serialize their read-modify-write
+operations with a shared file lock and replace the JSON atomically. Concurrent
+corrections, imports, frequency bumps and word-check results preserve each
+other's changes, unrelated entry fields and a symlinked glossary (product-owner
+request 2026-11-27: fix the paired-review findings).
+The empty sidecar lock file remains in place between writes. A dangling
+glossary symlink is left intact and the write fails until its target exists.
 
 ### Vocabulary auto-import (first launch)
 
@@ -1444,9 +1501,23 @@ atomically, preserving a symlinked glossary and unrelated entry fields.
 
 Mistranscriptions that are also common English words (e.g. "cloud" as a
 mistranscription of "Claude") are classified as **ambiguous** via an embedded
-common-word list (`common_words.rs`). Ambiguous exact hits are NOT rewritten
-unconditionally — they become `ExactAmbiguous` substitutions and defer to the
-LLM for context arbitration.
+common-word list (`common_words.rs`). For exact hits, a mistranscription the
+**word check** flagged is ambiguous too (product-owner request 2026-11-26: "a
+physical copy" became "an infisical copy"; no word lists, any language). The
+word check runs once per (entry, form) pair, in the background after a glossary
+reload, only in the daemon (never from a CLI command), and only while `postprocess_mode` is `groq` (no learned form is sent to
+Groq in any other mode), in batches of 40 forms each saved on its own; a
+(entry, form) pair the model leaves out is not re-sent until the daemon restarts.
+A reload that arrives while a check is running queues one more check after it. Groq (`openai/gpt-oss-120b`, JSON mode) says whether each unchecked
+form is an ordinary word or phrase in any language ("physical", "verre" → yes;
+"claud", "OpenClose" → no), and the verdict is stored in that entry's
+`wrong_form_is_word` map in `glossary.json` (other keys untouched; editable by
+hand). An unchecked form (no Groq key, or the check failed — no new check for
+10 min; the first glossary reload after that retries) is treated as not a word, i.e. today's unconditional rewrite. Ambiguous exact hits are NOT
+rewritten unconditionally — they become `ExactAmbiguous` substitutions and
+defer to the LLM for context arbitration. They also get no rule line in the
+LLM prompt's vocabulary section; the LLM sees them only as per-utterance
+`<glossary_candidates>`.
 
 Unambiguous learned forms (e.g. "kubernetics" → "Kubernetes") are deterministic
 and apply immediately, even with an LLM available.
@@ -1633,7 +1704,10 @@ Three steps:
      refuses any key Groq does not accept, or cannot be asked about, on every platform. A saved
      key stays shown masked, including when the step is revisited, until "Change". Caption: free tier is about
      2,000 requests a day and live transcript uses more of it.
-   - **Local model:** private and offline. Offers the best catalogue model
+   - **Local model:** speech recognition runs on-device. Before selection,
+     the card explains that enabled Groq cleanup sends transcript text to Groq
+     (product-owner request 2026-11-27: clarify the paired-review privacy finding).
+     Offers the best catalogue model
      (recommended first, then speed + accuracy); "Download & Use" downloads it
      with progress ("Keeps downloading while you continue") and switches when
      installed, even if the user has moved on to later steps or closed setup.
@@ -1840,6 +1914,11 @@ auto-enter `ctrl+alt+a` · force paste `ctrl+alt+v` · log correction
 ---
 
 ## 12. Build, install, run
+
+Short CLI commands on Unix terminate quietly when their output pipe closes;
+long-running commands retain Rust's default SIGPIPE handling. This Unix-only
+signal setup is omitted on Windows, where SIGPIPE is unavailable (product-owner
+request 2026-11-27: fix the paired-review Windows build finding).
 
 Two identities coexist on the development machine; each is one GUI + one
 daemon (I4/I5 hold *per instance*).

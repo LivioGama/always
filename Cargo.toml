@@ -1,6 +1,6 @@
 [package]
 name = "always"
-version = "0.1.14"
+version = "0.1.15"
 edition = "2024"
 description = "Always — the first speech-to-text software designed to be always on and free your hands from the affordance"
 license = "AGPL-3.0-only"
@@ -164,6 +164,10 @@ transcribe-rs = { version = "=0.3.12", features = ["whisper-cpp", "onnx"], optio
 # Linux/X11 global hotkeys. Wayland deliberately uses the CLI because
 # compositor policy prevents an ordinary daemon from observing global keys.
 rdev = "0.5"
+
+[build-dependencies]
+# Verifies the downloaded Cactus runtime (Whistle) in build.rs.
+sha2 = "0.11"
 
 [dev-dependencies]
 assert_cmd = "2"

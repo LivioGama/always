@@ -41,6 +41,7 @@ fn should_refetch_speaker_model(gate_enabled: bool, enrolled: bool, model_presen
 
 pub fn run(cfg: &AlwaysConfig) -> Result<()> {
     let _pid = daemon::PidGuard::install()?;
+    crate::glossary::allow_word_check();
     let mut log = Logger::open(&cfg.log_path)?;
     log.write(Event::Start { cfg });
     print_banner(cfg);

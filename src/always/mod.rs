@@ -4,6 +4,8 @@
 pub mod audio;
 pub mod auto_enter_countdown;
 pub mod ax_edit;
+#[cfg(cactus)]
+pub mod cactus;
 pub mod chunker;
 pub mod clipboard_watcher;
 pub mod common_words;

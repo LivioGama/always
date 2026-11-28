@@ -14,6 +14,7 @@ enum EngineType: String, Codable, Equatable {
     case canary = "Canary"
     case cohere = "Cohere"
     case nemotron = "Nemotron"
+    case whistle = "Whistle"
 
     var displayName: String {
         switch self {
@@ -26,6 +27,7 @@ enum EngineType: String, Codable, Equatable {
         case .canary: return "Canary"
         case .cohere: return "Cohere"
         case .nemotron: return "Nemotron"
+        case .whistle: return "Whistle"
         }
     }
 }

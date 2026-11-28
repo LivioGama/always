@@ -592,12 +592,13 @@ impl AlwaysConfig {
     /// the current utterance.
     ///
     /// Requires grammar correction enabled + a usable provider (Groq API
-    /// key for Groq, Apple Intelligence available for Apple). Local STT
-    /// stays raw to stay fully offline and near-instant.
+    /// key for Groq, Apple Intelligence available for Apple). Applies to
+    /// local speech models too (product-owner request 2026-11-26): the
+    /// speech stays on-device, the chosen cleanup still fixes the text.
     pub fn postprocess_available(&self) -> bool {
-        matches!(
+        !matches!(
             self.transcriber_backend,
-            TranscriberBackendChoice::Groq | TranscriberBackendChoice::Apple
+            TranscriberBackendChoice::Unconfigured
         ) && self
             .post_processor
             .as_ref()
@@ -607,14 +608,13 @@ impl AlwaysConfig {
     /// Whether deterministic CONTENT filtering (hard phrase filter +
     /// hallucination heuristics) may reject a transcript.
     ///
-    /// Only the remote Groq path — where an LLM does the real,
-    /// context-aware cleanup — is allowed to make content judgments, and
-    /// even there the heuristics are just a coarse pre-pass. On LOCAL
-    /// models there is no LLM in the loop and the deterministic rules are
+    /// Only the remote Groq speech-to-text path is allowed to make
+    /// deterministic content judgments, and even there the heuristics are
+    /// just a coarse pre-pass. On LOCAL models the deterministic rules are
     /// brittle: a natural stutter run ("uh uh uh", "o o o o") was counted
-    /// as a hallucination and DISCARDED a whole 5-minute dictation. Local
-    /// dictation is therefore RAW verbatim — the system transcribes and
-    /// inserts exactly what was said, and never judges the content. The
+    /// as a hallucination and DISCARDED a whole 5-minute dictation, so
+    /// local dictation is never rejected by these filters. (The optional
+    /// LLM cleanup may still rewrite its text; it never discards it.) The
     /// user is the authority on what they meant to say. Identity (the
     /// speaker/voiceprint gate) is separate and still applies.
     pub fn content_filtering_enabled(&self) -> bool {
@@ -1021,12 +1021,10 @@ mod tests {
         assert_eq!(resolve_silence_secs(Some(0.8), &prefs), 0.8);
     }
 
-    /// Local backend must never trigger the LLM postprocess pass, even
-    /// with grammar correction enabled and a working API key — local
-    /// models are the "no internet, still instant" path, and a stray
-    /// Groq round-trip would defeat that.
+    /// Local speech models get the chosen cleanup too (owner request
+    /// 2026-11-26: Whistle dictations never reached the AI cleanup).
     #[test]
-    fn postprocess_unavailable_on_local_backend_even_with_working_key() {
+    fn postprocess_available_on_local_backend_with_working_key() {
         let mut cfg = AlwaysConfig {
             post_processor: Some(Arc::new(PostProcessor::new(Some(
                 "test-key-never-used".to_string(),
@@ -1039,21 +1037,18 @@ mod tests {
         cfg.transcriber_backend = TranscriberBackendChoice::Local {
             model_id: "parakeet-tdt-0.6b-v2".to_string(),
         };
-        assert!(!cfg.postprocess_available());
+        assert!(cfg.postprocess_available());
     }
 
-    /// Switching back to Groq restores postprocess with no extra state
-    /// to reconcile — `postprocess_enabled` itself is untouched by the
-    /// backend switch.
+    /// No backend configured → no postprocess; configuring Groq restores
+    /// it with no extra state to reconcile.
     #[test]
     fn postprocess_available_resumes_when_switching_back_to_groq() {
         let mut cfg = AlwaysConfig {
             post_processor: Some(Arc::new(PostProcessor::new(Some(
                 "test-key-never-used".to_string(),
             )))),
-            transcriber_backend: TranscriberBackendChoice::Local {
-                model_id: "parakeet-tdt-0.6b-v2".to_string(),
-            },
+            transcriber_backend: TranscriberBackendChoice::Unconfigured,
             ..Default::default()
         };
         assert!(!cfg.postprocess_available());

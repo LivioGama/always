@@ -563,6 +563,7 @@ fn merge_into_glossary(path: &Path, terms: &[String]) -> Result<usize> {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
 
+    let _lock = lock_glossary(path)?;
     let mut entries: Vec<Value> = match std::fs::read_to_string(path) {
         Ok(content) if content.trim().is_empty() => Vec::new(),
         Ok(content) => serde_json::from_str(&content).with_context(|| {
@@ -612,6 +613,56 @@ fn merge_into_glossary(path: &Path, terms: &[String]) -> Result<usize> {
     Ok(added)
 }
 
+/// Serialize glossary read-modify-write operations across threads and processes.
+pub(crate) fn lock_glossary(path: &Path) -> Result<std::fs::File> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let lock_path = glossary_lock_path(path);
+    let lock_path =
+        lock_path.with_context(|| format!("resolve glossary lock for {}", path.display()))?;
+    // Keep the sidecar: unlinking it lets waiters lock different inodes.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("open glossary lock {}", lock_path.display()))?;
+    lock.lock()
+        .with_context(|| format!("lock glossary {}", path.display()))?;
+    Ok(lock)
+}
+
+fn glossary_lock_path(path: &Path) -> Result<PathBuf> {
+    use std::ffi::OsString;
+
+    let target = write_target(path)?;
+    let mut lock_name = OsString::from(".");
+    lock_name.push(target.file_name().unwrap_or_default());
+    lock_name.push(".lock");
+    Ok(target.with_file_name(lock_name))
+}
+
+fn write_target(path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path).or_else(|error| {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(error);
+        }
+        // Something is there now (another writer created the file after our
+        // first look, or it is a broken symlink): resolve it again. A broken
+        // symlink fails again here and stays intact.
+        if std::fs::symlink_metadata(path).is_ok() {
+            return std::fs::canonicalize(path);
+        }
+        // A missing regular file can be created.
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        Ok(std::fs::canonicalize(parent)?.join(path.file_name().unwrap_or_default()))
+    })
+}
+
 /// Write `bytes` to `path` atomically: a uniquely named temp file in the
 /// same directory (so the rename never crosses filesystems), fsynced, then
 /// renamed over `path`. A symlinked `path` (e.g. a dotfiles-managed
@@ -622,7 +673,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = write_target(path).with_context(|| format!("resolve {}", path.display()))?;
     let permissions = match std::fs::metadata(&target) {
         Ok(metadata) => Some(metadata.permissions()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -830,6 +881,104 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn dangling_glossary_symlink_is_preserved_without_writing() {
+        let dir = scratch_dir("dangling-symlink");
+        let target = dir.join("missing.json");
+        let link = dir.join("glossary.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(lock_glossary(&link).is_err());
+        assert!(write_atomic(&link, b"[]").is_err());
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert!(!target.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn glossary_updates_from_concurrent_writers_are_not_lost() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = scratch_dir("concurrent-lock");
+        let path = Arc::new(dir.join("glossary.json"));
+        std::fs::write(&*path, r#"[{"count":0}]"#).unwrap();
+        let workers = 8;
+        let barrier = Arc::new(Barrier::new(workers));
+        let joins: Vec<_> = (0..workers)
+            .map(|_| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..50 {
+                        let _lock = lock_glossary(&path).unwrap();
+                        let mut entries: Vec<serde_json::Value> =
+                            serde_json::from_slice(&std::fs::read(&*path).unwrap()).unwrap();
+                        entries[0]["count"] =
+                            serde_json::json!(entries[0]["count"].as_u64().unwrap() + 1);
+                        write_atomic(&path, serde_json::to_string(&entries).unwrap().as_bytes())
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for join in joins {
+            join.join().unwrap();
+        }
+
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(&*path).unwrap()).unwrap();
+        assert_eq!(entries[0]["count"], workers * 50);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn glossary_lock_child_cannot_acquire_parent_lock() {
+        let Ok(path) = std::env::var("ALWAYS_GLOSSARY_LOCK_TEST_PATH") else {
+            return;
+        };
+        let lock_path = glossary_lock_path(Path::new(&path)).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(lock_path)
+            .unwrap();
+        assert!(matches!(
+            lock.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+    }
+
+    #[test]
+    fn glossary_file_lock_is_shared_across_processes_and_symlinks() {
+        let dir = scratch_dir("cross-process-lock");
+        let real = dir.join("glossary.json");
+        std::fs::write(&real, "[]").unwrap();
+        #[cfg(unix)]
+        let alias = {
+            let alias = dir.join("glossary-link.json");
+            std::os::unix::fs::symlink(&real, &alias).unwrap();
+            alias
+        };
+        #[cfg(not(unix))]
+        let alias = real.clone();
+
+        let _parent_lock = lock_glossary(&real).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "always::vocab::tests::glossary_lock_child_cannot_acquire_parent_lock",
+            ])
+            .env("ALWAYS_GLOSSARY_LOCK_TEST_PATH", alias)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        drop(_parent_lock);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn merge_preserves_existing_entries_and_skips_known_terms_in_any_case() {
         let dir = scratch_dir("preserve");
@@ -933,9 +1082,10 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n != "glossary.json")
             .collect();
-        assert!(
-            leftovers.is_empty(),
-            "temp files left behind: {leftovers:?}"
+        assert_eq!(
+            leftovers,
+            [".glossary.json.lock"],
+            "unexpected files left behind"
         );
         assert_eq!(read_entries(&path).len(), 2);
         let _ = std::fs::remove_dir_all(&dir);

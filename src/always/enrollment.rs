@@ -125,6 +125,9 @@ fn record_and_store(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
     let embedder = speaker_embed::global().context("speaker embedding engine failed to load")?;
 
     let vad = SileroVad::new().context("failed to load Silero VAD")?;
+    // The sample belongs to the mic it is recorded on, not whichever is
+    // the default when it is saved.
+    let mic = crate::always::input_device::refresh();
     let broadcaster = event::global_broadcaster();
     broadcaster.voice_enrollment_started(step.as_str());
 
@@ -227,7 +230,11 @@ fn record_and_store(cfg: &AlwaysConfig, step: EnrollStep) -> Result<()> {
     let embedding = embedder
         .embed(&samples)
         .context("failed to compute voice embedding")?;
-    voiceprint::set_step(step, embedding).context("failed to persist voiceprint")?;
+    let mic_now = crate::always::input_device::refresh();
+    if mic_now.as_ref().map(|d| &d.uid) != mic.as_ref().map(|d| &d.uid) {
+        anyhow::bail!("the microphone changed during recording — record this sample again");
+    }
+    voiceprint::set_step_on(step, embedding, mic).context("failed to persist voiceprint")?;
     Ok(())
 }
 

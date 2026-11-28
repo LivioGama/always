@@ -53,6 +53,9 @@ pub enum EngineType {
     Canary,
     Cohere,
     Nemotron,
+    /// Cactus Compute Whistle, run by the statically linked Cactus engine
+    /// (`cfg(cactus)`, macOS Apple Silicon builds with `local-stt`).
+    Whistle,
 }
 
 /// One file of a multi-file directory model. See [`ModelInfo::files`].
@@ -2042,7 +2045,45 @@ fn populate_catalog(map: &mut HashMap<String, ModelInfo>) {
             is_verifying: false,
         },
     );
+
+    // Cactus Compute Whistle — 17 MB, 7 languages, punctuated output. Only
+    // offered where build.rs linked the Cactus engine (`cfg(cactus)`).
+    #[cfg(cactus)]
+    map.insert(
+        "whistle".into(),
+        ModelInfo {
+            id: "whistle".into(),
+            name: "Whistle".into(),
+            description: "Tiny (17 MB) and very fast. English, German, French, Spanish, Italian, Dutch, Polish.".into(),
+            filename: "whistle.cact".into(),
+            url: Some(WHISTLE_URL.into()),
+            sha256: Some("b6e02f048568ac5d01a2042556c658061e699acbc0aa2a1439f52f3d461dffeb".into()),
+            size_mb: 17,
+            is_downloaded: false,
+            is_downloading: false,
+            partial_size: 0,
+            is_directory: false,
+            engine_type: EngineType::Whistle,
+            accuracy_score: 0.60,
+            speed_score: 0.98,
+            supports_translation: false,
+            supports_streaming: false,
+            is_recommended: false,
+            supported_languages: ["en", "de", "fr", "es", "it", "nl", "pl"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            supports_language_selection: true,
+            is_custom: false,
+            files: Vec::new(),
+            is_verifying: false,
+        },
+    );
 }
+
+/// Whistle weights, pinned to one revision so the checksum stays true.
+#[cfg(cactus)]
+const WHISTLE_URL: &str = "https://huggingface.co/Cactus-Compute/whistle/resolve/88cb00eeb8928ddbcd410b491584f938ba030b07/whistle.cact";
 
 /// Remove `path` whether it is a file, a directory, or absent.
 ///
@@ -2085,6 +2126,8 @@ mod tests {
         assert!(engines.contains(&EngineType::Canary));
         assert!(engines.contains(&EngineType::Cohere));
         assert!(engines.contains(&EngineType::Nemotron));
+        #[cfg(cactus)]
+        assert!(engines.contains(&EngineType::Whistle));
     }
 
     /// Install must survive the target path being the wrong kind.
@@ -2219,6 +2262,8 @@ mod tests {
             EngineType::Canary,
             EngineType::Cohere,
             EngineType::Nemotron,
+            #[cfg(cactus)]
+            EngineType::Whistle,
         ]
         .into_iter()
         .collect();

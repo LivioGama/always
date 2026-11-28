@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-11-28
+
+### Added
+- **models:** new local model Whistle (Cactus Compute): 17 MB, transcribes English, German, French, Spanish, Italian, Dutch and Polish offline in tens of milliseconds, with punctuation. macOS Apple Silicon only.
+
+### Fixed
+- **dictation:** a long dictation whose last part held no audio is no longer flagged as missing a part. Always used to send that empty tail to Groq, which refused it, so the dictation showed a "part lost" warning and auto-Enter was skipped although nothing was lost.
+- **post-processing:** the Groq cleanup now also runs when a local speech model (such as Whistle) does the transcription, and fixes misheard words so each sentence makes sense in context. It no longer swaps a correctly heard glossary term for its misheard form ("infisical" became "physical"). With Groq post-processing on, each learned misheard form is sent to Groq once per entry that learns it to check whether it is an ordinary word ("physical"); such forms are then only corrected when the sentence is about the term. Forms still unchecked (no Groq key, or a failed check) are corrected everywhere, as before, unless they are on the built-in common-word list, which is always context-only; a saved verdict stays in `glossary.json` and applies in every mode, so after switching away from Groq the flagged forms remain context-only.
+- **my voice:** a voice from a video you were watching no longer gets through as yours. After you dictated over the video, Always briefly treated that mix as your voice, so the video's speaker alone could pass the check and its words were typed.
+
 ## [0.1.14] - 2026-11-27
 
 ### Fixed

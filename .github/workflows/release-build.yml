@@ -93,8 +93,10 @@ jobs:
         env:
           # kaldi-fbank-rust-kautism bundles C++14 code (see ci.yml).
           CXXFLAGS: -std=c++14
+          # Fail the release instead of shipping without Whistle.
+          ALWAYS_REQUIRE_CACTUS: "1"
         run: |
-          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin --features local-stt
           file target/aarch64-apple-darwin/release/always
           # Never ship the SDK stubs (see runs-on above).
           if grep -aq 'SDK requirement not met' target/aarch64-apple-darwin/release/always; then

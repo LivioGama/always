@@ -33,6 +33,10 @@ use strsim::levenshtein;
 pub struct GlossaryMatchEntry {
     pub term: String,
     pub mistranscriptions: Vec<String>,
+    /// Mistranscriptions that are ordinary words in some language
+    /// ("physical", "verre"), lowercased. Flagged once per form by the
+    /// glossary's word check; these need sentence context to be rewritten.
+    pub context_only: Vec<String>,
 }
 
 /// How confident a substitution is.
@@ -177,7 +181,8 @@ pub fn apply_glossary_tiered(
                 .filter(|c| c.is_alphanumeric() || *c == ' ')
                 .collect::<String>()
                 .to_lowercase();
-            let is_ambiguous = super::common_words::is_common_word(&check_word);
+            let is_ambiguous = super::common_words::is_common_word(&check_word)
+                || entries[idx].context_only.contains(&check_word);
 
             if original_window.to_lowercase() != rewritten.to_lowercase() {
                 if is_ambiguous {
@@ -685,6 +690,7 @@ mod tests {
             .map(|(term, miss)| GlossaryMatchEntry {
                 term: term.to_string(),
                 mistranscriptions: miss.iter().map(|s| s.to_string()).collect(),
+                context_only: Vec::new(),
             })
             .collect()
     }

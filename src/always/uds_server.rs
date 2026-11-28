@@ -1313,7 +1313,12 @@ fn execute_command(cmd: DaemonCommand, ctx: &ModelCommandCtx, consume_lease: &At
                     global_broadcaster().voice_profile_status(ctx.cfg.read().speaker_gate_enabled);
                     tracing::info!(uid = %uid, "uds_voice_profile_mic_deleted");
                 }
-                Err(e) => tracing::error!(error = %e, "uds_voice_profile_mic_delete_failed"),
+                Err(e) => {
+                    tracing::error!(error = %e, "uds_voice_profile_mic_delete_failed");
+                    // The GUI removed the row optimistically: resend the
+                    // real list so the voiceprint shows again.
+                    global_broadcaster().voice_profile_status(ctx.cfg.read().speaker_gate_enabled);
+                }
             }
         }
         DaemonCommand::SetVoiceProfileEnabled { enabled } => {
