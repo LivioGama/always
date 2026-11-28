@@ -3043,6 +3043,14 @@ fn record_with_local_vad(
     } else {
         match speculation {
             Some(Ok(r)) => (r, true),
+            // A chunked utterance whose tail holds no audio (the last cut
+            // landed on its end): nothing is left to transcribe. Sending it
+            // got HTTP 400 "audio_too_short" from Groq and flagged the
+            // dictation as missing a part (2026-11-26 prod: 13 times).
+            _ if has_chunks && speech_samples.len() < MIN_TAIL_SAMPLES => {
+                tracing::info!(samples = speech_samples.len(), "chunked_tail_empty_skipped");
+                (crate::stt::TranscriptionResult::default(), false)
+            }
             _ => {
                 // No speculation, speculation errored, or timeout — do a fresh
                 // transcription with the full audio (including any trailing silence).
@@ -3271,6 +3279,11 @@ fn recover_failed_chunked_tail(
     );
     recovered
 }
+
+/// Shortest chunked tail worth transcribing: 0.01 s at 16 kHz, Groq's
+/// minimum audio length (shorter gets HTTP 400 `audio_too_short`).
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]
+const MIN_TAIL_SAMPLES: usize = 160;
 
 /// One fresh transcription of a failed chunked tail by the pasting engine.
 #[cfg(any(target_os = "macos", all(target_os = "linux", feature = "cpal")))]

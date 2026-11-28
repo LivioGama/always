@@ -646,14 +646,17 @@ mod tests {
             GlossaryMatchEntry {
                 term: "Claude".into(),
                 mistranscriptions: vec!["cloud".into()],
+                context_only: Vec::new(),
             },
             GlossaryMatchEntry {
                 term: "winnow".into(),
                 mistranscriptions: vec!["Vino".into()],
+                context_only: Vec::new(),
             },
             GlossaryMatchEntry {
                 term: "Kubernetes".into(),
                 mistranscriptions: vec!["cuber netties".into()],
+                context_only: Vec::new(),
             },
         ];
         let samples = [

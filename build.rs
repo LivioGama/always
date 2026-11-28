@@ -80,6 +80,116 @@ fn main() {
         build_apple_stt_bridge();
         build_status_sound_bridge();
     }
+
+    // Cactus runtime for the Whistle local model. `cfg(cactus)` is set only
+    // when libcactus.a is actually linked, so a failed download degrades to
+    // "Whistle not offered" instead of a broken build.
+    println!("cargo:rustc-check-cfg=cfg(cactus)");
+    if std::env::var_os("CARGO_FEATURE_LOCAL_STT").is_some()
+        && target_os == "macos"
+        && target_arch == "aarch64"
+    {
+        match fetch_cactus_runtime() {
+            Ok(dir) => {
+                println!("cargo:rustc-link-search=native={}", dir.display());
+                println!("cargo:rustc-link-lib=static=cactus");
+                println!("cargo:rustc-link-lib=dylib=c++");
+                println!("cargo:rustc-cfg=cactus");
+            }
+            Err(e) => println!("cargo:warning=Whistle disabled: Cactus runtime unavailable ({e})"),
+        }
+    }
+}
+
+/// Cactus engine release pinned for Whistle (Apache-2.0,
+/// huggingface.co/Cactus-Compute/cactus). Checksum from the release manifest.
+const CACTUS_VERSION: &str = "4.1.4";
+const CACTUS_REVISION: &str = "f4ab2741203a282c6e7b89983de2b5e5b2e805a8";
+const CACTUS_MACOS_ARM64_SHA256: &str =
+    "f00c3cf43e31db9399b7b1739146fa8ab293b6f3e71d7c7ab9c8a91042f8c5ef";
+
+/// Return a directory holding a verified `libcactus.a`. Order:
+/// `ALWAYS_CACTUS_LIB_DIR` (offline override) → user cache → download.
+fn fetch_cactus_runtime() -> Result<PathBuf, String> {
+    use sha2::{Digest, Sha256};
+    println!("cargo:rerun-if-env-changed=ALWAYS_CACTUS_LIB_DIR");
+    let verify = |path: &Path| -> bool {
+        std::fs::read(path)
+            .map(|bytes| {
+                let digest = Sha256::digest(&bytes);
+                let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+                hex == CACTUS_MACOS_ARM64_SHA256
+            })
+            .unwrap_or(false)
+    };
+    if let Some(dir) = std::env::var_os("ALWAYS_CACTUS_LIB_DIR").map(PathBuf::from) {
+        // A missing path counts as changed, so a broken override retries.
+        println!(
+            "cargo:rerun-if-changed={}",
+            dir.join("libcactus.a").display()
+        );
+        return if verify(&dir.join("libcactus.a")) {
+            Ok(dir)
+        } else {
+            Err(format!(
+                "{}/libcactus.a missing or checksum mismatch",
+                dir.display()
+            ))
+        };
+    }
+    let home = std::env::var_os("HOME").ok_or("HOME not set")?;
+    let dir = PathBuf::from(home)
+        .join(".cache/always-build/cactus")
+        .join(CACTUS_VERSION)
+        .join("macos-arm64");
+    let lib = dir.join("libcactus.a");
+    // Rerun when the cached library changes or disappears; while it is
+    // absent (failed download) every build retries the fetch.
+    println!("cargo:rerun-if-changed={}", lib.display());
+    if verify(&lib) {
+        return Ok(dir);
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let url = format!(
+        "https://huggingface.co/Cactus-Compute/cactus/resolve/{CACTUS_REVISION}/releases/{CACTUS_VERSION}/macos-arm64/libcactus.a"
+    );
+    // Per-process name: concurrent builds must not share a partial file.
+    let tmp = dir.join(format!("libcactus.a.{}.part", std::process::id()));
+    let status = Command::new("curl")
+        .args([
+            "-sfL",
+            "--retry",
+            "3",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "300",
+            "--speed-limit",
+            "1024",
+            "--speed-time",
+            "30",
+            "-o",
+        ])
+        .arg(&tmp)
+        .arg(&url)
+        .status()
+        .map_err(|e| format!("curl: {e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("download failed: {url}"));
+    }
+    if !verify(&tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err("downloaded libcactus.a checksum mismatch".into());
+    }
+    // Atomic on one filesystem; a concurrent winner left identical bytes.
+    if let Err(e) = std::fs::rename(&tmp, &lib) {
+        let _ = std::fs::remove_file(&tmp);
+        if !verify(&lib) {
+            return Err(e.to_string());
+        }
+    }
+    Ok(dir)
 }
 
 fn watch_git_revision(manifest_dir: &Path) {

@@ -1084,7 +1084,10 @@ mod tests {
         assert_eq!(lift_with_recent(0.29, 0.90), (0.29, false));
         // Own voice over media: near the enrolled voice, the pool lifts it.
         assert_eq!(lift_with_recent(0.35, 0.56), (0.56, true));
-        assert_eq!(lift_with_recent(RECENT_POOL_ENROLLED_FLOOR, 0.6), (0.6, true));
+        assert_eq!(
+            lift_with_recent(RECENT_POOL_ENROLLED_FLOOR, 0.6),
+            (0.6, true)
+        );
         // Never below the enrolled-only score.
         assert_eq!(lift_with_recent(0.55, 0.40), (0.55, false));
         assert_eq!(lift_with_recent(0.55, f32::MIN), (0.55, false));

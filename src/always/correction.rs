@@ -323,6 +323,7 @@ pub fn apply_pairs_to_glossary_with_provenance(
         std::fs::create_dir_all(parent).ok();
     }
 
+    let _lock = crate::always::vocab::lock_glossary(&path)?;
     let mut entries: Vec<serde_json::Value> = if path.exists() {
         let content = std::fs::read_to_string(&path).context("read glossary.json")?;
         if content.trim().is_empty() {
@@ -434,7 +435,7 @@ pub fn apply_pairs_to_glossary_with_provenance(
     }
 
     let json = serde_json::to_string_pretty(&entries)?;
-    std::fs::write(&path, json).context("write glossary.json")?;
+    crate::always::vocab::write_atomic(&path, json.as_bytes())?;
 
     // Invalidate the in-memory cache so the next access reloads from disk.
     crate::glossary::invalidate_cache();
@@ -469,6 +470,7 @@ pub fn add_or_bump_term(term: &str) -> Result<()> {
         std::fs::create_dir_all(parent).ok();
     }
 
+    let _lock = crate::always::vocab::lock_glossary(&path)?;
     let mut entries: Vec<serde_json::Value> = if path.exists() {
         let content = std::fs::read_to_string(&path).context("read glossary.json")?;
         if content.trim().is_empty() {
@@ -500,7 +502,7 @@ pub fn add_or_bump_term(term: &str) -> Result<()> {
     }
 
     let json = serde_json::to_string_pretty(&entries)?;
-    std::fs::write(&path, json).context("write glossary.json")?;
+    crate::always::vocab::write_atomic(&path, json.as_bytes())?;
     crate::glossary::invalidate_cache();
     tracing::info!(term, "glossary_term_bumped");
     Ok(())

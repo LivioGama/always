@@ -95,7 +95,7 @@ struct OnboardingEngineStep: View {
         if let ready = readyLocal {
             card(
                 title: "Local model",
-                detail: "Private and offline. \(ready.name) is ready.",
+                detail: "Speech recognition runs on-device. If Groq cleanup is enabled, transcript text is sent to Groq. \(ready.name) is ready.",
                 selected: models.activeBackend.hasPrefix("local:")
             ) {
                 Button("Use \(ready.name)") { models.setActive(backend: "local:\(ready.id)") }
@@ -105,7 +105,7 @@ struct OnboardingEngineStep: View {
         } else if let best = bestLocal {
             card(
                 title: "Local model",
-                detail: "Private and offline. One-time download of \(best.name) (\(best.size_mb) MB).",
+                detail: "Speech recognition runs on-device. If Groq cleanup is enabled, transcript text is sent to Groq. One-time download of \(best.name) (\(best.size_mb) MB).",
                 selected: false
             ) {
                 if let p = models.downloadProgress[best.id] {
@@ -137,7 +137,7 @@ struct OnboardingEngineStep: View {
         } else {
             card(
                 title: "Local model",
-                detail: "Private and offline. Loading the model list…",
+                detail: "Speech recognition runs on-device. If Groq cleanup is enabled, transcript text is sent to Groq. Loading the model list…",
                 selected: false
             ) { ProgressView().controlSize(.small) }
         }

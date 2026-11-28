@@ -1,1 +1,0 @@
-**My Voice:** a voice from a video you were watching no longer gets through as yours. After you dictated over the video, Always briefly treated that mix as your voice, so the video's speaker alone could pass the check and its words were typed.

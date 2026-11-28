@@ -1,0 +1,1 @@
+**models:** new local model Whistle (Cactus Compute): 17 MB, transcribes English, German, French, Spanish, Italian, Dutch and Polish offline in tens of milliseconds, with punctuation. macOS Apple Silicon only.

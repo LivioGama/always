@@ -165,6 +165,10 @@ transcribe-rs = { version = "=0.3.12", features = ["whisper-cpp", "onnx"], optio
 # compositor policy prevents an ordinary daemon from observing global keys.
 rdev = "0.5"
 
+[build-dependencies]
+# Verifies the downloaded Cactus runtime (Whistle) in build.rs.
+sha2 = "0.11"
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"

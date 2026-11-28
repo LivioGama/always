@@ -98,11 +98,11 @@ export function EngineStep({ daemon, onPick }: { daemon: DaemonApi; onPick: (bac
       </EngineCard>
 
       {ready ? (
-        <EngineCard title="Local model" detail={`Private and offline. ${ready.name} is ready.`} selected={s.backend.startsWith("local:")}>
+        <EngineCard title="Local model" detail={`Speech recognition runs on-device. If Groq cleanup is enabled, transcript text is sent to Groq. ${ready.name} is ready.`} selected={s.backend.startsWith("local:")}>
           <div><Btn prominent onClick={() => { onPick(null); daemon.setActiveTranscriber(`local:${ready.id}`); }}>Use {ready.name}</Btn></div>
         </EngineCard>
       ) : target ? (
-        <EngineCard title="Local model" detail={`Private and offline. One-time download of ${target.name} (${target.size_mb} MB).`} selected={false}>
+        <EngineCard title="Local model" detail={`Speech recognition runs on-device. If Groq cleanup is enabled, transcript text is sent to Groq. One-time download of ${target.name} (${target.size_mb} MB).`} selected={false}>
           {progress !== undefined ? (
             <div className="flex items-center gap-2">
               <div className="flex-1 h-1.5 rounded-full bg-white/10 overflow-hidden">
@@ -129,7 +129,7 @@ export function EngineStep({ daemon, onPick }: { daemon: DaemonApi; onPick: (bac
           {err && <p className="text-xs text-red-400">{err}</p>}
         </EngineCard>
       ) : (
-        <EngineCard title="Local model" detail="Private and offline. Loading the model list…" selected={false}>
+        <EngineCard title="Local model" detail="Speech recognition runs on-device. If Groq cleanup is enabled, transcript text is sent to Groq. Loading the model list…" selected={false}>
           <div><Spinner /></div>
         </EngineCard>
       )}
