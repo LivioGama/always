@@ -529,6 +529,17 @@ fn remove_legacy_file() {
 /// recombine its voiceprint, persist, and refresh the cache. Other mics'
 /// voiceprints are untouched. Returns the updated profile.
 pub fn set_step(step: EnrollStep, embedding: Vec<f32>) -> Result<Arc<VoiceProfile>> {
+    set_step_on(step, embedding, input_device::refresh())
+}
+
+/// [`set_step`] for the mic the sample was RECORDED on (`dev`), which the
+/// caller captured before recording: the live default may have changed
+/// during the up-to-45 s pass.
+pub fn set_step_on(
+    step: EnrollStep,
+    embedding: Vec<f32>,
+    dev: Option<input_device::InputDevice>,
+) -> Result<Arc<VoiceProfile>> {
     if embedding.len() != speaker_embed::EMBEDDING_DIM {
         anyhow::bail!(
             "embedding dim {} != {}",
@@ -536,7 +547,6 @@ pub fn set_step(step: EnrollStep, embedding: Vec<f32>) -> Result<Arc<VoiceProfil
             speaker_embed::EMBEDDING_DIM
         );
     }
-    let dev = input_device::refresh();
     // On macOS the mic is always identifiable; saving under "default" would
     // invent a phantom mic and could split one enrollment across two keys.
     if cfg!(target_os = "macos") && dev.is_none() {
