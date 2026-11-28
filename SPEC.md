@@ -613,6 +613,9 @@ in the **lower** pass, which counts it from 0.2 (or the dictation bar, if
 lower): soft speech on a laptop's built-in mic rarely reaches 0.5, so that pass
 could never finish (2026-11-27, reported by Livio: "the quiet voice is not
 working"). Each pass logs its speech-probability histogram. Each pass is stored as its own embedding, plus their combined average.
+A pass is saved under the mic it was recorded on, captured when recording
+starts; if the input mic changes before the pass is saved, the pass is
+refused ("record this sample again") rather than stored under the wrong mic.
 In Settings, the My Voice switch cannot be turned on until all three samples
 are recorded, but it remains possible to turn it off if the saved setting is
 on. When off without a complete profile, the UI explains that enrollment is
