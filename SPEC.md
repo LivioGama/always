@@ -1053,7 +1053,11 @@ checksums and links statically. It is offered only in macOS Apple Silicon builds
 with `local-stt`; if the engine cannot be fetched at build time the build still
 succeeds and Whistle is simply absent from the catalog (`ALWAYS_CACTUS_LIB_DIR`
 points the build at a local copy). The engine holds one model in process-global
-state, so Whistle calls are serialized.
+state, so Whistle calls are serialized. Release builds: macOS arm64 and Linux
+are built with `local-stt` (local models run; Whistle on macOS only), Windows
+is not. The macOS release sets `ALWAYS_REQUIRE_CACTUS=1`, so a release whose
+Cactus download fails stops instead of publishing without Whistle (owner
+request 2026-11-28: "I want to include Whistle").
 
 ### 8.1 NVIDIA Nemotron 3.5 ASR — implementation notes
 
@@ -1495,7 +1499,7 @@ common-word list (`common_words.rs`). For exact hits, a mistranscription the
 **word check** flagged is ambiguous too (product-owner request 2026-11-26: "a
 physical copy" became "an infisical copy"; no word lists, any language). The
 word check runs once per (entry, form) pair, in the background after a glossary
-reload, and only while `postprocess_mode` is `groq` (no learned form is sent to
+reload, only in the daemon (never from a CLI command), and only while `postprocess_mode` is `groq` (no learned form is sent to
 Groq in any other mode), in batches of 40 forms each saved on its own; a
 (entry, form) pair the model leaves out is not re-sent until the daemon restarts.
 A reload that arrives while a check is running queues one more check after it. Groq (`openai/gpt-oss-120b`, JSON mode) says whether each unchecked

@@ -253,7 +253,7 @@ fn main() -> Result<()> {
     // instead of panicking (panic = "abort" → SIGABRT crash report). Rust
     // ignores SIGPIPE by default; long-running processes keep that.
     #[cfg(unix)]
-    if !matches!(
+    let long_running = matches!(
         cli.command,
         None | Some(
             Commands::Start { .. }
@@ -262,7 +262,11 @@ fn main() -> Result<()> {
                 | Commands::Update { .. }
                 | Commands::MenuBar { .. }
         )
-    ) {
+    );
+    #[cfg(all(unix, feature = "overlay"))]
+    let long_running = long_running || matches!(cli.command, Some(Commands::Overlay { .. }));
+    #[cfg(unix)]
+    if !long_running {
         unsafe {
             libc::signal(libc::SIGPIPE, libc::SIG_DFL);
         }
