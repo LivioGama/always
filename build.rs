@@ -85,6 +85,7 @@ fn main() {
     // when libcactus.a is actually linked, so a failed download degrades to
     // "Whistle not offered" instead of a broken build.
     println!("cargo:rustc-check-cfg=cfg(cactus)");
+    println!("cargo:rerun-if-env-changed=ALWAYS_REQUIRE_CACTUS");
     if std::env::var_os("CARGO_FEATURE_LOCAL_STT").is_some()
         && target_os == "macos"
         && target_arch == "aarch64"
@@ -95,6 +96,11 @@ fn main() {
                 println!("cargo:rustc-link-lib=static=cactus");
                 println!("cargo:rustc-link-lib=dylib=c++");
                 println!("cargo:rustc-cfg=cactus");
+            }
+            // Release builds set ALWAYS_REQUIRE_CACTUS=1: a release that
+            // silently lost Whistle must fail, not publish.
+            Err(e) if std::env::var_os("ALWAYS_REQUIRE_CACTUS").is_some() => {
+                panic!("Cactus runtime required but unavailable: {e}")
             }
             Err(e) => println!("cargo:warning=Whistle disabled: Cactus runtime unavailable ({e})"),
         }

@@ -658,6 +658,16 @@ fn unchecked_pairs(entries: &[Entry]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Set by the daemon at start: short CLI commands that load the glossary
+/// must not send forms to Groq on a thread that dies with the process.
+static WORD_CHECK_ALLOWED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Allow the background word check in this process (daemon only).
+pub fn allow_word_check() {
+    WORD_CHECK_ALLOWED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 static WORD_CHECK_IN_FLIGHT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 /// A reload arrived while a check was running; run one more check after it.
@@ -682,7 +692,10 @@ const WORD_CHECK_MODEL: &str = "openai/gpt-oss-120b";
 /// unchecked forms keep today's behaviour (rewritten everywhere).
 fn spawn_wrong_form_check(entries: &[Entry]) {
     use crate::always::postprocess::{PostprocessMode, mode};
-    if cfg!(test) || mode() != PostprocessMode::Groq {
+    if cfg!(test)
+        || !WORD_CHECK_ALLOWED.load(std::sync::atomic::Ordering::SeqCst)
+        || mode() != PostprocessMode::Groq
+    {
         return;
     }
     let pairs: Vec<(String, String)> = {
